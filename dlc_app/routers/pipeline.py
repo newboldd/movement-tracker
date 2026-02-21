@@ -38,32 +38,18 @@ DLC_STEPS = {"train", "analyze", "create_labeled_video", "triangulate"}
 
 
 def _check_dlc_available():
-    """Raise HTTPException if DeepLabCut cannot be imported."""
+    """Quick check that DeepLabCut is installed (metadata only, no import)."""
     settings = get_settings()
     try:
-        result = subprocess.run(
-            [settings.python_executable, "-c", "import deeplabcut"],
-            capture_output=True, text=True, timeout=120,
-        )
-        result.check_returncode()
-    except subprocess.TimeoutExpired:
-        # DLC import is slow but probably works — let it through
-        pass
+        subprocess.run(
+            [settings.python_executable, "-c",
+             "from importlib.metadata import version; version('deeplabcut')"],
+            capture_output=True, timeout=10,
+        ).check_returncode()
     except Exception:
-        # Get the actual error for a useful message
-        stderr = getattr(result, 'stderr', '') or ''
-        stdout = getattr(result, 'stdout', '') or ''
-        detail = stderr.strip() or stdout.strip() or ''
-        if 'tensorflow' in detail.lower():
-            raise HTTPException(
-                400,
-                "DeepLabCut requires tensorflow. Install it from Settings "
-                "or run: pip install tensorflow",
-            )
         raise HTTPException(
             400,
-            f"DeepLabCut import failed: {detail}" if detail else
-            "DeepLabCut is not installed. Install it from Settings.",
+            "DeepLabCut is not installed. Install it from the Settings page.",
         )
 
 
