@@ -146,6 +146,8 @@ const labeler = (() => {
         }
     }
 
+    let hasUserZoom = false; // true once user has zoomed/panned
+
     async function goToFrame(frame) {
         if (frame < 0 || frame >= totalFrames) return;
         currentFrame = frame;
@@ -154,7 +156,7 @@ const labeler = (() => {
             currentImage = await loadImage(frame, currentSide);
             imgW = currentImage.width;
             imgH = currentImage.height;
-            fitImage();
+            if (!hasUserZoom) fitImage();
             render();
             prefetchFrames(frame);
         } catch (e) {
@@ -370,7 +372,9 @@ const labeler = (() => {
     }
 
     function onMouseUp(e) {
-        if (dragging && dragging !== 'pan') {
+        if (dragging === 'pan') {
+            hasUserZoom = true;
+        } else if (dragging) {
             // Auto-save after drag
             scheduleSave();
         }
@@ -403,6 +407,7 @@ const labeler = (() => {
         offsetX = mx - (mx - offsetX) * zoomFactor;
         offsetY = my - (my - offsetY) * zoomFactor;
         scale = newScale;
+        hasUserZoom = true;
 
         render();
     }
@@ -562,7 +567,24 @@ const labeler = (() => {
 
     function toggleSide() {
         const idx = cameraNames.indexOf(currentSide);
-        currentSide = cameraNames[(idx + 1) % cameraNames.length];
+        const newIdx = (idx + 1) % cameraNames.length;
+
+        // Mirror the horizontal offset when switching cameras.
+        // The stereo image is split at the midline, so the same target
+        // in the right camera is roughly at (imgW - x) in image coords.
+        // To keep the viewport centered on the same area, we flip the
+        // horizontal pan around the image center.
+        if (hasUserZoom && imgW) {
+            // Current center of viewport in image coords
+            const cw = containerEl.clientWidth;
+            const centerImgX = (cw / 2 - offsetX) / scale;
+            // Mirror it
+            const mirroredX = imgW - centerImgX;
+            // Compute new offsetX so mirroredX maps to screen center
+            offsetX = cw / 2 - mirroredX * scale;
+        }
+
+        currentSide = cameraNames[newIdx];
         document.getElementById('sideToggle').textContent = currentSide;
         goToFrame(currentFrame);
     }
@@ -590,6 +612,7 @@ const labeler = (() => {
     }
 
     function resetZoom() {
+        hasUserZoom = false;
         fitImage();
         render();
     }
