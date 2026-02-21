@@ -17,7 +17,10 @@ def write_collected_data_csv(
     output_dir: Path,
     training_name: str = "round1",
 ):
-    """Write CollectedData_labels.csv in DLC multi-header format.
+    """Write CollectedData_labels.csv in DLC format.
+
+    DLC expects: single index column with relative image path,
+    3-row multi-level header (scorer, bodyparts, coords).
 
     Args:
         labels: list of dicts with keys: keypoints (dict), img_filename
@@ -31,29 +34,26 @@ def write_collected_data_csv(
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / "CollectedData_labels.csv"
 
-    # DLC multi-header format:
-    # Row 0: scorer,,,[scorer],[scorer],[scorer],[scorer]
-    # Row 1: bodyparts,,,[bp1],[bp1],[bp2],[bp2]
-    # Row 2: coords,,,x,y,x,y
-    # Data rows: labeled-data,[training_name],[imgfile],x1,y1,x2,y2
-
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
         n_bp = len(bodyparts)
-        scorer_row = ["scorer", "", ""] + [scorer] * (n_bp * 2)
-        bp_row = ["bodyparts", "", ""]
+
+        # Header rows: first cell empty (index column header)
+        scorer_row = ["scorer"] + [scorer] * (n_bp * 2)
+        bp_row = ["bodyparts"]
         for bp in bodyparts:
             bp_row.extend([bp, bp])
-        coords_row = ["coords", "", ""] + ["x", "y"] * n_bp
+        coords_row = ["coords"] + ["x", "y"] * n_bp
 
         writer.writerow(scorer_row)
         writer.writerow(bp_row)
         writer.writerow(coords_row)
 
-        # Data rows
+        # Data rows: index = relative path to image
         for label in sorted(labels, key=lambda x: x["img_filename"]):
             kp = label.get("keypoints", {})
-            row = ["labeled-data", training_name, label["img_filename"]]
+            img_path = f"labeled-data/{training_name}/{label['img_filename']}"
+            row = [img_path]
             for bp in bodyparts:
                 coords = kp.get(bp)
                 if coords and len(coords) >= 2 and coords[0] is not None:
@@ -74,35 +74,8 @@ def convert_csv_to_h5(csv_path: Path):
     """
     import pandas as pd
 
-    with open(csv_path, "r") as f:
-        reader = csv.reader(f)
-        scorer_row = next(reader)    # scorer, "", "", scorer, scorer, ...
-        bp_row = next(reader)        # bodyparts, "", "", bp1, bp1, bp2, bp2, ...
-        coords_row = next(reader)    # coords, "", "", x, y, x, y, ...
-        data_rows = list(reader)
-
-    # Build column MultiIndex from header rows (skip first 3 index columns)
-    n_prefix = 3
-    tuples = list(zip(scorer_row[n_prefix:], bp_row[n_prefix:], coords_row[n_prefix:]))
-    columns = pd.MultiIndex.from_tuples(tuples, names=["scorer", "bodyparts", "coords"])
-
-    # Build row index from first 3 columns (labeled-data, round, imgfile)
-    index = pd.MultiIndex.from_tuples(
-        [(r[0], r[1], r[2]) for r in data_rows]
-    )
-
-    # Build data — convert to float, empty strings become NaN
-    values = []
-    for r in data_rows:
-        row = []
-        for v in r[n_prefix:]:
-            try:
-                row.append(float(v))
-            except (ValueError, TypeError):
-                row.append(float("nan"))
-        values.append(row)
-
-    df = pd.DataFrame(values, index=index, columns=columns)
+    # Use pandas to read in DLC's expected format
+    df = pd.read_csv(csv_path, header=[0, 1, 2], index_col=0)
 
     h5_path = csv_path.with_suffix(".h5")
     df.to_hdf(h5_path, key="df_with_missing", mode="w")
