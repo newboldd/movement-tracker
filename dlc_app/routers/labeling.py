@@ -196,7 +196,11 @@ def get_labels(session_id: int) -> list[dict]:
 
 @router.put("/sessions/{session_id}/labels")
 def save_labels(session_id: int, req: LabelBatchSave) -> dict:
-    """Batch-save labels (upsert)."""
+    """Batch-save labels (full replace).
+
+    Deletes all existing labels for this session and re-inserts the
+    current set, ensuring deleted labels don't persist in the DB.
+    """
     with get_db_ctx() as db:
         session = db.execute(
             "SELECT * FROM label_sessions WHERE id = ?", (session_id,)
@@ -204,16 +208,18 @@ def save_labels(session_id: int, req: LabelBatchSave) -> dict:
         if not session:
             raise HTTPException(404, "Session not found")
 
+        # Full replace: clear existing, insert current
+        db.execute(
+            "DELETE FROM frame_labels WHERE session_id = ?",
+            (session_id,),
+        )
+
         for label in req.labels:
             kp_json = json.dumps(label.keypoints)
             db.execute(
                 """INSERT INTO frame_labels
                    (session_id, frame_num, trial_idx, side, keypoints, updated_at)
-                   VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                   ON CONFLICT(session_id, frame_num, trial_idx, side)
-                   DO UPDATE SET
-                     keypoints = excluded.keypoints,
-                     updated_at = CURRENT_TIMESTAMP""",
+                   VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
                 (
                     session_id, label.frame_num, label.trial_idx, label.side,
                     kp_json,
