@@ -23,8 +23,16 @@ class RemoteConfig:
 
 
 def _ssh_base_args(cfg: RemoteConfig) -> list[str]:
-    """Build base SSH command args with BatchMode (no password prompts)."""
-    args = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"]
+    """Build base SSH command args with BatchMode (no password prompts).
+
+    ClearAllForwardings suppresses port-forwarding noise from ~/.ssh/config.
+    """
+    args = [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ClearAllForwardings=yes",
+    ]
     if cfg.port != 22:
         args += ["-p", str(cfg.port)]
     if cfg.ssh_key_path:
@@ -34,12 +42,23 @@ def _ssh_base_args(cfg: RemoteConfig) -> list[str]:
 
 def _scp_base_args(cfg: RemoteConfig) -> list[str]:
     """Build base SCP command args."""
-    args = ["scp", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-r"]
+    args = [
+        "scp",
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ClearAllForwardings=yes",
+        "-r",
+    ]
     if cfg.port != 22:
         args += ["-P", str(cfg.port)]
     if cfg.ssh_key_path:
         args += ["-i", cfg.ssh_key_path]
     return args
+
+
+def _py_cmd(cfg: RemoteConfig, script: str) -> list[str]:
+    """Build SSH + remote python one-liner. Shell-agnostic (works on PowerShell, bash, etc.)."""
+    return _ssh_base_args(cfg) + [cfg.host, cfg.python_executable, "-u", "-c", script]
 
 
 def test_connection(cfg: RemoteConfig) -> dict:
@@ -67,43 +86,36 @@ def test_connection(cfg: RemoteConfig) -> dict:
     except FileNotFoundError:
         return {"ok": False, "message": "ssh command not found on this machine", "details": {"ssh": False}}
 
-    # Check 2: Create work directory
+    # Check 2: Create work directory (use Python — shell-agnostic)
     result = subprocess.run(
-        _ssh_base_args(cfg) + [cfg.host, f"mkdir -p {cfg.work_dir} && echo ok"],
+        _py_cmd(cfg, f"\"import os; os.makedirs(r'{cfg.work_dir}', exist_ok=True); print('ok')\""),
         capture_output=True, text=True, timeout=15,
     )
-    details["work_dir"] = result.returncode == 0
+    details["work_dir"] = result.returncode == 0 and "ok" in result.stdout
     if not details["work_dir"]:
         return {
             "ok": False,
-            "message": f"Cannot create work directory: {result.stderr.strip()}",
+            "message": f"Cannot create work directory: {(result.stderr or result.stdout).strip()[:200]}",
             "details": details,
         }
 
     # Check 3: DLC version
     result = subprocess.run(
-        _ssh_base_args(cfg) + [
-            cfg.host,
-            f"{cfg.python_executable} -c \"import deeplabcut; print(deeplabcut.__version__)\"",
-        ],
+        _py_cmd(cfg, "\"import deeplabcut; print(deeplabcut.__version__)\""),
         capture_output=True, text=True, timeout=30,
     )
-    if result.returncode == 0:
+    if result.returncode == 0 and result.stdout.strip():
         details["dlc_version"] = result.stdout.strip()
     else:
         return {
             "ok": False,
-            "message": f"DeepLabCut not found on remote: {result.stderr.strip()[:200]}",
+            "message": f"DeepLabCut not found on remote: {(result.stderr or result.stdout).strip()[:200]}",
             "details": details,
         }
 
     # Check 4: GPU availability
     result = subprocess.run(
-        _ssh_base_args(cfg) + [
-            cfg.host,
-            f"{cfg.python_executable} -c \""
-            "import torch; print(f'GPU: {torch.cuda.get_device_name(0)}' if torch.cuda.is_available() else 'No GPU')\"",
-        ],
+        _py_cmd(cfg, "\"import torch; print(f'GPU: {torch.cuda.get_device_name(0)}' if torch.cuda.is_available() else 'No GPU')\""),
         capture_output=True, text=True, timeout=30,
     )
     details["gpu"] = result.stdout.strip() if result.returncode == 0 else "check failed"
@@ -163,9 +175,9 @@ def remote_train_monitor(
             logfile.write(f"=== Phase 1: Uploading {local_dlc_dir} to {cfg.host}:{remote_project_dir} ===\n")
             logfile.flush()
 
-            # Ensure remote dir exists
+            # Ensure remote dir exists (Python — shell-agnostic)
             subprocess.run(
-                _ssh_base_args(cfg) + [cfg.host, f"mkdir -p {cfg.work_dir}"],
+                _py_cmd(cfg, f"\"import os; os.makedirs(r'{cfg.work_dir}', exist_ok=True)\""),
                 capture_output=True, timeout=15,
             )
 
@@ -194,26 +206,25 @@ def remote_train_monitor(
             logfile.write("=== Upload complete ===\n")
             logfile.flush()
 
-            # ── Fix remote config.yaml project_path ──────────────────
-            fix_cmd = (
-                f"sed -i 's|^project_path:.*|project_path: {remote_project_dir}|' "
-                f"{remote_project_dir}/config.yaml"
+            # ── Fix remote config.yaml project_path (Python — shell-agnostic) ──
+            fix_script = (
+                f"\"import re, pathlib; "
+                f"p = pathlib.Path(r'{remote_project_dir}/config.yaml'); "
+                f"t = p.read_text(); "
+                f"t = re.sub(r'(?m)^project_path:.*', r'project_path: {remote_project_dir}', t); "
+                f"p.write_text(t)\""
             )
             subprocess.run(
-                _ssh_base_args(cfg) + [cfg.host, fix_cmd],
+                _py_cmd(cfg, fix_script),
                 capture_output=True, timeout=15,
             )
 
             # ── Phase 2: Training ────────────────────────────────────
             remote_config = f"{remote_project_dir}/config.yaml"
-            train_script = (
-                f"import deeplabcut; "
-                f"deeplabcut.train_network(r'{remote_config}')"
+            train_cmd = _py_cmd(
+                cfg,
+                f"\"import deeplabcut; deeplabcut.train_network(r'{remote_config}')\"",
             )
-            train_cmd = _ssh_base_args(cfg) + [
-                cfg.host,
-                f"{cfg.python_executable} -u -c \"{train_script}\"",
-            ]
 
             logfile.write(f"=== Phase 2: Training on {cfg.host} ===\n")
             logfile.flush()
