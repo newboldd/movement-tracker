@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Launch the DLC Finger-Tapping Pipeline web app.
-# Usage: ./run.sh
+# Usage: ./dlc_app/run.sh
 
 set -e
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_DIR="$PROJECT_DIR/.venv"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+VENV_DIR="$SCRIPT_DIR/.venv"
 
 # Activate venv if it exists (created by setup.sh)
 if [ -d "$VENV_DIR" ]; then

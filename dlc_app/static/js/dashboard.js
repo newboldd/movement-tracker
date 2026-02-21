@@ -162,28 +162,14 @@ function closeDetail() {
 
 // ── Pipeline actions ─────────────────────────────────
 async function runStep(subjectId, step) {
-    // Disable the clicked button and show feedback
-    const btn = event && event.target;
-    const origText = btn ? btn.textContent : '';
-    if (btn) {
-        btn.disabled = true;
-        btn.textContent = 'Starting...';
-    }
-
     try {
         const result = await API.post(`/api/subjects/${subjectId}/run-step`, { step });
         if (result.job_id) {
             // Start tracking job
             trackJob(result.job_id);
-            // Scroll to jobs card
-            document.getElementById('jobsCard').scrollIntoView({ behavior: 'smooth' });
         }
         loadSubjects();
     } catch (e) {
-        if (btn) {
-            btn.disabled = false;
-            btn.textContent = origText;
-        }
         alert('Error: ' + e.message);
     }
 }
@@ -212,38 +198,23 @@ function updateJobDisplay(jobId, data) {
         list.appendChild(el);
     }
 
-    const errorLine = data.error_msg ? `<div style="color:var(--red);font-size:12px;margin-top:4px;">${data.error_msg}</div>` : '';
+    const remoteBadge = data.remote_host
+        ? '<span class="badge" style="background:rgba(33,150,243,0.15);color:#2196f3;font-size:11px;">Remote</span>'
+        : '';
+
     el.innerHTML = `
         <div style="display:flex;align-items:center;gap:12px;">
             <span class="job-indicator job-${data.status}"></span>
             <span>Job #${jobId}</span>
+            ${remoteBadge}
             <div class="progress-bar" style="flex:1;max-width:200px;">
                 <div class="fill" style="width:${data.progress_pct || 0}%"></div>
             </div>
             <span>${(data.progress_pct || 0).toFixed(0)}%</span>
             <span class="badge badge-${data.status}">${data.status}</span>
             ${data.status === 'running' ? `<button class="btn btn-sm btn-danger" onclick="cancelJob(${jobId})">Cancel</button>` : ''}
-            ${data.status === 'failed' ? `<button class="btn btn-sm" onclick="showJobLog(${jobId})">Show Log</button>` : ''}
         </div>
-        ${errorLine}
     `;
-}
-
-async function showJobLog(jobId) {
-    try {
-        const job = await API.get(`/api/jobs/${jobId}`);
-        const tail = (job.log_tail || []).join('');
-        const msg = tail || job.error_msg || 'No log available';
-        document.getElementById('logModalTitle').textContent = `Job #${jobId} Log`;
-        document.getElementById('logModalContent').textContent = msg;
-        document.getElementById('logModal').classList.add('active');
-    } catch (e) {
-        alert('Could not load log: ' + e.message);
-    }
-}
-
-function hideLogModal() {
-    document.getElementById('logModal').classList.remove('active');
 }
 
 async function cancelJob(jobId) {
@@ -316,7 +287,7 @@ document.getElementById('stageFilter').addEventListener('change', renderTable);
 
 // Escape closes modal
 document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { hideAddModal(); hideLogModal(); }
+    if (e.key === 'Escape') hideAddModal();
 });
 
 // ── Init ─────────────────────────────────────────────

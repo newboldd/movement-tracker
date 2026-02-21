@@ -1,7 +1,5 @@
 """DLC subprocess command builders."""
 
-from __future__ import annotations
-
 from pathlib import Path
 
 from ..config import get_settings
@@ -49,91 +47,62 @@ def fix_project_path(subject_name: str) -> str:
     return str(config_path)
 
 
-def _ensure_pytorch_engine(config_path: str):
-    """Ensure config.yaml has engine: pytorch set."""
-    from pathlib import Path
-    p = Path(config_path)
-    if not p.exists():
-        return
-    text = p.read_text()
-    if "engine:" not in text:
-        text += "\nengine: pytorch\n"
-        p.write_text(text)
-    elif "engine: tensorflow" in text:
-        text = text.replace("engine: tensorflow", "engine: pytorch")
-        p.write_text(text)
-
-
-def _wrap_script(body: str) -> str:
-    """Wrap a DLC script with error handling so failures are always logged."""
-    return f"import sys, traceback\ntry:\n    {body}\nexcept Exception:\n    traceback.print_exc()\n    sys.exit(1)"
-
-
 def cmd_create_training_dataset(config_path: str) -> list[str]:
     """Build command to create DLC training dataset."""
     settings = get_settings()
-    _ensure_pytorch_engine(config_path)
-    script = _wrap_script(
+    script = (
         f"import deeplabcut; "
         f"deeplabcut.create_training_dataset(r'{config_path}', net_type='{settings.dlc_net_type}')"
     )
-    return [settings.python_executable, "-u", "-c", script]
+    return [settings.python_executable, "-c", script]
 
 
 def cmd_train_network(config_path: str) -> list[str]:
-    """Build command to train DLC network.
-
-    Calls create_training_dataset first to generate pose_cfg.yaml
-    and other DLC-specific training files if they don't exist yet.
-    """
+    """Build command to train DLC network."""
     settings = get_settings()
-    _ensure_pytorch_engine(config_path)
-    script = _wrap_script(
+    script = (
         f"import deeplabcut; "
-        f"deeplabcut.create_training_dataset(r'{config_path}', net_type='{settings.dlc_net_type}'); "
         f"deeplabcut.train_network(r'{config_path}')"
     )
-    return [settings.python_executable, "-u", "-c", script]
+    return [settings.python_executable, "-c", script]
 
 
 def cmd_analyze_videos(config_path: str, video_dir: str) -> list[str]:
     """Build command to analyze videos with trained DLC model."""
     settings = get_settings()
-    _ensure_pytorch_engine(config_path)
-    script = _wrap_script(
+    script = (
         f"import deeplabcut; "
         f"deeplabcut.analyze_videos(r'{config_path}', r'{video_dir}')"
     )
-    return [settings.python_executable, "-u", "-c", script]
+    return [settings.python_executable, "-c", script]
 
 
 def cmd_create_labeled_video(config_path: str, video_dir: str) -> list[str]:
     """Build command to create labeled overlay videos."""
     settings = get_settings()
-    _ensure_pytorch_engine(config_path)
-    script = _wrap_script(
+    script = (
         f"import deeplabcut; "
         f"deeplabcut.create_labeled_video(r'{config_path}', r'{video_dir}')"
     )
-    return [settings.python_executable, "-u", "-c", script]
+    return [settings.python_executable, "-c", script]
 
 
 def cmd_triangulate(config_3d_path: str, video_dir: str) -> list[str]:
     """Build command for stereo triangulation."""
     settings = get_settings()
-    script = _wrap_script(
+    script = (
         f"import deeplabcut; "
         f"deeplabcut.triangulate(r'{config_3d_path}', r'{video_dir}', "
         f"filterpredictions=False, save_as_csv=True)"
     )
-    return [settings.python_executable, "-u", "-c", script]
+    return [settings.python_executable, "-c", script]
 
 
 def cmd_convert_h5_to_csv(video_dir: str) -> list[str]:
     """Build command to convert H5 results to CSV."""
     settings = get_settings()
-    script = _wrap_script(
+    script = (
         f"import deeplabcut; "
         f"deeplabcut.analyze_videos_converth5_to_csv(r'{video_dir}')"
     )
-    return [settings.python_executable, "-u", "-c", script]
+    return [settings.python_executable, "-c", script]

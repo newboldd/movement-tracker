@@ -2,26 +2,27 @@
 # One-command setup and launch for the DLC Finger-Tapping Pipeline.
 #
 # Usage:
-#   ./setup.sh
+#   ./dlc_app/setup.sh
 #
 # What it does:
-#   1. Checks for Python 3.10+ (or 3.9 — DLC training needs 3.10+ but labeling works on 3.9)
+#   1. Checks for Python 3.9+
 #   2. Creates a virtual environment (first run only)
 #   3. Installs dependencies (first run only)
 #   4. Starts the web app and opens your browser
 
 set -e
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_DIR="$PROJECT_DIR/.venv"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+VENV_DIR="$SCRIPT_DIR/.venv"
 REQUIREMENTS="$PROJECT_DIR/requirements.txt"
 PORT=8080
 
 # ── Find Python ──────────────────────────────────────────────────────────
 find_python() {
-    # Prefer 3.11 (best scientific package support), then 3.10, then any 3.9+
-    for cmd in python3.11 python3.10 python3.12 python3 python; do
+    for cmd in python3 python; do
         if command -v "$cmd" &>/dev/null; then
+            # Check version >= 3.9
             version=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
             major=$(echo "$version" | cut -d. -f1)
             minor=$(echo "$version" | cut -d. -f2)

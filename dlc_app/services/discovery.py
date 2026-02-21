@@ -1,7 +1,5 @@
 """Scan dlc/ directories to infer subject state from filesystem artifacts."""
 
-from __future__ import annotations
-
 import glob
 import re
 from pathlib import Path
@@ -137,73 +135,38 @@ def infer_stage(dlc_path: Path) -> str:
     return "created"
 
 
-def _discover_subjects_from_videos() -> set:
-    """Discover subject names from video filenames (SubjectName_Trial.mp4)."""
-    settings = get_settings()
-    video_dir = settings.video_path
-    if not video_dir.exists():
-        return set()
-
-    names = set()
-    for vpath in sorted(video_dir.glob("*.mp4")):
-        # Subject name is everything before the last underscore + trial info
-        # e.g. "MSA01_L1.mp4" -> "MSA01", "Con07_R2.mp4" -> "Con07"
-        stem = vpath.stem
-        # Split on underscore and take the first part as subject name
-        parts = stem.split("_")
-        if parts:
-            names.add(parts[0])
-    return names
-
-
 def scan_all_subjects() -> list[dict]:
-    """Scan dlc/ directory and video filenames to discover subjects."""
+    """Scan dlc/ directory and return info for each subject."""
     settings = get_settings()
     dlc_dir = settings.dlc_path
 
-    found = {}  # name -> subject dict
+    if not dlc_dir.exists():
+        return []
 
-    # 1. Discover from DLC project directories (existing behavior)
-    if dlc_dir.exists():
-        for entry in sorted(dlc_dir.iterdir()):
-            if not entry.is_dir():
-                continue
-            if entry.name in SKIP_NAMES:
-                continue
-            if LABEL_SET_PATTERN.match(entry.name):
-                continue
-            if not (entry / "config.yaml").exists():
-                continue
+    subjects = []
+    for entry in sorted(dlc_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        if entry.name in SKIP_NAMES:
+            continue
+        if LABEL_SET_PATTERN.match(entry.name):
+            continue
+        if not (entry / "config.yaml").exists():
+            continue
 
-            videos = _find_videos(entry.name)
-            stage = infer_stage(entry)
+        videos = _find_videos(entry.name)
+        stage = infer_stage(entry)
 
-            found[entry.name] = {
-                "name": entry.name,
-                "stage": stage,
-                "dlc_dir": entry.name,
-                "camera_name": _get_camera_name(entry),
-                "video_count": len(videos),
-                "videos": videos,
-                "has_snapshots": _has_snapshots(entry),
-                "has_labels": _has_labeled_data(entry),
-                "labeled_frame_count": _count_labeled_frames(entry),
-            }
+        subjects.append({
+            "name": entry.name,
+            "stage": stage,
+            "dlc_dir": entry.name,  # Store relative name only
+            "camera_name": _get_camera_name(entry),
+            "video_count": len(videos),
+            "videos": videos,
+            "has_snapshots": _has_snapshots(entry),
+            "has_labels": _has_labeled_data(entry),
+            "labeled_frame_count": _count_labeled_frames(entry),
+        })
 
-    # 2. Discover from video filenames (new — catches subjects with no DLC project yet)
-    for name in _discover_subjects_from_videos():
-        if name not in found:
-            videos = _find_videos(name)
-            found[name] = {
-                "name": name,
-                "stage": "created",
-                "dlc_dir": name,
-                "camera_name": None,
-                "video_count": len(videos),
-                "videos": videos,
-                "has_snapshots": False,
-                "has_labels": False,
-                "labeled_frame_count": 0,
-            }
-
-    return sorted(found.values(), key=lambda s: s["name"])
+    return subjects

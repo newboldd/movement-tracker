@@ -41,7 +41,6 @@
                 <div style="margin-bottom: 8px;">
                     <label style="font-size:12px;color:var(--text-muted);">Playback speed</label>
                     <select id="playbackRate" style="width:100%;padding:4px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:12px;">
-                        <option value="0.1">0.1x</option>
                         <option value="0.25">0.25x</option>
                         <option value="0.5">0.5x</option>
                         <option value="1" selected>1x</option>
@@ -59,7 +58,8 @@
 
             <div style="margin-bottom: 16px;">
                 <h3 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">Actions</h3>
-                <button class="btn btn-sm btn-success" onclick="labeler.commitSession()" style="width:100%;">Save &amp; Commit</button>
+                <button class="btn btn-sm btn-success" onclick="labeler.commitSession()" style="width:100%;margin-bottom:6px;">Commit to DLC</button>
+                <button class="btn btn-sm" onclick="labeler.saveLabels()" style="width:100%;">Save Labels</button>
             </div>
 
             <div>
@@ -80,10 +80,9 @@
 
         <!-- Main area -->
         <div class="labeling-main">
-            <!-- Canvas + hidden video for playback -->
+            <!-- Canvas -->
             <div class="canvas-container" id="canvasContainer">
                 <canvas id="labelCanvas"></canvas>
-                <video id="videoPlayer" style="display:none;" muted preload="auto"></video>
             </div>
 
             <!-- Controls bar -->
@@ -101,7 +100,7 @@
         </div>
     </div>
 
-    <script src="/static/js/api.js?v=3"></script>
-    <script src="/static/js/labeler.js?v=3"></script>
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/labeler.js"></script>
 </body>
 </html>

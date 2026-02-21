@@ -1,7 +1,5 @@
 """Configuration for DLC web app — Settings singleton with JSON persistence."""
 
-from __future__ import annotations
-
 import json
 import logging
 import os
@@ -40,6 +38,13 @@ class Settings:
         self.host: str = "127.0.0.1"
         self.port: int = 8080
 
+        # Remote training (optional)
+        self.remote_host: str = ""       # e.g. user@192.168.1.50
+        self.remote_python: str = ""     # e.g. /home/user/miniconda3/envs/dlc/bin/python
+        self.remote_work_dir: str = ""   # e.g. /home/user/dlc_training
+        self.remote_ssh_key: str = ""    # optional, e.g. ~/.ssh/id_ed25519
+        self.remote_ssh_port: int = 22
+
         self._load()
 
     @property
@@ -53,6 +58,24 @@ class Settings:
     @property
     def dlc_path(self) -> Path:
         return Path(self.dlc_dir) if self.dlc_dir else PROJECT_DIR / "dlc"
+
+    @property
+    def remote_enabled(self) -> bool:
+        """True when remote training is configured (host + python + work_dir all set)."""
+        return bool(self.remote_host) and bool(self.remote_python) and bool(self.remote_work_dir)
+
+    def get_remote_config(self):
+        """Return a RemoteConfig if remote training is configured, else None."""
+        if not self.remote_enabled:
+            return None
+        from .services.remote import RemoteConfig
+        return RemoteConfig(
+            host=self.remote_host,
+            python_executable=self.remote_python,
+            work_dir=self.remote_work_dir,
+            ssh_key_path=self.remote_ssh_key,
+            port=self.remote_ssh_port,
+        )
 
     @property
     def data_path(self) -> Path:
@@ -72,18 +95,18 @@ class Settings:
         self._apply_env_overrides()
 
     def _auto_detect(self):
-        """On first run, create default directories and save settings."""
+        """On first run, detect existing paths from project structure."""
         video_dir = PROJECT_DIR / "videos"
         dlc_dir = PROJECT_DIR / "dlc"
 
-        video_dir.mkdir(exist_ok=True)
-        dlc_dir.mkdir(exist_ok=True)
+        if video_dir.exists():
+            self.video_dir = str(video_dir)
+        if dlc_dir.exists():
+            self.dlc_dir = str(dlc_dir)
 
-        self.video_dir = str(video_dir)
-        self.dlc_dir = str(dlc_dir)
-
-        logger.info("Created default directories (videos/, dlc/), saving settings.json")
-        self.save()
+        if self.is_configured:
+            logger.info("Auto-detected existing paths, saving settings.json")
+            self.save()
 
     def _apply_dict(self, data: dict):
         """Apply a dict of settings values."""
@@ -91,6 +114,7 @@ class Settings:
             "video_dir", "dlc_dir", "calibration_3d_config",
             "python_executable", "dlc_scorer", "dlc_date", "dlc_net_type",
             "host",
+            "remote_host", "remote_python", "remote_work_dir", "remote_ssh_key",
         ]:
             if key in data and data[key] is not None:
                 setattr(self, key, data[key])
@@ -101,6 +125,8 @@ class Settings:
             self.bodyparts = data["bodyparts"]
         if "port" in data and data["port"] is not None:
             self.port = int(data["port"])
+        if "remote_ssh_port" in data and data["remote_ssh_port"] is not None:
+            self.remote_ssh_port = int(data["remote_ssh_port"])
 
     def _apply_env_overrides(self):
         """Override settings from DLC_APP_* environment variables."""
@@ -113,6 +139,10 @@ class Settings:
             "DLC_APP_DLC_DATE": "dlc_date",
             "DLC_APP_DLC_NET_TYPE": "dlc_net_type",
             "DLC_APP_HOST": "host",
+            "DLC_APP_REMOTE_HOST": "remote_host",
+            "DLC_APP_REMOTE_PYTHON": "remote_python",
+            "DLC_APP_REMOTE_WORK_DIR": "remote_work_dir",
+            "DLC_APP_REMOTE_SSH_KEY": "remote_ssh_key",
         }
         for env_key, attr in env_map.items():
             val = os.environ.get(env_key)
@@ -122,6 +152,10 @@ class Settings:
         port = os.environ.get("DLC_APP_PORT")
         if port is not None:
             self.port = int(port)
+
+        remote_port = os.environ.get("DLC_APP_REMOTE_SSH_PORT")
+        if remote_port is not None:
+            self.remote_ssh_port = int(remote_port)
 
         cam = os.environ.get("DLC_APP_CAMERA_NAMES")
         if cam:
@@ -144,6 +178,11 @@ class Settings:
             "dlc_net_type": self.dlc_net_type,
             "host": self.host,
             "port": self.port,
+            "remote_host": self.remote_host,
+            "remote_python": self.remote_python,
+            "remote_work_dir": self.remote_work_dir,
+            "remote_ssh_key": self.remote_ssh_key,
+            "remote_ssh_port": self.remote_ssh_port,
         }
 
     def save(self):

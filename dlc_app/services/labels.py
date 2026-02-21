@@ -1,9 +1,8 @@
 """CollectedData CSV read/write and H5 conversion for DLC."""
 
-from __future__ import annotations
-
 import csv
 import json
+import subprocess
 from pathlib import Path
 
 import cv2
@@ -17,10 +16,7 @@ def write_collected_data_csv(
     output_dir: Path,
     training_name: str = "round1",
 ):
-    """Write CollectedData_labels.csv in DLC format.
-
-    DLC expects: single index column with relative image path,
-    3-row multi-level header (scorer, bodyparts, coords).
+    """Write CollectedData_labels.csv in DLC multi-header format.
 
     Args:
         labels: list of dicts with keys: keypoints (dict), img_filename
@@ -34,26 +30,29 @@ def write_collected_data_csv(
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / "CollectedData_labels.csv"
 
+    # DLC multi-header format:
+    # Row 0: scorer,,,[scorer],[scorer],[scorer],[scorer]
+    # Row 1: bodyparts,,,[bp1],[bp1],[bp2],[bp2]
+    # Row 2: coords,,,x,y,x,y
+    # Data rows: labeled-data,[training_name],[imgfile],x1,y1,x2,y2
+
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
         n_bp = len(bodyparts)
-
-        # Header rows: first cell empty (index column header)
-        scorer_row = ["scorer"] + [scorer] * (n_bp * 2)
-        bp_row = ["bodyparts"]
+        scorer_row = ["scorer", "", ""] + [scorer] * (n_bp * 2)
+        bp_row = ["bodyparts", "", ""]
         for bp in bodyparts:
             bp_row.extend([bp, bp])
-        coords_row = ["coords"] + ["x", "y"] * n_bp
+        coords_row = ["coords", "", ""] + ["x", "y"] * n_bp
 
         writer.writerow(scorer_row)
         writer.writerow(bp_row)
         writer.writerow(coords_row)
 
-        # Data rows: index = relative path to image
+        # Data rows
         for label in sorted(labels, key=lambda x: x["img_filename"]):
             kp = label.get("keypoints", {})
-            img_path = f"labeled-data/{training_name}/{label['img_filename']}"
-            row = [img_path]
+            row = ["labeled-data", training_name, label["img_filename"]]
             for bp in bodyparts:
                 coords = kp.get(bp)
                 if coords and len(coords) >= 2 and coords[0] is not None:
@@ -65,21 +64,22 @@ def write_collected_data_csv(
     return csv_path
 
 
-def convert_csv_to_h5(csv_path: Path):
-    """Convert CollectedData CSV to H5 in DLC multi-index format.
+def convert_csv_to_h5(config_path: str):
+    """Call deeplabcut.convertcsv2h5 via subprocess."""
+    settings = get_settings()
+    python_exe = settings.python_executable
 
-    Reads the 3-row header (scorer, bodyparts, coords) and data rows,
-    builds a MultiIndex DataFrame, and saves as HDF5.
-    No DLC dependency required.
-    """
-    import pandas as pd
-
-    # Use pandas to read in DLC's expected format
-    df = pd.read_csv(csv_path, header=[0, 1, 2], index_col=0)
-
-    h5_path = csv_path.with_suffix(".h5")
-    df.to_hdf(h5_path, key="df_with_missing", mode="w")
-    return h5_path
+    script = (
+        f"import deeplabcut; "
+        f"deeplabcut.convertcsv2h5(r'{config_path}', userfeedback=False)"
+    )
+    result = subprocess.run(
+        [python_exe, "-c", script],
+        capture_output=True, text=True, timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"convertcsv2h5 failed: {result.stderr}")
+    return result.stdout
 
 
 def commit_labels_to_dlc(
@@ -151,93 +151,17 @@ def commit_labels_to_dlc(
 
     # Convert CSV to H5
     try:
-        convert_csv_to_h5(csv_path)
+        convert_csv_to_h5(str(config_path))
     except Exception as e:
-        # Non-fatal — CSV is the primary format
-        print(f"Warning: CSV to H5 conversion failed: {e}")
+        # Non-fatal — CSV is the primary format; H5 needs DeepLabCut
+        print(f"Warning: CSV to H5 conversion skipped ({e}). Install DeepLabCut for H5 support.")
 
-    # Create training dataset so subject is ready to train immediately
-    try:
-        td_result = create_training_dataset(dlc_path)
-    except Exception as e:
-        print(f"Warning: Training dataset creation failed: {e}")
-        td_result = None
-
-    result = {
+    return {
         "dlc_dir": str(dlc_path),
         "labeled_data_dir": str(labeled_data_dir),
         "csv_path": str(csv_path),
         "frame_count": len(extracted),
     }
-    if td_result:
-        result["training_dataset_dir"] = td_result
-    return result
-
-
-def create_training_dataset(dlc_path: Path) -> str:
-    """Create DLC training dataset natively (no DLC dependency).
-
-    Reads labeled-data CSVs, builds a train/test split, and writes
-    the training-datasets directory structure that DLC expects.
-
-    Args:
-        dlc_path: Path to the subject's DLC project directory
-
-    Returns:
-        str path to the training dataset directory
-    """
-    import random
-    import yaml
-
-    settings = get_settings()
-
-    labeled_dir = dlc_path / "labeled-data"
-    if not labeled_dir.exists():
-        raise FileNotFoundError(f"No labeled data at {labeled_dir}")
-
-    # Read config.yaml for training fraction
-    config = {}
-    config_file = dlc_path / "config.yaml"
-    if config_file.exists():
-        config = yaml.safe_load(config_file.read_text()) or {}
-
-    train_fraction = 0.95
-    if "TrainingFraction" in config and config["TrainingFraction"]:
-        train_fraction = config["TrainingFraction"][0]
-
-    # Gather all image paths from labeled-data subdirectories
-    all_images = []
-    for subdir in sorted(labeled_dir.iterdir()):
-        if not subdir.is_dir():
-            continue
-        csv_file = subdir / "CollectedData_labels.csv"
-        if csv_file.exists():
-            for img in sorted(subdir.glob("img*.png")):
-                all_images.append(str(img.relative_to(dlc_path)))
-
-    if not all_images:
-        raise FileNotFoundError("No labeled images found in labeled-data/")
-
-    # Train/test split
-    random.seed(42)
-    shuffled = all_images[:]
-    random.shuffle(shuffled)
-    n_train = max(1, int(len(shuffled) * train_fraction))
-    train_set = sorted(shuffled[:n_train])
-    test_set = sorted(shuffled[n_train:]) if n_train < len(shuffled) else []
-
-    # Write training-datasets directory
-    iteration = config.get("iteration", 0)
-    dataset_name = f"iteration-{iteration}/UnaugmentedDataSet_{config.get('Task', 'project')}{config.get('date', '')}"
-    dataset_dir = dlc_path / "training-datasets" / dataset_name
-    dataset_dir.mkdir(parents=True, exist_ok=True)
-
-    # Write train/test index files
-    (dataset_dir / "CollectedData_train.csv").write_text("\n".join(train_set))
-    if test_set:
-        (dataset_dir / "CollectedData_test.csv").write_text("\n".join(test_set))
-
-    return str(dataset_dir)
 
 
 def _create_dlc_config(dlc_path: Path, subject_name: str, training_name: str):

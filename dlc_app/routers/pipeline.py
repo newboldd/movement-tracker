@@ -1,8 +1,7 @@
 """Pipeline step triggers: crop, train, analyze, etc."""
 
-from __future__ import annotations
-
 import subprocess
+import threading
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 
@@ -19,6 +18,7 @@ from ..services.dlc_wrapper import (
     cmd_convert_h5_to_csv,
 )
 from ..services.jobs import registry, parse_dlc_training_progress
+from ..services.remote import remote_train_monitor
 from ..services.video import get_subject_videos
 
 router = APIRouter(prefix="/api/subjects", tags=["pipeline"])
@@ -33,23 +33,23 @@ VALID_STEPS = [
     "triangulate",
 ]
 
-# Steps that require DeepLabCut (crop and create_training_dataset are native)
-DLC_STEPS = {"train", "analyze", "create_labeled_video", "triangulate"}
+# Steps that require DeepLabCut (crop is pure OpenCV)
+DLC_STEPS = {"create_training_dataset", "train", "analyze", "create_labeled_video", "triangulate"}
 
 
 def _check_dlc_available():
-    """Quick check that DeepLabCut is installed (metadata only, no import)."""
+    """Raise HTTPException if DeepLabCut is not installed."""
     settings = get_settings()
     try:
         subprocess.run(
-            [settings.python_executable, "-c",
-             "from importlib.metadata import version; version('deeplabcut')"],
-            capture_output=True, timeout=10,
+            [settings.python_executable, "-c", "import deeplabcut"],
+            capture_output=True, timeout=15,
         ).check_returncode()
     except Exception:
         raise HTTPException(
             400,
-            "DeepLabCut is not installed. Install it from the Settings page.",
+            "DeepLabCut is not installed. Install it to use training/analysis features. "
+            "Labeling and video cropping work without it.",
         )
 
 
@@ -77,10 +77,13 @@ def run_step(subject_id: int, req: RunStepRequest) -> dict:
     if req.step not in VALID_STEPS:
         raise HTTPException(400, f"Invalid step '{req.step}'. Valid: {VALID_STEPS}")
 
-    if req.step in DLC_STEPS:
-        _check_dlc_available()
-
     settings = get_settings()
+    remote_cfg = settings.get_remote_config()
+
+    # Skip local DLC check for remote training
+    if req.step in DLC_STEPS:
+        if not (req.step == "train" and remote_cfg):
+            _check_dlc_available()
 
     with get_db_ctx() as db:
         subj = db.execute(
@@ -101,13 +104,63 @@ def run_step(subject_id: int, req: RunStepRequest) -> dict:
         raise HTTPException(400, f"No DLC config for {subject_name}")
 
     if req.step == "create_training_dataset":
-        _do_create_training_dataset(subject_name, job["id"], config_path)
-        return {"job_id": job["id"], "status": "completed"}
+        cmd = cmd_create_training_dataset(config_path)
+        progress_parser = None
+        next_stage = "training_dataset_created"
 
     elif req.step == "train":
-        cmd = cmd_train_network(config_path)
-        progress_parser = parse_dlc_training_progress
         next_stage = "trained"
+
+        def on_train_complete(jid, returncode):
+            if returncode == 0:
+                # Restore local project_path in config.yaml after remote download
+                try:
+                    fix_project_path(subject_name)
+                except Exception:
+                    pass
+                with get_db_ctx() as db:
+                    db.execute(
+                        "UPDATE subjects SET stage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (next_stage, subject_id),
+                    )
+
+        if remote_cfg:
+            # Remote training via SSH
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET remote_host = ?, status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (remote_cfg.host, job["id"]),
+                )
+
+            thread = threading.Thread(
+                target=remote_train_monitor,
+                kwargs=dict(
+                    job_id=job["id"],
+                    cfg=remote_cfg,
+                    local_dlc_dir=dlc_dir / subject_name,
+                    subject_name=subject_name,
+                    log_path=job["log_path"],
+                    progress_parser=parse_dlc_training_progress,
+                    on_complete=on_train_complete,
+                    registry=registry,
+                ),
+                daemon=True,
+            )
+            thread.start()
+            registry._threads[job["id"]] = thread
+
+            return {"job_id": job["id"], "status": "running", "remote": True}
+        else:
+            # Local training
+            cmd = cmd_train_network(config_path)
+            progress_parser = parse_dlc_training_progress
+
+            registry.launch(
+                job["id"], cmd, job["log_path"],
+                progress_parser=progress_parser,
+                on_complete=on_train_complete,
+            )
+            return {"job_id": job["id"], "status": "running"}
 
     elif req.step == "crop":
         # Crop is done inline (not a DLC call) — use our crop script
@@ -228,39 +281,6 @@ def _do_crop(subject_name: str, job_id: int):
         )
         db.execute(
             "UPDATE subjects SET stage = 'cropped', updated_at = CURRENT_TIMESTAMP WHERE id = (SELECT subject_id FROM jobs WHERE id = ?)",
-            (job_id,),
-        )
-
-
-def _do_create_training_dataset(subject_name: str, job_id: int, config_path: str):
-    """Create DLC training dataset natively (no DLC dependency).
-
-    Delegates to the shared create_training_dataset() in labels.py.
-    """
-    from ..services.labels import create_training_dataset
-
-    settings = get_settings()
-    dlc_path = settings.dlc_path / subject_name
-
-    try:
-        create_training_dataset(dlc_path)
-    except FileNotFoundError as e:
-        with get_db_ctx() as db:
-            db.execute(
-                "UPDATE jobs SET status = 'failed', error_msg = ? WHERE id = ?",
-                (str(e), job_id),
-            )
-        return
-
-    # Update job and subject status
-    with get_db_ctx() as db:
-        db.execute(
-            """UPDATE jobs SET status = 'completed', progress_pct = 100,
-               finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
-            (job_id,),
-        )
-        db.execute(
-            "UPDATE subjects SET stage = 'training_dataset_created', updated_at = CURRENT_TIMESTAMP WHERE id = (SELECT subject_id FROM jobs WHERE id = ?)",
             (job_id,),
         )
 

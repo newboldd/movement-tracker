@@ -88,43 +88,6 @@
         }
         .status-ok { background: rgba(76,175,80,0.15); color: var(--green); }
         .status-warn { background: rgba(255,152,0,0.15); color: var(--orange); }
-        .input-with-btn {
-            display: flex;
-            gap: 6px;
-        }
-        .input-with-btn input { flex: 1; }
-        .input-with-btn .btn { white-space: nowrap; padding: 8px 12px; }
-        .browse-modal {
-            position: fixed; inset: 0;
-            background: rgba(0,0,0,0.6);
-            display: none; align-items: center; justify-content: center;
-            z-index: 1000;
-        }
-        .browse-modal.active { display: flex; }
-        .browse-modal .modal {
-            background: var(--bg-card); border-radius: var(--radius);
-            padding: 20px; width: 500px; max-height: 70vh;
-            display: flex; flex-direction: column;
-        }
-        .browse-path {
-            font-size: 12px; color: var(--text-muted);
-            padding: 6px 8px; background: var(--bg);
-            border-radius: 4px; margin-bottom: 8px;
-            word-break: break-all;
-        }
-        .browse-list {
-            flex: 1; overflow-y: auto; min-height: 200px;
-            border: 1px solid var(--border); border-radius: var(--radius);
-        }
-        .browse-item {
-            padding: 8px 12px; cursor: pointer;
-            border-bottom: 1px solid var(--border);
-            font-size: 13px;
-        }
-        .browse-item:hover { background: var(--accent); }
-        .browse-item::before { content: '\1F4C1 '; }
-        .browse-up { color: var(--blue); font-weight: 500; }
-        .browse-up::before { content: '\2190 '; }
     </style>
 </head>
 <body>
@@ -147,18 +110,12 @@
                 <h3>Paths</h3>
                 <div class="form-row">
                     <label>Video Directory *</label>
-                    <div class="input-with-btn">
-                        <input type="text" id="video_dir" placeholder="/path/to/videos">
-                        <button class="btn" onclick="openBrowse('video_dir')">Browse</button>
-                    </div>
+                    <input type="text" id="video_dir" placeholder="/path/to/videos">
                     <div class="help">Directory containing stereo MP4 files (e.g. SubjectName_Trial1.mp4)</div>
                 </div>
                 <div class="form-row">
                     <label>DLC Project Directory *</label>
-                    <div class="input-with-btn">
-                        <input type="text" id="dlc_dir" placeholder="/path/to/dlc">
-                        <button class="btn" onclick="openBrowse('dlc_dir')">Browse</button>
-                    </div>
+                    <input type="text" id="dlc_dir" placeholder="/path/to/dlc">
                     <div class="help">Directory for DLC project folders (one per subject)</div>
                 </div>
             </div>
@@ -220,6 +177,39 @@
                 </div>
             </div>
 
+            <!-- Remote Training (Optional) -->
+            <div class="form-section">
+                <h3>Remote Training (Optional)</h3>
+                <div class="form-row">
+                    <label>SSH Host</label>
+                    <input type="text" id="remote_host" placeholder="user@192.168.1.50">
+                    <div class="help">SSH destination for remote training (e.g. user@hostname or user@IP)</div>
+                </div>
+                <div class="form-row">
+                    <label>Remote Python Executable</label>
+                    <input type="text" id="remote_python" placeholder="/home/user/miniconda3/envs/dlc/bin/python">
+                    <div class="help">Path to Python with DLC installed on the remote machine</div>
+                </div>
+                <div class="form-row">
+                    <label>Remote Work Directory</label>
+                    <input type="text" id="remote_work_dir" placeholder="/home/user/dlc_training">
+                    <div class="help">Directory on the remote machine where DLC projects will be uploaded</div>
+                </div>
+                <div class="form-row">
+                    <label>SSH Key Path (optional)</label>
+                    <input type="text" id="remote_ssh_key" placeholder="~/.ssh/id_ed25519">
+                    <div class="help">Path to SSH private key. Leave empty to use default SSH key.</div>
+                </div>
+                <div class="form-row">
+                    <label>SSH Port</label>
+                    <input type="number" id="remote_ssh_port" placeholder="22" value="22">
+                </div>
+                <div style="margin-top:8px;">
+                    <button class="btn" onclick="testRemoteConnection()" id="testRemoteBtn">Test Connection</button>
+                    <span id="remoteTestResult" style="margin-left:12px;font-size:13px;"></span>
+                </div>
+            </div>
+
             <!-- Advanced -->
             <div class="form-section">
                 <h3>Advanced</h3>
@@ -238,31 +228,10 @@
                 </div>
             </div>
 
-            <!-- DeepLabCut -->
-            <div class="form-section">
-                <h3>DeepLabCut</h3>
-                <div id="dlcStatus" style="margin-bottom:8px;font-size:13px;color:var(--text-muted);">Checking...</div>
-                <div id="dlcInstallBtn"></div>
-                <div id="dlcInstallLog" style="display:none;margin-top:8px;max-height:200px;overflow-y:auto;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:8px;font-family:monospace;font-size:11px;white-space:pre-wrap;color:var(--text-muted);"></div>
-            </div>
-
             <!-- Actions -->
             <div style="display:flex;gap:8px;justify-content:flex-end;padding-top:12px;border-top:1px solid var(--border);">
                 <button class="btn" onclick="loadSettings()">Reset</button>
                 <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Browse modal -->
-    <div class="browse-modal" id="browseModal">
-        <div class="modal">
-            <h3>Select Directory</h3>
-            <div class="browse-path" id="browsePath"></div>
-            <div class="browse-list" id="browseList"></div>
-            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
-                <button class="btn" onclick="closeBrowse()">Cancel</button>
-                <button class="btn btn-primary" onclick="selectBrowsePath()">Select This Folder</button>
             </div>
         </div>
     </div>

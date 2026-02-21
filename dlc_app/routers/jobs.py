@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
@@ -14,9 +13,9 @@ router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
 @router.get("")
 def list_jobs(
-    subject_id: Optional[int] = Query(None),
-    status: Optional[str] = Query(None),
-) -> List[dict]:
+    subject_id: int | None = Query(None),
+    status: str | None = Query(None),
+) -> list[dict]:
     """List jobs, optionally filtered by subject or status."""
     with get_db_ctx() as db:
         query = "SELECT * FROM jobs WHERE 1=1"
@@ -58,7 +57,7 @@ async def stream_job(job_id: int) -> StreamingResponse:
         while True:
             with get_db_ctx() as db:
                 current = db.execute(
-                    "SELECT status, progress_pct, error_msg FROM jobs WHERE id = ?",
+                    "SELECT status, progress_pct, error_msg, remote_host FROM jobs WHERE id = ?",
                     (job_id,),
                 ).fetchone()
 

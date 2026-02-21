@@ -1,8 +1,7 @@
 """Pydantic request/response models."""
 
-from typing import Dict, List, Optional
-
 from pydantic import BaseModel
+from typing import Optional
 
 
 # ── Subject stages (ordered) ──────────────────────────────────────────────
@@ -55,10 +54,10 @@ class SubjectResponse(BaseModel):
 
 
 class SubjectDetail(SubjectResponse):
-    videos: List[str] = []
-    trials: List[str] = []
-    jobs: List[dict] = []
-    label_sessions: List[dict] = []
+    videos: list[str] = []
+    trials: list[str] = []
+    jobs: list[dict] = []
+    label_sessions: list[dict] = []
 
 
 # ── Jobs ──────────────────────────────────────────────────────────────────
@@ -83,11 +82,11 @@ class LabelData(BaseModel):
     frame_num: int
     trial_idx: int = 0
     side: str = "OS"
-    keypoints: Dict[str, List[Optional[float]]] = {}
+    keypoints: dict[str, list[Optional[float]]] = {}
 
 
 class LabelBatchSave(BaseModel):
-    labels: List[LabelData]
+    labels: list[LabelData]
 
 
 class SessionCreate(BaseModel):

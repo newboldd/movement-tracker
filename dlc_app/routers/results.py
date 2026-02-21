@@ -1,7 +1,5 @@
 """Analysis results and plot serving."""
 
-from __future__ import annotations
-
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 

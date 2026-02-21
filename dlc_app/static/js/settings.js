@@ -63,14 +63,16 @@ async function loadSettings() {
         const fields = [
             'video_dir', 'dlc_dir', 'calibration_3d_config',
             'python_executable', 'dlc_scorer', 'dlc_date', 'host',
+            'remote_host', 'remote_python', 'remote_work_dir', 'remote_ssh_key',
         ];
         fields.forEach(f => {
             const el = document.getElementById(f);
             if (el) el.value = settings[f] || '';
         });
 
-        // Port
+        // Ports
         document.getElementById('port').value = settings.port || 8080;
+        document.getElementById('remote_ssh_port').value = settings.remote_ssh_port || 22;
 
         // Select
         const netType = document.getElementById('dlc_net_type');
@@ -106,8 +108,8 @@ function renderStatus(status) {
 }
 
 // ── Save settings ─────────────────────────────────────────────
-async function saveSettings() {
-    const data = {
+function _gatherSettings() {
+    return {
         video_dir: document.getElementById('video_dir').value.trim(),
         dlc_dir: document.getElementById('dlc_dir').value.trim(),
         calibration_3d_config: document.getElementById('calibration_3d_config').value.trim(),
@@ -119,7 +121,16 @@ async function saveSettings() {
         dlc_net_type: document.getElementById('dlc_net_type').value,
         host: document.getElementById('host').value.trim(),
         port: parseInt(document.getElementById('port').value) || 8080,
+        remote_host: document.getElementById('remote_host').value.trim(),
+        remote_python: document.getElementById('remote_python').value.trim(),
+        remote_work_dir: document.getElementById('remote_work_dir').value.trim(),
+        remote_ssh_key: document.getElementById('remote_ssh_key').value.trim(),
+        remote_ssh_port: parseInt(document.getElementById('remote_ssh_port').value) || 22,
     };
+}
+
+async function saveSettings() {
+    const data = _gatherSettings();
 
     try {
         await API.put('/api/settings', data);
@@ -131,137 +142,36 @@ async function saveSettings() {
     }
 }
 
-// ── Directory browser ─────────────────────────────────────────
-let browseTargetField = null;
-let browseCurrentPath = '';
+async function testRemoteConnection() {
+    const btn = document.getElementById('testRemoteBtn');
+    const result = document.getElementById('remoteTestResult');
 
-function openBrowse(fieldId) {
-    browseTargetField = fieldId;
-    const current = document.getElementById(fieldId).value.trim();
-    document.getElementById('browseModal').classList.add('active');
-    loadBrowse(current || null);
-}
-
-function closeBrowse() {
-    document.getElementById('browseModal').classList.remove('active');
-    browseTargetField = null;
-}
-
-function selectBrowsePath() {
-    if (browseTargetField && browseCurrentPath) {
-        document.getElementById(browseTargetField).value = browseCurrentPath;
-    }
-    closeBrowse();
-}
-
-async function loadBrowse(path) {
-    const url = path
-        ? '/api/settings/browse?path=' + encodeURIComponent(path)
-        : '/api/settings/browse';
-
+    // Save settings first (silently) so the backend has the latest values
     try {
-        const data = await API.get(url);
-        browseCurrentPath = data.path;
-        document.getElementById('browsePath').textContent = data.path;
-
-        const list = document.getElementById('browseList');
-        let html = '';
-
-        if (data.parent) {
-            html += `<div class="browse-item browse-up" onclick="loadBrowse('${data.parent.replace(/'/g, "\\'")}')">Parent directory</div>`;
-        }
-
-        if (data.error) {
-            html += `<div style="padding:12px;color:var(--red);font-size:13px;">${data.error}</div>`;
-        }
-
-        data.dirs.forEach(d => {
-            const full = data.path + (data.path.endsWith('/') ? '' : '/') + d;
-            html += `<div class="browse-item" onclick="loadBrowse('${full.replace(/'/g, "\\'")}')">${d}</div>`;
-        });
-
-        if (!data.dirs.length && !data.error) {
-            html += '<div style="padding:12px;color:var(--text-muted);font-size:13px;">Empty directory</div>';
-        }
-
-        list.innerHTML = html;
+        await API.put('/api/settings', _gatherSettings());
     } catch (e) {
-        console.error('Browse failed:', e);
+        result.innerHTML = `<span style="color:var(--red)">Failed to save settings: ${e.message}</span>`;
+        return;
     }
-}
 
-// Escape closes browse modal
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeBrowse();
-});
+    btn.disabled = true;
+    btn.textContent = 'Testing...';
+    result.innerHTML = '<span style="color:var(--text-muted)">Connecting...</span>';
 
-// ── DLC install ──────────────────────────────────────────────
-let dlcPollTimer = null;
-
-async function checkDlcStatus() {
     try {
-        const data = await API.get('/api/settings/dlc-status');
-        const statusEl = document.getElementById('dlcStatus');
-        const btnEl = document.getElementById('dlcInstallBtn');
-        const logEl = document.getElementById('dlcInstallLog');
-
-        if (data.installed) {
-            statusEl.innerHTML = `<span class="status-indicator status-ok">DeepLabCut ${data.version} installed</span>`;
-            btnEl.innerHTML = '';
-            logEl.style.display = 'none';
-            stopDlcPoll();
-        } else if (data.install_running) {
-            statusEl.innerHTML = `<span class="status-indicator status-warn">Installing DeepLabCut...</span>`;
-            btnEl.innerHTML = '';
-            logEl.style.display = 'block';
-            logEl.textContent = (data.install_log || []).join('\n');
-            logEl.scrollTop = logEl.scrollHeight;
-            startDlcPoll();
-        } else if (data.install_status === 'completed') {
-            statusEl.innerHTML = `<span class="status-indicator status-ok">DeepLabCut installed successfully</span>`;
-            btnEl.innerHTML = '';
-            logEl.style.display = 'none';
-            stopDlcPoll();
-        } else if (data.install_status === 'failed') {
-            statusEl.innerHTML = `<span class="status-indicator status-warn">Install failed: ${data.install_error || 'unknown error'}</span>`;
-            btnEl.innerHTML = `<button class="btn" onclick="installDlc()">Retry Install</button>`;
-            logEl.style.display = 'block';
-            logEl.textContent = (data.install_log || []).join('\n');
-            logEl.scrollTop = logEl.scrollHeight;
-            stopDlcPoll();
+        const resp = await API.post('/api/settings/test-remote');
+        if (resp.ok) {
+            result.innerHTML = `<span style="color:var(--green)">${resp.message}</span>`;
         } else {
-            statusEl.innerHTML = 'DeepLabCut is not installed.';
-            btnEl.innerHTML = `<button class="btn btn-primary" onclick="installDlc()">Install DeepLabCut</button>`;
-            logEl.style.display = 'none';
+            result.innerHTML = `<span style="color:var(--red)">${resp.message}</span>`;
         }
     } catch (e) {
-        console.error('DLC status check failed:', e);
-    }
-}
-
-async function installDlc() {
-    try {
-        await API.post('/api/settings/install-dlc');
-        startDlcPoll();
-        checkDlcStatus();
-    } catch (e) {
-        alert('Failed to start DLC install: ' + e.message);
-    }
-}
-
-function startDlcPoll() {
-    if (!dlcPollTimer) {
-        dlcPollTimer = setInterval(checkDlcStatus, 3000);
-    }
-}
-
-function stopDlcPoll() {
-    if (dlcPollTimer) {
-        clearInterval(dlcPollTimer);
-        dlcPollTimer = null;
+        result.innerHTML = `<span style="color:var(--red)">Error: ${e.message}</span>`;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Test Connection';
     }
 }
 
 // Load on page ready
 loadSettings();
-checkDlcStatus();
