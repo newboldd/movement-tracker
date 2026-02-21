@@ -306,7 +306,7 @@ const labeler = (() => {
         // Resize handler
         const ro = new ResizeObserver(() => {
             if (currentImage) {
-                fitImage();
+                if (!hasUserZoom) fitImage();
                 render();
                 renderTimeline();
             }
