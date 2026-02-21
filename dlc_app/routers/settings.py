@@ -162,7 +162,7 @@ def _run_dlc_install(python: str):
     """Run pip install deeplabcut[pytorch] and capture output."""
     try:
         proc = subprocess.Popen(
-            [python, "-m", "pip", "install", "deeplabcut", "torch", "torchvision"],
+            [python, "-m", "pip", "install", "deeplabcut>=3.0.0rc13", "torch", "torchvision"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
