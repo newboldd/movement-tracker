@@ -4,8 +4,8 @@ from pathlib import Path
 
 from ..config import get_settings
 
-# Preamble for all DLC commands: force PyTorch engine (DLC 3.0 defaults to TF)
-_DLC_PREAMBLE = "import os; os.environ['DLC_USE_PYTORCH']='True'; import deeplabcut; "
+# Preamble for all DLC commands
+_DLC_PREAMBLE = "import deeplabcut; "
 
 
 def fix_project_path(subject_name: str) -> str:
@@ -65,7 +65,7 @@ def cmd_train_network(config_path: str) -> list[str]:
     settings = get_settings()
     script = (
         f"{_DLC_PREAMBLE}"
-        f"deeplabcut.train_network(r'{config_path}')"
+        f"deeplabcut.train_network(r'{config_path}', engine='pytorch')"
     )
     return [settings.python_executable, "-c", script]
 
