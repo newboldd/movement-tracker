@@ -19,8 +19,8 @@ PORT=8080
 
 # ── Find Python ──────────────────────────────────────────────────────────
 find_python() {
-    # Prefer newer Python versions (3.12, 3.11, 3.10) for DLC 3.0 compatibility
-    for cmd in python3.12 python3.11 python3.10 python3 python; do
+    # Prefer Python 3.11 (best wheel availability for scientific packages)
+    for cmd in python3.11 python3.10 python3.12 python3 python; do
         if command -v "$cmd" &>/dev/null; then
             version=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
             major=$(echo "$version" | cut -d. -f1)
