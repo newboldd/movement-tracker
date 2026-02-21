@@ -472,6 +472,7 @@ const labeler = (() => {
         }
 
         render();
+        renderTimeline();
         updateLabelCount();
         scheduleSave();
         recomputeCameraShift();
@@ -565,6 +566,7 @@ const labeler = (() => {
         }
 
         render();
+        renderTimeline();
         updateLabelCount();
         scheduleSave();
         recomputeCameraShift();
@@ -586,6 +588,7 @@ const labeler = (() => {
         }
 
         render();
+        renderTimeline();
         updateLabelCount();
         scheduleSave();
     }
