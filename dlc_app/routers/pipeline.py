@@ -41,9 +41,12 @@ def _check_dlc_available():
     """Raise HTTPException if DeepLabCut is not installed."""
     settings = get_settings()
     try:
+        # Use importlib.metadata for a fast check — actually importing DLC
+        # loads PyTorch etc. and can exceed the subprocess timeout.
         subprocess.run(
-            [settings.python_executable, "-c", "import deeplabcut"],
-            capture_output=True, timeout=15,
+            [settings.python_executable, "-c",
+             "from importlib.metadata import version; version('deeplabcut')"],
+            capture_output=True, timeout=10,
         ).check_returncode()
     except Exception:
         raise HTTPException(

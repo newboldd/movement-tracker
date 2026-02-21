@@ -115,10 +115,12 @@ def dlc_install_status() -> dict:
     installed = False
     version = None
     try:
+        # Use importlib.metadata instead of importing deeplabcut — DLC import
+        # is very slow (loads PyTorch etc.) and can exceed subprocess timeout.
         result = subprocess.run(
             [python, "-c",
-             "import deeplabcut; print(deeplabcut.__version__)"],
-            capture_output=True, text=True, timeout=15,
+             "from importlib.metadata import version; print(version('deeplabcut'))"],
+            capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0:
             installed = True
