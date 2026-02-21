@@ -131,5 +131,69 @@ async function saveSettings() {
     }
 }
 
+// ── Directory browser ─────────────────────────────────────────
+let browseTargetField = null;
+let browseCurrentPath = '';
+
+function openBrowse(fieldId) {
+    browseTargetField = fieldId;
+    const current = document.getElementById(fieldId).value.trim();
+    document.getElementById('browseModal').classList.add('active');
+    loadBrowse(current || null);
+}
+
+function closeBrowse() {
+    document.getElementById('browseModal').classList.remove('active');
+    browseTargetField = null;
+}
+
+function selectBrowsePath() {
+    if (browseTargetField && browseCurrentPath) {
+        document.getElementById(browseTargetField).value = browseCurrentPath;
+    }
+    closeBrowse();
+}
+
+async function loadBrowse(path) {
+    const url = path
+        ? '/api/settings/browse?path=' + encodeURIComponent(path)
+        : '/api/settings/browse';
+
+    try {
+        const data = await API.get(url);
+        browseCurrentPath = data.path;
+        document.getElementById('browsePath').textContent = data.path;
+
+        const list = document.getElementById('browseList');
+        let html = '';
+
+        if (data.parent) {
+            html += `<div class="browse-item browse-up" onclick="loadBrowse('${data.parent.replace(/'/g, "\\'")}')">Parent directory</div>`;
+        }
+
+        if (data.error) {
+            html += `<div style="padding:12px;color:var(--red);font-size:13px;">${data.error}</div>`;
+        }
+
+        data.dirs.forEach(d => {
+            const full = data.path + (data.path.endsWith('/') ? '' : '/') + d;
+            html += `<div class="browse-item" onclick="loadBrowse('${full.replace(/'/g, "\\'")}')">${d}</div>`;
+        });
+
+        if (!data.dirs.length && !data.error) {
+            html += '<div style="padding:12px;color:var(--text-muted);font-size:13px;">Empty directory</div>';
+        }
+
+        list.innerHTML = html;
+    } catch (e) {
+        console.error('Browse failed:', e);
+    }
+}
+
+// Escape closes browse modal
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeBrowse();
+});
+
 // Load on page ready
 loadSettings();
