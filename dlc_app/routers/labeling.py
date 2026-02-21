@@ -82,12 +82,6 @@ def create_session(subject_id: int, req: SessionCreate) -> dict:
                 (session["id"], prev["id"]),
             )
 
-        # Update subject stage
-        db.execute(
-            "UPDATE subjects SET stage = 'labeling', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (subject_id,),
-        )
-
     return session
 
 
@@ -224,6 +218,14 @@ def save_labels(session_id: int, req: LabelBatchSave) -> dict:
                     session_id, label.frame_num, label.trial_idx, label.side,
                     kp_json,
                 ),
+            )
+
+        # Set stage to 'labeling' now that labels actually exist
+        if req.labels:
+            db.execute(
+                """UPDATE subjects SET stage = 'labeling', updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ? AND stage NOT IN ('committed', 'training_dataset_created', 'trained', 'analyzed', 'triangulated')""",
+                (session["subject_id"],),
             )
 
     return {"saved": len(req.labels)}
