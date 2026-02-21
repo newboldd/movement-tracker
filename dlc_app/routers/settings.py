@@ -1,5 +1,7 @@
 """Settings API: read, update, and status check."""
 
+from __future__ import annotations
+
 from pathlib import Path
 from fastapi import APIRouter
 from pydantic import BaseModel

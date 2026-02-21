@@ -1,5 +1,7 @@
 """Labeling session endpoints: frame serving, label CRUD, commit."""
 
+from __future__ import annotations
+
 import json
 
 from fastapi import APIRouter, HTTPException, Query

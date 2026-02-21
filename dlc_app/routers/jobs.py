@@ -1,5 +1,7 @@
 """Job listing, log tailing, and SSE progress streaming."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 from fastapi import APIRouter, HTTPException, Query

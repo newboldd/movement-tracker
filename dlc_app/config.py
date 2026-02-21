@@ -1,5 +1,7 @@
 """Configuration for DLC web app — Settings singleton with JSON persistence."""
 
+from __future__ import annotations
+
 import json
 import logging
 import os
