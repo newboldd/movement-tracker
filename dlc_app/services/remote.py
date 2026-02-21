@@ -87,25 +87,36 @@ def test_connection(cfg: RemoteConfig) -> dict:
         return {"ok": False, "message": "ssh command not found on this machine", "details": {"ssh": False}}
 
     # Check 2: Create work directory (use Python — shell-agnostic)
-    result = subprocess.run(
-        _py_cmd(cfg, f"\"import os; os.makedirs(r'{cfg.work_dir}', exist_ok=True); print('ok')\""),
-        capture_output=True, text=True, timeout=15,
-    )
-    details["work_dir"] = result.returncode == 0 and "ok" in result.stdout
+    try:
+        result = subprocess.run(
+            _py_cmd(cfg, f"\"import os; os.makedirs(r'{cfg.work_dir}', exist_ok=True); print('ok')\""),
+            capture_output=True, text=True, timeout=15,
+        )
+        details["work_dir"] = result.returncode == 0 and "ok" in result.stdout
+    except subprocess.TimeoutExpired:
+        details["work_dir"] = False
     if not details["work_dir"]:
         return {
             "ok": False,
-            "message": f"Cannot create work directory: {(result.stderr or result.stdout).strip()[:200]}",
+            "message": f"Cannot create work directory (timed out or failed)",
             "details": details,
         }
 
-    # Check 3: DLC version
-    result = subprocess.run(
-        _py_cmd(cfg, "\"import deeplabcut; print(deeplabcut.__version__)\""),
-        capture_output=True, text=True, timeout=30,
-    )
+    # Check 3: DLC version (generous timeout — DLC import loads PyTorch/CUDA)
+    try:
+        result = subprocess.run(
+            _py_cmd(cfg, "\"import deeplabcut; print(deeplabcut.__version__)\""),
+            capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "message": "DLC import timed out (>120s). Check the remote Python path.",
+            "details": details,
+        }
     if result.returncode == 0 and result.stdout.strip():
-        details["dlc_version"] = result.stdout.strip()
+        # DLC prints "Loading DLC X.Y.Z..." to stderr; version is on stdout
+        details["dlc_version"] = result.stdout.strip().splitlines()[-1]
     else:
         return {
             "ok": False,
@@ -114,11 +125,14 @@ def test_connection(cfg: RemoteConfig) -> dict:
         }
 
     # Check 4: GPU availability
-    result = subprocess.run(
-        _py_cmd(cfg, "\"import torch; print(f'GPU: {torch.cuda.get_device_name(0)}' if torch.cuda.is_available() else 'No GPU')\""),
-        capture_output=True, text=True, timeout=30,
-    )
-    details["gpu"] = result.stdout.strip() if result.returncode == 0 else "check failed"
+    try:
+        result = subprocess.run(
+            _py_cmd(cfg, "\"import torch; print(f'GPU: {torch.cuda.get_device_name(0)}' if torch.cuda.is_available() else 'No GPU')\""),
+            capture_output=True, text=True, timeout=60,
+        )
+        details["gpu"] = result.stdout.strip() if result.returncode == 0 else "check failed"
+    except subprocess.TimeoutExpired:
+        details["gpu"] = "check timed out"
 
     return {
         "ok": True,
