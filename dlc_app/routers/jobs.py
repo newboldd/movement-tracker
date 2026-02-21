@@ -1,9 +1,8 @@
 """Job listing, log tailing, and SSE progress streaming."""
 
-from __future__ import annotations
-
 import asyncio
 import json
+from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
@@ -15,9 +14,9 @@ router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
 @router.get("")
 def list_jobs(
-    subject_id: int | None = Query(None),
-    status: str | None = Query(None),
-) -> list[dict]:
+    subject_id: Optional[int] = Query(None),
+    status: Optional[str] = Query(None),
+) -> List[dict]:
     """List jobs, optionally filtered by subject or status."""
     with get_db_ctx() as db:
         query = "SELECT * FROM jobs WHERE 1=1"

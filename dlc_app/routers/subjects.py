@@ -1,8 +1,7 @@
 """Subject CRUD and dashboard data endpoints."""
 
-from __future__ import annotations
-
 from pathlib import Path
+from typing import List, Optional
 from fastapi import APIRouter, HTTPException
 
 from ..config import get_settings
@@ -16,7 +15,7 @@ from ..services.discovery import scan_all_subjects, infer_stage, _find_videos, _
 router = APIRouter(prefix="/api/subjects", tags=["subjects"])
 
 
-def _resolve_dlc_path(dlc_dir_value: str | None) -> Path | None:
+def _resolve_dlc_path(dlc_dir_value: Optional[str]) -> Optional[Path]:
     """Resolve a dlc_dir value (subject name) to absolute path."""
     if not dlc_dir_value:
         return None
@@ -38,7 +37,7 @@ def _subject_row_to_response(row: dict) -> dict:
 
 
 @router.get("")
-def list_subjects() -> list[dict]:
+def list_subjects() -> List[dict]:
     """List all subjects with stage info."""
     with get_db_ctx() as db:
         rows = db.execute(
