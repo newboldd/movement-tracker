@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import subprocess
-import sys
 import threading
 from pathlib import Path
 from fastapi import APIRouter, Query
@@ -111,11 +110,13 @@ def browse_directory(path: Optional[str] = Query(None)) -> dict:
 @router.get("/dlc-status")
 def dlc_install_status() -> dict:
     """Check if DeepLabCut is installed and get install progress."""
+    settings = get_settings()
+    python = settings.python_executable
     installed = False
     version = None
     try:
         result = subprocess.run(
-            [sys.executable, "-c",
+            [python, "-c",
              "import deeplabcut; print(deeplabcut.__version__)"],
             capture_output=True, text=True, timeout=15,
         )
@@ -141,22 +142,25 @@ def install_dlc() -> dict:
     if _dlc_install["running"]:
         return {"status": "already_running"}
 
+    settings = get_settings()
+    python = settings.python_executable
+
     _dlc_install["running"] = True
     _dlc_install["log"] = []
     _dlc_install["status"] = "installing"
     _dlc_install["error"] = None
 
-    thread = threading.Thread(target=_run_dlc_install, daemon=True)
+    thread = threading.Thread(target=_run_dlc_install, args=(python,), daemon=True)
     thread.start()
 
     return {"status": "started"}
 
 
-def _run_dlc_install():
+def _run_dlc_install(python: str):
     """Run pip install deeplabcut[pytorch] and capture output."""
     try:
         proc = subprocess.Popen(
-            [sys.executable, "-m", "pip", "install", "deeplabcut[pytorch]"],
+            [python, "-m", "pip", "install", "deeplabcut[pytorch]"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
