@@ -2,7 +2,7 @@
 # One-command setup and launch for the DLC Finger-Tapping Pipeline.
 #
 # Usage:
-#   ./dlc_app/setup.sh
+#   ./setup.sh
 #
 # What it does:
 #   1. Checks for Python 3.9+
@@ -12,9 +12,8 @@
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-VENV_DIR="$SCRIPT_DIR/.venv"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="$PROJECT_DIR/.venv"
 REQUIREMENTS="$PROJECT_DIR/requirements.txt"
 PORT=8080
 
