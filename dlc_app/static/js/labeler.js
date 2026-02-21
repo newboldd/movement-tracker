@@ -569,19 +569,15 @@ const labeler = (() => {
         const idx = cameraNames.indexOf(currentSide);
         const newIdx = (idx + 1) % cameraNames.length;
 
-        // Mirror the horizontal offset when switching cameras.
-        // The stereo image is split at the midline, so the same target
-        // in the right camera is roughly at (imgW - x) in image coords.
-        // To keep the viewport centered on the same area, we flip the
-        // horizontal pan around the image center.
+        // Nudge the horizontal offset when switching cameras.
+        // Stereo cameras have a small lateral offset (~5-10% of image width).
+        // Switching from left to right camera: targets shift left in the image,
+        // so we shift the viewport right (positive offsetX) to compensate.
         if (hasUserZoom && imgW) {
-            // Current center of viewport in image coords
-            const cw = containerEl.clientWidth;
-            const centerImgX = (cw / 2 - offsetX) / scale;
-            // Mirror it
-            const mirroredX = imgW - centerImgX;
-            // Compute new offsetX so mirroredX maps to screen center
-            offsetX = cw / 2 - mirroredX * scale;
+            const nudge = imgW * 0.07 * scale;
+            // Left-to-right camera: targets move left -> shift view right
+            // Right-to-left camera: targets move right -> shift view left
+            offsetX += (newIdx > idx) ? nudge : -nudge;
         }
 
         currentSide = cameraNames[newIdx];
@@ -597,17 +593,25 @@ const labeler = (() => {
             playbackRate = parseFloat(document.getElementById('playbackRate').value);
             const fps = trials.length > 0 ? trials[0].fps : 30;
             const interval = 1000 / (fps * playbackRate);
-            playTimer = setInterval(() => {
-                if (currentFrame < totalFrames - 1) {
-                    goToFrame(currentFrame + 1);
-                } else {
-                    togglePlay();
+
+            // Sequential async loop — waits for each frame to load
+            // before scheduling the next, preventing stacking
+            (async function playLoop() {
+                while (playing && currentFrame < totalFrames - 1) {
+                    const start = performance.now();
+                    await goToFrame(currentFrame + 1);
+                    const elapsed = performance.now() - start;
+                    const wait = Math.max(0, interval - elapsed);
+                    await new Promise(r => setTimeout(r, wait));
                 }
-            }, interval);
+                if (playing) {
+                    // Reached end — stop
+                    playing = false;
+                    btn.innerHTML = '&#9654;';
+                }
+            })();
         } else {
             btn.innerHTML = '&#9654;';
-            clearInterval(playTimer);
-            playTimer = null;
         }
     }
 
