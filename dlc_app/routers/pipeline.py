@@ -33,8 +33,8 @@ VALID_STEPS = [
     "triangulate",
 ]
 
-# Steps that require DeepLabCut (crop is pure OpenCV)
-DLC_STEPS = {"create_training_dataset", "train", "analyze", "create_labeled_video", "triangulate"}
+# Steps that require DeepLabCut (crop and create_training_dataset are native)
+DLC_STEPS = {"train", "analyze", "create_labeled_video", "triangulate"}
 
 
 def _check_dlc_available():
@@ -101,9 +101,8 @@ def run_step(subject_id: int, req: RunStepRequest) -> dict:
         raise HTTPException(400, f"No DLC config for {subject_name}")
 
     if req.step == "create_training_dataset":
-        cmd = cmd_create_training_dataset(config_path)
-        progress_parser = None
-        next_stage = "training_dataset_created"
+        _do_create_training_dataset(subject_name, job["id"], config_path)
+        return {"job_id": job["id"], "status": "completed"}
 
     elif req.step == "train":
         cmd = cmd_train_network(config_path)
@@ -229,6 +228,92 @@ def _do_crop(subject_name: str, job_id: int):
         )
         db.execute(
             "UPDATE subjects SET stage = 'cropped', updated_at = CURRENT_TIMESTAMP WHERE id = (SELECT subject_id FROM jobs WHERE id = ?)",
+            (job_id,),
+        )
+
+
+def _do_create_training_dataset(subject_name: str, job_id: int, config_path: str):
+    """Create DLC training dataset natively (no DLC dependency).
+
+    Reads labeled-data CSVs, builds a train/test split, and writes
+    the training-datasets directory structure that DLC expects.
+    """
+    import random
+    import yaml
+
+    settings = get_settings()
+    dlc_path = settings.dlc_path / subject_name
+
+    # Collect all labeled frames from labeled-data subdirs
+    labeled_dir = dlc_path / "labeled-data"
+    if not labeled_dir.exists():
+        with get_db_ctx() as db:
+            db.execute(
+                "UPDATE jobs SET status = 'failed', error_msg = 'No labeled data found. Commit labels first.' WHERE id = ?",
+                (job_id,),
+            )
+        return
+
+    # Read config.yaml for training fraction
+    config = {}
+    config_file = Path(config_path)
+    if config_file.exists():
+        config = yaml.safe_load(config_file.read_text()) or {}
+
+    train_fraction = 0.95
+    if "TrainingFraction" in config and config["TrainingFraction"]:
+        train_fraction = config["TrainingFraction"][0]
+
+    scorer = config.get("scorer", settings.dlc_scorer)
+    net_type = config.get("default_net_type", settings.dlc_net_type)
+
+    # Gather all image paths from labeled-data subdirectories
+    all_images = []
+    for subdir in sorted(labeled_dir.iterdir()):
+        if not subdir.is_dir():
+            continue
+        csv_file = subdir / "CollectedData_labels.csv"
+        if csv_file.exists():
+            for img in sorted(subdir.glob("img*.png")):
+                all_images.append(str(img.relative_to(dlc_path)))
+
+    if not all_images:
+        with get_db_ctx() as db:
+            db.execute(
+                "UPDATE jobs SET status = 'failed', error_msg = 'No labeled images found' WHERE id = ?",
+                (job_id,),
+            )
+        return
+
+    # Train/test split
+    random.seed(42)
+    shuffled = all_images[:]
+    random.shuffle(shuffled)
+    n_train = max(1, int(len(shuffled) * train_fraction))
+    train_set = sorted(shuffled[:n_train])
+    test_set = sorted(shuffled[n_train:]) if n_train < len(shuffled) else []
+
+    # Write training-datasets directory
+    iteration = config.get("iteration", 0)
+    frac_str = str(int(train_fraction * 100))
+    dataset_name = f"iteration-{iteration}/UnaugmentedDataSet_{config.get('Task', 'project')}{config.get('date', '')}"
+    dataset_dir = dlc_path / "training-datasets" / dataset_name
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write train/test index files
+    (dataset_dir / "CollectedData_train.csv").write_text("\n".join(train_set))
+    if test_set:
+        (dataset_dir / "CollectedData_test.csv").write_text("\n".join(test_set))
+
+    # Update job and subject status
+    with get_db_ctx() as db:
+        db.execute(
+            """UPDATE jobs SET status = 'completed', progress_pct = 100,
+               finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+            (job_id,),
+        )
+        db.execute(
+            "UPDATE subjects SET stage = 'training_dataset_created', updated_at = CURRENT_TIMESTAMP WHERE id = (SELECT subject_id FROM jobs WHERE id = ?)",
             (job_id,),
         )
 
