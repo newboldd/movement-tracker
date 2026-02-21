@@ -20,7 +20,12 @@ router = APIRouter(prefix="/api/labeling", tags=["labeling"])
 
 @router.post("/{subject_id}/sessions", status_code=201)
 def create_session(subject_id: int, req: SessionCreate) -> dict:
-    """Create a new labeling session for a subject."""
+    """Get or create a labeling session for a subject.
+
+    - If an active (non-committed) session exists, reuse it.
+    - Otherwise create a new session and copy labels from the most
+      recent committed session so the user can refine existing work.
+    """
     with get_db_ctx() as db:
         subj = db.execute(
             "SELECT * FROM subjects WHERE id = ?", (subject_id,)
@@ -28,6 +33,26 @@ def create_session(subject_id: int, req: SessionCreate) -> dict:
         if not subj:
             raise HTTPException(404, "Subject not found")
 
+        # Check for an existing active session
+        active = db.execute(
+            """SELECT * FROM label_sessions
+               WHERE subject_id = ? AND status != 'committed'
+               ORDER BY id DESC LIMIT 1""",
+            (subject_id,),
+        ).fetchone()
+
+        if active:
+            return active
+
+        # Find the most recent committed session to copy labels from
+        prev = db.execute(
+            """SELECT id FROM label_sessions
+               WHERE subject_id = ? AND status = 'committed'
+               ORDER BY id DESC LIMIT 1""",
+            (subject_id,),
+        ).fetchone()
+
+        # Create new session
         db.execute(
             """INSERT INTO label_sessions (subject_id, iteration, session_type)
                VALUES (?, ?, ?)""",
@@ -37,6 +62,15 @@ def create_session(subject_id: int, req: SessionCreate) -> dict:
             "SELECT * FROM label_sessions WHERE subject_id = ? ORDER BY id DESC LIMIT 1",
             (subject_id,),
         ).fetchone()
+
+        # Copy labels from previous session
+        if prev:
+            db.execute(
+                """INSERT INTO frame_labels (session_id, frame_num, trial_idx, side, keypoints, updated_at)
+                   SELECT ?, frame_num, trial_idx, side, keypoints, CURRENT_TIMESTAMP
+                   FROM frame_labels WHERE session_id = ?""",
+                (session["id"], prev["id"]),
+            )
 
         # Update subject stage
         db.execute(
