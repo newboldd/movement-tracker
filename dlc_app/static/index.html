@@ -99,6 +99,17 @@
         </div>
     </div>
 
+    <!-- Log Modal -->
+    <div class="modal-overlay" id="logModal">
+        <div class="modal" style="max-width:700px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                <h3 id="logModalTitle">Job Log</h3>
+                <button class="btn btn-sm" onclick="hideLogModal()">Close</button>
+            </div>
+            <pre id="logModalContent" style="max-height:60vh;overflow:auto;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px;font-size:12px;white-space:pre-wrap;word-break:break-all;color:var(--text);user-select:text;"></pre>
+        </div>
+    </div>
+
     <script src="/static/js/api.js"></script>
     <script src="/static/js/dashboard.js"></script>
 </body>

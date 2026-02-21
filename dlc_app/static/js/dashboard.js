@@ -234,10 +234,16 @@ async function showJobLog(jobId) {
         const job = await API.get(`/api/jobs/${jobId}`);
         const tail = (job.log_tail || []).join('');
         const msg = tail || job.error_msg || 'No log available';
-        alert(`Job #${jobId} log:\n\n${msg}`);
+        document.getElementById('logModalTitle').textContent = `Job #${jobId} Log`;
+        document.getElementById('logModalContent').textContent = msg;
+        document.getElementById('logModal').classList.add('active');
     } catch (e) {
         alert('Could not load log: ' + e.message);
     }
+}
+
+function hideLogModal() {
+    document.getElementById('logModal').classList.remove('active');
 }
 
 async function cancelJob(jobId) {
@@ -310,7 +316,7 @@ document.getElementById('stageFilter').addEventListener('change', renderTable);
 
 // Escape closes modal
 document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') hideAddModal();
+    if (e.key === 'Escape') { hideAddModal(); hideLogModal(); }
 });
 
 // ── Init ─────────────────────────────────────────────
