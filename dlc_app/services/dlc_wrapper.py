@@ -5,7 +5,7 @@ from pathlib import Path
 from ..config import get_settings
 
 # Preamble for all DLC commands
-_DLC_PREAMBLE = "import deeplabcut; "
+_DLC_PREAMBLE = "from deeplabcut.core.engine import Engine; import deeplabcut; "
 
 
 def fix_project_path(subject_name: str) -> str:
@@ -65,7 +65,7 @@ def cmd_train_network(config_path: str) -> list[str]:
     settings = get_settings()
     script = (
         f"{_DLC_PREAMBLE}"
-        f"deeplabcut.train_network(r'{config_path}', engine='pytorch')"
+        f"deeplabcut.train_network(r'{config_path}', engine=Engine.PYTORCH)"
     )
     return [settings.python_executable, "-c", script]
 
