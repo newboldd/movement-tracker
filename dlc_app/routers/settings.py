@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-import os
+import subprocess
+import sys
+import threading
 from pathlib import Path
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
@@ -11,6 +13,9 @@ from typing import List, Optional
 from ..config import get_settings, PROJECT_DIR
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+# DLC install state (module-level, survives across requests)
+_dlc_install = {"running": False, "log": [], "status": None, "error": None}
 
 
 class SettingsUpdate(BaseModel):
@@ -101,3 +106,78 @@ def browse_directory(path: Optional[str] = Query(None)) -> dict:
         "parent": parent,
         "dirs": dirs,
     }
+
+
+@router.get("/dlc-status")
+def dlc_install_status() -> dict:
+    """Check if DeepLabCut is installed and get install progress."""
+    installed = False
+    version = None
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import deeplabcut; print(deeplabcut.__version__)"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            installed = True
+            version = result.stdout.strip()
+    except Exception:
+        pass
+
+    return {
+        "installed": installed,
+        "version": version,
+        "install_running": _dlc_install["running"],
+        "install_status": _dlc_install["status"],
+        "install_error": _dlc_install["error"],
+        "install_log": _dlc_install["log"][-20:],  # last 20 lines
+    }
+
+
+@router.post("/install-dlc")
+def install_dlc() -> dict:
+    """Start installing DeepLabCut[pytorch] in a background thread."""
+    if _dlc_install["running"]:
+        return {"status": "already_running"}
+
+    _dlc_install["running"] = True
+    _dlc_install["log"] = []
+    _dlc_install["status"] = "installing"
+    _dlc_install["error"] = None
+
+    thread = threading.Thread(target=_run_dlc_install, daemon=True)
+    thread.start()
+
+    return {"status": "started"}
+
+
+def _run_dlc_install():
+    """Run pip install deeplabcut[pytorch] and capture output."""
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "pip", "install", "deeplabcut[pytorch]"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+
+        for line in proc.stdout:
+            _dlc_install["log"].append(line.rstrip())
+            # Keep log bounded
+            if len(_dlc_install["log"]) > 500:
+                _dlc_install["log"] = _dlc_install["log"][-200:]
+
+        proc.wait()
+
+        if proc.returncode == 0:
+            _dlc_install["status"] = "completed"
+        else:
+            _dlc_install["status"] = "failed"
+            _dlc_install["error"] = f"pip exited with code {proc.returncode}"
+
+    except Exception as e:
+        _dlc_install["status"] = "failed"
+        _dlc_install["error"] = str(e)
+    finally:
+        _dlc_install["running"] = False

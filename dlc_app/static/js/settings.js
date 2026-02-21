@@ -195,5 +195,73 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeBrowse();
 });
 
+// ── DLC install ──────────────────────────────────────────────
+let dlcPollTimer = null;
+
+async function checkDlcStatus() {
+    try {
+        const data = await API.get('/api/settings/dlc-status');
+        const statusEl = document.getElementById('dlcStatus');
+        const btnEl = document.getElementById('dlcInstallBtn');
+        const logEl = document.getElementById('dlcInstallLog');
+
+        if (data.installed) {
+            statusEl.innerHTML = `<span class="status-indicator status-ok">DeepLabCut ${data.version} installed</span>`;
+            btnEl.innerHTML = '';
+            logEl.style.display = 'none';
+            stopDlcPoll();
+        } else if (data.install_running) {
+            statusEl.innerHTML = `<span class="status-indicator status-warn">Installing DeepLabCut...</span>`;
+            btnEl.innerHTML = '';
+            logEl.style.display = 'block';
+            logEl.textContent = (data.install_log || []).join('\n');
+            logEl.scrollTop = logEl.scrollHeight;
+            startDlcPoll();
+        } else if (data.install_status === 'completed') {
+            statusEl.innerHTML = `<span class="status-indicator status-ok">DeepLabCut installed successfully</span>`;
+            btnEl.innerHTML = '';
+            logEl.style.display = 'none';
+            stopDlcPoll();
+        } else if (data.install_status === 'failed') {
+            statusEl.innerHTML = `<span class="status-indicator status-warn">Install failed: ${data.install_error || 'unknown error'}</span>`;
+            btnEl.innerHTML = `<button class="btn" onclick="installDlc()">Retry Install</button>`;
+            logEl.style.display = 'block';
+            logEl.textContent = (data.install_log || []).join('\n');
+            logEl.scrollTop = logEl.scrollHeight;
+            stopDlcPoll();
+        } else {
+            statusEl.innerHTML = 'DeepLabCut is not installed.';
+            btnEl.innerHTML = `<button class="btn btn-primary" onclick="installDlc()">Install DeepLabCut</button>`;
+            logEl.style.display = 'none';
+        }
+    } catch (e) {
+        console.error('DLC status check failed:', e);
+    }
+}
+
+async function installDlc() {
+    try {
+        await API.post('/api/settings/install-dlc');
+        startDlcPoll();
+        checkDlcStatus();
+    } catch (e) {
+        alert('Failed to start DLC install: ' + e.message);
+    }
+}
+
+function startDlcPoll() {
+    if (!dlcPollTimer) {
+        dlcPollTimer = setInterval(checkDlcStatus, 3000);
+    }
+}
+
+function stopDlcPoll() {
+    if (dlcPollTimer) {
+        clearInterval(dlcPollTimer);
+        dlcPollTimer = null;
+    }
+}
+
 // Load on page ready
 loadSettings();
+checkDlcStatus();
