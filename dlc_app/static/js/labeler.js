@@ -48,8 +48,9 @@ const labeler = (() => {
     let didDrag = false; // true once mouse moves past threshold during 'pending'
     const DRAG_THRESHOLD = 4; // pixels before a click becomes a pan drag
 
-    // Camera shift computed from paired OS/OD labels
-    let computedCameraShift = null; // pixels in image coords, or null = use default
+    // Camera shift computed from paired OS/OD labels (image pixels)
+    let computedCameraShiftX = null; // horizontal, or null = use default
+    let computedCameraShiftY = null; // vertical, or null = no shift
 
     // Prefetch cache
     const imageCache = new Map();
@@ -585,12 +586,13 @@ const labeler = (() => {
     }
 
     function recomputeCameraShift() {
-        // Compute the average horizontal offset between OS/OD labels
+        // Compute the average horizontal and vertical offset between OS/OD labels
         // for frames that have labels in both cameras.
         if (cameraNames.length < 2) return;
         const cam0 = cameraNames[0];
         const cam1 = cameraNames[1];
         const dxValues = [];
+        const dyValues = [];
 
         // Find frames that have labels in both cameras
         const frameNums = new Set();
@@ -608,15 +610,15 @@ const labeler = (() => {
                 const c0 = lbl0[bp];
                 const c1 = lbl1[bp];
                 if (c0 && c0[0] != null && c1 && c1[0] != null) {
-                    // dx = how much the point moves in image coords from cam0 to cam1
                     dxValues.push(c1[0] - c0[0]);
+                    dyValues.push(c1[1] - c0[1]);
                 }
             }
         }
 
         if (dxValues.length > 0) {
-            const mean = dxValues.reduce((a, b) => a + b, 0) / dxValues.length;
-            computedCameraShift = mean; // image-pixel shift from cam0 to cam1
+            computedCameraShiftX = dxValues.reduce((a, b) => a + b, 0) / dxValues.length;
+            computedCameraShiftY = dyValues.reduce((a, b) => a + b, 0) / dyValues.length;
         }
     }
 
@@ -625,18 +627,20 @@ const labeler = (() => {
         const newIdx = (idx + 1) % cameraNames.length;
 
         // Shift viewport to keep targets roughly centered when switching cameras.
-        // Uses computed shift from paired labels, falls back to 7% default.
+        // Uses computed shift from paired labels, falls back to 7% horizontal default.
         if (hasUserZoom && imgW) {
-            let shiftPx; // shift in image pixels
-            if (computedCameraShift != null) {
-                shiftPx = computedCameraShift;
+            let shiftX, shiftY;
+            if (computedCameraShiftX != null) {
+                shiftX = computedCameraShiftX;
+                shiftY = computedCameraShiftY || 0;
             } else {
-                shiftPx = imgW * 0.07;
+                shiftX = imgW * 0.07;
+                shiftY = 0;
             }
-            // cam0→cam1: targets move by shiftPx, compensate viewport in opposite direction
-            // cam1→cam0: reverse
+            // cam0→cam1: targets move by shift, compensate viewport in opposite direction
             const direction = (newIdx > idx) ? -1 : 1;
-            offsetX += direction * shiftPx * scale;
+            offsetX += direction * shiftX * scale;
+            offsetY += direction * shiftY * scale;
         }
 
         currentSide = cameraNames[newIdx];
