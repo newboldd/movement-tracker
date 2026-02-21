@@ -33,24 +33,34 @@ def create_session(subject_id: int, req: SessionCreate) -> dict:
         if not subj:
             raise HTTPException(404, "Subject not found")
 
-        # Check for an existing active session
+        # Check for an existing active session that has labels
         active = db.execute(
-            """SELECT * FROM label_sessions
-               WHERE subject_id = ? AND status != 'committed'
-               ORDER BY id DESC LIMIT 1""",
+            """SELECT ls.* FROM label_sessions ls
+               WHERE ls.subject_id = ? AND ls.status != 'committed'
+               AND EXISTS (SELECT 1 FROM frame_labels fl WHERE fl.session_id = ls.id)
+               ORDER BY ls.id DESC LIMIT 1""",
             (subject_id,),
         ).fetchone()
 
         if active:
             return active
 
-        # Find the most recent committed session to copy labels from
+        # Find the most recent session that has labels (committed or not)
         prev = db.execute(
-            """SELECT id FROM label_sessions
-               WHERE subject_id = ? AND status = 'committed'
-               ORDER BY id DESC LIMIT 1""",
+            """SELECT ls.id FROM label_sessions ls
+               WHERE ls.subject_id = ?
+               AND EXISTS (SELECT 1 FROM frame_labels fl WHERE fl.session_id = ls.id)
+               ORDER BY ls.id DESC LIMIT 1""",
             (subject_id,),
         ).fetchone()
+
+        # Clean up empty active sessions from previous clicks
+        db.execute(
+            """DELETE FROM label_sessions
+               WHERE subject_id = ? AND status != 'committed'
+               AND id NOT IN (SELECT DISTINCT session_id FROM frame_labels)""",
+            (subject_id,),
+        )
 
         # Create new session
         db.execute(
