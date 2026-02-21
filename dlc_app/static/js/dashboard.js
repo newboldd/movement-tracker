@@ -162,14 +162,28 @@ function closeDetail() {
 
 // ── Pipeline actions ─────────────────────────────────
 async function runStep(subjectId, step) {
+    // Disable the clicked button and show feedback
+    const btn = event && event.target;
+    const origText = btn ? btn.textContent : '';
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Starting...';
+    }
+
     try {
         const result = await API.post(`/api/subjects/${subjectId}/run-step`, { step });
         if (result.job_id) {
             // Start tracking job
             trackJob(result.job_id);
+            // Scroll to jobs card
+            document.getElementById('jobsCard').scrollIntoView({ behavior: 'smooth' });
         }
         loadSubjects();
     } catch (e) {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = origText;
+        }
         alert('Error: ' + e.message);
     }
 }
@@ -198,6 +212,7 @@ function updateJobDisplay(jobId, data) {
         list.appendChild(el);
     }
 
+    const errorLine = data.error_msg ? `<div style="color:var(--red);font-size:12px;margin-top:4px;">${data.error_msg}</div>` : '';
     el.innerHTML = `
         <div style="display:flex;align-items:center;gap:12px;">
             <span class="job-indicator job-${data.status}"></span>
@@ -208,8 +223,21 @@ function updateJobDisplay(jobId, data) {
             <span>${(data.progress_pct || 0).toFixed(0)}%</span>
             <span class="badge badge-${data.status}">${data.status}</span>
             ${data.status === 'running' ? `<button class="btn btn-sm btn-danger" onclick="cancelJob(${jobId})">Cancel</button>` : ''}
+            ${data.status === 'failed' ? `<button class="btn btn-sm" onclick="showJobLog(${jobId})">Show Log</button>` : ''}
         </div>
+        ${errorLine}
     `;
+}
+
+async function showJobLog(jobId) {
+    try {
+        const job = await API.get(`/api/jobs/${jobId}`);
+        const tail = (job.log_tail || []).join('');
+        const msg = tail || job.error_msg || 'No log available';
+        alert(`Job #${jobId} log:\n\n${msg}`);
+    } catch (e) {
+        alert('Could not load log: ' + e.message);
+    }
 }
 
 async function cancelJob(jobId) {
