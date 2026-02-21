@@ -632,22 +632,16 @@ const labeler = (() => {
 
     // ── Commit ────────────────────────────────────────
     async function commitSession() {
-        // Save first
         await saveLabels();
 
-        const count = labels.size;
-        if (count === 0) {
+        if (labels.size === 0) {
             alert('No labels to commit.');
-            return;
-        }
-
-        if (!confirm(`Commit ${count} labeled frames to DLC? This will extract PNGs and write CollectedData CSV.`)) {
             return;
         }
 
         try {
             const result = await API.post(`/api/labeling/sessions/${sessionId}/commit`);
-            alert(`Committed ${result.frame_count} frames to ${result.labeled_data_dir}`);
+            updateLabelInfo(`Committed ${result.frame_count} frames.`);
         } catch (e) {
             alert('Commit error: ' + e.message);
         }
