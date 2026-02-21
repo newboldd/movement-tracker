@@ -183,12 +183,88 @@ def commit_labels_to_dlc(
         # Non-fatal — CSV is the primary format
         print(f"Warning: CSV to H5 conversion failed: {e}")
 
-    return {
+    # Create training dataset so subject is ready to train immediately
+    try:
+        td_result = create_training_dataset(dlc_path)
+    except Exception as e:
+        print(f"Warning: Training dataset creation failed: {e}")
+        td_result = None
+
+    result = {
         "dlc_dir": str(dlc_path),
         "labeled_data_dir": str(labeled_data_dir),
         "csv_path": str(csv_path),
         "frame_count": len(extracted),
     }
+    if td_result:
+        result["training_dataset_dir"] = td_result
+    return result
+
+
+def create_training_dataset(dlc_path: Path) -> str:
+    """Create DLC training dataset natively (no DLC dependency).
+
+    Reads labeled-data CSVs, builds a train/test split, and writes
+    the training-datasets directory structure that DLC expects.
+
+    Args:
+        dlc_path: Path to the subject's DLC project directory
+
+    Returns:
+        str path to the training dataset directory
+    """
+    import random
+    import yaml
+
+    settings = get_settings()
+
+    labeled_dir = dlc_path / "labeled-data"
+    if not labeled_dir.exists():
+        raise FileNotFoundError(f"No labeled data at {labeled_dir}")
+
+    # Read config.yaml for training fraction
+    config = {}
+    config_file = dlc_path / "config.yaml"
+    if config_file.exists():
+        config = yaml.safe_load(config_file.read_text()) or {}
+
+    train_fraction = 0.95
+    if "TrainingFraction" in config and config["TrainingFraction"]:
+        train_fraction = config["TrainingFraction"][0]
+
+    # Gather all image paths from labeled-data subdirectories
+    all_images = []
+    for subdir in sorted(labeled_dir.iterdir()):
+        if not subdir.is_dir():
+            continue
+        csv_file = subdir / "CollectedData_labels.csv"
+        if csv_file.exists():
+            for img in sorted(subdir.glob("img*.png")):
+                all_images.append(str(img.relative_to(dlc_path)))
+
+    if not all_images:
+        raise FileNotFoundError("No labeled images found in labeled-data/")
+
+    # Train/test split
+    random.seed(42)
+    shuffled = all_images[:]
+    random.shuffle(shuffled)
+    n_train = max(1, int(len(shuffled) * train_fraction))
+    train_set = sorted(shuffled[:n_train])
+    test_set = sorted(shuffled[n_train:]) if n_train < len(shuffled) else []
+
+    # Write training-datasets directory
+    iteration = config.get("iteration", 0)
+    dataset_name = f"iteration-{iteration}/UnaugmentedDataSet_{config.get('Task', 'project')}{config.get('date', '')}"
+    dataset_dir = dlc_path / "training-datasets" / dataset_name
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write train/test index files
+    (dataset_dir / "CollectedData_train.csv").write_text("\n".join(train_set))
+    if test_set:
+        (dataset_dir / "CollectedData_test.csv").write_text("\n".join(test_set))
+
+    return str(dataset_dir)
 
 
 def _create_dlc_config(dlc_path: Path, subject_name: str, training_name: str):

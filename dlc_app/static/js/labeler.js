@@ -42,9 +42,14 @@ const labeler = (() => {
     let offsetX = 0, offsetY = 0;
 
     // Drag state
-    let dragging = null; // bodypart name | 'pan'
+    let dragging = null; // bodypart name | 'pan' | 'pending'
     let dragStartX = 0, dragStartY = 0;
     let dragOrigX = 0, dragOrigY = 0;
+    let didDrag = false; // true once mouse moves past threshold during 'pending'
+    const DRAG_THRESHOLD = 4; // pixels before a click becomes a pan drag
+
+    // Camera shift computed from paired OS/OD labels
+    let computedCameraShift = null; // pixels in image coords, or null = use default
 
     // Prefetch cache
     const imageCache = new Map();
@@ -103,6 +108,7 @@ const labeler = (() => {
                 labels.set(key, l.keypoints || {});
             });
 
+            recomputeCameraShift();
             updateLabelCount();
             goToFrame(0);
         } catch (e) {
@@ -324,6 +330,7 @@ const labeler = (() => {
         if (hit) {
             // Start dragging existing point
             dragging = hit;
+            didDrag = false;
             const key = `${currentFrame}_${currentSide}`;
             const lbl = labels.get(key);
             const coords = lbl[hit];
@@ -333,20 +340,13 @@ const labeler = (() => {
             dragStartY = sy;
             canvas.style.cursor = 'grabbing';
         } else {
-            // Check if click is within image bounds
-            const img = screenToImage(sx, sy);
-            if (img.x >= 0 && img.x < imgW && img.y >= 0 && img.y < imgH) {
-                // Place new label
-                placeLabel(img.x, img.y);
-            } else {
-                // Pan
-                dragging = 'pan';
-                dragStartX = sx;
-                dragStartY = sy;
-                dragOrigX = offsetX;
-                dragOrigY = offsetY;
-                canvas.style.cursor = 'move';
-            }
+            // Pending: could become a pan (drag) or a click (place label)
+            dragging = 'pending';
+            didDrag = false;
+            dragStartX = sx;
+            dragStartY = sy;
+            dragOrigX = offsetX;
+            dragOrigY = offsetY;
         }
     }
 
@@ -355,6 +355,16 @@ const labeler = (() => {
         const rect = canvas.getBoundingClientRect();
         const sx = e.clientX - rect.left;
         const sy = e.clientY - rect.top;
+
+        if (dragging === 'pending') {
+            // Check if mouse has moved enough to become a pan drag
+            if (Math.hypot(sx - dragStartX, sy - dragStartY) > DRAG_THRESHOLD) {
+                dragging = 'pan';
+                didDrag = true;
+                canvas.style.cursor = 'move';
+            }
+            return;
+        }
 
         if (dragging === 'pan') {
             offsetX = dragOrigX + (sx - dragStartX);
@@ -372,13 +382,21 @@ const labeler = (() => {
     }
 
     function onMouseUp(e) {
-        if (dragging === 'pan') {
+        if (dragging === 'pending') {
+            // Mouse didn't move much — this is a click, place a label
+            const img = screenToImage(dragStartX, dragStartY);
+            if (img.x >= 0 && img.x < imgW && img.y >= 0 && img.y < imgH) {
+                placeLabel(img.x, img.y);
+            }
+        } else if (dragging === 'pan') {
             hasUserZoom = true;
         } else if (dragging) {
-            // Auto-save after drag
+            // Finished dragging a bodypart point
             scheduleSave();
+            recomputeCameraShift();
         }
         dragging = null;
+        didDrag = false;
         canvas.style.cursor = 'crosshair';
     }
 
@@ -457,6 +475,7 @@ const labeler = (() => {
         render();
         updateLabelCount();
         scheduleSave();
+        recomputeCameraShift();
     }
 
     function removeLabel(which) {
@@ -565,19 +584,59 @@ const labeler = (() => {
         return [...frames].sort((a, b) => a - b);
     }
 
+    function recomputeCameraShift() {
+        // Compute the average horizontal offset between OS/OD labels
+        // for frames that have labels in both cameras.
+        if (cameraNames.length < 2) return;
+        const cam0 = cameraNames[0];
+        const cam1 = cameraNames[1];
+        const dxValues = [];
+
+        // Find frames that have labels in both cameras
+        const frameNums = new Set();
+        labels.forEach((_, key) => {
+            const [f] = key.split('_');
+            frameNums.add(f);
+        });
+
+        for (const f of frameNums) {
+            const lbl0 = labels.get(`${f}_${cam0}`);
+            const lbl1 = labels.get(`${f}_${cam1}`);
+            if (!lbl0 || !lbl1) continue;
+
+            for (const bp of bodyparts) {
+                const c0 = lbl0[bp];
+                const c1 = lbl1[bp];
+                if (c0 && c0[0] != null && c1 && c1[0] != null) {
+                    // dx = how much the point moves in image coords from cam0 to cam1
+                    dxValues.push(c1[0] - c0[0]);
+                }
+            }
+        }
+
+        if (dxValues.length > 0) {
+            const mean = dxValues.reduce((a, b) => a + b, 0) / dxValues.length;
+            computedCameraShift = mean; // image-pixel shift from cam0 to cam1
+        }
+    }
+
     function toggleSide() {
         const idx = cameraNames.indexOf(currentSide);
         const newIdx = (idx + 1) % cameraNames.length;
 
-        // Nudge the horizontal offset when switching cameras.
-        // Stereo cameras have a small lateral offset (~5-10% of image width).
-        // Switching from left to right camera: targets shift left in the image,
-        // so we shift the viewport right (positive offsetX) to compensate.
+        // Shift viewport to keep targets roughly centered when switching cameras.
+        // Uses computed shift from paired labels, falls back to 7% default.
         if (hasUserZoom && imgW) {
-            const nudge = imgW * 0.07 * scale;
-            // Left-to-right camera: targets move left -> shift view right
-            // Right-to-left camera: targets move right -> shift view left
-            offsetX += (newIdx > idx) ? nudge : -nudge;
+            let shiftPx; // shift in image pixels
+            if (computedCameraShift != null) {
+                shiftPx = computedCameraShift;
+            } else {
+                shiftPx = imgW * 0.07;
+            }
+            // cam0→cam1: targets move by shiftPx, compensate viewport in opposite direction
+            // cam1→cam0: reverse
+            const direction = (newIdx > idx) ? -1 : 1;
+            offsetX += direction * shiftPx * scale;
         }
 
         currentSide = cameraNames[newIdx];
@@ -622,6 +681,9 @@ const labeler = (() => {
     }
 
     // ── Keyboard shortcuts ────────────────────────────
+    // Letter keys for deleting bodyparts (first two get D/F, rest use number keys)
+    const DELETE_KEYS = { 'd': 0, 'f': 1 };
+
     function setupKeyboard() {
         document.addEventListener('keydown', (e) => {
             // Ignore if typing in input
@@ -649,6 +711,15 @@ const labeler = (() => {
                     togglePlay();
                     break;
                 default:
+                    // D/F: delete bodypart by letter
+                    if (e.key in DELETE_KEYS) {
+                        const idx = DELETE_KEYS[e.key];
+                        if (idx < bodyparts.length) {
+                            e.preventDefault();
+                            removeLabel(bodyparts[idx]);
+                        }
+                        break;
+                    }
                     // Number keys 1-9: delete bodypart by index
                     if (e.key >= '1' && e.key <= '9') {
                         const idx = parseInt(e.key) - 1;
@@ -692,12 +763,14 @@ const labeler = (() => {
         const el = document.getElementById('shortcutList');
         if (!el) return;
 
+        const deleteLetters = ['D', 'F'];
         let html = `
             <div><kbd>A</kbd> / <kbd>&larr;</kbd> Prev frame</div>
             <div><kbd>S</kbd> / <kbd>&rarr;</kbd> Next frame</div>
         `;
         bodyparts.forEach((bp, idx) => {
-            html += `<div><kbd>${idx + 1}</kbd> Delete ${bp}</div>`;
+            const letter = deleteLetters[idx] ? `<kbd>${deleteLetters[idx]}</kbd> / ` : '';
+            html += `<div>${letter}<kbd>${idx + 1}</kbd> Delete ${bp}</div>`;
         });
         html += `
             <div><kbd>E</kbd> Toggle ${cameraNames.join('/')}</div>
@@ -705,7 +778,8 @@ const labeler = (() => {
             <div><kbd>Space</kbd> Play/pause</div>
             <div><kbd>Scroll</kbd> Zoom at cursor</div>
             <div><kbd>Click</kbd> Place label</div>
-            <div><kbd>Drag</kbd> Move label</div>
+            <div><kbd>Drag image</kbd> Pan</div>
+            <div><kbd>Drag label</kbd> Move label</div>
             <div><kbd>Right-click</kbd> Remove label</div>
         `;
         el.innerHTML = html;

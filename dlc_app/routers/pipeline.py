@@ -235,75 +235,22 @@ def _do_crop(subject_name: str, job_id: int):
 def _do_create_training_dataset(subject_name: str, job_id: int, config_path: str):
     """Create DLC training dataset natively (no DLC dependency).
 
-    Reads labeled-data CSVs, builds a train/test split, and writes
-    the training-datasets directory structure that DLC expects.
+    Delegates to the shared create_training_dataset() in labels.py.
     """
-    import random
-    import yaml
+    from ..services.labels import create_training_dataset
 
     settings = get_settings()
     dlc_path = settings.dlc_path / subject_name
 
-    # Collect all labeled frames from labeled-data subdirs
-    labeled_dir = dlc_path / "labeled-data"
-    if not labeled_dir.exists():
+    try:
+        create_training_dataset(dlc_path)
+    except FileNotFoundError as e:
         with get_db_ctx() as db:
             db.execute(
-                "UPDATE jobs SET status = 'failed', error_msg = 'No labeled data found. Commit labels first.' WHERE id = ?",
-                (job_id,),
+                "UPDATE jobs SET status = 'failed', error_msg = ? WHERE id = ?",
+                (str(e), job_id),
             )
         return
-
-    # Read config.yaml for training fraction
-    config = {}
-    config_file = Path(config_path)
-    if config_file.exists():
-        config = yaml.safe_load(config_file.read_text()) or {}
-
-    train_fraction = 0.95
-    if "TrainingFraction" in config and config["TrainingFraction"]:
-        train_fraction = config["TrainingFraction"][0]
-
-    scorer = config.get("scorer", settings.dlc_scorer)
-    net_type = config.get("default_net_type", settings.dlc_net_type)
-
-    # Gather all image paths from labeled-data subdirectories
-    all_images = []
-    for subdir in sorted(labeled_dir.iterdir()):
-        if not subdir.is_dir():
-            continue
-        csv_file = subdir / "CollectedData_labels.csv"
-        if csv_file.exists():
-            for img in sorted(subdir.glob("img*.png")):
-                all_images.append(str(img.relative_to(dlc_path)))
-
-    if not all_images:
-        with get_db_ctx() as db:
-            db.execute(
-                "UPDATE jobs SET status = 'failed', error_msg = 'No labeled images found' WHERE id = ?",
-                (job_id,),
-            )
-        return
-
-    # Train/test split
-    random.seed(42)
-    shuffled = all_images[:]
-    random.shuffle(shuffled)
-    n_train = max(1, int(len(shuffled) * train_fraction))
-    train_set = sorted(shuffled[:n_train])
-    test_set = sorted(shuffled[n_train:]) if n_train < len(shuffled) else []
-
-    # Write training-datasets directory
-    iteration = config.get("iteration", 0)
-    frac_str = str(int(train_fraction * 100))
-    dataset_name = f"iteration-{iteration}/UnaugmentedDataSet_{config.get('Task', 'project')}{config.get('date', '')}"
-    dataset_dir = dlc_path / "training-datasets" / dataset_name
-    dataset_dir.mkdir(parents=True, exist_ok=True)
-
-    # Write train/test index files
-    (dataset_dir / "CollectedData_train.csv").write_text("\n".join(train_set))
-    if test_set:
-        (dataset_dir / "CollectedData_test.csv").write_text("\n".join(test_set))
 
     # Update job and subject status
     with get_db_ctx() as db:

@@ -252,7 +252,7 @@ def commit_session(session_id: int) -> dict:
             (session_id,),
         )
         db.execute(
-            "UPDATE subjects SET stage = 'committed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE subjects SET stage = 'training_dataset_created', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (session["subject_id"],),
         )
 
