@@ -72,18 +72,18 @@ class Settings:
         self._apply_env_overrides()
 
     def _auto_detect(self):
-        """On first run, detect existing paths from project structure."""
+        """On first run, create default directories and save settings."""
         video_dir = PROJECT_DIR / "videos"
         dlc_dir = PROJECT_DIR / "dlc"
 
-        if video_dir.exists():
-            self.video_dir = str(video_dir)
-        if dlc_dir.exists():
-            self.dlc_dir = str(dlc_dir)
+        video_dir.mkdir(exist_ok=True)
+        dlc_dir.mkdir(exist_ok=True)
 
-        if self.is_configured:
-            logger.info("Auto-detected existing paths, saving settings.json")
-            self.save()
+        self.video_dir = str(video_dir)
+        self.dlc_dir = str(dlc_dir)
+
+        logger.info("Created default directories (videos/, dlc/), saving settings.json")
+        self.save()
 
     def _apply_dict(self, data: dict):
         """Apply a dict of settings values."""
