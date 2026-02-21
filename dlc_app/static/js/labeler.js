@@ -52,6 +52,10 @@ const labeler = (() => {
     let computedCameraShiftX = null; // horizontal, or null = use default
     let computedCameraShiftY = null; // vertical, or null = no shift
 
+    // Undo stack: each entry = { key, bp, prev (coords or null), cur (coords or null) }
+    const undoStack = [];
+    const MAX_UNDO = 50;
+
     // Prefetch cache
     const imageCache = new Map();
     const PREFETCH_AHEAD = 3;
@@ -392,7 +396,9 @@ const labeler = (() => {
         } else if (dragging === 'pan') {
             hasUserZoom = true;
         } else if (dragging) {
-            // Finished dragging a bodypart point
+            // Finished dragging a bodypart point — record undo with pre-drag position
+            const key = `${currentFrame}_${currentSide}`;
+            pushUndo(key, dragging, [dragOrigX, dragOrigY]);
             scheduleSave();
             recomputeCameraShift();
         }
@@ -431,6 +437,76 @@ const labeler = (() => {
         render();
     }
 
+    // ── Undo ──────────────────────────────────────────
+    function pushUndo(key, bp, prevCoords) {
+        undoStack.push({ key, bp, prev: prevCoords });
+        if (undoStack.length > MAX_UNDO) undoStack.shift();
+    }
+
+    function undo() {
+        if (undoStack.length === 0) return;
+        const action = undoStack.pop();
+        const { key, bp, prev } = action;
+
+        let lbl = labels.get(key);
+        if (prev) {
+            // Restore previous coordinates
+            if (!lbl) { lbl = {}; labels.set(key, lbl); }
+            lbl[bp] = prev;
+        } else {
+            // Was a new placement — remove it
+            if (lbl) {
+                delete lbl[bp];
+                const hasAny = bodyparts.some(b => lbl[b] && lbl[b][0] != null);
+                if (!hasAny) labels.delete(key);
+            }
+        }
+
+        render();
+        updateLabelCount();
+        scheduleSave();
+        recomputeCameraShift();
+    }
+
+    // ── Zoom to labels ───────────────────────────────
+    function zoomToLabels(frame, side) {
+        const key = `${frame}_${side}`;
+        const lbl = labels.get(key);
+        if (!lbl) return;
+
+        // Collect all placed coordinates
+        const pts = [];
+        for (const bp of bodyparts) {
+            const c = lbl[bp];
+            if (c && c[0] != null) pts.push(c);
+        }
+        if (pts.length === 0) return;
+
+        // Bounding box in image coords
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const [x, y] of pts) {
+            if (x < minX) minX = x;
+            if (y < minY) minY = y;
+            if (x > maxX) maxX = x;
+            if (y > maxY) maxY = y;
+        }
+
+        // Add padding around the bounding box (in image pixels)
+        const pad = Math.max(maxX - minX, maxY - minY, 80) * 0.8;
+        minX -= pad; minY -= pad;
+        maxX += pad; maxY += pad;
+
+        const cw = containerEl.clientWidth;
+        const ch = containerEl.clientHeight;
+        const bboxW = maxX - minX;
+        const bboxH = maxY - minY;
+
+        scale = Math.min(cw / bboxW, ch / bboxH);
+        offsetX = (cw - bboxW * scale) / 2 - minX * scale;
+        offsetY = (ch - bboxH * scale) / 2 - minY * scale;
+        hasUserZoom = true;
+    }
+
     // ── Label placement ───────────────────────────────
     function placeLabel(imgX, imgY) {
         const key = `${currentFrame}_${currentSide}`;
@@ -445,6 +521,7 @@ const labeler = (() => {
         for (const bp of bodyparts) {
             const coords = lbl[bp];
             if (!coords || coords[0] == null) {
+                pushUndo(key, bp, null);
                 lbl[bp] = [imgX, imgY];
                 placed = true;
                 const remaining = bodyparts.filter(b => !lbl[b] || lbl[b][0] == null);
@@ -469,6 +546,7 @@ const labeler = (() => {
                 }
             }
             if (closest) {
+                pushUndo(key, closest, [...lbl[closest]]);
                 lbl[closest] = [imgX, imgY];
             }
         }
@@ -484,6 +562,8 @@ const labeler = (() => {
         const lbl = labels.get(key);
         if (!lbl) return;
 
+        const prev = lbl[which];
+        if (prev && prev[0] != null) pushUndo(key, which, [...prev]);
         delete lbl[which];
 
         // Remove entry if all bodyparts are empty
@@ -564,16 +644,22 @@ const labeler = (() => {
     function nextFrame() { goToFrame(currentFrame + 1); }
     function prevFrame() { goToFrame(currentFrame - 1); }
 
-    function nextLabel() {
+    async function nextLabel() {
         const sorted = getLabeledFrames();
         const next = sorted.find(f => f > currentFrame);
-        if (next !== undefined) goToFrame(next);
+        if (next !== undefined) {
+            zoomToLabels(next, currentSide);
+            await goToFrame(next);
+        }
     }
 
-    function prevLabel() {
+    async function prevLabel() {
         const sorted = getLabeledFrames();
         const prev = [...sorted].reverse().find(f => f < currentFrame);
-        if (prev !== undefined) goToFrame(prev);
+        if (prev !== undefined) {
+            zoomToLabels(prev, currentSide);
+            await goToFrame(prev);
+        }
     }
 
     function getLabeledFrames() {
@@ -693,6 +779,13 @@ const labeler = (() => {
             // Ignore if typing in input
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
 
+            // Ctrl+Z: undo
+            if (e.key === 'z' && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                undo();
+                return;
+            }
+
             switch (e.key) {
                 case 'a': case 'ArrowLeft':
                     e.preventDefault();
@@ -701,6 +794,14 @@ const labeler = (() => {
                 case 's': case 'ArrowRight':
                     e.preventDefault();
                     nextFrame();
+                    break;
+                case 'q':
+                    e.preventDefault();
+                    prevLabel();
+                    break;
+                case 'w':
+                    e.preventDefault();
+                    nextLabel();
                     break;
                 case 'e':
                     e.preventDefault();
@@ -771,12 +872,15 @@ const labeler = (() => {
         let html = `
             <div><kbd>A</kbd> / <kbd>&larr;</kbd> Prev frame</div>
             <div><kbd>S</kbd> / <kbd>&rarr;</kbd> Next frame</div>
+            <div><kbd>Q</kbd> Prev label</div>
+            <div><kbd>W</kbd> Next label</div>
         `;
         bodyparts.forEach((bp, idx) => {
             const letter = deleteLetters[idx] ? `<kbd>${deleteLetters[idx]}</kbd> / ` : '';
             html += `<div>${letter}<kbd>${idx + 1}</kbd> Delete ${bp}</div>`;
         });
         html += `
+            <div><kbd>Ctrl+Z</kbd> Undo</div>
             <div><kbd>E</kbd> Toggle ${cameraNames.join('/')}</div>
             <div><kbd>Z</kbd> Reset zoom</div>
             <div><kbd>Space</kbd> Play/pause</div>
