@@ -237,7 +237,7 @@ def remote_train_monitor(
             remote_config = f"{remote_project_dir}/config.yaml"
             train_cmd = _py_cmd(
                 cfg,
-                f"\"import deeplabcut; deeplabcut.train_network(r'{remote_config}')\"",
+                f"\"import os; os.environ['DLC_USE_PYTORCH']='True'; import deeplabcut; deeplabcut.train_network(r'{remote_config}')\"",
             )
 
             logfile.write(f"=== Phase 2: Training on {cfg.host} ===\n")
