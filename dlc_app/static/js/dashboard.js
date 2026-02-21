@@ -201,6 +201,9 @@ function updateJobDisplay(jobId, data) {
     const remoteBadge = data.remote_host
         ? '<span class="badge" style="background:rgba(33,150,243,0.15);color:#2196f3;font-size:11px;">Remote</span>'
         : '';
+    const errorMsg = (data.status === 'failed' && data.error_msg)
+        ? `<div style="color:var(--red);font-size:12px;margin-top:4px;">${data.error_msg}</div>`
+        : '';
 
     el.innerHTML = `
         <div style="display:flex;align-items:center;gap:12px;">
@@ -214,6 +217,7 @@ function updateJobDisplay(jobId, data) {
             <span class="badge badge-${data.status}">${data.status}</span>
             ${data.status === 'running' ? `<button class="btn btn-sm btn-danger" onclick="cancelJob(${jobId})">Cancel</button>` : ''}
         </div>
+        ${errorMsg}
     `;
 }
 
