@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import csv
 import json
-import subprocess
 from pathlib import Path
 
 import cv2
@@ -66,22 +65,48 @@ def write_collected_data_csv(
     return csv_path
 
 
-def convert_csv_to_h5(config_path: str):
-    """Call deeplabcut.convertcsv2h5 via subprocess."""
-    settings = get_settings()
-    python_exe = settings.python_executable
+def convert_csv_to_h5(csv_path: Path):
+    """Convert CollectedData CSV to H5 in DLC multi-index format.
 
-    script = (
-        f"import deeplabcut; "
-        f"deeplabcut.convertcsv2h5(r'{config_path}', userfeedback=False)"
+    Reads the 3-row header (scorer, bodyparts, coords) and data rows,
+    builds a MultiIndex DataFrame, and saves as HDF5.
+    No DLC dependency required.
+    """
+    import pandas as pd
+
+    with open(csv_path, "r") as f:
+        reader = csv.reader(f)
+        scorer_row = next(reader)    # scorer, "", "", scorer, scorer, ...
+        bp_row = next(reader)        # bodyparts, "", "", bp1, bp1, bp2, bp2, ...
+        coords_row = next(reader)    # coords, "", "", x, y, x, y, ...
+        data_rows = list(reader)
+
+    # Build column MultiIndex from header rows (skip first 3 index columns)
+    n_prefix = 3
+    tuples = list(zip(scorer_row[n_prefix:], bp_row[n_prefix:], coords_row[n_prefix:]))
+    columns = pd.MultiIndex.from_tuples(tuples, names=["scorer", "bodyparts", "coords"])
+
+    # Build row index from first 3 columns (labeled-data, round, imgfile)
+    index = pd.MultiIndex.from_tuples(
+        [(r[0], r[1], r[2]) for r in data_rows]
     )
-    result = subprocess.run(
-        [python_exe, "-c", script],
-        capture_output=True, text=True, timeout=60,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"convertcsv2h5 failed: {result.stderr}")
-    return result.stdout
+
+    # Build data — convert to float, empty strings become NaN
+    values = []
+    for r in data_rows:
+        row = []
+        for v in r[n_prefix:]:
+            try:
+                row.append(float(v))
+            except (ValueError, TypeError):
+                row.append(float("nan"))
+        values.append(row)
+
+    df = pd.DataFrame(values, index=index, columns=columns)
+
+    h5_path = csv_path.with_suffix(".h5")
+    df.to_hdf(h5_path, key="df_with_missing", mode="w")
+    return h5_path
 
 
 def commit_labels_to_dlc(
@@ -153,10 +178,10 @@ def commit_labels_to_dlc(
 
     # Convert CSV to H5
     try:
-        convert_csv_to_h5(str(config_path))
+        convert_csv_to_h5(csv_path)
     except Exception as e:
-        # Non-fatal — CSV is the primary format; H5 needs DeepLabCut
-        print(f"Warning: CSV to H5 conversion skipped ({e}). Install DeepLabCut for H5 support.")
+        # Non-fatal — CSV is the primary format
+        print(f"Warning: CSV to H5 conversion failed: {e}")
 
     return {
         "dlc_dir": str(dlc_path),
