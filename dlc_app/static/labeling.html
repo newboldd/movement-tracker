@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DLC Labeling</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+    <style>
+        body { overflow: hidden; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1 id="headerTitle">Labeling</h1>
+        <nav>
+            <a href="/">Dashboard</a>
+            <a href="/labeling" class="active">Labeling</a>
+            <a href="/results">Results</a>
+            <a href="/settings">Settings</a>
+        </nav>
+    </div>
+
+    <div class="labeling-layout">
+        <!-- Sidebar -->
+        <div class="labeling-sidebar">
+            <div style="margin-bottom: 16px;">
+                <div class="label-count" id="labelCount">Labels: <strong>0</strong></div>
+            </div>
+
+            <div style="margin-bottom: 16px;">
+                <h3 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">Navigation</h3>
+                <div style="display:flex;gap:4px;margin-bottom:8px;">
+                    <button class="btn btn-sm" onclick="labeler.prevFrame()" title="Previous frame (A/Left)">&larr;</button>
+                    <button class="btn btn-sm" id="playBtn" onclick="labeler.togglePlay()" title="Play/Pause (Space)">&#9654;</button>
+                    <button class="btn btn-sm" onclick="labeler.nextFrame()" title="Next frame (S/Right)">&rarr;</button>
+                </div>
+                <div style="display:flex;gap:4px;margin-bottom:8px;">
+                    <button class="btn btn-sm" onclick="labeler.prevLabel()" title="Previous labeled frame">&larr; Label</button>
+                    <button class="btn btn-sm" onclick="labeler.nextLabel()" title="Next labeled frame">Label &rarr;</button>
+                </div>
+                <div style="margin-bottom: 8px;">
+                    <label style="font-size:12px;color:var(--text-muted);">Playback speed</label>
+                    <select id="playbackRate" style="width:100%;padding:4px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:12px;">
+                        <option value="0.25">0.25x</option>
+                        <option value="0.5">0.5x</option>
+                        <option value="1" selected>1x</option>
+                        <option value="2">2x</option>
+                        <option value="4">4x</option>
+                    </select>
+                </div>
+            </div>
+
+            <div style="margin-bottom: 16px;">
+                <h3 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">View</h3>
+                <button class="btn btn-sm" id="sideToggle" onclick="labeler.toggleSide()" title="Toggle camera (E)">OS</button>
+                <button class="btn btn-sm" onclick="labeler.resetZoom()" title="Reset zoom (Z)">Reset Zoom</button>
+            </div>
+
+            <div style="margin-bottom: 16px;">
+                <h3 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">Actions</h3>
+                <button class="btn btn-sm btn-success" onclick="labeler.commitSession()" style="width:100%;margin-bottom:6px;">Commit to DLC</button>
+                <button class="btn btn-sm" onclick="labeler.saveLabels()" style="width:100%;">Save Labels</button>
+            </div>
+
+            <div>
+                <h3 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">Shortcuts</h3>
+                <div class="shortcut-list" id="shortcutList">
+                    <div><kbd>A</kbd> / <kbd>&larr;</kbd> Prev frame</div>
+                    <div><kbd>S</kbd> / <kbd>&rarr;</kbd> Next frame</div>
+                    <div><kbd>E</kbd> Toggle camera</div>
+                    <div><kbd>Z</kbd> Reset zoom</div>
+                    <div><kbd>Space</kbd> Play/pause</div>
+                    <div><kbd>Scroll</kbd> Zoom at cursor</div>
+                    <div><kbd>Click</kbd> Place label</div>
+                    <div><kbd>Drag</kbd> Move label</div>
+                    <div><kbd>Right-click</kbd> Remove label</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main area -->
+        <div class="labeling-main">
+            <!-- Canvas -->
+            <div class="canvas-container" id="canvasContainer">
+                <canvas id="labelCanvas"></canvas>
+            </div>
+
+            <!-- Controls bar -->
+            <div class="controls-bar">
+                <span class="frame-display" id="frameDisplay">Frame: 0 / 0</span>
+                <span id="trialDisplay" style="color:var(--text-muted);font-size:12px;">Trial: --</span>
+                <div style="flex:1;"></div>
+                <span id="labelInfo" style="font-size:12px;color:var(--text-muted);">Click to place keypoints</span>
+            </div>
+
+            <!-- Timeline -->
+            <div class="timeline-container">
+                <canvas id="timelineCanvas" class="timeline-canvas"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/labeler.js"></script>
+</body>
+</html>

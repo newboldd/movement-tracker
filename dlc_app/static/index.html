@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DLC Finger-Tapping Pipeline</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+</head>
+<body>
+    <div class="header">
+        <h1>DLC Finger-Tapping Pipeline</h1>
+        <nav>
+            <a href="/" class="active">Dashboard</a>
+            <a href="/labeling">Labeling</a>
+            <a href="/results">Results</a>
+            <a href="/settings">Settings</a>
+        </nav>
+    </div>
+
+    <div class="container">
+        <!-- First-run banner (hidden by default) -->
+        <div id="welcomeBanner" style="display:none;" class="card" role="alert">
+            <div style="display:flex;align-items:center;gap:12px;">
+                <span style="font-size:24px;">&#9881;</span>
+                <div>
+                    <strong>Welcome!</strong> The app is not configured yet.
+                    <a href="/settings" style="color:var(--blue);text-decoration:underline;">Open Settings</a>
+                    to set your video and DLC directories.
+                </div>
+            </div>
+        </div>
+
+        <!-- Toolbar -->
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+            <div style="display: flex; gap: 8px; align-items: center;">
+                <input type="text" id="filterInput" placeholder="Filter subjects..."
+                    style="padding: 6px 12px; background: var(--bg-card); border: 1px solid var(--border);
+                           border-radius: var(--radius); color: var(--text); font-size: 13px; width: 200px;">
+                <select id="stageFilter"
+                    style="padding: 6px 12px; background: var(--bg-card); border: 1px solid var(--border);
+                           border-radius: var(--radius); color: var(--text); font-size: 13px;">
+                    <option value="">All stages</option>
+                </select>
+                <span id="subjectCount" class="label-count"></span>
+            </div>
+            <div style="display: flex; gap: 8px;">
+                <button class="btn btn-sm" onclick="syncSubjects()">Sync from disk</button>
+                <button class="btn btn-sm btn-primary" onclick="showAddModal()">+ Add Subject</button>
+            </div>
+        </div>
+
+        <!-- Subject table -->
+        <div class="card" style="padding: 0; overflow: hidden;">
+            <table class="subject-table">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Stage</th>
+                        <th>Videos</th>
+                        <th>Labels</th>
+                        <th>Model</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="subjectTableBody">
+                    <tr><td colspan="6" style="text-align:center; padding:40px; color:var(--text-muted)">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Subject detail panel -->
+        <div id="detailPanel" class="detail-panel card">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h2 id="detailName">Subject Detail</h2>
+                <button class="btn btn-sm" onclick="closeDetail()">Close</button>
+            </div>
+            <div class="detail-grid" id="detailContent"></div>
+        </div>
+
+        <!-- Running jobs -->
+        <div class="card" id="jobsCard" style="display:none;">
+            <h2>Running Jobs</h2>
+            <div id="jobsList"></div>
+        </div>
+    </div>
+
+    <!-- Add Subject Modal -->
+    <div class="modal-overlay" id="addModal">
+        <div class="modal">
+            <h3>Add New Subject</h3>
+            <div class="form-group">
+                <label>Subject Name (e.g. MSA20, Con10, PD15)</label>
+                <input type="text" id="newSubjectName" placeholder="Subject name">
+            </div>
+            <div class="actions">
+                <button class="btn" onclick="hideAddModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="addSubject()">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>

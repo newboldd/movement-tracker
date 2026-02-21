@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# App runtime data
+*.db
+settings.json
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data directories (created at runtime)
+videos/
+dlc/

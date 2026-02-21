@@ -1,0 +1,364 @@
+/* DLC Finger-Tapping Pipeline — Main Styles */
+
+:root {
+    --bg: #1a1a2e;
+    --bg-card: #16213e;
+    --bg-hover: #1a2744;
+    --text: #e0e0e0;
+    --text-muted: #8892a0;
+    --accent: #0f3460;
+    --blue: #4a9eff;
+    --green: #4caf50;
+    --orange: #ff9800;
+    --red: #f44336;
+    --purple: #9c27b0;
+    --border: #2a3a5c;
+    --radius: 6px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+}
+
+/* ── Layout ─────────────────────────────────────────── */
+.header {
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.header h1 {
+    font-size: 18px;
+    font-weight: 600;
+}
+
+.header nav a {
+    color: var(--text-muted);
+    text-decoration: none;
+    margin-left: 24px;
+    font-size: 14px;
+}
+.header nav a:hover, .header nav a.active {
+    color: var(--blue);
+}
+
+.container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 24px;
+}
+
+/* ── Cards ──────────────────────────────────────────── */
+.card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin-bottom: 16px;
+}
+
+.card h2 {
+    font-size: 16px;
+    margin-bottom: 12px;
+    color: var(--text);
+}
+
+/* ── Stage badges ───────────────────────────────────── */
+.badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 500;
+    text-transform: capitalize;
+}
+
+.badge-created     { background: #333; color: #999; }
+.badge-labeling    { background: #1a237e; color: #7986cb; }
+.badge-labeled,
+.badge-committed   { background: #1b5e20; color: #81c784; }
+.badge-training,
+.badge-training_dataset_created { background: #e65100; color: #ffb74d; }
+.badge-trained     { background: #004d40; color: #4db6ac; }
+.badge-cropping,
+.badge-cropped     { background: #4a148c; color: #ce93d8; }
+.badge-analyzing,
+.badge-analyzed    { background: #0d47a1; color: #64b5f6; }
+.badge-triangulating,
+.badge-triangulated { background: #006064; color: #4dd0e1; }
+.badge-complete    { background: #2e7d32; color: #a5d6a7; }
+.badge-error_detection,
+.badge-errors_detected,
+.badge-error_labeling,
+.badge-error_labeled { background: #b71c1c; color: #ef9a9a; }
+.badge-retraining,
+.badge-retrained   { background: #ff6f00; color: #ffe082; }
+
+/* ── Subject table ──────────────────────────────────── */
+.subject-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+}
+
+.subject-table th {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 2px solid var(--border);
+    color: var(--text-muted);
+    font-weight: 500;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.subject-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+}
+
+.subject-table tr:hover td {
+    background: var(--bg-hover);
+}
+
+.subject-table .name-col {
+    font-weight: 600;
+    color: var(--blue);
+    cursor: pointer;
+}
+.subject-table .name-col:hover {
+    text-decoration: underline;
+}
+
+/* ── Buttons ────────────────────────────────────────── */
+.btn {
+    display: inline-block;
+    padding: 6px 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--accent);
+    color: var(--text);
+    font-size: 13px;
+    cursor: pointer;
+    text-decoration: none;
+    transition: background 0.15s;
+}
+.btn:hover { background: #1a4a80; }
+.btn-sm { padding: 3px 10px; font-size: 12px; }
+.btn-primary { background: var(--blue); color: #fff; border-color: var(--blue); }
+.btn-primary:hover { background: #3a8adf; }
+.btn-danger { background: var(--red); border-color: var(--red); }
+.btn-danger:hover { background: #d32f2f; }
+.btn-success { background: var(--green); border-color: var(--green); }
+.btn-success:hover { background: #388e3c; }
+
+/* ── Job indicators ─────────────────────────────────── */
+.job-indicator {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+}
+.job-running  { background: var(--orange); animation: pulse 1.5s infinite; }
+.job-completed { background: var(--green); }
+.job-failed   { background: var(--red); }
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+/* ── Progress bar ───────────────────────────────────── */
+.progress-bar {
+    width: 100%;
+    height: 6px;
+    background: var(--bg);
+    border-radius: 3px;
+    overflow: hidden;
+}
+.progress-bar .fill {
+    height: 100%;
+    background: var(--blue);
+    border-radius: 3px;
+    transition: width 0.3s;
+}
+
+/* ── Modal ──────────────────────────────────────────── */
+.modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+}
+.modal-overlay.active { display: flex; }
+
+.modal {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px;
+    min-width: 400px;
+    max-width: 600px;
+}
+.modal h3 { margin-bottom: 16px; }
+.modal .form-group { margin-bottom: 12px; }
+.modal label { display: block; font-size: 13px; color: var(--text-muted); margin-bottom: 4px; }
+.modal input, .modal select {
+    width: 100%;
+    padding: 8px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 14px;
+}
+.modal .actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 16px;
+}
+
+/* ── Subject detail panel ───────────────────────────── */
+.detail-panel {
+    display: none;
+}
+.detail-panel.active {
+    display: block;
+}
+.detail-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+.detail-section h3 {
+    font-size: 14px;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.detail-section .info-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    font-size: 13px;
+}
+.detail-section .info-row .label { color: var(--text-muted); }
+
+/* ── Labeling page ──────────────────────────────────── */
+.labeling-layout {
+    display: flex;
+    height: calc(100vh - 52px);
+}
+
+.labeling-sidebar {
+    width: 240px;
+    background: var(--bg-card);
+    border-right: 1px solid var(--border);
+    padding: 16px;
+    overflow-y: auto;
+    flex-shrink: 0;
+}
+
+.labeling-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.canvas-container {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.canvas-container canvas {
+    cursor: crosshair;
+}
+
+.timeline-container {
+    height: 80px;
+    background: var(--bg-card);
+    border-top: 1px solid var(--border);
+    padding: 8px 16px;
+    flex-shrink: 0;
+}
+
+.controls-bar {
+    background: var(--bg-card);
+    border-top: 1px solid var(--border);
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
+    flex-shrink: 0;
+}
+
+.controls-bar .frame-display {
+    font-family: 'Consolas', monospace;
+    color: var(--blue);
+    min-width: 120px;
+}
+
+.controls-bar .side-toggle {
+    padding: 4px 12px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-weight: 600;
+}
+.controls-bar .side-toggle.os { background: #1b5e20; color: #81c784; }
+.controls-bar .side-toggle.od { background: #0d47a1; color: #64b5f6; }
+
+.shortcut-list {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.shortcut-list kbd {
+    display: inline-block;
+    padding: 1px 5px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    font-family: monospace;
+    font-size: 11px;
+    margin: 0 2px;
+}
+
+/* ── Timeline ───────────────────────────────────────── */
+.timeline-canvas {
+    width: 100%;
+    height: 100%;
+}
+
+/* ── Label count indicator ──────────────────────────── */
+.label-count {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.label-count strong { color: var(--green); }
+
+/* ── Responsive ─────────────────────────────────────── */
+@media (max-width: 900px) {
+    .detail-grid { grid-template-columns: 1fr; }
+    .labeling-sidebar { width: 180px; }
+}
