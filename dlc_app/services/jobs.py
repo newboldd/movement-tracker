@@ -35,16 +35,12 @@ class JobRegistry:
         """
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
-        env = os.environ.copy()
-        env["TF_USE_LEGACY_KERAS"] = "1"
-
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             cwd=str(PROJECT_DIR),
-            env=env,
         )
 
         self._processes[job_id] = proc
