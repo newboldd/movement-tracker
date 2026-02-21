@@ -127,7 +127,7 @@ def test_connection(cfg: RemoteConfig) -> dict:
     # Check 4: GPU availability
     try:
         result = subprocess.run(
-            _py_cmd(cfg, "\"import torch; print(f'GPU: {torch.cuda.get_device_name(0)}' if torch.cuda.is_available() else 'No GPU')\""),
+            _py_cmd(cfg, "\"import os; os.environ['KMP_DUPLICATE_LIB_OK']='TRUE'; import torch; print(f'GPU: {torch.cuda.get_device_name(0)}' if torch.cuda.is_available() else 'No GPU')\""),
             capture_output=True, text=True, timeout=60,
         )
         details["gpu"] = result.stdout.strip() if result.returncode == 0 else "check failed"
