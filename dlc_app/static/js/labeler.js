@@ -56,6 +56,14 @@ const labeler = (() => {
     const undoStack = [];
     const MAX_UNDO = 50;
 
+    // Review mode: null = all bodyparts, or bodypart name for focused review
+    let reviewBp = null;
+
+    // Video element for smooth playback
+    let videoEl = null;
+    let videoPlaying = false;
+    let currentTrialIdx = -1; // which trial the video element is loaded with
+
     // Prefetch cache
     const imageCache = new Map();
     const PREFETCH_AHEAD = 3;
@@ -78,6 +86,7 @@ const labeler = (() => {
         timeline = document.getElementById('timelineCanvas');
         tlCtx = timeline.getContext('2d');
         containerEl = document.getElementById('canvasContainer');
+        videoEl = document.getElementById('videoPlayer');
 
         setupCanvasEvents();
         setupTimeline();
@@ -474,9 +483,12 @@ const labeler = (() => {
         const lbl = labels.get(key);
         if (!lbl) return;
 
-        // Collect all placed coordinates
+        // In review mode, zoom to just the reviewed bodypart
+        const bpsToShow = reviewBp ? [reviewBp] : bodyparts;
+
+        // Collect placed coordinates
         const pts = [];
-        for (const bp of bodyparts) {
+        for (const bp of bpsToShow) {
             const c = lbl[bp];
             if (c && c[0] != null) pts.push(c);
         }
@@ -491,8 +503,9 @@ const labeler = (() => {
             if (y > maxY) maxY = y;
         }
 
-        // Add padding around the bounding box (in image pixels)
-        const pad = Math.max(maxX - minX, maxY - minY, 80) * 0.8;
+        // Padding: tighter for single-point review mode
+        const span = Math.max(maxX - minX, maxY - minY, 20);
+        const pad = reviewBp ? span * 2.5 + 30 : span * 0.8 + 40;
         minX -= pad; minY -= pad;
         maxX += pad; maxY += pad;
 
@@ -664,9 +677,15 @@ const labeler = (() => {
 
     function getLabeledFrames() {
         const frames = new Set();
-        labels.forEach((_, key) => {
+        labels.forEach((lbl, key) => {
             const [frameStr, side] = key.split('_');
-            if (side === currentSide) frames.add(parseInt(frameStr));
+            if (side !== currentSide) return;
+            // In review mode, only include frames that have the reviewed bodypart
+            if (reviewBp) {
+                const c = lbl[reviewBp];
+                if (!c || c[0] == null) return;
+            }
+            frames.add(parseInt(frameStr));
         });
         return [...frames].sort((a, b) => a - b);
     }
@@ -708,6 +727,46 @@ const labeler = (() => {
         }
     }
 
+    function cycleReviewMode() {
+        if (!reviewBp) {
+            reviewBp = bodyparts[0];
+        } else {
+            const idx = bodyparts.indexOf(reviewBp);
+            if (idx < bodyparts.length - 1) {
+                reviewBp = bodyparts[idx + 1];
+            } else {
+                reviewBp = null;
+            }
+        }
+        updateReviewIndicator();
+        // Re-zoom to current frame's labels with new mode
+        if (reviewBp) {
+            zoomToLabels(currentFrame, currentSide);
+            render();
+        }
+    }
+
+    function updateReviewIndicator() {
+        const el = document.getElementById('labelInfo');
+        if (reviewBp) {
+            const idx = bodyparts.indexOf(reviewBp);
+            el.textContent = `Review mode: ${reviewBp}`;
+            el.style.color = bpColor(idx);
+        } else {
+            el.textContent = 'Click to place keypoints';
+            el.style.color = '';
+        }
+    }
+
+    function getTrialForFrame(frame) {
+        for (let i = 0; i < trials.length; i++) {
+            if (frame >= trials[i].start_frame && frame <= trials[i].end_frame) {
+                return i;
+            }
+        }
+        return 0;
+    }
+
     function toggleSide() {
         const idx = cameraNames.indexOf(currentSide);
         const newIdx = (idx + 1) % cameraNames.length;
@@ -740,28 +799,152 @@ const labeler = (() => {
         if (playing) {
             btn.innerHTML = '&#9646;&#9646;';
             playbackRate = parseFloat(document.getElementById('playbackRate').value);
-            const fps = trials.length > 0 ? trials[0].fps : 30;
-            const interval = 1000 / (fps * playbackRate);
-
-            // Sequential async loop — waits for each frame to load
-            // before scheduling the next, preventing stacking
-            (async function playLoop() {
-                while (playing && currentFrame < totalFrames - 1) {
-                    const start = performance.now();
-                    await goToFrame(currentFrame + 1);
-                    const elapsed = performance.now() - start;
-                    const wait = Math.max(0, interval - elapsed);
-                    await new Promise(r => setTimeout(r, wait));
-                }
-                if (playing) {
-                    // Reached end — stop
-                    playing = false;
-                    btn.innerHTML = '&#9654;';
-                }
-            })();
+            startVideoPlayback();
         } else {
             btn.innerHTML = '&#9654;';
+            stopVideoPlayback();
         }
+    }
+
+    function startVideoPlayback() {
+        const trialIdx = getTrialForFrame(currentFrame);
+        const trial = trials[trialIdx];
+        if (!trial) return;
+
+        const localFrame = currentFrame - trial.start_frame;
+        const startTime = localFrame / trial.fps;
+
+        // Load video for this trial if not already loaded
+        if (currentTrialIdx !== trialIdx) {
+            videoEl.src = `/api/labeling/sessions/${sessionId}/video?trial=${trialIdx}`;
+            currentTrialIdx = trialIdx;
+        }
+
+        videoEl.playbackRate = playbackRate;
+        videoEl.currentTime = startTime;
+        videoPlaying = true;
+
+        videoEl.play().then(() => {
+            requestAnimationFrame(videoDrawLoop);
+        }).catch(e => {
+            console.error('Video play failed, falling back to frame-by-frame', e);
+            videoPlaying = false;
+            fallbackPlay();
+        });
+
+        // Handle trial end — stop or advance to next trial
+        videoEl.onended = () => {
+            const nextTrialIdx = trialIdx + 1;
+            if (nextTrialIdx < trials.length && playing) {
+                currentFrame = trials[nextTrialIdx].start_frame;
+                currentTrialIdx = nextTrialIdx;
+                videoEl.src = `/api/labeling/sessions/${sessionId}/video?trial=${nextTrialIdx}`;
+                videoEl.currentTime = 0;
+                videoEl.play();
+            } else {
+                playing = false;
+                videoPlaying = false;
+                document.getElementById('playBtn').innerHTML = '&#9654;';
+            }
+        };
+    }
+
+    function videoDrawLoop() {
+        if (!videoPlaying || !playing) return;
+
+        const trial = trials[currentTrialIdx];
+        if (!trial) return;
+
+        // Calculate current global frame from video time
+        const localFrame = Math.floor(videoEl.currentTime * trial.fps);
+        currentFrame = trial.start_frame + Math.min(localFrame, trial.frame_count - 1);
+
+        // Draw video frame to canvas (cropped to correct camera half)
+        const cw = containerEl.clientWidth;
+        const ch = containerEl.clientHeight;
+        canvas.width = cw;
+        canvas.height = ch;
+        ctx.clearRect(0, 0, cw, ch);
+
+        const vw = videoEl.videoWidth;
+        const vh = videoEl.videoHeight;
+        if (vw > 0 && vh > 0) {
+            const midline = Math.floor(vw / 2);
+            const settings_cam = cameraNames;
+            // Source crop: left half or right half of stereo video
+            let sx, sw;
+            if (settings_cam.length >= 2 && currentSide === settings_cam[1]) {
+                sx = midline; sw = vw - midline;
+            } else {
+                sx = 0; sw = midline;
+            }
+
+            imgW = sw;
+            imgH = vh;
+            if (!hasUserZoom) fitImage();
+
+            ctx.save();
+            ctx.translate(offsetX, offsetY);
+            ctx.scale(scale, scale);
+            ctx.drawImage(videoEl, sx, 0, sw, vh, 0, 0, sw, vh);
+            ctx.restore();
+        }
+
+        // Draw labels overlay
+        const key = `${currentFrame}_${currentSide}`;
+        const lbl = labels.get(key);
+        if (lbl) {
+            const placedBps = [];
+            bodyparts.forEach((bp, idx) => {
+                const coords = lbl[bp];
+                if (coords && coords[0] != null && coords[1] != null) {
+                    drawPoint(coords[0], coords[1], bpColor(idx), bpLetter(bp));
+                    placedBps.push({ bp, x: coords[0], y: coords[1] });
+                }
+            });
+            for (let i = 1; i < placedBps.length; i++) {
+                const a = placedBps[i - 1];
+                const b = placedBps[i];
+                ctx.beginPath();
+                ctx.moveTo(a.x * scale + offsetX, a.y * scale + offsetY);
+                ctx.lineTo(b.x * scale + offsetX, b.y * scale + offsetY);
+                ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+        }
+
+        updateFrameDisplay();
+        renderTimeline();
+
+        requestAnimationFrame(videoDrawLoop);
+    }
+
+    function stopVideoPlayback() {
+        videoPlaying = false;
+        videoEl.pause();
+        // Load the precise frame via image API for labeling
+        goToFrame(currentFrame);
+    }
+
+    function fallbackPlay() {
+        // Fallback: frame-by-frame if video streaming fails
+        playbackRate = parseFloat(document.getElementById('playbackRate').value);
+        const fps = trials.length > 0 ? trials[0].fps : 30;
+        const interval = 1000 / (fps * playbackRate);
+        (async function playLoop() {
+            while (playing && currentFrame < totalFrames - 1) {
+                const start = performance.now();
+                await goToFrame(currentFrame + 1);
+                const elapsed = performance.now() - start;
+                const wait = Math.max(0, interval - elapsed);
+                await new Promise(r => setTimeout(r, wait));
+            }
+            if (playing) {
+                playing = false;
+                document.getElementById('playBtn').innerHTML = '&#9654;';
+            }
+        })();
     }
 
     function resetZoom() {
@@ -802,6 +985,10 @@ const labeler = (() => {
                 case 'w':
                     e.preventDefault();
                     nextLabel();
+                    break;
+                case 'r':
+                    e.preventDefault();
+                    cycleReviewMode();
                     break;
                 case 'e':
                     e.preventDefault();
@@ -881,6 +1068,7 @@ const labeler = (() => {
         });
         html += `
             <div><kbd>Ctrl+Z</kbd> Undo</div>
+            <div><kbd>R</kbd> Review mode (cycle)</div>
             <div><kbd>E</kbd> Toggle ${cameraNames.join('/')}</div>
             <div><kbd>Z</kbd> Reset zoom</div>
             <div><kbd>Space</kbd> Play/pause</div>
@@ -981,7 +1169,7 @@ const labeler = (() => {
     return {
         init,
         nextFrame, prevFrame, nextLabel, prevLabel,
-        toggleSide, togglePlay, resetZoom,
+        toggleSide, togglePlay, resetZoom, cycleReviewMode,
         saveLabels, commitSession,
     };
 })();
