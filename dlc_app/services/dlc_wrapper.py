@@ -81,11 +81,16 @@ def cmd_create_training_dataset(config_path: str) -> list[str]:
 
 
 def cmd_train_network(config_path: str) -> list[str]:
-    """Build command to train DLC network."""
+    """Build command to train DLC network.
+
+    Calls create_training_dataset first to generate pose_cfg.yaml
+    and other DLC-specific training files if they don't exist yet.
+    """
     settings = get_settings()
     _ensure_pytorch_engine(config_path)
     script = _wrap_script(
         f"import deeplabcut; "
+        f"deeplabcut.create_training_dataset(r'{config_path}', net_type='{settings.dlc_net_type}'); "
         f"deeplabcut.train_network(r'{config_path}')"
     )
     return [settings.python_executable, "-u", "-c", script]
