@@ -5,7 +5,7 @@
 #   ./setup.sh
 #
 # What it does:
-#   1. Checks for Python 3.10+ (needed for DeepLabCut 3.0)
+#   1. Checks for Python 3.10+ (or 3.9 — DLC training needs 3.10+ but labeling works on 3.9)
 #   2. Creates a virtual environment (first run only)
 #   3. Installs dependencies (first run only)
 #   4. Starts the web app and opens your browser
@@ -19,13 +19,13 @@ PORT=8080
 
 # ── Find Python ──────────────────────────────────────────────────────────
 find_python() {
-    # Prefer Python 3.11 (best wheel availability for scientific packages)
+    # Prefer 3.11 (best scientific package support), then 3.10, then any 3.9+
     for cmd in python3.11 python3.10 python3.12 python3 python; do
         if command -v "$cmd" &>/dev/null; then
             version=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
             major=$(echo "$version" | cut -d. -f1)
             minor=$(echo "$version" | cut -d. -f2)
-            if [ "$major" -eq 3 ] && [ "$minor" -ge 10 ]; then
+            if [ "$major" -eq 3 ] && [ "$minor" -ge 9 ]; then
                 echo "$cmd"
                 return 0
             fi
@@ -35,8 +35,8 @@ find_python() {
 }
 
 PYTHON=$(find_python) || {
-    echo "Error: Python 3.10+ is required but not found."
-    echo "Install it with: brew install python@3.12"
+    echo "Error: Python 3.9+ is required but not found."
+    echo "Install it from https://www.python.org/downloads/ and try again."
     exit 1
 }
 
