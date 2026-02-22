@@ -5,7 +5,7 @@ import json
 from typing import List
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 
 from ..config import get_settings
 from ..db import get_db_ctx
@@ -134,6 +134,30 @@ def get_labels(session_id: int) -> List[dict]:
             lbl["keypoints"] = json.loads(lbl["keypoints"])
 
     return labels
+
+
+@router.get("/sessions/{session_id}/video")
+def get_video(
+    session_id: int,
+    trial: int = Query(0, description="Trial index"),
+) -> FileResponse:
+    """Stream a trial's raw video file for smooth HTML5 playback."""
+    with get_db_ctx() as db:
+        session = db.execute(
+            "SELECT * FROM label_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not session:
+            raise HTTPException(404, "Session not found")
+        subj = db.execute(
+            "SELECT * FROM subjects WHERE id = ?", (session["subject_id"],)
+        ).fetchone()
+
+    trials = build_trial_map(subj["name"])
+    if trial < 0 or trial >= len(trials):
+        raise HTTPException(400, f"Trial index {trial} out of range (0-{len(trials)-1})")
+
+    video_path = trials[trial]["video_path"]
+    return FileResponse(video_path, media_type="video/mp4")
 
 
 @router.get("/sessions/{session_id}/mediapipe")
