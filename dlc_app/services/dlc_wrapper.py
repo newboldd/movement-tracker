@@ -55,7 +55,7 @@ def cmd_create_training_dataset(config_path: str) -> list[str]:
     settings = get_settings()
     script = (
         f"{_DLC_PREAMBLE}"
-        f"deeplabcut.create_training_dataset(r'{config_path}', net_type='{settings.dlc_net_type}')"
+        f"deeplabcut.create_training_dataset(r'{config_path}', net_type='{settings.dlc_net_type}', engine=Engine.PYTORCH)"
     )
     return [settings.python_executable, "-c", script]
 

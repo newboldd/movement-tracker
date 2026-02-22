@@ -275,9 +275,9 @@ def remote_train_monitor(
             logfile.write(f"=== Phase 3: Downloading model from {cfg.host} ===\n")
             logfile.flush()
 
-            # Download dlc-models directory back to local
-            remote_models = f"{cfg.host}:{remote_project_dir}/dlc-models"
-            local_models = local_dlc_dir / "dlc-models"
+            # Download dlc-models-pytorch directory back to local (PyTorch engine)
+            remote_models = f"{cfg.host}:{remote_project_dir}/dlc-models-pytorch"
+            local_models = local_dlc_dir / "dlc-models-pytorch"
 
             download_cmd = _scp_base_args(cfg) + [
                 remote_models,
