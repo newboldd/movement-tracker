@@ -42,6 +42,16 @@ def startup():
         logger.info("App not configured. Visit /settings to set up paths.")
         return
 
+    # Mark orphaned "running" jobs as failed (from prior server sessions)
+    from .db import get_db_ctx
+    with get_db_ctx() as db:
+        stale = db.execute(
+            "UPDATE jobs SET status = 'failed', error_msg = 'Server restarted', "
+            "finished_at = CURRENT_TIMESTAMP WHERE status IN ('running', 'pending')"
+        )
+        if stale.rowcount:
+            logger.info(f"Cleaned up {stale.rowcount} stale jobs from prior session")
+
     logger.info("Syncing subjects from filesystem...")
     from .routers.subjects import sync_from_filesystem
     result = sync_from_filesystem()
