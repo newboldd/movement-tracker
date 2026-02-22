@@ -1304,8 +1304,10 @@ const labeler = (() => {
     function onTimelineClick(e) {
         const rect = timeline.getBoundingClientRect();
         const x = e.clientX - rect.left;
-        const frame = Math.floor((x / rect.width) * totalFrames);
-        goToFrame(Math.max(0, Math.min(frame, totalFrames - 1)));
+        const frame = Math.max(0, Math.min(Math.floor((x / rect.width) * totalFrames), totalFrames - 1));
+        // Auto-zoom to labels/MP at the target frame
+        autoZoomForFrame(frame, currentSide);
+        goToFrame(frame);
     }
 
     function renderTimeline() {
@@ -1425,8 +1427,9 @@ const labeler = (() => {
         const padL = 40;
         const padR = 8;
         const plotW = rect.width - padL - padR;
-        const frame = Math.floor(((x - padL) / plotW) * totalFrames);
-        goToFrame(Math.max(0, Math.min(frame, totalFrames - 1)));
+        const frame = Math.max(0, Math.min(Math.floor(((x - padL) / plotW) * totalFrames), totalFrames - 1));
+        autoZoomForFrame(frame, currentSide);
+        goToFrame(frame);
     }
 
     function renderDistanceTrace() {
