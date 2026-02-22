@@ -19,6 +19,14 @@ SETTINGS_PATH = APP_DIR / "settings.json"
 # ── Constants (not worth making configurable) ─────────────────────────────
 JPEG_QUALITY = 85
 FRAME_CACHE_SIZE = 256
+CALIBRATION_DIR = PROJECT_DIR / "calibration"
+
+# Default calibrations shipped with the app (camera name -> YAML path)
+DEFAULT_CALIBRATIONS = {
+    "camera1": str(CALIBRATION_DIR / "camera1_recalibrated.yaml"),
+    "dysaut_cam1": str(CALIBRATION_DIR / "cam1_calibration.yaml"),
+    "dysaut_cam2": str(CALIBRATION_DIR / "cam2_calibration.yaml"),
+}
 
 
 class Settings:
@@ -37,7 +45,7 @@ class Settings:
         self.dlc_date: str = "Sep16"
         self.dlc_net_type: str = "resnet_50"
         self.calibration_dir: str = ""  # path to calibration/ with camera_assignments.yaml
-        self.calibrations: dict = {}    # camera_name -> YAML calibration file path
+        self.calibrations: dict = dict(DEFAULT_CALIBRATIONS)  # camera_name -> YAML path
         self.host: str = "127.0.0.1"
         self.port: int = 8080
 
