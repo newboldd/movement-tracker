@@ -1,4 +1,5 @@
 """SQLite database schema and connection helpers."""
+from __future__ import annotations
 
 import json
 import logging

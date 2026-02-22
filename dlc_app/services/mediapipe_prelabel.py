@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """MediaPipe pre-labeling: extract thumb/index predictions + 3D distance trace.
 
 Runs MediaPipe on stereo videos, extracts thumb tip (joint 4) and index tip

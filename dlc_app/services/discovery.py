@@ -1,4 +1,5 @@
 """Scan dlc/ directories to infer subject state from filesystem artifacts."""
+from __future__ import annotations
 
 import glob
 import re

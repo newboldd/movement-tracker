@@ -1,4 +1,5 @@
 """Job registry: subprocess management and progress tracking."""
+from __future__ import annotations
 
 import logging
 import os

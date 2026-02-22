@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Stereo calibration loading for the DLC app.
 
 Loads camera_assignments.yaml to map subjects to camera calibration files,

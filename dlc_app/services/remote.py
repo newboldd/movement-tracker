@@ -1,4 +1,5 @@
 """Remote DLC training via SSH: upload project, train, crop, analyze, download results."""
+from __future__ import annotations
 
 import logging
 import os

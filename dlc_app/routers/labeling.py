@@ -1,4 +1,5 @@
 """Labeling session endpoints: frame serving, label CRUD, commit, MediaPipe prelabels."""
+from __future__ import annotations
 
 import json
 

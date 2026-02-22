@@ -1,4 +1,5 @@
 """CollectedData CSV read/write and H5 conversion for DLC."""
+from __future__ import annotations
 
 import csv
 import json
