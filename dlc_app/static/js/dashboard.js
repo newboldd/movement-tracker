@@ -137,6 +137,7 @@ async function showDetail(subjectId) {
             <div class="detail-section" style="grid-column: 1 / -1;">
                 <h3>Pipeline Steps</h3>
                 <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;">
+                    <button class="btn btn-sm" onclick="runStep(${detail.id}, 'mediapipe')">Run MediaPipe</button>
                     <button class="btn btn-sm" onclick="runStep(${detail.id}, 'create_training_dataset')">Create Dataset</button>
                     <button class="btn btn-sm btn-primary" onclick="runStep(${detail.id}, 'train')">Train</button>
                     <button class="btn btn-sm" onclick="runStep(${detail.id}, 'crop')">Crop Videos</button>
