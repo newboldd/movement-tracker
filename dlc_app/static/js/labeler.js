@@ -203,7 +203,10 @@ const labeler = (() => {
             currentImage = await loadImage(frame, currentSide);
             imgW = currentImage.width;
             imgH = currentImage.height;
-            if (!hasUserZoom) fitImage();
+            if (!hasUserZoom) {
+                // Try to auto-zoom to visible points (manual or MP)
+                if (!autoZoomForFrame(frame, currentSide)) fitImage();
+            }
             render();
             prefetchFrames(frame);
         } catch (e) {
@@ -604,7 +607,54 @@ const labeler = (() => {
         recomputeCameraShift();
     }
 
-    // ── Zoom to labels ───────────────────────────────
+    // ── Zoom helpers ─────────────────────────────────
+    function autoZoomForFrame(frame, side) {
+        // Collect points from manual labels, falling back to MP detections
+        const key = `${frame}_${side}`;
+        const lbl = labels.get(key);
+        const pts = [];
+
+        for (const bp of bodyparts) {
+            const manual = lbl ? lbl[bp] : null;
+            if (manual && manual[0] != null) {
+                pts.push(manual);
+            } else {
+                const mp = getMpLabel(frame, side, bp);
+                if (mp) pts.push(mp);
+            }
+        }
+        if (pts.length === 0) return false;
+
+        zoomToPoints(pts, false);
+        return true;
+    }
+
+    function zoomToPoints(pts, tight) {
+        // Bounding box in image coords
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const [x, y] of pts) {
+            if (x < minX) minX = x;
+            if (y < minY) minY = y;
+            if (x > maxX) maxX = x;
+            if (y > maxY) maxY = y;
+        }
+
+        const span = Math.max(maxX - minX, maxY - minY, 20);
+        const pad = tight ? span * 2.5 + 30 : span * 0.8 + 40;
+        minX -= pad; minY -= pad;
+        maxX += pad; maxY += pad;
+
+        const cw = containerEl.clientWidth;
+        const ch = containerEl.clientHeight;
+        const bboxW = maxX - minX;
+        const bboxH = maxY - minY;
+
+        scale = Math.min(cw / bboxW, ch / bboxH);
+        offsetX = (cw - bboxW * scale) / 2 - minX * scale;
+        offsetY = (ch - bboxH * scale) / 2 - minY * scale;
+        hasUserZoom = true;
+    }
+
     function zoomToLabels(frame, side) {
         const key = `${frame}_${side}`;
         const lbl = labels.get(key);
@@ -621,30 +671,7 @@ const labeler = (() => {
         }
         if (pts.length === 0) return;
 
-        // Bounding box in image coords
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-        for (const [x, y] of pts) {
-            if (x < minX) minX = x;
-            if (y < minY) minY = y;
-            if (x > maxX) maxX = x;
-            if (y > maxY) maxY = y;
-        }
-
-        // Padding: tighter for single-point review mode
-        const span = Math.max(maxX - minX, maxY - minY, 20);
-        const pad = reviewBp ? span * 2.5 + 30 : span * 0.8 + 40;
-        minX -= pad; minY -= pad;
-        maxX += pad; maxY += pad;
-
-        const cw = containerEl.clientWidth;
-        const ch = containerEl.clientHeight;
-        const bboxW = maxX - minX;
-        const bboxH = maxY - minY;
-
-        scale = Math.min(cw / bboxW, ch / bboxH);
-        offsetX = (cw - bboxW * scale) / 2 - minX * scale;
-        offsetY = (ch - bboxH * scale) / 2 - minY * scale;
-        hasUserZoom = true;
+        zoomToPoints(pts, !!reviewBp);
     }
 
     // ── Label placement ───────────────────────────────
@@ -828,15 +855,15 @@ const labeler = (() => {
     }
 
     function recomputeCameraShift() {
-        // Compute the average horizontal and vertical offset between OS/OD labels
-        // for frames that have labels in both cameras.
+        // Compute the average horizontal and vertical offset between cam0/cam1.
+        // Uses manual labels first; falls back to MP detections for more samples.
         if (cameraNames.length < 2) return;
         const cam0 = cameraNames[0];
         const cam1 = cameraNames[1];
         const dxValues = [];
         const dyValues = [];
 
-        // Find frames that have labels in both cameras
+        // 1. Manual labels: find frames with labels in both cameras
         const frameNums = new Set();
         labels.forEach((_, key) => {
             const [f] = key.split('_');
@@ -855,6 +882,40 @@ const labeler = (() => {
                     dxValues.push(c1[0] - c0[0]);
                     dyValues.push(c1[1] - c0[1]);
                 }
+            }
+        }
+
+        // 2. MP labels: sample every 10th frame for efficiency
+        if (dxValues.length < 4 && mpLabels && mpLabels[cam0] && mpLabels[cam1]) {
+            const mpDx = [];
+            const mpDy = [];
+            for (let f = 0; f < totalFrames; f += 10) {
+                for (const bp of bodyparts) {
+                    const c0 = getMpLabel(f, cam0, bp);
+                    const c1 = getMpLabel(f, cam1, bp);
+                    if (c0 && c1) {
+                        mpDx.push(c1[0] - c0[0]);
+                        mpDy.push(c1[1] - c0[1]);
+                    }
+                }
+            }
+            if (mpDx.length > 0) {
+                // Use median to be robust to MP outliers
+                mpDx.sort((a, b) => a - b);
+                mpDy.sort((a, b) => a - b);
+                const mid = Math.floor(mpDx.length / 2);
+                const mpShiftX = mpDx.length % 2 ? mpDx[mid] : (mpDx[mid - 1] + mpDx[mid]) / 2;
+                const mpShiftY = mpDy.length % 2 ? mpDy[mid] : (mpDy[mid - 1] + mpDy[mid]) / 2;
+
+                if (dxValues.length === 0) {
+                    // No manual data at all — use MP directly
+                    computedCameraShiftX = mpShiftX;
+                    computedCameraShiftY = mpShiftY;
+                    return;
+                }
+                // Few manual samples — blend: manual mean weighted 2x over MP median
+                dxValues.push(mpShiftX, mpShiftX);
+                dyValues.push(mpShiftY, mpShiftY);
             }
         }
 
