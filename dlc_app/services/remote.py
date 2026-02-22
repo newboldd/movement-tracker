@@ -233,40 +233,70 @@ def remote_train_monitor(
                 capture_output=True, timeout=15,
             )
 
-            # ── Phase 1b: Create training dataset on remote ─────────
+            # ── Phase 1b: Detect shuffle and ensure pytorch config exists ─
             remote_config = f"{remote_project_dir}/config.yaml"
-            create_ds_cmd = _py_cmd(
-                cfg,
-                f"\"from deeplabcut.core.engine import Engine; import deeplabcut; deeplabcut.create_training_dataset(r'{remote_config}', engine=Engine.PYTORCH)\"",
+
+            # Detect shuffle number from dlc-models-pytorch, or create dataset if missing
+            detect_script = (
+                f"\"import glob, re, sys; "
+                f"hits = glob.glob(r'{remote_project_dir}/dlc-models-pytorch/iteration-*/*/train/pytorch_config.yaml'); "
+                f"shuffles = [int(m.group(1)) for h in hits if (m := re.search(r'shuffle(\\d+)', h))]; "
+                f"print(max(shuffles)) if shuffles else sys.exit(1)\""
+            )
+            result = subprocess.run(
+                _py_cmd(cfg, detect_script),
+                capture_output=True, text=True, timeout=30,
             )
 
-            logfile.write(f"=== Phase 1b: Creating training dataset on {cfg.host} ===\n")
-            logfile.flush()
-
-            proc = subprocess.Popen(
-                create_ds_cmd,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            )
-            registry._processes[job_id] = proc
-
-            for line in proc.stdout:
-                logfile.write(line)
+            if result.returncode == 0:
+                shuffle = int(result.stdout.strip())
+                logfile.write(f"=== Detected existing pytorch config (shuffle {shuffle}) ===\n")
+                logfile.flush()
+            else:
+                # No pytorch config found — create training dataset on remote
+                logfile.write(f"=== Creating training dataset on {cfg.host} ===\n")
                 logfile.flush()
 
-            proc.wait()
-            if proc.returncode != 0:
-                _fail(f"Create training dataset failed (exit {proc.returncode})")
-                if on_complete:
-                    on_complete(job_id, proc.returncode)
-                return
+                create_ds_cmd = _py_cmd(
+                    cfg,
+                    f"\"from deeplabcut.core.engine import Engine; import deeplabcut; deeplabcut.create_training_dataset(r'{remote_config}', engine=Engine.PYTORCH)\"",
+                )
+                proc = subprocess.Popen(
+                    create_ds_cmd,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                )
+                registry._processes[job_id] = proc
 
-            logfile.write("=== Training dataset created ===\n")
-            logfile.flush()
+                for line in proc.stdout:
+                    logfile.write(line)
+                    logfile.flush()
+
+                proc.wait()
+                if proc.returncode != 0:
+                    _fail(f"Create training dataset failed (exit {proc.returncode})")
+                    if on_complete:
+                        on_complete(job_id, proc.returncode)
+                    return
+
+                logfile.write("=== Training dataset created ===\n")
+                logfile.flush()
+
+                # Re-detect shuffle after creation
+                result = subprocess.run(
+                    _py_cmd(cfg, detect_script),
+                    capture_output=True, text=True, timeout=30,
+                )
+                if result.returncode != 0:
+                    _fail("Could not detect shuffle number after creating training dataset")
+                    if on_complete:
+                        on_complete(job_id, 1)
+                    return
+                shuffle = int(result.stdout.strip())
 
             # ── Phase 2: Training ────────────────────────────────────
             train_cmd = _py_cmd(
                 cfg,
-                f"\"from deeplabcut.core.engine import Engine; import deeplabcut; deeplabcut.train_network(r'{remote_config}', engine=Engine.PYTORCH)\"",
+                f"\"from deeplabcut.core.engine import Engine; import deeplabcut; deeplabcut.train_network(r'{remote_config}', shuffle={shuffle}, engine=Engine.PYTORCH)\"",
             )
 
             logfile.write(f"=== Phase 2: Training on {cfg.host} ===\n")
