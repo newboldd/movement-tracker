@@ -25,8 +25,14 @@ const labeler = (() => {
     // MediaPipe prelabels: {OS: {thumb: [...], index: [...]}, OD: {...}, distances: [...]}
     let mpLabels = null;
 
+    // DLC analysis predictions: same shape as mpLabels
+    let dlcLabels = null;
+
     // 3D distance trace
     let distances = null;
+
+    // Committed frame count from DLC labeled-data/
+    let committedFrameCount = 0;
 
     // Color palette for bodyparts
     const COLORS = [
@@ -117,10 +123,18 @@ const labeler = (() => {
             // Get dynamic bodyparts and camera names from session info
             if (sessionInfo.bodyparts) bodyparts = sessionInfo.bodyparts;
             if (sessionInfo.camera_names) cameraNames = sessionInfo.camera_names;
+            if (sessionInfo.committed_frame_count) committedFrameCount = sessionInfo.committed_frame_count;
             currentSide = cameraNames[0] || 'OS';
 
+            const isRefine = sessionInfo.session && sessionInfo.session.session_type === 'refine';
             document.getElementById('headerTitle').textContent =
-                `Labeling: ${sessionInfo.subject.name}`;
+                isRefine ? `Refine: ${sessionInfo.subject.name}` : `Labeling: ${sessionInfo.subject.name}`;
+
+            // Update commit button text for refine sessions
+            const commitBtn = document.querySelector('[onclick="labeler.commitSession()"]');
+            if (commitBtn && isRefine) {
+                commitBtn.textContent = 'Commit & Retrain';
+            }
 
             // Update sidebar with dynamic shortcuts
             updateShortcutsSidebar();
@@ -152,6 +166,16 @@ const labeler = (() => {
                 }
             } catch (e) {
                 console.log('No MediaPipe prelabels available');
+            }
+
+            // Load DLC predictions as ghost markers
+            try {
+                const dlcData = await API.get(`/api/labeling/sessions/${sessionId}/dlc_predictions`);
+                if (dlcData && Object.keys(dlcData).length > 0) {
+                    dlcLabels = dlcData;
+                }
+            } catch (e) {
+                console.log('No DLC predictions available');
             }
 
             recomputeCameraShift();
@@ -242,6 +266,15 @@ const labeler = (() => {
         return arr[frame]; // [x, y] or null
     }
 
+    function getDlcLabel(frame, side, bodypart) {
+        if (!dlcLabels) return null;
+        const camData = dlcLabels[side];
+        if (!camData) return null;
+        const arr = camData[bodypart];
+        if (!arr || frame >= arr.length) return null;
+        return arr[frame]; // [x, y] or null
+    }
+
     function hasManualLabel(frame, side, bodypart) {
         const key = `${frame}_${side}`;
         const lbl = labels.get(key);
@@ -281,11 +314,15 @@ const labeler = (() => {
                 drawPoint(manualCoords[0], manualCoords[1], bpColor(idx), bpLetter(bp));
                 placedBps.push({ bp, x: manualCoords[0], y: manualCoords[1] });
             } else {
-                // Draw ghost MP marker if available
+                // Ghost priority: MP > DLC
                 const mpCoords = getMpLabel(currentFrame, currentSide, bp);
+                const dlcCoords = getDlcLabel(currentFrame, currentSide, bp);
                 if (mpCoords) {
                     drawGhostPoint(mpCoords[0], mpCoords[1], bpColor(idx), 'MP');
                     placedBps.push({ bp, x: mpCoords[0], y: mpCoords[1], ghost: true });
+                } else if (dlcCoords) {
+                    drawGhostPoint(dlcCoords[0], dlcCoords[1], bpColor(idx), 'D');
+                    placedBps.push({ bp, x: dlcCoords[0], y: dlcCoords[1], ghost: true });
                 }
             }
         });
@@ -411,13 +448,19 @@ const labeler = (() => {
             }
         }
 
-        // Check ghost markers
+        // Check ghost markers (MP first, then DLC)
         for (const bp of bodyparts) {
             if (hasManualLabel(currentFrame, currentSide, bp)) continue;
             const mpCoords = getMpLabel(currentFrame, currentSide, bp);
             if (mpCoords) {
                 const p = imageToScreen(mpCoords[0], mpCoords[1]);
-                if (Math.hypot(sx - p.x, sy - p.y) < HIT_RADIUS) return { bp, ghost: true };
+                if (Math.hypot(sx - p.x, sy - p.y) < HIT_RADIUS) return { bp, ghost: true, source: 'mp' };
+            } else {
+                const dlcCoords = getDlcLabel(currentFrame, currentSide, bp);
+                if (dlcCoords) {
+                    const p = imageToScreen(dlcCoords[0], dlcCoords[1]);
+                    if (Math.hypot(sx - p.x, sy - p.y) < HIT_RADIUS) return { bp, ghost: true, source: 'dlc' };
+                }
             }
         }
 
@@ -453,20 +496,22 @@ const labeler = (() => {
         const hit = hitTest(sx, sy);
         if (hit) {
             if (hit.ghost) {
-                // Click on ghost marker: accept MP position as manual label
+                // Click on ghost marker: accept MP or DLC position as manual label
                 const mpCoords = getMpLabel(currentFrame, currentSide, hit.bp);
-                if (mpCoords) {
+                const dlcCoords = getDlcLabel(currentFrame, currentSide, hit.bp);
+                const ghostCoords = mpCoords || dlcCoords;
+                if (ghostCoords) {
                     const key = `${currentFrame}_${currentSide}`;
                     let lbl = labels.get(key);
                     if (!lbl) { lbl = {}; labels.set(key, lbl); }
                     pushUndo(key, hit.bp, null);
-                    lbl[hit.bp] = [mpCoords[0], mpCoords[1]];
+                    lbl[hit.bp] = [ghostCoords[0], ghostCoords[1]];
 
                     // Enter drag mode immediately for refine
                     dragging = hit.bp;
                     didDrag = false;
-                    dragOrigX = mpCoords[0];
-                    dragOrigY = mpCoords[1];
+                    dragOrigX = ghostCoords[0];
+                    dragOrigY = ghostCoords[1];
                     dragStartX = sx;
                     dragStartY = sy;
                     canvas.style.cursor = 'grabbing';
@@ -630,7 +675,12 @@ const labeler = (() => {
                 pts.push(manual);
             } else {
                 const mp = getMpLabel(frame, side, bp);
-                if (mp) pts.push(mp);
+                if (mp) {
+                    pts.push(mp);
+                } else {
+                    const dlc = getDlcLabel(frame, side, bp);
+                    if (dlc) pts.push(dlc);
+                }
             }
         }
         if (pts.length === 0) return false;
@@ -832,7 +882,11 @@ const labeler = (() => {
 
         try {
             const result = await API.post(`/api/labeling/sessions/${sessionId}/commit`);
-            updateLabelInfo(`Committed ${result.frame_count} frames.`);
+            let msg = `Committed ${result.frame_count} frames.`;
+            if (result.retrain_job_id) {
+                msg += ` Retrain job #${result.retrain_job_id} started.`;
+            }
+            updateLabelInfo(msg);
         } catch (e) {
             alert('Commit error: ' + e.message);
         }
@@ -1276,8 +1330,9 @@ const labeler = (() => {
 
     function updateLabelCount() {
         const count = labels.size;
+        const committedStr = committedFrameCount > 0 ? ` (${committedFrameCount} committed)` : '';
         document.getElementById('labelCount').innerHTML =
-            `Labels: <strong>${count}</strong>`;
+            `Labels: <strong>${count}</strong>${committedStr}`;
     }
 
     function updateLabelInfo(msg) {

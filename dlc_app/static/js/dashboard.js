@@ -93,10 +93,7 @@ function getActions(subject) {
     btns.push(`<button class="btn btn-sm" onclick="runStep(${subject.id}, 'mediapipe')">${mpLabel}</button>`);
 
     // Stage-specific actions
-    if (s === 'committed' || s === 'labeled') {
-        btns.push(`<button class="btn btn-sm" onclick="runStep(${subject.id}, 'create_training_dataset')">Create Dataset</button>`);
-    }
-    if (s === 'training_dataset_created') {
+    if (s === 'committed' || s === 'labeled' || s === 'training_dataset_created') {
         btns.push(`<button class="btn btn-sm btn-primary" onclick="runStep(${subject.id}, 'train')">Train</button>`);
     }
     if (s === 'trained') {
@@ -107,6 +104,11 @@ function getActions(subject) {
     }
     if (s === 'analyzed' && appStatus.has_calibration) {
         btns.push(`<button class="btn btn-sm" onclick="runStep(${subject.id}, 'triangulate')">Triangulate</button>`);
+    }
+    // Refine available for analyzed and beyond
+    const refineStages = ['analyzed', 'triangulated', 'complete', 'retrained'];
+    if (refineStages.includes(s)) {
+        btns.push(`<button class="btn btn-sm" onclick="openRefine(${subject.id})">Refine</button>`);
     }
 
     return btns.join(' ');
@@ -164,7 +166,6 @@ async function showDetail(subjectId) {
                 <h3>Pipeline Steps</h3>
                 <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;">
                     <button class="btn btn-sm" onclick="runStep(${detail.id}, 'mediapipe')">Run MediaPipe</button>
-                    <button class="btn btn-sm" onclick="runStep(${detail.id}, 'create_training_dataset')">Create Dataset</button>
                     <button class="btn btn-sm btn-primary" onclick="runStep(${detail.id}, 'train')">Train</button>
                     <button class="btn btn-sm" onclick="runStep(${detail.id}, 'crop')">Crop Videos</button>
                     <button class="btn btn-sm" onclick="runStep(${detail.id}, 'analyze')">Analyze</button>
@@ -184,6 +185,7 @@ async function showDetail(subjectId) {
         `;
 
         panel.classList.add('active');
+        panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch (e) {
         alert('Error loading subject: ' + e.message);
     }
@@ -202,6 +204,7 @@ async function runStep(subjectId, step) {
             trackJob(result.job_id);
         }
         loadSubjects();
+        showDetail(subjectId);
     } catch (e) {
         alert('Error: ' + e.message);
     }
@@ -325,6 +328,16 @@ async function syncSubjects() {
         const result = await API.post('/api/subjects/sync');
         alert(`Sync complete: ${result.created} new, ${result.updated} updated, ${result.total} total`);
         loadSubjects();
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+// ── Refine navigation ────────────────────────────────
+async function openRefine(subjectId) {
+    try {
+        const session = await API.post(`/api/labeling/${subjectId}/sessions`, { session_type: 'refine' });
+        window.location.href = `/labeling?session=${session.id}`;
     } catch (e) {
         alert('Error: ' + e.message);
     }

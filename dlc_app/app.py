@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 
 from .config import get_settings
 from .db import init_db
-from .routers import subjects, labeling, pipeline, jobs, results, settings
+from .routers import subjects, labeling, pipeline, jobs, results, settings, filebrowser, video_tools
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -23,6 +23,8 @@ app.include_router(pipeline.router)
 app.include_router(jobs.router)
 app.include_router(results.router)
 app.include_router(settings.router)
+app.include_router(filebrowser.router)
+app.include_router(video_tools.router)
 
 # Mount static files
 STATIC_DIR = Path(__file__).parent / "static"
@@ -68,6 +70,12 @@ def results_page():
 def settings_page():
     """Serve the settings page."""
     return FileResponse(str(STATIC_DIR / "settings.html"))
+
+
+@app.get("/onboarding")
+def onboarding_page():
+    """Serve the subject onboarding page."""
+    return FileResponse(str(STATIC_DIR / "onboarding.html"))
 
 
 if __name__ == "__main__":

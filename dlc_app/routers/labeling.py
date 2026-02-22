@@ -18,6 +18,8 @@ from ..services.mediapipe_prelabel import (
     get_mediapipe_for_session,
     recompute_distance_for_frame,
 )
+from ..services.discovery import _count_labeled_frames
+from ..services.dlc_predictions import get_dlc_predictions_for_session
 
 router = APIRouter(prefix="/api/labeling", tags=["labeling"])
 
@@ -26,8 +28,9 @@ router = APIRouter(prefix="/api/labeling", tags=["labeling"])
 def create_session(subject_id: int, req: SessionCreate) -> dict:
     """Create a new labeling session for a subject.
 
-    If the subject has a previous committed session, its labels are copied
-    into the new session so existing annotations show up automatically.
+    For 'initial' sessions: copies labels from previous committed session.
+    For 'refine' sessions: starts fresh (DLC predictions serve as ghost markers),
+    increments iteration, doesn't change subject stage.
     """
     with get_db_ctx() as db:
         subj = db.execute(
@@ -36,37 +39,41 @@ def create_session(subject_id: int, req: SessionCreate) -> dict:
         if not subj:
             raise HTTPException(404, "Subject not found")
 
+        is_refine = req.session_type == "refine"
+        iteration = subj["iteration"] + 1 if is_refine else subj["iteration"]
+
         db.execute(
             """INSERT INTO label_sessions (subject_id, iteration, session_type)
                VALUES (?, ?, ?)""",
-            (subject_id, subj["iteration"], req.session_type),
+            (subject_id, iteration, req.session_type),
         )
         session = db.execute(
             "SELECT * FROM label_sessions WHERE subject_id = ? ORDER BY id DESC LIMIT 1",
             (subject_id,),
         ).fetchone()
 
-        # Copy labels from the most recent committed session (if any)
-        prev_session = db.execute(
-            """SELECT id FROM label_sessions
-               WHERE subject_id = ? AND status = 'committed'
-               ORDER BY committed_at DESC LIMIT 1""",
-            (subject_id,),
-        ).fetchone()
-        if prev_session:
-            db.execute(
-                """INSERT INTO frame_labels
-                   (session_id, frame_num, trial_idx, side, keypoints, updated_at)
-                   SELECT ?, frame_num, trial_idx, side, keypoints, CURRENT_TIMESTAMP
-                   FROM frame_labels WHERE session_id = ?""",
-                (session["id"], prev_session["id"]),
-            )
+        if not is_refine:
+            # Copy labels from the most recent committed session (if any)
+            prev_session = db.execute(
+                """SELECT id FROM label_sessions
+                   WHERE subject_id = ? AND status = 'committed'
+                   ORDER BY committed_at DESC LIMIT 1""",
+                (subject_id,),
+            ).fetchone()
+            if prev_session:
+                db.execute(
+                    """INSERT INTO frame_labels
+                       (session_id, frame_num, trial_idx, side, keypoints, updated_at)
+                       SELECT ?, frame_num, trial_idx, side, keypoints, CURRENT_TIMESTAMP
+                       FROM frame_labels WHERE session_id = ?""",
+                    (session["id"], prev_session["id"]),
+                )
 
-        # Update subject stage
-        db.execute(
-            "UPDATE subjects SET stage = 'labeling', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (subject_id,),
-        )
+            # Update subject stage
+            db.execute(
+                "UPDATE subjects SET stage = 'labeling', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (subject_id,),
+            )
 
     return session
 
@@ -99,6 +106,13 @@ def get_session_info(session_id: int) -> dict:
         "fps": t["fps"],
     } for t in trials]
 
+    # Count committed frames in DLC labeled-data/
+    committed_frame_count = 0
+    if subj.get("dlc_dir"):
+        dlc_path = settings.dlc_path / subj["dlc_dir"]
+        if dlc_path.exists():
+            committed_frame_count = _count_labeled_frames(dlc_path)
+
     return {
         "session": session,
         "subject": subj,
@@ -106,6 +120,7 @@ def get_session_info(session_id: int) -> dict:
         "total_frames": total_frames,
         "bodyparts": settings.bodyparts,
         "camera_names": settings.camera_names,
+        "committed_frame_count": committed_frame_count,
     }
 
 
@@ -208,6 +223,33 @@ def get_mediapipe(session_id: int) -> dict:
     return data
 
 
+@router.get("/sessions/{session_id}/dlc_predictions")
+def get_dlc_predictions(session_id: int) -> dict:
+    """Return DLC analysis predictions for this session's subject.
+
+    Response shape matches mediapipe format:
+    {
+        "OS": {"thumb": [[x,y], null, ...], "index": [[x,y], ...]},
+        "OD": {"thumb": [[x,y], ...], "index": [[x,y], ...]}
+    }
+    """
+    with get_db_ctx() as db:
+        session = db.execute(
+            "SELECT * FROM label_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not session:
+            raise HTTPException(404, "Session not found")
+        subj = db.execute(
+            "SELECT * FROM subjects WHERE id = ?", (session["subject_id"],)
+        ).fetchone()
+
+    data = get_dlc_predictions_for_session(subj["name"])
+    if data is None:
+        return {}
+
+    return data
+
+
 @router.put("/sessions/{session_id}/labels")
 def save_labels(session_id: int, req: LabelBatchSave) -> dict:
     """Batch-save labels (upsert). Returns updated distances for affected frames."""
@@ -269,7 +311,10 @@ def delete_label(session_id: int, frame_num: int, side: str = Query(...)) -> dic
 
 @router.post("/sessions/{session_id}/commit")
 def commit_session(session_id: int) -> dict:
-    """Commit session: extract frames as PNGs, write CSV/H5, create DLC structure."""
+    """Commit session: extract frames as PNGs, write CSV/H5, create DLC structure.
+
+    For refine sessions: also updates subject.iteration and auto-triggers remote training.
+    """
     with get_db_ctx() as db:
         session = db.execute(
             "SELECT * FROM label_sessions WHERE id = ?", (session_id,)
@@ -296,15 +341,35 @@ def commit_session(session_id: int) -> dict:
         iteration=session["iteration"],
     )
 
+    is_refine = session["session_type"] == "refine"
+
     # Update session and subject status
     with get_db_ctx() as db:
         db.execute(
             "UPDATE label_sessions SET status = 'committed', committed_at = CURRENT_TIMESTAMP WHERE id = ?",
             (session_id,),
         )
-        db.execute(
-            "UPDATE subjects SET stage = 'committed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (session["subject_id"],),
-        )
+        if is_refine:
+            db.execute(
+                "UPDATE subjects SET iteration = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (session["iteration"], session["subject_id"]),
+            )
+        else:
+            db.execute(
+                "UPDATE subjects SET stage = 'committed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (session["subject_id"],),
+            )
 
+    # For refine sessions, auto-trigger training
+    retrain_job_id = None
+    if is_refine:
+        try:
+            from .pipeline import run_step as _run_step
+            from ..models import RunStepRequest
+            step_result = _run_step(session["subject_id"], RunStepRequest(step="train"))
+            retrain_job_id = step_result.get("job_id")
+        except Exception:
+            pass  # Training trigger is best-effort
+
+    result["retrain_job_id"] = retrain_job_id
     return result

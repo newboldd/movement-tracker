@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Add Subject — DLC Pipeline</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+    <style>
+        .onboard-container { max-width: 900px; margin: 0 auto; padding: 24px; }
+        .step-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+        .step-num { background: var(--blue); color: #fff; width: 28px; height: 28px;
+            border-radius: 50%; display: flex; align-items: center; justify-content: center;
+            font-weight: 700; font-size: 14px; flex-shrink: 0; }
+        .step-num.done { background: var(--green); }
+        .step-num.inactive { background: var(--border); color: var(--text-muted); }
+
+        /* File browser */
+        .file-browser { border: 1px solid var(--border); border-radius: var(--radius);
+            max-height: 400px; overflow-y: auto; background: var(--bg); }
+        .fb-breadcrumbs { padding: 8px 12px; border-bottom: 1px solid var(--border);
+            font-size: 12px; display: flex; gap: 4px; flex-wrap: wrap; }
+        .fb-breadcrumbs a { color: var(--blue); cursor: pointer; text-decoration: none; }
+        .fb-breadcrumbs a:hover { text-decoration: underline; }
+        .fb-item { padding: 6px 12px; cursor: pointer; display: flex; align-items: center;
+            gap: 8px; font-size: 13px; border-bottom: 1px solid rgba(42,58,92,0.3); }
+        .fb-item:hover { background: var(--bg-hover); }
+        .fb-item.selected { background: rgba(74,158,255,0.15); }
+        .fb-item .icon { font-size: 16px; width: 20px; text-align: center; }
+        .fb-item .size { color: var(--text-muted); font-size: 11px; margin-left: auto; }
+        .fb-locations { padding: 12px; }
+        .fb-loc { padding: 8px 12px; cursor: pointer; border-radius: var(--radius);
+            display: flex; align-items: center; gap: 8px; }
+        .fb-loc:hover { background: var(--bg-hover); }
+
+        /* Video trimmer */
+        .trimmer { margin-top: 12px; }
+        .trimmer video { width: 100%; max-height: 300px; border-radius: var(--radius);
+            background: #000; }
+        .trim-controls { display: flex; gap: 8px; align-items: center; margin-top: 8px;
+            flex-wrap: wrap; }
+        .trim-controls input[type="number"] { width: 80px; padding: 4px 8px;
+            background: var(--bg); border: 1px solid var(--border);
+            border-radius: var(--radius); color: var(--text); font-size: 13px; }
+        .trim-controls select { padding: 4px 8px; background: var(--bg);
+            border: 1px solid var(--border); border-radius: var(--radius);
+            color: var(--text); font-size: 13px; }
+        .time-display { font-family: monospace; font-size: 13px; color: var(--text-muted); min-width: 60px; }
+
+        /* Segment list */
+        .segment-list { margin-top: 12px; }
+        .segment-item { display: flex; align-items: center; gap: 12px; padding: 8px 12px;
+            background: var(--bg-card); border: 1px solid var(--border);
+            border-radius: var(--radius); margin-bottom: 6px; font-size: 13px; }
+        .segment-item .trial { font-weight: 600; color: var(--blue); min-width: 60px; }
+        .segment-item .times { color: var(--text-muted); font-family: monospace; }
+        .segment-item .source { color: var(--text-muted); font-size: 11px;
+            flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .segment-item .remove { cursor: pointer; color: var(--red); font-size: 16px; }
+
+        /* Video metadata badge */
+        .video-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+        .meta-badge { background: var(--accent); color: var(--text); padding: 2px 8px;
+            border-radius: 10px; font-size: 11px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Add New Subject</h1>
+        <nav>
+            <a href="/">Dashboard</a>
+            <a href="/labeling">Labeling</a>
+            <a href="/results">Results</a>
+            <a href="/settings">Settings</a>
+        </nav>
+    </div>
+
+    <div class="onboard-container">
+        <!-- Step 1: Subject name -->
+        <div class="card" id="step1">
+            <div class="step-header">
+                <div class="step-num" id="step1Num">1</div>
+                <h3>Subject Name</h3>
+            </div>
+            <div style="display:flex;gap:8px;">
+                <input type="text" id="subjectName" placeholder="e.g. MSA20, Con10, PD15"
+                    style="flex:1;padding:8px 12px;background:var(--bg);border:1px solid var(--border);
+                    border-radius:var(--radius);color:var(--text);font-size:14px;">
+                <button class="btn btn-primary" onclick="onboard.confirmName()">Confirm</button>
+            </div>
+        </div>
+
+        <!-- Step 2: Browse & select videos -->
+        <div class="card" id="step2" style="display:none;">
+            <div class="step-header">
+                <div class="step-num" id="step2Num">2</div>
+                <h3>Select Source Video</h3>
+            </div>
+            <div class="file-browser" id="fileBrowser"></div>
+            <div style="margin-top:8px;display:flex;gap:8px;">
+                <button class="btn btn-sm" id="selectVideoBtn" onclick="onboard.selectVideo()" disabled>
+                    Select Video
+                </button>
+            </div>
+        </div>
+
+        <!-- Step 3: Trim & label segments -->
+        <div class="card" id="step3" style="display:none;">
+            <div class="step-header">
+                <div class="step-num" id="step3Num">3</div>
+                <h3>Trim Segments & Label Trials</h3>
+            </div>
+            <div id="selectedVideoName" style="font-size:13px;color:var(--text-muted);margin-bottom:4px;"></div>
+            <div class="video-meta" id="videoMeta"></div>
+            <div class="trimmer">
+                <video id="trimVideo" controls preload="auto"></video>
+                <div class="trim-controls">
+                    <button class="btn btn-sm" onclick="onboard.setInPoint()">Set In (I)</button>
+                    <span class="time-display" id="inTime">In: --</span>
+                    <button class="btn btn-sm" onclick="onboard.setOutPoint()">Set Out (O)</button>
+                    <span class="time-display" id="outTime">Out: --</span>
+                    <select id="trialLabel">
+                        <option value="L1">L1</option>
+                        <option value="L2">L2</option>
+                        <option value="L3">L3</option>
+                        <option value="R1">R1</option>
+                        <option value="R2">R2</option>
+                        <option value="R3">R3</option>
+                    </select>
+                    <button class="btn btn-sm btn-primary" onclick="onboard.addSegment()">Add Segment</button>
+                    <button class="btn btn-sm" onclick="onboard.pickAnotherVideo()">Pick Another Video</button>
+                </div>
+            </div>
+            <div class="segment-list" id="segmentList"></div>
+        </div>
+
+        <!-- Step 4: Review & process -->
+        <div class="card" id="step4" style="display:none;">
+            <div class="step-header">
+                <div class="step-num" id="step4Num">4</div>
+                <h3>Review & Process</h3>
+            </div>
+            <div id="reviewSegments"></div>
+            <div style="margin-top:12px;display:flex;gap:8px;">
+                <button class="btn btn-primary" onclick="onboard.startProcessing()">
+                    Trim, Blur Faces & Create Subject
+                </button>
+                <button class="btn" onclick="window.location.href='/'">Cancel</button>
+            </div>
+            <div id="processingStatus" style="margin-top:12px;display:none;">
+                <div class="progress-bar" style="margin-bottom:8px;">
+                    <div class="fill" id="processingFill" style="width:0%"></div>
+                </div>
+                <div id="processingMsg" style="font-size:13px;color:var(--text-muted);"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/api.js?v=8"></script>
+    <script src="/static/js/onboarding.js?v=1"></script>
+</body>
+</html>
