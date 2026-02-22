@@ -178,6 +178,7 @@ async function showDetail(subjectId) {
                     <button class="btn btn-sm" onclick="runStep(${detail.id}, 'crop')">Crop Videos</button>
                     <button class="btn btn-sm" onclick="runStep(${detail.id}, 'analyze')">Analyze</button>
                     ${triangulateBtn}
+                    <button class="btn btn-sm btn-danger" onclick="removeSubject(${detail.id}, '${detail.name}')" style="margin-left:auto;">Remove</button>
                 </div>
             </div>
             ${detail.jobs.length > 0 ? `
@@ -311,7 +312,24 @@ async function loadJobs() {
 async function syncSubjects() {
     try {
         const result = await API.post('/api/subjects/sync');
-        alert(`Sync complete: ${result.created} new, ${result.updated} updated, ${result.total} total`);
+        const parts = [`${result.created} new`, `${result.updated} updated`];
+        if (result.removed) parts.push(`${result.removed} removed`);
+        parts.push(`${result.total} total`);
+        alert(`Sync complete: ${parts.join(', ')}`);
+        loadSubjects();
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function removeSubject(subjectId, subjectName) {
+    if (!confirm(`Remove subject "${subjectName}"?\n\nThis will delete the DLC directory (models, labels, config).\nTrial and deidentified videos are NOT deleted.`)) {
+        return;
+    }
+    try {
+        const result = await API.del(`/api/subjects/${subjectId}`);
+        alert(result.message);
+        closeDetail();
         loadSubjects();
     } catch (e) {
         alert('Error: ' + e.message);
@@ -339,6 +357,37 @@ async function openLabeling(subjectId) {
     }
 }
 
+// ── Batch preprocessing ─────────────────────────────
+function showBatchPreprocess() {
+    document.getElementById('batchModal').classList.add('active');
+}
+
+function closeBatchModal() {
+    document.getElementById('batchModal').classList.remove('active');
+}
+
+async function startBatchPreprocess() {
+    const steps = [];
+    if (document.getElementById('batchStepMp').checked) steps.push('mediapipe');
+    if (document.getElementById('batchStepBlur').checked) steps.push('blur');
+
+    if (steps.length === 0) {
+        alert('Select at least one step');
+        return;
+    }
+
+    closeBatchModal();
+
+    try {
+        const result = await API.post('/api/batch/preprocess', { steps, subjects: [] });
+        if (result.job_id) {
+            trackJob(result.job_id);
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
 // ── Event listeners ──────────────────────────────────
 document.getElementById('filterInput').addEventListener('input', renderTable);
 document.getElementById('stageFilter').addEventListener('change', renderTable);
@@ -346,5 +395,9 @@ document.getElementById('stageFilter').addEventListener('change', renderTable);
 // ── Init ─────────────────────────────────────────────
 checkStatus().then(async () => {
     await loadCalibrationNames();
+    // Show batch button if remote is configured
+    if (appStatus.remote_enabled) {
+        document.getElementById('batchPreprocessBtn').style.display = '';
+    }
     loadSubjects();
 });

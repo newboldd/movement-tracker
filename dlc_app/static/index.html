@@ -44,6 +44,7 @@
                 <span id="subjectCount" class="label-count"></span>
             </div>
             <div style="display: flex; gap: 8px;">
+                <button class="btn btn-sm" id="batchPreprocessBtn" style="display:none;" onclick="showBatchPreprocess()">Preprocess All (Remote)</button>
                 <button class="btn btn-sm" onclick="syncSubjects()">Sync from disk</button>
                 <a href="/onboarding" class="btn btn-sm btn-primary" style="text-decoration:none;">+ Add Subject</a>
             </div>
@@ -87,6 +88,34 @@
         </div>
     </div>
 
+    <!-- Batch Preprocess Modal -->
+    <div class="modal-overlay" id="batchModal">
+        <div class="modal" style="min-width:400px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                <h3 style="margin:0;">Batch Remote Preprocessing</h3>
+                <button class="btn btn-sm" onclick="closeBatchModal()">Close</button>
+            </div>
+            <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px;">
+                Run preprocessing steps on all subjects via SSH.
+                Videos are uploaded to the remote host and results downloaded back.
+            </p>
+            <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px;">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                    <input type="checkbox" id="batchStepMp" checked>
+                    <span>MediaPipe (hand landmarks)</span>
+                </label>
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                    <input type="checkbox" id="batchStepBlur" checked>
+                    <span>Face blur (de-identification)</span>
+                </label>
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;">
+                <button class="btn btn-sm" onclick="closeBatchModal()">Cancel</button>
+                <button class="btn btn-sm btn-primary" onclick="startBatchPreprocess()">Start</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Log Modal -->
     <div class="modal-overlay" id="logModal">
         <div class="modal" style="min-width:600px;max-width:80vw;">
@@ -98,7 +127,7 @@
         </div>
     </div>
 
-    <script src="/static/js/api.js?v=9"></script>
-    <script src="/static/js/dashboard.js?v=9"></script>
+    <script src="/static/js/api.js?v=10"></script>
+    <script src="/static/js/dashboard.js?v=10"></script>
 </body>
 </html>

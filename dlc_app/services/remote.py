@@ -1,4 +1,4 @@
-"""Remote DLC training via SSH: upload project, train, crop, analyze, download results."""
+"""Remote DLC training and preprocessing via SSH."""
 from __future__ import annotations
 
 import logging
@@ -474,3 +474,341 @@ def remote_train_monitor(
     finally:
         registry._processes.pop(job_id, None)
         registry._threads.pop(job_id, None)
+
+
+def remote_preprocess_batch(
+    job_id: int,
+    cfg: RemoteConfig,
+    steps: list[str],
+    subjects: list[str],
+    log_path: str,
+    registry,
+):
+    """Batch remote preprocessing: upload videos, run MP/blur, download results.
+
+    Runs in a daemon thread. Steps can include 'mediapipe' and/or 'blur'.
+
+    Phases:
+      1. Upload videos to remote (only new ones)
+      2. Upload preprocessing script
+      3. Run MediaPipe (if requested)
+      4. Run blur (if requested)
+      5. Download results (npz files, blurred videos)
+      6. Write local markers
+
+    Args:
+        job_id: Database job ID
+        cfg: RemoteConfig with SSH details
+        steps: List of steps to run ('mediapipe', 'blur')
+        subjects: List of subject names (empty = all discovered)
+        log_path: Path for log file
+        registry: JobRegistry instance
+    """
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+    from ..config import get_settings
+    settings = get_settings()
+
+    remote_video_dir = f"{cfg.work_dir}/videos"
+    remote_output_dir = f"{cfg.work_dir}/preprocess_output"
+    script_path = Path(__file__).parent / "remote_preprocess_script.py"
+
+    cancel_event = registry.register_cancel_event(job_id)
+
+    # Progress allocation across phases
+    do_mp = "mediapipe" in steps
+    do_blur = "blur" in steps
+    # Upload: 0-5%, MP: 5-50%, Blur: 50-90%, Download: 90-100%
+    # Adjust ranges based on which steps are requested
+    if do_mp and do_blur:
+        mp_range = (5, 45)
+        blur_range = (45, 85)
+    elif do_mp:
+        mp_range = (5, 85)
+        blur_range = None
+    else:
+        mp_range = None
+        blur_range = (5, 85)
+    download_start = 85
+
+    def _update_progress(pct):
+        with get_db_ctx() as db:
+            db.execute("UPDATE jobs SET progress_pct = ? WHERE id = ?",
+                        (round(pct, 1), job_id))
+
+    def _fail(msg):
+        logger.error(f"Job {job_id} remote preprocess failed: {msg}")
+        with get_db_ctx() as db:
+            db.execute(
+                """UPDATE jobs SET status = 'failed', error_msg = ?,
+                   finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                (msg, job_id),
+            )
+
+    def _check_cancel():
+        if cancel_event.is_set():
+            raise InterruptedError("Job cancelled")
+
+    def _run_remote_proc(cmd, logfile, phase_name):
+        """Run a remote command, log output, return process."""
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        registry._processes[job_id] = proc
+
+        for line in proc.stdout:
+            logfile.write(line)
+            logfile.flush()
+
+        proc.wait()
+        registry._processes.pop(job_id, None)
+        return proc
+
+    def _run_remote_proc_with_progress(cmd, logfile, phase_name,
+                                        pct_start, pct_end):
+        """Run remote command, parse PROGRESS: lines, scale to pct range."""
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        registry._processes[job_id] = proc
+
+        for line in proc.stdout:
+            logfile.write(line)
+            logfile.flush()
+
+            # Parse PROGRESS:subject:pct
+            m = re.match(r"PROGRESS:([^:]+):([\d.]+)", line.strip())
+            if m:
+                raw_pct = float(m.group(2))
+                # Scale per-subject progress to overall range
+                # (crude: treats all subjects as equal weight)
+                scaled = pct_start + (raw_pct / 100.0) * (pct_end - pct_start)
+                _update_progress(scaled)
+
+        proc.wait()
+        registry._processes.pop(job_id, None)
+        return proc
+
+    try:
+        with open(log_path, "w") as logfile:
+            # ── Phase 1: Upload videos ────────────────────────────
+            logfile.write(f"=== Phase 1: Uploading videos to {cfg.host}:{remote_video_dir} ===\n")
+            logfile.flush()
+            _check_cancel()
+
+            # Ensure remote dirs exist
+            subprocess.run(
+                _py_cmd(cfg, f"\"import os; os.makedirs(r'{remote_video_dir}', exist_ok=True); os.makedirs(r'{remote_output_dir}', exist_ok=True)\""),
+                capture_output=True, timeout=15,
+            )
+
+            # List remote videos to skip already-uploaded ones
+            result = subprocess.run(
+                _py_cmd(cfg, f"\"import os; print('\\n'.join(os.listdir(r'{remote_video_dir}')))\""),
+                capture_output=True, text=True, timeout=15,
+            )
+            remote_files = set(result.stdout.strip().splitlines()) if result.returncode == 0 else set()
+
+            # Find local videos to upload
+            from .video import get_subject_videos
+            all_videos = []
+            if subjects:
+                for subj_name in subjects:
+                    all_videos.extend(get_subject_videos(subj_name))
+            else:
+                # All subjects — list all .mp4 in video dir
+                import glob
+                all_videos = sorted(glob.glob(str(settings.video_path / "*.mp4")))
+
+            to_upload = [v for v in all_videos if Path(v).name not in remote_files]
+            logfile.write(f"  {len(all_videos)} videos total, {len(to_upload)} new to upload\n")
+            logfile.flush()
+
+            for i, vid_path in enumerate(to_upload):
+                _check_cancel()
+                logfile.write(f"  Uploading {Path(vid_path).name}...\n")
+                logfile.flush()
+
+                upload_cmd = _scp_base_args(cfg) + [
+                    vid_path,
+                    f"{cfg.host}:{remote_video_dir}/",
+                ]
+                proc = _run_remote_proc(upload_cmd, logfile, "Upload")
+                if proc.returncode != 0:
+                    logfile.write(f"  Warning: Upload failed for {Path(vid_path).name}\n")
+
+                pct = (i + 1) / max(len(to_upload), 1) * 3.0
+                _update_progress(pct)
+
+            _update_progress(3.0)
+            logfile.write("=== Upload complete ===\n")
+            logfile.flush()
+
+            # ── Phase 2: Upload script ────────────────────────────
+            _check_cancel()
+            logfile.write(f"=== Phase 2: Uploading preprocessing script ===\n")
+            logfile.flush()
+
+            upload_script_cmd = _scp_base_args(cfg) + [
+                str(script_path),
+                f"{cfg.host}:{cfg.work_dir}/",
+            ]
+            proc = _run_remote_proc(upload_script_cmd, logfile, "Upload script")
+            if proc.returncode != 0:
+                _fail("Failed to upload preprocessing script")
+                return
+
+            _update_progress(5.0)
+
+            # Build subject filter arg
+            subject_arg = ""
+            if subjects and len(subjects) == 1:
+                subject_arg = f" --subject {subjects[0]}"
+
+            # ── Phase 3: MediaPipe ────────────────────────────────
+            if do_mp:
+                _check_cancel()
+                logfile.write(f"=== Phase 3: Running MediaPipe on {cfg.host} ===\n")
+                logfile.flush()
+
+                mp_cmd = _ssh_base_args(cfg) + [
+                    cfg.host,
+                    cfg.python_executable, "-u",
+                    f"{cfg.work_dir}/remote_preprocess_script.py",
+                    "mp", remote_video_dir, remote_output_dir,
+                ] + (["--subject", subjects[0]] if subjects and len(subjects) == 1 else [])
+
+                proc = _run_remote_proc_with_progress(
+                    mp_cmd, logfile, "MediaPipe",
+                    mp_range[0], mp_range[1],
+                )
+
+                if proc.returncode != 0:
+                    _fail(f"MediaPipe failed (exit {proc.returncode})")
+                    return
+
+                _update_progress(mp_range[1])
+                logfile.write("=== MediaPipe complete ===\n")
+                logfile.flush()
+
+            # ── Phase 4: Blur ─────────────────────────────────────
+            if do_blur:
+                _check_cancel()
+                logfile.write(f"=== Phase 4: Running blur on {cfg.host} ===\n")
+                logfile.flush()
+
+                blur_cmd = _ssh_base_args(cfg) + [
+                    cfg.host,
+                    cfg.python_executable, "-u",
+                    f"{cfg.work_dir}/remote_preprocess_script.py",
+                    "blur", remote_video_dir, remote_output_dir,
+                ] + (["--subject", subjects[0]] if subjects and len(subjects) == 1 else [])
+
+                proc = _run_remote_proc_with_progress(
+                    blur_cmd, logfile, "Blur",
+                    blur_range[0], blur_range[1],
+                )
+
+                if proc.returncode != 0:
+                    _fail(f"Blur failed (exit {proc.returncode})")
+                    return
+
+                _update_progress(blur_range[1])
+                logfile.write("=== Blur complete ===\n")
+                logfile.flush()
+
+            # ── Phase 5: Download results ─────────────────────────
+            _check_cancel()
+            logfile.write(f"=== Phase 5: Downloading results from {cfg.host} ===\n")
+            logfile.flush()
+            _update_progress(download_start)
+
+            # List subject dirs in remote output
+            result = subprocess.run(
+                _py_cmd(cfg, f"\"import os; dirs = [d for d in os.listdir(r'{remote_output_dir}') if os.path.isdir(os.path.join(r'{remote_output_dir}', d))]; print('\\n'.join(dirs))\""),
+                capture_output=True, text=True, timeout=15,
+            )
+            remote_subjects = result.stdout.strip().splitlines() if result.returncode == 0 else []
+            remote_subjects = [s for s in remote_subjects if s]
+
+            logfile.write(f"  Found {len(remote_subjects)} subject outputs\n")
+            logfile.flush()
+
+            for i, subj_name in enumerate(remote_subjects):
+                _check_cancel()
+
+                # Download mediapipe_prelabels.npz
+                if do_mp:
+                    remote_npz = f"{cfg.host}:{remote_output_dir}/{subj_name}/mediapipe_prelabels.npz"
+                    local_dlc_dir = settings.dlc_path / subj_name
+                    local_dlc_dir.mkdir(parents=True, exist_ok=True)
+                    local_npz = str(local_dlc_dir / "mediapipe_prelabels.npz")
+
+                    dl_cmd = _scp_base_args(cfg) + [remote_npz, local_npz]
+                    proc = _run_remote_proc(dl_cmd, logfile, f"Download npz {subj_name}")
+                    if proc.returncode == 0:
+                        logfile.write(f"  Downloaded {subj_name}/mediapipe_prelabels.npz\n")
+                    else:
+                        logfile.write(f"  Warning: npz download failed for {subj_name}\n")
+
+                # Download deidentified videos
+                if do_blur:
+                    remote_deident = f"{cfg.host}:{remote_output_dir}/{subj_name}/deidentified"
+                    local_deident_dir = settings.video_path / "deidentified"
+                    local_deident_dir.mkdir(parents=True, exist_ok=True)
+
+                    # SCP individual deidentified videos (not the whole dir)
+                    result = subprocess.run(
+                        _py_cmd(cfg, f"\"import os; d = r'{remote_output_dir}/{subj_name}/deidentified'; print('\\n'.join(os.listdir(d))) if os.path.isdir(d) else print('')\""),
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    deident_files = [f for f in result.stdout.strip().splitlines() if f.endswith(".mp4")]
+
+                    for df in deident_files:
+                        dl_cmd = _scp_base_args(cfg) + [
+                            f"{cfg.host}:{remote_output_dir}/{subj_name}/deidentified/{df}",
+                            str(local_deident_dir / df),
+                        ]
+                        proc = _run_remote_proc(dl_cmd, logfile, f"Download blur {df}")
+                        if proc.returncode == 0:
+                            logfile.write(f"  Downloaded deidentified/{df}\n")
+
+                    # Write .deidentified marker
+                    if deident_files:
+                        local_dlc_dir = settings.dlc_path / subj_name
+                        local_dlc_dir.mkdir(parents=True, exist_ok=True)
+                        (local_dlc_dir / ".deidentified").write_text("")
+                        logfile.write(f"  Wrote .deidentified marker for {subj_name}\n")
+
+                logfile.flush()
+                pct = download_start + (i + 1) / max(len(remote_subjects), 1) * (100 - download_start)
+                _update_progress(pct)
+
+            _update_progress(100.0)
+            logfile.write("=== Download complete ===\n")
+            logfile.flush()
+
+        # ── Success ──────────────────────────────────────────────
+        with get_db_ctx() as db:
+            db.execute(
+                """UPDATE jobs SET status = 'completed', progress_pct = 100,
+                   finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                (job_id,),
+            )
+
+    except InterruptedError:
+        logger.info(f"Job {job_id} remote preprocess cancelled")
+        with get_db_ctx() as db:
+            db.execute(
+                """UPDATE jobs SET status = 'cancelled',
+                   finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                (job_id,),
+            )
+    except Exception as e:
+        logger.exception(f"Job {job_id} remote preprocess error")
+        _fail(str(e))
+    finally:
+        registry._processes.pop(job_id, None)
+        registry.unregister_cancel_event(job_id)

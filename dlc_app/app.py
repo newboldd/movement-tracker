@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 
 from .config import get_settings
 from .db import init_db
-from .routers import subjects, labeling, pipeline, jobs, results, settings, filebrowser, video_tools
+from .routers import subjects, labeling, pipeline, jobs, results, settings, filebrowser, video_tools, batch
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -25,6 +25,7 @@ app.include_router(results.router)
 app.include_router(settings.router)
 app.include_router(filebrowser.router)
 app.include_router(video_tools.router)
+app.include_router(batch.router)
 
 # Mount static files
 STATIC_DIR = Path(__file__).parent / "static"
@@ -55,7 +56,8 @@ def startup():
     logger.info("Syncing subjects from filesystem...")
     from .routers.subjects import sync_from_filesystem
     result = sync_from_filesystem()
-    logger.info(f"Discovery: {result['created']} new, {result['updated']} updated, {result['total']} total")
+    removed = result.get('removed', 0)
+    logger.info(f"Discovery: {result['created']} new, {result['updated']} updated, {removed} removed, {result['total']} total")
 
 
 @app.get("/")

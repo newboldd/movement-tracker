@@ -30,6 +30,24 @@ def _find_videos(subject_name: str) -> list[str]:
     return [Path(v).name for v in videos]
 
 
+def _find_deidentified_videos(subject_name: str) -> list[str]:
+    """Find deidentified videos for a subject in videos/deidentified/."""
+    settings = get_settings()
+    deident_dir = settings.video_path / "deidentified"
+    if not deident_dir.exists():
+        return []
+    pattern = str(deident_dir / f"{subject_name}_*.mp4")
+    videos = sorted(glob.glob(pattern))
+    if not videos:
+        all_vids = glob.glob(str(deident_dir / "*.mp4"))
+        prefix_lower = subject_name.lower() + "_"
+        videos = sorted(
+            v for v in all_vids
+            if Path(v).name.lower().startswith(prefix_lower)
+        )
+    return [Path(v).name for v in videos]
+
+
 def _has_snapshots(dlc_path: Path) -> bool:
     """Check if DLC model snapshots exist (pytorch or tensorflow)."""
     pytorch_dir = dlc_path / "dlc-models-pytorch"

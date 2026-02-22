@@ -1,6 +1,7 @@
 """Subject CRUD and dashboard data endpoints."""
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException
@@ -11,7 +12,10 @@ from ..models import (
     SubjectCreate, SubjectUpdate, SubjectResponse, SubjectDetail,
     STAGE_INDEX,
 )
-from ..services.discovery import scan_all_subjects, infer_stage, _find_videos, _has_snapshots, _has_labeled_data, _has_mediapipe, _has_deidentified
+from ..services.discovery import (
+    scan_all_subjects, infer_stage, _find_videos, _find_deidentified_videos,
+    _has_snapshots, _has_labeled_data, _has_mediapipe, _has_deidentified,
+)
 
 router = APIRouter(prefix="/api/subjects", tags=["subjects"])
 
@@ -90,6 +94,65 @@ def update_subject(subject_id: int, req: SubjectUpdate) -> dict:
     return _subject_row_to_response(row)
 
 
+@router.delete("/{subject_id}")
+def delete_subject(subject_id: int) -> dict:
+    """Remove a subject: delete DLC dir, purge from DB if no videos remain.
+
+    Always deletes the DLC directory (config, models, labels — not trial/deidentified videos).
+    Only removes the DB record if no trial or deidentified videos exist.
+    """
+    with get_db_ctx() as db:
+        row = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Subject not found")
+
+        subject_name = row["name"]
+        settings = get_settings()
+
+        # Delete DLC directory
+        dlc_path = _resolve_dlc_path(row.get("dlc_dir"))
+        dlc_deleted = False
+        if dlc_path and dlc_path.exists():
+            shutil.rmtree(dlc_path)
+            dlc_deleted = True
+
+        # Check for remaining videos
+        trial_videos = _find_videos(subject_name)
+        deident_videos = _find_deidentified_videos(subject_name)
+        has_videos = bool(trial_videos or deident_videos)
+
+        if has_videos:
+            # Keep DB entry but clear dlc_dir
+            db.execute(
+                "UPDATE subjects SET dlc_dir = NULL, stage = 'created', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (subject_id,),
+            )
+            return {
+                "deleted_from_db": False,
+                "dlc_deleted": dlc_deleted,
+                "remaining_videos": len(trial_videos) + len(deident_videos),
+                "message": f"DLC dir removed. Subject kept — {len(trial_videos)} trial + {len(deident_videos)} deidentified videos remain.",
+            }
+
+        # No videos — full purge from DB (cascade)
+        session_ids = [r["id"] for r in db.execute(
+            "SELECT id FROM label_sessions WHERE subject_id = ?", (subject_id,)
+        ).fetchall()]
+        if session_ids:
+            placeholders = ",".join("?" * len(session_ids))
+            db.execute(f"DELETE FROM frame_labels WHERE session_id IN ({placeholders})", session_ids)
+        db.execute("DELETE FROM label_sessions WHERE subject_id = ?", (subject_id,))
+        db.execute("DELETE FROM jobs WHERE subject_id = ?", (subject_id,))
+        db.execute("DELETE FROM subjects WHERE id = ?", (subject_id,))
+
+        return {
+            "deleted_from_db": True,
+            "dlc_deleted": dlc_deleted,
+            "remaining_videos": 0,
+            "message": f"Subject '{subject_name}' fully removed.",
+        }
+
+
 @router.get("/{subject_id}")
 def get_subject(subject_id: int) -> dict:
     """Get full subject detail including jobs and sessions."""
@@ -128,6 +191,9 @@ def sync_from_filesystem() -> dict:
     discovered = scan_all_subjects()
     created = 0
     updated = 0
+    removed = 0
+
+    discovered_names = {s["name"] for s in discovered}
 
     with get_db_ctx() as db:
         for subj in discovered:
@@ -154,4 +220,25 @@ def sync_from_filesystem() -> dict:
                 )
                 created += 1
 
-    return {"created": created, "updated": updated, "total": len(discovered)}
+        # Remove stale subjects: in DB but no DLC dir AND no trial/deidentified videos
+        all_db = db.execute("SELECT id, name FROM subjects").fetchall()
+        for row in all_db:
+            if row["name"] in discovered_names:
+                continue
+            # Subject has no DLC dir on disk — check for videos
+            trial_vids = _find_videos(row["name"])
+            deident_vids = _find_deidentified_videos(row["name"])
+            if not trial_vids and not deident_vids:
+                # Full purge
+                session_ids = [r["id"] for r in db.execute(
+                    "SELECT id FROM label_sessions WHERE subject_id = ?", (row["id"],)
+                ).fetchall()]
+                if session_ids:
+                    placeholders = ",".join("?" * len(session_ids))
+                    db.execute(f"DELETE FROM frame_labels WHERE session_id IN ({placeholders})", session_ids)
+                db.execute("DELETE FROM label_sessions WHERE subject_id = ?", (row["id"],))
+                db.execute("DELETE FROM jobs WHERE subject_id = ?", (row["id"],))
+                db.execute("DELETE FROM subjects WHERE id = ?", (row["id"],))
+                removed += 1
+
+    return {"created": created, "updated": updated, "removed": removed, "total": len(discovered)}
