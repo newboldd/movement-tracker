@@ -58,7 +58,7 @@ function renderTable() {
 
     const tbody = document.getElementById('subjectTableBody');
     if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-muted)">No subjects found</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted)">No subjects found</td></tr>';
         return;
     }
 
@@ -71,6 +71,7 @@ function renderTable() {
                 ${calibrationNames.map(n => `<option value="${n}"${n === (s.camera_name || '') ? ' selected' : ''}>${n}</option>`).join('')}
             </select></td>
             <td>${s.video_count}</td>
+            <td>${s.has_mediapipe ? '&check;' : '&mdash;'}</td>
             <td>${s.has_labels ? '&check;' : '&mdash;'}</td>
             <td>${s.has_snapshots ? '&check;' : '&mdash;'}</td>
             <td>
@@ -88,7 +89,8 @@ function getActions(subject) {
     btns.push(`<button class="btn btn-sm" onclick="openLabeling(${subject.id})">Label</button>`);
 
     // MediaPipe always available (useful for refining labels at any stage)
-    btns.push(`<button class="btn btn-sm" onclick="runStep(${subject.id}, 'mediapipe')">Run MP</button>`);
+    const mpLabel = subject.has_mediapipe ? 'Re-run MP' : 'Run MP';
+    btns.push(`<button class="btn btn-sm" onclick="runStep(${subject.id}, 'mediapipe')">${mpLabel}</button>`);
 
     // Stage-specific actions
     if (s === 'committed' || s === 'labeled') {

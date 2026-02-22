@@ -65,6 +65,11 @@ def _has_labels_v1(dlc_path: Path) -> bool:
     return False
 
 
+def _has_mediapipe(dlc_path: Path) -> bool:
+    """Check if MediaPipe prelabels exist for this subject."""
+    return (dlc_path / "mediapipe_prelabels.npz").exists()
+
+
 def _has_labeled_videos(dlc_path: Path) -> bool:
     """Check if labeled_videos directory exists (post-analysis)."""
     return (dlc_path / "labeled_videos").exists()
