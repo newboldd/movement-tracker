@@ -11,7 +11,7 @@ from ..models import (
     SubjectCreate, SubjectUpdate, SubjectResponse, SubjectDetail,
     STAGE_INDEX,
 )
-from ..services.discovery import scan_all_subjects, infer_stage, _find_videos, _has_snapshots, _has_labeled_data, _has_mediapipe
+from ..services.discovery import scan_all_subjects, infer_stage, _find_videos, _has_snapshots, _has_labeled_data, _has_mediapipe, _has_deidentified
 
 router = APIRouter(prefix="/api/subjects", tags=["subjects"])
 
@@ -35,6 +35,7 @@ def _subject_row_to_response(row: dict) -> dict:
         "has_snapshots": _has_snapshots(dlc_path) if dlc_path and dlc_path.exists() else False,
         "has_labels": _has_labeled_data(dlc_path) if dlc_path and dlc_path.exists() else False,
         "has_mediapipe": _has_mediapipe(dlc_path) if dlc_path and dlc_path.exists() else False,
+        "has_blur": _has_deidentified(dlc_path) if dlc_path and dlc_path.exists() else False,
     }
 
 

@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, Response
 
 from ..config import get_settings
 from ..db import get_db_ctx
-from ..models import LabelBatchSave, SessionCreate, SessionResponse
+from ..models import LabelBatchSave, SessionCreate, SessionResponse, STAGE_INDEX
 from ..services.video import (
     extract_frame, build_trial_map, get_total_frames, get_subject_videos,
 )
@@ -69,11 +69,13 @@ def create_session(subject_id: int, req: SessionCreate) -> dict:
                     (session["id"], prev_session["id"]),
                 )
 
-            # Update subject stage
-            db.execute(
-                "UPDATE subjects SET stage = 'labeling', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (subject_id,),
-            )
+            # Only advance to 'labeling' if subject hasn't progressed beyond it
+            current_stage = subj.get("stage", "created")
+            if STAGE_INDEX.get(current_stage, 0) < STAGE_INDEX["labeling"]:
+                db.execute(
+                    "UPDATE subjects SET stage = 'labeling', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (subject_id,),
+                )
 
     return session
 

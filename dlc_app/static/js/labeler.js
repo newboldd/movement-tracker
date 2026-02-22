@@ -665,11 +665,13 @@ const labeler = (() => {
     // ── Zoom helpers ─────────────────────────────────
     function autoZoomForFrame(frame, side) {
         // Collect points from manual labels, falling back to MP detections
+        // In review mode, only zoom to the reviewed bodypart (tight zoom)
         const key = `${frame}_${side}`;
         const lbl = labels.get(key);
         const pts = [];
+        const bpsToShow = reviewBp ? [reviewBp] : bodyparts;
 
-        for (const bp of bodyparts) {
+        for (const bp of bpsToShow) {
             const manual = lbl ? lbl[bp] : null;
             if (manual && manual[0] != null) {
                 pts.push(manual);
@@ -685,7 +687,7 @@ const labeler = (() => {
         }
         if (pts.length === 0) return false;
 
-        zoomToPoints(pts, false);
+        zoomToPoints(pts, !!reviewBp);
         return true;
     }
 

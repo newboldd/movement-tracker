@@ -27,7 +27,7 @@ async function loadSubjects() {
         loadJobs();
     } catch (e) {
         document.getElementById('subjectTableBody').innerHTML =
-            `<tr><td colspan="6" style="text-align:center;color:var(--red)">${e.message}</td></tr>`;
+            `<tr><td colspan="9" style="text-align:center;color:var(--red)">${e.message}</td></tr>`;
     }
 }
 
@@ -58,7 +58,7 @@ function renderTable() {
 
     const tbody = document.getElementById('subjectTableBody');
     if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted)">No subjects found</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-muted)">No subjects found</td></tr>';
         return;
     }
 
@@ -72,6 +72,7 @@ function renderTable() {
             </select></td>
             <td>${s.video_count}</td>
             <td>${s.has_mediapipe ? '&check;' : '&mdash;'}</td>
+            <td>${s.has_blur ? '&check;' : '&mdash;'}</td>
             <td>${s.has_labels ? '&check;' : '&mdash;'}</td>
             <td>${s.has_snapshots ? '&check;' : '&mdash;'}</td>
             <td>
@@ -94,7 +95,8 @@ function getActions(subject) {
 
     // Blur faces available for any subject with videos
     if (subject.video_count > 0) {
-        btns.push(`<button class="btn btn-sm" onclick="runStep(${subject.id}, 'deidentify')">Blur Faces</button>`);
+        const blurLabel = subject.has_blur ? 'Re-blur' : 'Blur Faces';
+        btns.push(`<button class="btn btn-sm" onclick="runStep(${subject.id}, 'deidentify')">${blurLabel}</button>`);
     }
 
     // Stage-specific actions

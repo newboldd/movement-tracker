@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from ..config import get_settings
 from ..db import get_db_ctx
+from ..services.jobs import registry
 
 router = APIRouter(prefix="/api/video-tools", tags=["video-tools"])
 logger = logging.getLogger(__name__)
@@ -265,9 +266,12 @@ def _update_job_progress(job_id: int, pct: float, logfile=None, msg: str = ""):
 def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
                          segments: list[dict], log_path: str,
                          blur_faces: bool = True):
-    """Background thread: trim + blur each segment."""
+    """Background thread: trim each segment, optionally blur to deidentified/ dir."""
+
+    cancel_event = registry.register_cancel_event(job_id)
 
     def _run():
+        temp_trimmed = None
         try:
             with get_db_ctx() as db:
                 db.execute(
@@ -280,29 +284,28 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
             os.makedirs(str(output_dir), exist_ok=True)
 
             total_segments = len(segments)
-            # Each segment gets an equal slice of 0-100%.
-            # Within a segment: trim = 5%, blur = 95%.
             seg_span = 100.0 / total_segments
 
             with open(log_path, "w") as logfile:
                 for i, seg in enumerate(segments):
+                    if cancel_event.is_set():
+                        raise InterruptedError("Job cancelled")
+
                     trial = seg["trial_label"]
                     output_name = f"{subject_name}_{trial}.mp4"
                     output_path = str(output_dir / output_name)
 
-                    seg_base = i * seg_span  # start pct for this segment
-                    trim_pct = seg_base + seg_span * 0.05  # 5% for trim
+                    seg_base = i * seg_span
+                    trim_pct = seg_base + seg_span * 0.05
                     blur_start = trim_pct
-                    blur_span = seg_span * 0.95  # 95% for blur
+                    blur_span = seg_span * 0.95
 
                     logfile.write(f"=== Segment {i+1}/{total_segments}: {trial} ===\n")
                     logfile.flush()
-
-                    # Initial progress for this segment
                     _update_job_progress(job_id, seg_base + 1, logfile, f"Starting {trial}")
 
                     if blur_faces:
-                        # Trim to temp, then blur to output
+                        # Trim to temp, then blur to deidentified/ dir
                         temp_trimmed = str(output_dir / f"_temp_trim_{subject_name}_{trial}.mp4")
                         logfile.write(f"  Trimming {seg['source_path']} [{seg['start_time']:.1f}-{seg['end_time']:.1f}s]\n")
                         logfile.flush()
@@ -312,37 +315,51 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
                                         seg["end_time"], temp_trimmed)
                         except Exception as e:
                             logfile.write(f"  Trim failed: {e}\n")
+                            temp_trimmed = None
                             continue
 
                         _update_job_progress(job_id, trim_pct, logfile, "Trim done")
 
-                        # Face blur — progress callback maps 0-100 to this segment's blur range
                         logfile.write(f"  Running face blur...\n")
                         logfile.flush()
 
                         def _blur_progress(blur_pct, _blur_start=blur_start, _blur_span=blur_span):
+                            if cancel_event.is_set():
+                                raise InterruptedError("Job cancelled")
                             overall = _blur_start + (blur_pct / 100.0) * _blur_span
                             _update_job_progress(job_id, overall)
 
+                        # Also save the original (unblurred) trimmed segment
+                        import shutil
+                        shutil.move(temp_trimmed, output_path)
+                        temp_trimmed = None
+
+                        # Blur to deidentified/ subdir
+                        deident_dir = Path(output_dir) / "deidentified"
+                        deident_dir.mkdir(parents=True, exist_ok=True)
+                        deident_path = str(deident_dir / output_name)
+                        temp_blur = deident_path + ".tmp.mp4"
+
                         try:
                             from ..services.deidentify import deidentify_video
-                            deidentify_video(temp_trimmed, output_path,
-                                            progress_callback=_blur_progress)
-                            logfile.write(f"  Saved {output_path}\n")
+                            deidentify_video(
+                                output_path, temp_blur,
+                                progress_callback=_blur_progress,
+                            )
+                            os.replace(temp_blur, deident_path)
+                            logfile.write(f"  Saved {deident_path}\n")
                         except ImportError:
-                            logfile.write(f"  Deidentify not available, using trimmed video\n")
-                            import shutil
-                            shutil.move(temp_trimmed, output_path)
-                            temp_trimmed = None
+                            logfile.write(f"  Deidentify not available, skipping blur\n")
+                            if os.path.exists(temp_blur):
+                                os.remove(temp_blur)
+                        except InterruptedError:
+                            if os.path.exists(temp_blur):
+                                os.remove(temp_blur)
+                            raise
                         except Exception as e:
-                            logfile.write(f"  Blur failed: {e}, using trimmed video\n")
-                            import shutil
-                            shutil.move(temp_trimmed, output_path)
-                            temp_trimmed = None
-
-                        # Clean up temp
-                        if temp_trimmed and os.path.exists(temp_trimmed):
-                            os.remove(temp_trimmed)
+                            logfile.write(f"  Blur failed: {e}\n")
+                            if os.path.exists(temp_blur):
+                                os.remove(temp_blur)
                     else:
                         # No blur — trim directly to output
                         logfile.write(f"  Trimming {seg['source_path']} [{seg['start_time']:.1f}-{seg['end_time']:.1f}s] (no blur)\n")
@@ -358,6 +375,12 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
                     pct = seg_base + seg_span
                     _update_job_progress(job_id, pct, logfile, f"Done {trial}")
 
+            # Write .deidentified marker if blur was done
+            if blur_faces:
+                dlc_path = settings.dlc_path / subject_name
+                dlc_path.mkdir(parents=True, exist_ok=True)
+                (dlc_path / ".deidentified").write_text("")
+
             # Mark complete
             with get_db_ctx() as db:
                 db.execute(
@@ -370,7 +393,18 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
                     (subject_id,),
                 )
 
+        except InterruptedError:
+            if temp_trimmed and os.path.exists(temp_trimmed):
+                os.remove(temp_trimmed)
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'cancelled',
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (job_id,),
+                )
         except Exception as e:
+            if temp_trimmed and os.path.exists(temp_trimmed):
+                os.remove(temp_trimmed)
             logger.exception(f"Job {job_id} onboarding failed")
             with get_db_ctx() as db:
                 db.execute(
@@ -378,6 +412,8 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
                        finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
                     (str(e), job_id),
                 )
+        finally:
+            registry.unregister_cancel_event(job_id)
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()

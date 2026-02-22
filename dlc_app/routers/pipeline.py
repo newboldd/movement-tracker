@@ -1,5 +1,6 @@
 """Pipeline step triggers: crop, train, analyze, etc."""
 
+import os
 import subprocess
 import threading
 from pathlib import Path
@@ -226,6 +227,8 @@ def _do_mediapipe(subject_name: str, job_id: int):
     """Run MediaPipe prelabeling in a background thread."""
     import threading
 
+    cancel_event = registry.register_cancel_event(job_id)
+
     def _run():
         try:
             with get_db_ctx() as db:
@@ -235,6 +238,8 @@ def _do_mediapipe(subject_name: str, job_id: int):
                 )
 
             def progress_cb(pct):
+                if cancel_event.is_set():
+                    raise InterruptedError("Job cancelled")
                 with get_db_ctx() as db:
                     db.execute(
                         "UPDATE jobs SET progress_pct = ? WHERE id = ?",
@@ -253,6 +258,13 @@ def _do_mediapipe(subject_name: str, job_id: int):
                     "UPDATE subjects SET stage = 'prelabeled', updated_at = CURRENT_TIMESTAMP WHERE id = (SELECT subject_id FROM jobs WHERE id = ?)",
                     (job_id,),
                 )
+        except InterruptedError:
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'cancelled',
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (job_id,),
+                )
         except Exception as e:
             with get_db_ctx() as db:
                 db.execute(
@@ -260,6 +272,8 @@ def _do_mediapipe(subject_name: str, job_id: int):
                        finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
                     (str(e), job_id),
                 )
+        finally:
+            registry.unregister_cancel_event(job_id)
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
@@ -268,12 +282,15 @@ def _do_mediapipe(subject_name: str, job_id: int):
 def _do_deidentify(subject_name: str, job_id: int):
     """Run face de-identification on all videos for a subject in a background thread.
 
-    Each video is blurred in-place (via temp file swap) with per-video progress.
-    Does not change the subject's pipeline stage.
+    Blurred videos are written to a ``deidentified/`` subdirectory next to the
+    originals (never overwrites the source).  Writes a ``.deidentified`` marker
+    in the subject's DLC dir on success.
     """
-    import shutil
+    settings = get_settings()
+    cancel_event = registry.register_cancel_event(job_id)
 
     def _run():
+        temp_path = None
         try:
             with get_db_ctx() as db:
                 db.execute(
@@ -292,13 +309,24 @@ def _do_deidentify(subject_name: str, job_id: int):
 
             from ..services.deidentify import deidentify_video
 
+            # Output to deidentified/ subdir next to originals
+            deident_dir = Path(settings.video_path) / "deidentified"
+            deident_dir.mkdir(parents=True, exist_ok=True)
+
             total = len(videos)
             vid_span = 100.0 / total
 
             for i, vid_path in enumerate(videos):
+                if cancel_event.is_set():
+                    raise InterruptedError("Job cancelled")
+
                 vid_base = i * vid_span
+                out_name = Path(vid_path).name
+                out_path = str(deident_dir / out_name)
 
                 def _progress(pct, _base=vid_base, _span=vid_span):
+                    if cancel_event.is_set():
+                        raise InterruptedError("Job cancelled")
                     overall = _base + (pct / 100.0) * _span
                     with get_db_ctx() as db:
                         db.execute(
@@ -306,10 +334,16 @@ def _do_deidentify(subject_name: str, job_id: int):
                             (round(overall, 1), job_id),
                         )
 
-                # Blur to temp, then swap
-                temp_path = vid_path + ".deident_tmp.mp4"
+                # Write to temp first, then rename (atomic on same filesystem)
+                temp_path = out_path + ".tmp.mp4"
                 deidentify_video(vid_path, temp_path, progress_callback=_progress)
-                shutil.move(temp_path, vid_path)
+                os.replace(temp_path, out_path)
+                temp_path = None
+
+            # Write .deidentified marker
+            dlc_path = settings.dlc_path / subject_name
+            dlc_path.mkdir(parents=True, exist_ok=True)
+            (dlc_path / ".deidentified").write_text("")
 
             with get_db_ctx() as db:
                 db.execute(
@@ -317,13 +351,26 @@ def _do_deidentify(subject_name: str, job_id: int):
                        finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
                     (job_id,),
                 )
+        except InterruptedError:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'cancelled',
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (job_id,),
+                )
         except Exception as e:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
             with get_db_ctx() as db:
                 db.execute(
                     """UPDATE jobs SET status = 'failed', error_msg = ?,
                        finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
                     (str(e), job_id),
                 )
+        finally:
+            registry.unregister_cancel_event(job_id)
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()

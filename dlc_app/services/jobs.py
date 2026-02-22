@@ -20,6 +20,7 @@ class JobRegistry:
     def __init__(self):
         self._processes: dict[int, subprocess.Popen] = {}
         self._threads: dict[int, threading.Thread] = {}
+        self._cancel_events: dict[int, threading.Event] = {}
 
     def launch(self, job_id: int, cmd: list[str], log_path: str,
                progress_parser=None, on_complete=None) -> int:
@@ -106,27 +107,46 @@ class JobRegistry:
             self._processes.pop(job_id, None)
             self._threads.pop(job_id, None)
 
-    def cancel(self, job_id: int) -> bool:
-        """Cancel a running job."""
-        proc = self._processes.get(job_id)
-        if proc is None:
-            return False
-        try:
-            proc.terminate()
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+    def register_cancel_event(self, job_id: int) -> threading.Event:
+        """Create and register a cancel event for a thread-based job."""
+        evt = threading.Event()
+        self._cancel_events[job_id] = evt
+        return evt
 
-        with get_db_ctx() as db:
-            db.execute(
-                """UPDATE jobs SET status = 'cancelled',
-                   finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
-                (job_id,),
-            )
-        return True
+    def unregister_cancel_event(self, job_id: int):
+        """Remove cancel event after job finishes."""
+        self._cancel_events.pop(job_id, None)
+
+    def cancel(self, job_id: int) -> bool:
+        """Cancel a running job (subprocess or thread-based)."""
+        # Try subprocess first
+        proc = self._processes.get(job_id)
+        if proc is not None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'cancelled',
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (job_id,),
+                )
+            return True
+
+        # Try cancel event (thread-based jobs)
+        evt = self._cancel_events.get(job_id)
+        if evt is not None:
+            evt.set()
+            # DB update will be handled by the thread itself when it checks the event
+            return True
+
+        return False
 
     def is_running(self, job_id: int) -> bool:
-        return job_id in self._processes
+        return job_id in self._processes or job_id in self._cancel_events
 
     def get_log_tail(self, log_path: str, n_lines: int = 50) -> list[str]:
         """Read last N lines of a log file."""

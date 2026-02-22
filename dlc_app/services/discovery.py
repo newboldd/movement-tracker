@@ -70,6 +70,11 @@ def _has_mediapipe(dlc_path: Path) -> bool:
     return (dlc_path / "mediapipe_prelabels.npz").exists()
 
 
+def _has_deidentified(dlc_path: Path) -> bool:
+    """Check if face blur has been completed for this subject."""
+    return (dlc_path / ".deidentified").exists()
+
+
 def _has_labeled_videos(dlc_path: Path) -> bool:
     """Check if labeled_videos directory exists (post-analysis)."""
     return (dlc_path / "labeled_videos").exists()

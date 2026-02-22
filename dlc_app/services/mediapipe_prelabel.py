@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-"""MediaPipe pre-labeling: extract thumb/index predictions + 3D distance trace.
+"""MediaPipe pre-labeling: extract all 21 hand landmarks + 3D distance trace.
 
-Runs MediaPipe on stereo videos, extracts thumb tip (joint 4) and index tip
-(joint 8) for each camera half, tracks hand identity via wrist proximity,
-and computes 3D triangulated distances using stereo calibration.
+Runs MediaPipe on stereo videos, extracts all 21 hand joint positions for each
+camera half, tracks hand identity via wrist proximity, and computes 3D
+triangulated thumb-index distances using stereo calibration.
 """
 
 import logging
@@ -20,10 +20,11 @@ from .calibration import get_calibration_for_subject, triangulate_points
 
 logger = logging.getLogger(__name__)
 
-# MediaPipe joint indices for the keypoints we care about
+# MediaPipe joint indices
 THUMB_TIP = 4
 INDEX_TIP = 8
 WRIST = 0
+N_JOINTS = 21
 
 
 def _extract_hands(results, width, height):
@@ -62,7 +63,7 @@ def _target_hand_label(video_name: str) -> str | None:
 def run_mediapipe(subject_name: str, progress_callback=None) -> str:
     """Run MediaPipe on all stereo videos for a subject.
 
-    Extracts thumb tip and index tip positions from both camera halves.
+    Extracts all 21 hand joint positions from both camera halves.
     Tracks hand identity via wrist proximity across frames.
     Computes 3D triangulated thumb-index distances when calibration available.
 
@@ -84,16 +85,11 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
     trials = build_trial_map(subject_name)
     total_frames = trials[-1]["end_frame"] + 1 if trials else 0
 
-    # Allocate arrays for all frames across all trials
-    # Shape: (total_frames, 2) for each keypoint per camera
-    OS_thumb = np.full((total_frames, 2), np.nan)
-    OS_index = np.full((total_frames, 2), np.nan)
-    OD_thumb = np.full((total_frames, 2), np.nan)
-    OD_index = np.full((total_frames, 2), np.nan)
+    # Allocate arrays: all 21 joints per camera, shape (total_frames, 21, 2)
+    OS_landmarks = np.full((total_frames, N_JOINTS, 2), np.nan)
+    OD_landmarks = np.full((total_frames, N_JOINTS, 2), np.nan)
     confidence_OS = np.full(total_frames, np.nan)
     confidence_OD = np.full(total_frames, np.nan)
-
-    cam_names = settings.camera_names  # ['OS', 'OD']
 
     frames_processed = 0
 
@@ -160,8 +156,7 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
                     ]))
                 else:
                     idx = 0
-                OS_thumb[global_frame] = hands_L[idx][THUMB_TIP]
-                OS_index[global_frame] = hands_L[idx][INDEX_TIP]
+                OS_landmarks[global_frame] = hands_L[idx]  # all 21 joints
                 confidence_OS[global_frame] = scores_L[idx]
                 prev_wrist_L = hands_L[idx][WRIST].copy()
 
@@ -172,8 +167,7 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
                     ]))
                 else:
                     idx = 0
-                OD_thumb[global_frame] = hands_R[idx][THUMB_TIP]
-                OD_index[global_frame] = hands_R[idx][INDEX_TIP]
+                OD_landmarks[global_frame] = hands_R[idx]  # all 21 joints
                 confidence_OD[global_frame] = scores_R[idx]
                 prev_wrist_R = hands_R[idx][WRIST].copy()
 
@@ -190,9 +184,7 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
     distances = np.full(total_frames, np.nan)
     calib = get_calibration_for_subject(subject_name)
     if calib is not None:
-        distances = _compute_distances(
-            OS_thumb, OS_index, OD_thumb, OD_index, calib
-        )
+        distances = _compute_distances(OS_landmarks, OD_landmarks, calib)
         valid_dist = np.sum(~np.isnan(distances))
         logger.info(f"Computed 3D distances for {valid_dist}/{total_frames} frames")
 
@@ -203,18 +195,16 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
 
     np.savez(
         npz_path,
-        OS_thumb=OS_thumb,
-        OS_index=OS_index,
-        OD_thumb=OD_thumb,
-        OD_index=OD_index,
+        OS_landmarks=OS_landmarks,
+        OD_landmarks=OD_landmarks,
         confidence_OS=confidence_OS,
         confidence_OD=confidence_OD,
         distances=distances,
         total_frames=total_frames,
     )
 
-    valid_OS = np.sum(~np.isnan(OS_thumb[:, 0]))
-    valid_OD = np.sum(~np.isnan(OD_thumb[:, 0]))
+    valid_OS = np.sum(~np.isnan(OS_landmarks[:, 0, 0]))
+    valid_OD = np.sum(~np.isnan(OD_landmarks[:, 0, 0]))
     logger.info(
         f"MediaPipe prelabels saved: {npz_path} "
         f"(OS: {valid_OS}/{total_frames}, OD: {valid_OD}/{total_frames})"
@@ -226,19 +216,27 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
     return npz_path
 
 
-def _compute_distances(OS_thumb, OS_index, OD_thumb, OD_index, calib):
-    """Compute 3D triangulated thumb-index distance for each frame."""
-    n = len(OS_thumb)
+def _compute_distances(OS_landmarks, OD_landmarks, calib):
+    """Compute 3D triangulated thumb-index distance for each frame.
+
+    Accepts full landmark arrays (N, 21, 2) — extracts thumb tip (4)
+    and index tip (8) internally.
+    """
+    n = len(OS_landmarks)
     distances = np.full(n, np.nan)
 
     for i in range(n):
-        # Need all 4 points to triangulate
-        if (np.any(np.isnan(OS_thumb[i])) or np.any(np.isnan(OD_thumb[i])) or
-                np.any(np.isnan(OS_index[i])) or np.any(np.isnan(OD_index[i]))):
+        os_thumb = OS_landmarks[i, THUMB_TIP]
+        os_index = OS_landmarks[i, INDEX_TIP]
+        od_thumb = OD_landmarks[i, THUMB_TIP]
+        od_index = OD_landmarks[i, INDEX_TIP]
+
+        if (np.any(np.isnan(os_thumb)) or np.any(np.isnan(od_thumb)) or
+                np.any(np.isnan(os_index)) or np.any(np.isnan(od_index))):
             continue
 
-        pts_L = np.array([OS_thumb[i], OS_index[i]])
-        pts_R = np.array([OD_thumb[i], OD_index[i]])
+        pts_L = np.array([os_thumb, os_index])
+        pts_R = np.array([od_thumb, od_index])
         pts_3d = triangulate_points(pts_L, pts_R, calib)
 
         if not np.any(np.isnan(pts_3d)):
@@ -250,7 +248,10 @@ def _compute_distances(OS_thumb, OS_index, OD_thumb, OD_index, calib):
 def load_mediapipe_prelabels(subject_name: str) -> dict | None:
     """Load saved MediaPipe prelabels for a subject.
 
-    Returns dict with keys: OS_thumb, OS_index, OD_thumb, OD_index,
+    Handles both new format (OS_landmarks/OD_landmarks with all 21 joints)
+    and old format (OS_thumb/OS_index/OD_thumb/OD_index with just 2 joints).
+
+    Returns dict with keys: OS_landmarks, OD_landmarks (N, 21, 2),
     confidence_OS, confidence_OD, distances, total_frames.
     Returns None if file doesn't exist.
     """
@@ -260,16 +261,34 @@ def load_mediapipe_prelabels(subject_name: str) -> dict | None:
         return None
 
     data = np.load(str(npz_path))
-    return {
-        "OS_thumb": data["OS_thumb"],
-        "OS_index": data["OS_index"],
-        "OD_thumb": data["OD_thumb"],
-        "OD_index": data["OD_index"],
-        "confidence_OS": data["confidence_OS"],
-        "confidence_OD": data["confidence_OD"],
-        "distances": data["distances"],
-        "total_frames": int(data["total_frames"]),
-    }
+
+    if "OS_landmarks" in data:
+        # New format: full 21-joint arrays
+        return {
+            "OS_landmarks": data["OS_landmarks"],
+            "OD_landmarks": data["OD_landmarks"],
+            "confidence_OS": data["confidence_OS"],
+            "confidence_OD": data["confidence_OD"],
+            "distances": data["distances"],
+            "total_frames": int(data["total_frames"]),
+        }
+    else:
+        # Old format: only thumb + index tip stored
+        n = int(data["total_frames"])
+        OS_lm = np.full((n, N_JOINTS, 2), np.nan)
+        OD_lm = np.full((n, N_JOINTS, 2), np.nan)
+        OS_lm[:, THUMB_TIP] = data["OS_thumb"]
+        OS_lm[:, INDEX_TIP] = data["OS_index"]
+        OD_lm[:, THUMB_TIP] = data["OD_thumb"]
+        OD_lm[:, INDEX_TIP] = data["OD_index"]
+        return {
+            "OS_landmarks": OS_lm,
+            "OD_landmarks": OD_lm,
+            "confidence_OS": data["confidence_OS"],
+            "confidence_OD": data["confidence_OD"],
+            "distances": data["distances"],
+            "total_frames": n,
+        }
 
 
 def get_mediapipe_for_session(subject_name: str) -> dict | None:
@@ -285,22 +304,30 @@ def get_mediapipe_for_session(subject_name: str) -> dict | None:
     if data is None:
         return None
 
+    OS_lm = data["OS_landmarks"]
+    OD_lm = data["OD_landmarks"]
+
     # Recompute distances if they're all NaN but calibration is available
     if np.all(np.isnan(data["distances"])):
         calib = get_calibration_for_subject(subject_name)
         if calib is not None:
             logger.info(f"Recomputing distances for {subject_name} (calibration now available)")
-            distances = _compute_distances(
-                data["OS_thumb"], data["OS_index"],
-                data["OD_thumb"], data["OD_index"], calib,
-            )
+            distances = _compute_distances(OS_lm, OD_lm, calib)
             valid = np.sum(~np.isnan(distances))
             if valid > 0:
                 data["distances"] = distances
                 # Update the npz file so we don't recompute every time
                 settings = get_settings()
                 npz_path = str(settings.dlc_path / subject_name / "mediapipe_prelabels.npz")
-                np.savez(npz_path, **data)
+                np.savez(
+                    npz_path,
+                    OS_landmarks=OS_lm,
+                    OD_landmarks=OD_lm,
+                    confidence_OS=data["confidence_OS"],
+                    confidence_OD=data["confidence_OD"],
+                    distances=distances,
+                    total_frames=data["total_frames"],
+                )
                 logger.info(f"Updated distances in {npz_path}: {valid}/{len(distances)} frames")
 
     settings = get_settings()
@@ -326,13 +353,13 @@ def get_mediapipe_for_session(subject_name: str) -> dict | None:
     response = {}
     if len(cam_names) >= 1:
         response[cam_names[0]] = {
-            "thumb": _to_list(data["OS_thumb"]),
-            "index": _to_list(data["OS_index"]),
+            "thumb": _to_list(OS_lm[:, THUMB_TIP]),
+            "index": _to_list(OS_lm[:, INDEX_TIP]),
         }
     if len(cam_names) >= 2:
         response[cam_names[1]] = {
-            "thumb": _to_list(data["OD_thumb"]),
-            "index": _to_list(data["OD_index"]),
+            "thumb": _to_list(OD_lm[:, THUMB_TIP]),
+            "index": _to_list(OD_lm[:, INDEX_TIP]),
         }
 
     response["distances"] = _dist_to_list(data["distances"])
@@ -359,8 +386,12 @@ def recompute_distance_for_frame(subject_name: str, frame_num: int,
     settings = get_settings()
     cam_names = settings.camera_names
 
+    # Map bodypart names to joint indices
+    bp_to_joint = {"thumb": THUMB_TIP, "index": INDEX_TIP}
+
     # Get coords for each camera: prefer manual, fall back to MP
-    def _get_coords(side, bodypart):
+    def _get_coords(side_idx, bodypart):
+        side = cam_names[side_idx]
         # Check manual labels first
         side_labels = manual_labels.get(side, {})
         coords = side_labels.get(bodypart)
@@ -368,16 +399,18 @@ def recompute_distance_for_frame(subject_name: str, frame_num: int,
             return np.array(coords, dtype=np.float64)
         # Fall back to MP
         if mp_data is not None:
-            key = f"{side}_{bodypart}"
-            mp_arr = mp_data.get(key)
-            if mp_arr is not None and not np.isnan(mp_arr[frame_num, 0]):
-                return mp_arr[frame_num]
+            lm_key = "OS_landmarks" if side_idx == 0 else "OD_landmarks"
+            joint_idx = bp_to_joint.get(bodypart)
+            if joint_idx is not None:
+                pt = mp_data[lm_key][frame_num, joint_idx]
+                if not np.isnan(pt[0]):
+                    return pt
         return None
 
-    thumb_L = _get_coords(cam_names[0], "thumb") if len(cam_names) >= 1 else None
-    index_L = _get_coords(cam_names[0], "index") if len(cam_names) >= 1 else None
-    thumb_R = _get_coords(cam_names[1], "thumb") if len(cam_names) >= 2 else None
-    index_R = _get_coords(cam_names[1], "index") if len(cam_names) >= 2 else None
+    thumb_L = _get_coords(0, "thumb") if len(cam_names) >= 1 else None
+    index_L = _get_coords(0, "index") if len(cam_names) >= 1 else None
+    thumb_R = _get_coords(1, "thumb") if len(cam_names) >= 2 else None
+    index_R = _get_coords(1, "index") if len(cam_names) >= 2 else None
 
     if any(v is None for v in [thumb_L, index_L, thumb_R, index_R]):
         return None
@@ -409,16 +442,15 @@ def compute_optimal_crop(subject_name: str) -> dict:
             crops[cam] = None
             continue
 
-        prefix = cam_names[0] if i == 0 else cam_names[1]
-        thumb_key = f"{prefix}_thumb"
-        index_key = f"{prefix}_index"
-
-        thumb = mp_data.get(thumb_key)
-        index = mp_data.get(index_key)
-
-        if thumb is None or index is None:
+        lm_key = "OS_landmarks" if i == 0 else "OD_landmarks"
+        lm = mp_data.get(lm_key)  # (N, 21, 2)
+        if lm is None:
             crops[cam] = None
             continue
+
+        # Use thumb tip and index tip for crop region
+        thumb = lm[:, THUMB_TIP]  # (N, 2)
+        index = lm[:, INDEX_TIP]  # (N, 2)
 
         # Collect all valid coords
         all_x = []
