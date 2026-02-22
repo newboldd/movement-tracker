@@ -92,6 +92,11 @@ function getActions(subject) {
     const mpLabel = subject.has_mediapipe ? 'Re-run MP' : 'Run MP';
     btns.push(`<button class="btn btn-sm" onclick="runStep(${subject.id}, 'mediapipe')">${mpLabel}</button>`);
 
+    // Blur faces available for any subject with videos
+    if (subject.video_count > 0) {
+        btns.push(`<button class="btn btn-sm" onclick="runStep(${subject.id}, 'deidentify')">Blur Faces</button>`);
+    }
+
     // Stage-specific actions
     if (s === 'committed' || s === 'labeled' || s === 'training_dataset_created') {
         btns.push(`<button class="btn btn-sm btn-primary" onclick="runStep(${subject.id}, 'train')">Train</button>`);
@@ -166,6 +171,7 @@ async function showDetail(subjectId) {
                 <h3>Pipeline Steps</h3>
                 <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;">
                     <button class="btn btn-sm" onclick="runStep(${detail.id}, 'mediapipe')">Run MediaPipe</button>
+                    <button class="btn btn-sm" onclick="runStep(${detail.id}, 'deidentify')">Blur Faces</button>
                     <button class="btn btn-sm btn-primary" onclick="runStep(${detail.id}, 'train')">Train</button>
                     <button class="btn btn-sm" onclick="runStep(${detail.id}, 'crop')">Crop Videos</button>
                     <button class="btn btn-sm" onclick="runStep(${detail.id}, 'analyze')">Analyze</button>

@@ -27,6 +27,7 @@ router = APIRouter(prefix="/api/subjects", tags=["pipeline"])
 # Valid pipeline steps in order
 VALID_STEPS = [
     "mediapipe",
+    "deidentify",
     "create_training_dataset",
     "train",
     "crop",
@@ -103,6 +104,11 @@ def run_step(subject_id: int, req: RunStepRequest) -> dict:
     if req.step == "mediapipe":
         # MediaPipe prelabeling runs inline in a thread (no DLC needed)
         _do_mediapipe(subject_name, job["id"])
+        return {"job_id": job["id"], "status": "running"}
+
+    if req.step == "deidentify":
+        # Face blur runs inline in a thread (no DLC needed)
+        _do_deidentify(subject_name, job["id"])
         return {"job_id": job["id"], "status": "running"}
 
     try:
@@ -245,6 +251,70 @@ def _do_mediapipe(subject_name: str, job_id: int):
                 )
                 db.execute(
                     "UPDATE subjects SET stage = 'prelabeled', updated_at = CURRENT_TIMESTAMP WHERE id = (SELECT subject_id FROM jobs WHERE id = ?)",
+                    (job_id,),
+                )
+        except Exception as e:
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'failed', error_msg = ?,
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (str(e), job_id),
+                )
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+
+def _do_deidentify(subject_name: str, job_id: int):
+    """Run face de-identification on all videos for a subject in a background thread.
+
+    Each video is blurred in-place (via temp file swap) with per-video progress.
+    Does not change the subject's pipeline stage.
+    """
+    import shutil
+
+    def _run():
+        try:
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP, progress_pct = 1 WHERE id = ?",
+                    (job_id,),
+                )
+
+            videos = get_subject_videos(subject_name)
+            if not videos:
+                with get_db_ctx() as db:
+                    db.execute(
+                        "UPDATE jobs SET status = 'failed', error_msg = 'No videos found', finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (job_id,),
+                    )
+                return
+
+            from ..services.deidentify import deidentify_video
+
+            total = len(videos)
+            vid_span = 100.0 / total
+
+            for i, vid_path in enumerate(videos):
+                vid_base = i * vid_span
+
+                def _progress(pct, _base=vid_base, _span=vid_span):
+                    overall = _base + (pct / 100.0) * _span
+                    with get_db_ctx() as db:
+                        db.execute(
+                            "UPDATE jobs SET progress_pct = ? WHERE id = ?",
+                            (round(overall, 1), job_id),
+                        )
+
+                # Blur to temp, then swap
+                temp_path = vid_path + ".deident_tmp.mp4"
+                deidentify_video(vid_path, temp_path, progress_callback=_progress)
+                shutil.move(temp_path, vid_path)
+
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'completed', progress_pct = 100,
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
                     (job_id,),
                 )
         except Exception as e:
