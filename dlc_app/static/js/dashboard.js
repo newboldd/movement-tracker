@@ -58,7 +58,7 @@ function renderTable() {
 
     const tbody = document.getElementById('subjectTableBody');
     if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted)">No subjects found</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-muted)">No subjects found</td></tr>';
         return;
     }
 
@@ -66,6 +66,10 @@ function renderTable() {
         <tr>
             <td class="name-col" onclick="showDetail(${s.id})">${s.name}</td>
             <td><span class="badge badge-${s.stage}">${s.stage.replace(/_/g, ' ')}</span></td>
+            <td><select onchange="updateSubjectCamera(${s.id}, this.value)" style="font-size:12px;padding:2px 4px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);">
+                <option value="">--</option>
+                ${calibrationNames.map(n => `<option value="${n}"${n === (s.camera_name || '') ? ' selected' : ''}>${n}</option>`).join('')}
+            </select></td>
             <td>${s.video_count}</td>
             <td>${s.has_labels ? '&check;' : '&mdash;'}</td>
             <td>${s.has_snapshots ? '&check;' : '&mdash;'}</td>
@@ -348,7 +352,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ── Init ─────────────────────────────────────────────
-checkStatus().then(() => {
-    loadCalibrationNames();
+checkStatus().then(async () => {
+    await loadCalibrationNames();
     loadSubjects();
 });
