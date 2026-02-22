@@ -127,15 +127,21 @@ def stream_video(path: str = Query(..., description="Path to video file")) -> Fi
 # ── Trim ──────────────────────────────────────────────────────────────────
 
 def _ffmpeg_trim(source_path: str, start_time: float, end_time: float,
-                 output_path: str) -> str:
+                 output_path: str, progress_callback=None) -> str:
     """Trim a video segment using ffmpeg with frame-accurate re-encoding.
 
     Uses -ss before -i for fast keyframe seek, then re-encodes to get an exact
     cut.  Stream copy (-c copy) is avoided because it must start on a keyframe,
     which leaves black/blank frames at the beginning when the requested start
     doesn't coincide with one.
+
+    Args:
+        progress_callback: optional callable(pct: float) called with 0-100 during encode.
     """
+    import re as _re
+
     duration = end_time - start_time
+    duration_us = duration * 1_000_000
 
     cmd = [
         "ffmpeg", "-y",
@@ -144,16 +150,38 @@ def _ffmpeg_trim(source_path: str, start_time: float, end_time: float,
         "-t", f"{duration:.3f}",
         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
         "-an",  # no audio
+        "-progress", "pipe:1",
         output_path,
     ]
 
+    if not progress_callback:
+        # Simple blocking path
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        except FileNotFoundError:
+            raise HTTPException(500, "ffmpeg not found. Install FFmpeg and add to PATH.")
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg trim failed: {result.stderr[:500]}")
+        return output_path
+
+    # Stream stdout for progress parsing
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
     except FileNotFoundError:
         raise HTTPException(500, "ffmpeg not found. Install FFmpeg and add to PATH.")
 
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg trim failed: {result.stderr[:500]}")
+    for line in proc.stdout:
+        m = _re.match(r"out_time_us=(\d+)", line.strip())
+        if m and duration_us > 0:
+            pct = min(100.0, float(m.group(1)) / duration_us * 100)
+            progress_callback(pct)
+
+    proc.wait()
+    if proc.returncode != 0:
+        stderr = proc.stderr.read() if proc.stderr else ""
+        raise RuntimeError(f"ffmpeg trim failed: {stderr[:500]}")
 
     return output_path
 
@@ -286,13 +314,26 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
                     output_path = str(output_dir / output_name)
 
                     seg_base = i * seg_span
-                    trim_pct = seg_base + seg_span * 0.05
-                    blur_start = trim_pct
-                    blur_span = seg_span * 0.95
+
+                    # Progress allocation within each segment:
+                    #   blur enabled:  trim 20%, blur 80%
+                    #   blur disabled: trim 100%
+                    if blur_faces:
+                        trim_span = seg_span * 0.20
+                        blur_start_pct = seg_base + trim_span
+                        blur_span = seg_span * 0.80
+                    else:
+                        trim_span = seg_span
 
                     logfile.write(f"=== Segment {i+1}/{total_segments}: {trial} ===\n")
                     logfile.flush()
                     _update_job_progress(job_id, seg_base + 1, logfile, f"Starting {trial}")
+
+                    def _trim_progress(pct, _base=seg_base, _span=trim_span):
+                        if cancel_event.is_set():
+                            raise InterruptedError("Job cancelled")
+                        overall = _base + (pct / 100.0) * _span
+                        _update_job_progress(job_id, overall)
 
                     if blur_faces:
                         # Trim to temp, then blur to deidentified/ dir
@@ -302,18 +343,19 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
 
                         try:
                             _ffmpeg_trim(seg["source_path"], seg["start_time"],
-                                        seg["end_time"], temp_trimmed)
+                                        seg["end_time"], temp_trimmed,
+                                        progress_callback=_trim_progress)
                         except Exception as e:
                             logfile.write(f"  Trim failed: {e}\n")
                             temp_trimmed = None
                             continue
 
-                        _update_job_progress(job_id, trim_pct, logfile, "Trim done")
+                        _update_job_progress(job_id, seg_base + trim_span, logfile, "Trim done")
 
                         logfile.write(f"  Running face blur...\n")
                         logfile.flush()
 
-                        def _blur_progress(blur_pct, _blur_start=blur_start, _blur_span=blur_span):
+                        def _blur_progress(blur_pct, _blur_start=blur_start_pct, _blur_span=blur_span):
                             if cancel_event.is_set():
                                 raise InterruptedError("Job cancelled")
                             overall = _blur_start + (blur_pct / 100.0) * _blur_span
@@ -357,7 +399,8 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
 
                         try:
                             _ffmpeg_trim(seg["source_path"], seg["start_time"],
-                                        seg["end_time"], output_path)
+                                        seg["end_time"], output_path,
+                                        progress_callback=_trim_progress)
                         except Exception as e:
                             logfile.write(f"  Trim failed: {e}\n")
                             continue
