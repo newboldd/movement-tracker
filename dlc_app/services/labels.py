@@ -105,12 +105,17 @@ def commit_labels_to_dlc(
 
     labeled_data_dir.mkdir(parents=True, exist_ok=True)
 
+    # Clean up old PNGs from previous commits
+    for old_png in labeled_data_dir.glob("img*.png"):
+        old_png.unlink()
+
     # Build trial map for frame resolution
     trials = build_trial_map(subject_name)
 
     # Group labels by (frame_num, trial_idx, side) to handle both camera views
     # For DLC, each labeled image is one camera half at one frame
     extracted = []
+    metadata = {}  # img_filename -> {frame_num, trial_idx, side}
     img_idx = 0
 
     for label in sorted(session_labels, key=lambda x: (x["trial_idx"], x["frame_num"], x["side"])):
@@ -140,7 +145,17 @@ def commit_labels_to_dlc(
             "img_filename": img_filename,
             "keypoints": kp,
         })
+        metadata[img_filename] = {
+            "frame_num": label["frame_num"],
+            "trial_idx": label["trial_idx"],
+            "side": label["side"],
+        }
         img_idx += 1
+
+    # Write label metadata sidecar for future recovery
+    meta_path = labeled_data_dir / "label_metadata.json"
+    with open(meta_path, "w") as f:
+        json.dump(metadata, f, indent=2)
 
     # Write CollectedData CSV
     csv_path = write_collected_data_csv(extracted, labeled_data_dir, training_name)

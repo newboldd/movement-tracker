@@ -24,7 +24,11 @@ router = APIRouter(prefix="/api/labeling", tags=["labeling"])
 
 @router.post("/{subject_id}/sessions", status_code=201)
 def create_session(subject_id: int, req: SessionCreate) -> dict:
-    """Create a new labeling session for a subject."""
+    """Create a new labeling session for a subject.
+
+    If the subject has a previous committed session, its labels are copied
+    into the new session so existing annotations show up automatically.
+    """
     with get_db_ctx() as db:
         subj = db.execute(
             "SELECT * FROM subjects WHERE id = ?", (subject_id,)
@@ -41,6 +45,22 @@ def create_session(subject_id: int, req: SessionCreate) -> dict:
             "SELECT * FROM label_sessions WHERE subject_id = ? ORDER BY id DESC LIMIT 1",
             (subject_id,),
         ).fetchone()
+
+        # Copy labels from the most recent committed session (if any)
+        prev_session = db.execute(
+            """SELECT id FROM label_sessions
+               WHERE subject_id = ? AND status = 'committed'
+               ORDER BY committed_at DESC LIMIT 1""",
+            (subject_id,),
+        ).fetchone()
+        if prev_session:
+            db.execute(
+                """INSERT INTO frame_labels
+                   (session_id, frame_num, trial_idx, side, keypoints, updated_at)
+                   SELECT ?, frame_num, trial_idx, side, keypoints, CURRENT_TIMESTAMP
+                   FROM frame_labels WHERE session_id = ?""",
+                (session["id"], prev_session["id"]),
+            )
 
         # Update subject stage
         db.execute(

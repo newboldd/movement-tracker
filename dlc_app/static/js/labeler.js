@@ -72,6 +72,9 @@ const labeler = (() => {
     let videoPlaying = false;
     let currentTrialIdx = -1; // which trial the video element is loaded with
 
+    // Deleted frame/side keys — sent to server on save so DB stays in sync
+    const deletedKeys = new Set();
+
     // Prefetch cache
     const imageCache = new Map();
     const PREFETCH_AHEAD = 3;
@@ -139,10 +142,12 @@ const labeler = (() => {
                 if (mpData && Object.keys(mpData).length > 0) {
                     mpLabels = mpData;
                     distances = mpData.distances || null;
-                    // Show distance trace if we have data
+                    // Show distance trace if we have data; hide timeline to save space
                     if (distances && distances.some(d => d !== null)) {
                         const traceContainer = document.getElementById('distanceTraceContainer');
                         if (traceContainer) traceContainer.style.display = 'block';
+                        const timelineContainer = document.querySelector('.timeline-container');
+                        if (timelineContainer) timelineContainer.style.display = 'none';
                     }
                 }
             } catch (e) {
@@ -592,12 +597,17 @@ const labeler = (() => {
             // Restore previous coordinates
             if (!lbl) { lbl = {}; labels.set(key, lbl); }
             lbl[bp] = prev;
+            // If restoring a label, it's no longer deleted
+            deletedKeys.delete(key);
         } else {
             // Was a new placement — remove it
             if (lbl) {
                 delete lbl[bp];
                 const hasAny = bodyparts.some(b => lbl[b] && lbl[b][0] != null);
-                if (!hasAny) labels.delete(key);
+                if (!hasAny) {
+                    labels.delete(key);
+                    deletedKeys.add(key);
+                }
             }
         }
 
@@ -737,6 +747,8 @@ const labeler = (() => {
         const hasAny = bodyparts.some(bp => lbl[bp] && lbl[bp][0] != null);
         if (!hasAny) {
             labels.delete(key);
+            // Track deletion so the server removes it too
+            deletedKeys.add(key);
         }
 
         render();
@@ -754,6 +766,21 @@ const labeler = (() => {
 
     async function saveLabels() {
         if (saveTimeout) clearTimeout(saveTimeout);
+
+        // Send DELETE requests for removed labels
+        const deletePromises = [];
+        for (const key of deletedKeys) {
+            const [frameStr, side] = key.split('_');
+            deletePromises.push(
+                API.del(`/api/labeling/sessions/${sessionId}/labels/${frameStr}?side=${encodeURIComponent(side)}`)
+                    .catch(e => console.error('Delete failed for', key, e))
+            );
+        }
+        if (deletePromises.length > 0) {
+            await Promise.all(deletePromises);
+            deletedKeys.clear();
+        }
+
         const batch = [];
 
         labels.forEach((lbl, key) => {
@@ -1478,6 +1505,17 @@ const labeler = (() => {
             distCtx.stroke();
         }
 
+        // Trial boundaries
+        for (const t of trials) {
+            const x = padL + (t.start_frame / totalFrames) * plotW;
+            distCtx.beginPath();
+            distCtx.moveTo(x, padT);
+            distCtx.lineTo(x, h - padB);
+            distCtx.strokeStyle = 'rgba(42, 58, 92, 0.8)';
+            distCtx.lineWidth = 1;
+            distCtx.stroke();
+        }
+
         // Draw distance line
         distCtx.beginPath();
         let started = false;
@@ -1500,20 +1538,30 @@ const labeler = (() => {
         distCtx.lineWidth = 1;
         distCtx.stroke();
 
-        // Draw dots for frames with manual corrections
+        // Draw dots for frames with manual corrections on the trace line
+        // and camera indicator ticks at the bottom
         labels.forEach((lbl, key) => {
             const [frameStr, side] = key.split('_');
             const frame = parseInt(frameStr);
-            if (frame >= distances.length) return;
-            const d = distances[frame];
-            if (d === null || d === undefined) return;
-
             const x = padL + (frame / totalFrames) * plotW;
-            const y = padT + ((maxD - d) / (maxD - minD)) * plotH;
-            distCtx.beginPath();
-            distCtx.arc(x, y, 2.5, 0, Math.PI * 2);
-            distCtx.fillStyle = '#4caf50';
-            distCtx.fill();
+
+            // Green dot on the distance line if distance exists
+            if (frame < distances.length) {
+                const d = distances[frame];
+                if (d !== null && d !== undefined) {
+                    const y = padT + ((maxD - d) / (maxD - minD)) * plotH;
+                    distCtx.beginPath();
+                    distCtx.arc(x, y, 2.5, 0, Math.PI * 2);
+                    distCtx.fillStyle = '#4caf50';
+                    distCtx.fill();
+                }
+            }
+
+            // Camera tick at bottom edge
+            const camIdx = cameraNames.indexOf(side);
+            const tickY = h - padB - (camIdx === 0 ? 6 : 1);
+            distCtx.fillStyle = camIdx === 0 ? '#ff4444' : '#4a9eff';
+            distCtx.fillRect(x - 0.5, tickY, 1.5, 4);
         });
 
         // Current frame cursor
