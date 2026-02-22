@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-command setup and launch for the DLC Finger-Tapping Pipeline.
+# One-command setup and launch for DLC Labeler.
 #
 # Usage:
 #   ./setup.sh
@@ -61,7 +61,7 @@ fi
 
 # ── Launch ───────────────────────────────────────────────────────────────
 echo ""
-echo "Starting DLC Finger-Tapping Pipeline at http://localhost:$PORT"
+echo "Starting DLC Labeler at http://localhost:$PORT"
 echo "Press Ctrl+C to stop."
 echo ""
 

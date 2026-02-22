@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch the DLC Finger-Tapping Pipeline web app.
+# Launch the DLC Labeler web app.
 # Usage: ./run.sh
 
 set -e
@@ -12,7 +12,7 @@ if [ -d "$VENV_DIR" ]; then
     source "$VENV_DIR/bin/activate"
 fi
 
-echo "Starting DLC Finger-Tapping Pipeline..."
+echo "Starting DLC Labeler..."
 echo ""
 echo "Dashboard will open at http://localhost:8080"
 echo ""

@@ -14,7 +14,7 @@ from .routers import subjects, labeling, pipeline, jobs, results, settings, file
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="DLC Finger-Tapping Pipeline", version="0.2.0")
+app = FastAPI(title="DLC Labeler", version="0.2.0")
 
 # Mount routers
 app.include_router(subjects.router)

@@ -1,4 +1,4 @@
-/* Canvas labeling engine for DLC finger-tapping keypoint annotation
+/* Canvas labeling engine for DLC keypoint annotation
    with MediaPipe ghost markers, click-to-accept, and 3D distance trace */
 
 const labeler = (() => {

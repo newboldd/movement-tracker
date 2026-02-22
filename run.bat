@@ -1,5 +1,5 @@
 @echo off
-echo Starting DLC Finger-Tapping Pipeline...
+echo Starting DLC Labeler...
 echo.
 echo Dashboard will open at http://localhost:8080
 echo.
