@@ -277,10 +277,31 @@ def get_mediapipe_for_session(subject_name: str) -> dict | None:
 
     Returns dict with per-camera thumb/index arrays as lists (JSON-serializable),
     plus distances array. Returns None if no prelabels exist.
+
+    If stored distances are all NaN but calibration is now available,
+    recomputes them from the MP coordinates and updates the npz file.
     """
     data = load_mediapipe_prelabels(subject_name)
     if data is None:
         return None
+
+    # Recompute distances if they're all NaN but calibration is available
+    if np.all(np.isnan(data["distances"])):
+        calib = get_calibration_for_subject(subject_name)
+        if calib is not None:
+            logger.info(f"Recomputing distances for {subject_name} (calibration now available)")
+            distances = _compute_distances(
+                data["OS_thumb"], data["OS_index"],
+                data["OD_thumb"], data["OD_index"], calib,
+            )
+            valid = np.sum(~np.isnan(distances))
+            if valid > 0:
+                data["distances"] = distances
+                # Update the npz file so we don't recompute every time
+                settings = get_settings()
+                npz_path = str(settings.dlc_path / subject_name / "mediapipe_prelabels.npz")
+                np.savez(npz_path, **data)
+                logger.info(f"Updated distances in {npz_path}: {valid}/{len(distances)} frames")
 
     settings = get_settings()
     cam_names = settings.camera_names
