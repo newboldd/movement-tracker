@@ -303,8 +303,12 @@ def deidentify_video(input_path: str, output_path: str,
 
     # ── Pass 2: Render with hand protection ──
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    import sys
+    codec = "avc1" if sys.platform == "darwin" else "mp4v"
+    fourcc = cv2.VideoWriter_fourcc(*codec)
     writer = cv2.VideoWriter(output_path, fourcc, fps, (full_w, h))
+    if not writer.isOpened():
+        raise RuntimeError(f"cv2.VideoWriter failed to open: {output_path} (codec={codec})")
 
     face_det_count = 0
 
