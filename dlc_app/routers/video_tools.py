@@ -128,30 +128,15 @@ def stream_video(path: str = Query(..., description="Path to video file")) -> Fi
 
 def _ffmpeg_trim(source_path: str, start_time: float, end_time: float,
                  output_path: str) -> str:
-    """Trim a video segment using ffmpeg. Tries stream copy first, falls back to re-encode."""
+    """Trim a video segment using ffmpeg with frame-accurate re-encoding.
+
+    Uses -ss before -i for fast keyframe seek, then re-encodes to get an exact
+    cut.  Stream copy (-c copy) is avoided because it must start on a keyframe,
+    which leaves black/blank frames at the beginning when the requested start
+    doesn't coincide with one.
+    """
     duration = end_time - start_time
 
-    # Try stream copy first (fast, no quality loss).
-    # -ss after -i avoids black first frame (cuts at nearest keyframe >= start).
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", source_path,
-        "-ss", f"{start_time:.3f}",
-        "-t", f"{duration:.3f}",
-        "-c", "copy",
-        output_path,
-    ]
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if result.returncode == 0:
-            return output_path
-    except FileNotFoundError:
-        raise HTTPException(500, "ffmpeg not found. Install FFmpeg and add to PATH.")
-    except subprocess.TimeoutExpired:
-        pass
-
-    # Fall back to re-encode
     cmd = [
         "ffmpeg", "-y",
         "-ss", f"{start_time:.3f}",
@@ -161,7 +146,12 @@ def _ffmpeg_trim(source_path: str, start_time: float, end_time: float,
         "-an",  # no audio
         output_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except FileNotFoundError:
+        raise HTTPException(500, "ffmpeg not found. Install FFmpeg and add to PATH.")
+
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg trim failed: {result.stderr[:500]}")
 
