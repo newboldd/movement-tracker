@@ -204,6 +204,9 @@ function updateJobDisplay(jobId, data) {
     const errorMsg = (data.status === 'failed' && data.error_msg)
         ? `<div style="color:var(--red);font-size:12px;margin-top:4px;">${data.error_msg}</div>`
         : '';
+    const logBtn = (data.status === 'failed')
+        ? `<button class="btn btn-sm" onclick="viewJobLog(${jobId})">View Log</button>`
+        : '';
 
     el.innerHTML = `
         <div style="display:flex;align-items:center;gap:12px;">
@@ -216,6 +219,7 @@ function updateJobDisplay(jobId, data) {
             <span>${(data.progress_pct || 0).toFixed(0)}%</span>
             <span class="badge badge-${data.status}">${data.status}</span>
             ${data.status === 'running' ? `<button class="btn btn-sm btn-danger" onclick="cancelJob(${jobId})">Cancel</button>` : ''}
+            ${logBtn}
         </div>
         ${errorMsg}
     `;
@@ -228,6 +232,24 @@ async function cancelJob(jobId) {
     } catch (e) {
         alert('Error: ' + e.message);
     }
+}
+
+async function viewJobLog(jobId) {
+    const modal = document.getElementById('logModal');
+    const pre = document.getElementById('logContent');
+    pre.textContent = 'Loading...';
+    modal.classList.add('active');
+    try {
+        const job = await API.get(`/api/jobs/${jobId}`);
+        pre.textContent = (job.log_tail || []).join('') || 'No log output.';
+        pre.scrollTop = pre.scrollHeight;
+    } catch (e) {
+        pre.textContent = 'Error fetching log: ' + e.message;
+    }
+}
+
+function closeLogModal() {
+    document.getElementById('logModal').classList.remove('active');
 }
 
 // ── Jobs polling ─────────────────────────────────────
