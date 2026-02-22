@@ -80,9 +80,10 @@
 
         <!-- Main area -->
         <div class="labeling-main">
-            <!-- Canvas -->
+            <!-- Canvas + hidden video for playback -->
             <div class="canvas-container" id="canvasContainer">
                 <canvas id="labelCanvas"></canvas>
+                <video id="videoPlayer" style="display:none;" muted preload="auto"></video>
             </div>
 
             <!-- Controls bar -->
@@ -106,7 +107,7 @@
         </div>
     </div>
 
-    <script src="/static/js/api.js"></script>
-    <script src="/static/js/labeler.js"></script>
+    <script src="/static/js/api.js?v=4"></script>
+    <script src="/static/js/labeler.js?v=4"></script>
 </body>
 </html>

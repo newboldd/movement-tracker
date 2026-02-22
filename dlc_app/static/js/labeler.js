@@ -50,9 +50,27 @@ const labeler = (() => {
     let offsetX = 0, offsetY = 0;
 
     // Drag state
-    let dragging = null; // bodypart name | 'pan'
+    let dragging = null; // bodypart name | 'pan' | 'pending'
     let dragStartX = 0, dragStartY = 0;
     let dragOrigX = 0, dragOrigY = 0;
+    let didDrag = false; // true once mouse moves past threshold during 'pending'
+    const DRAG_THRESHOLD = 4; // pixels before a click becomes a pan drag
+
+    // Camera shift computed from paired OS/OD labels (image pixels)
+    let computedCameraShiftX = null; // horizontal, or null = use default
+    let computedCameraShiftY = null; // vertical, or null = no shift
+
+    // Undo stack: each entry = { key, bp, prev (coords or null) }
+    const undoStack = [];
+    const MAX_UNDO = 50;
+
+    // Review mode: null = all bodyparts, or bodypart name for focused review
+    let reviewBp = null;
+
+    // Video element for smooth playback
+    let videoEl = null;
+    let videoPlaying = false;
+    let currentTrialIdx = -1; // which trial the video element is loaded with
 
     // Prefetch cache
     const imageCache = new Map();
@@ -78,6 +96,7 @@ const labeler = (() => {
         distCanvas = document.getElementById('distanceTraceCanvas');
         distCtx = distCanvas ? distCanvas.getContext('2d') : null;
         containerEl = document.getElementById('canvasContainer');
+        videoEl = document.getElementById('videoPlayer');
 
         setupCanvasEvents();
         setupTimeline();
@@ -130,6 +149,7 @@ const labeler = (() => {
                 console.log('No MediaPipe prelabels available');
             }
 
+            recomputeCameraShift();
             updateLabelCount();
             goToFrame(0);
         } catch (e) {
@@ -173,6 +193,8 @@ const labeler = (() => {
         }
     }
 
+    let hasUserZoom = false; // true once user has zoomed/panned
+
     async function goToFrame(frame) {
         if (frame < 0 || frame >= totalFrames) return;
         currentFrame = frame;
@@ -181,7 +203,7 @@ const labeler = (() => {
             currentImage = await loadImage(frame, currentSide);
             imgW = currentImage.width;
             imgH = currentImage.height;
-            fitImage();
+            if (!hasUserZoom) fitImage();
             render();
             prefetchFrames(frame);
         } catch (e) {
@@ -405,7 +427,7 @@ const labeler = (() => {
         // Resize handler
         const ro = new ResizeObserver(() => {
             if (currentImage) {
-                fitImage();
+                if (!hasUserZoom) fitImage();
                 render();
                 renderTimeline();
                 renderDistanceTrace();
@@ -429,10 +451,12 @@ const labeler = (() => {
                     const key = `${currentFrame}_${currentSide}`;
                     let lbl = labels.get(key);
                     if (!lbl) { lbl = {}; labels.set(key, lbl); }
+                    pushUndo(key, hit.bp, null);
                     lbl[hit.bp] = [mpCoords[0], mpCoords[1]];
 
                     // Enter drag mode immediately for refine
                     dragging = hit.bp;
+                    didDrag = false;
                     dragOrigX = mpCoords[0];
                     dragOrigY = mpCoords[1];
                     dragStartX = sx;
@@ -445,6 +469,7 @@ const labeler = (() => {
             } else {
                 // Start dragging existing manual point
                 dragging = hit.bp;
+                didDrag = false;
                 const key = `${currentFrame}_${currentSide}`;
                 const lbl = labels.get(key);
                 const coords = lbl[hit.bp];
@@ -455,20 +480,13 @@ const labeler = (() => {
                 canvas.style.cursor = 'grabbing';
             }
         } else {
-            // Check if click is within image bounds
-            const img = screenToImage(sx, sy);
-            if (img.x >= 0 && img.x < imgW && img.y >= 0 && img.y < imgH) {
-                // Place new label
-                placeLabel(img.x, img.y);
-            } else {
-                // Pan
-                dragging = 'pan';
-                dragStartX = sx;
-                dragStartY = sy;
-                dragOrigX = offsetX;
-                dragOrigY = offsetY;
-                canvas.style.cursor = 'move';
-            }
+            // Pending: could become a pan (drag) or a click (place label)
+            dragging = 'pending';
+            didDrag = false;
+            dragStartX = sx;
+            dragStartY = sy;
+            dragOrigX = offsetX;
+            dragOrigY = offsetY;
         }
     }
 
@@ -477,6 +495,16 @@ const labeler = (() => {
         const rect = canvas.getBoundingClientRect();
         const sx = e.clientX - rect.left;
         const sy = e.clientY - rect.top;
+
+        if (dragging === 'pending') {
+            // Check if mouse has moved enough to become a pan drag
+            if (Math.hypot(sx - dragStartX, sy - dragStartY) > DRAG_THRESHOLD) {
+                dragging = 'pan';
+                didDrag = true;
+                canvas.style.cursor = 'move';
+            }
+            return;
+        }
 
         if (dragging === 'pan') {
             offsetX = dragOrigX + (sx - dragStartX);
@@ -494,11 +522,23 @@ const labeler = (() => {
     }
 
     function onMouseUp(e) {
-        if (dragging && dragging !== 'pan') {
-            // Auto-save after drag
+        if (dragging === 'pending') {
+            // Mouse didn't move much — this is a click, place a label
+            const img = screenToImage(dragStartX, dragStartY);
+            if (img.x >= 0 && img.x < imgW && img.y >= 0 && img.y < imgH) {
+                placeLabel(img.x, img.y);
+            }
+        } else if (dragging === 'pan') {
+            hasUserZoom = true;
+        } else if (dragging) {
+            // Finished dragging a bodypart point — record undo with pre-drag position
+            const key = `${currentFrame}_${currentSide}`;
+            pushUndo(key, dragging, [dragOrigX, dragOrigY]);
             scheduleSave();
+            recomputeCameraShift();
         }
         dragging = null;
+        didDrag = false;
         canvas.style.cursor = 'crosshair';
     }
 
@@ -528,8 +568,83 @@ const labeler = (() => {
         offsetX = mx - (mx - offsetX) * zoomFactor;
         offsetY = my - (my - offsetY) * zoomFactor;
         scale = newScale;
+        hasUserZoom = true;
 
         render();
+    }
+
+    // ── Undo ──────────────────────────────────────────
+    function pushUndo(key, bp, prevCoords) {
+        undoStack.push({ key, bp, prev: prevCoords });
+        if (undoStack.length > MAX_UNDO) undoStack.shift();
+    }
+
+    function undo() {
+        if (undoStack.length === 0) return;
+        const action = undoStack.pop();
+        const { key, bp, prev } = action;
+
+        let lbl = labels.get(key);
+        if (prev) {
+            // Restore previous coordinates
+            if (!lbl) { lbl = {}; labels.set(key, lbl); }
+            lbl[bp] = prev;
+        } else {
+            // Was a new placement — remove it
+            if (lbl) {
+                delete lbl[bp];
+                const hasAny = bodyparts.some(b => lbl[b] && lbl[b][0] != null);
+                if (!hasAny) labels.delete(key);
+            }
+        }
+
+        render();
+        updateLabelCount();
+        scheduleSave();
+        recomputeCameraShift();
+    }
+
+    // ── Zoom to labels ───────────────────────────────
+    function zoomToLabels(frame, side) {
+        const key = `${frame}_${side}`;
+        const lbl = labels.get(key);
+        if (!lbl) return;
+
+        // In review mode, zoom to just the reviewed bodypart
+        const bpsToShow = reviewBp ? [reviewBp] : bodyparts;
+
+        // Collect placed coordinates
+        const pts = [];
+        for (const bp of bpsToShow) {
+            const c = lbl[bp];
+            if (c && c[0] != null) pts.push(c);
+        }
+        if (pts.length === 0) return;
+
+        // Bounding box in image coords
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const [x, y] of pts) {
+            if (x < minX) minX = x;
+            if (y < minY) minY = y;
+            if (x > maxX) maxX = x;
+            if (y > maxY) maxY = y;
+        }
+
+        // Padding: tighter for single-point review mode
+        const span = Math.max(maxX - minX, maxY - minY, 20);
+        const pad = reviewBp ? span * 2.5 + 30 : span * 0.8 + 40;
+        minX -= pad; minY -= pad;
+        maxX += pad; maxY += pad;
+
+        const cw = containerEl.clientWidth;
+        const ch = containerEl.clientHeight;
+        const bboxW = maxX - minX;
+        const bboxH = maxY - minY;
+
+        scale = Math.min(cw / bboxW, ch / bboxH);
+        offsetX = (cw - bboxW * scale) / 2 - minX * scale;
+        offsetY = (ch - bboxH * scale) / 2 - minY * scale;
+        hasUserZoom = true;
     }
 
     // ── Label placement ───────────────────────────────
@@ -546,6 +661,7 @@ const labeler = (() => {
         for (const bp of bodyparts) {
             const coords = lbl[bp];
             if (!coords || coords[0] == null) {
+                pushUndo(key, bp, null);
                 lbl[bp] = [imgX, imgY];
                 placed = true;
                 const remaining = bodyparts.filter(b => !lbl[b] || lbl[b][0] == null);
@@ -570,6 +686,7 @@ const labeler = (() => {
                 }
             }
             if (closest) {
+                pushUndo(key, closest, [...lbl[closest]]);
                 lbl[closest] = [imgX, imgY];
             }
         }
@@ -577,6 +694,7 @@ const labeler = (() => {
         render();
         updateLabelCount();
         scheduleSave();
+        recomputeCameraShift();
     }
 
     function removeLabel(which) {
@@ -584,6 +702,8 @@ const labeler = (() => {
         const lbl = labels.get(key);
         if (!lbl) return;
 
+        const prev = lbl[which];
+        if (prev && prev[0] != null) pushUndo(key, which, [...prev]);
         delete lbl[which];
 
         // Remove entry if all bodyparts are empty
@@ -674,30 +794,138 @@ const labeler = (() => {
     function nextFrame() { goToFrame(currentFrame + 1); }
     function prevFrame() { goToFrame(currentFrame - 1); }
 
-    function nextLabel() {
+    async function nextLabel() {
         const sorted = getLabeledFrames();
         const next = sorted.find(f => f > currentFrame);
-        if (next !== undefined) goToFrame(next);
+        if (next !== undefined) {
+            zoomToLabels(next, currentSide);
+            await goToFrame(next);
+        }
     }
 
-    function prevLabel() {
+    async function prevLabel() {
         const sorted = getLabeledFrames();
         const prev = [...sorted].reverse().find(f => f < currentFrame);
-        if (prev !== undefined) goToFrame(prev);
+        if (prev !== undefined) {
+            zoomToLabels(prev, currentSide);
+            await goToFrame(prev);
+        }
     }
 
     function getLabeledFrames() {
         const frames = new Set();
-        labels.forEach((_, key) => {
+        labels.forEach((lbl, key) => {
             const [frameStr, side] = key.split('_');
-            if (side === currentSide) frames.add(parseInt(frameStr));
+            if (side !== currentSide) return;
+            // In review mode, only include frames that have the reviewed bodypart
+            if (reviewBp) {
+                const c = lbl[reviewBp];
+                if (!c || c[0] == null) return;
+            }
+            frames.add(parseInt(frameStr));
         });
         return [...frames].sort((a, b) => a - b);
     }
 
+    function recomputeCameraShift() {
+        // Compute the average horizontal and vertical offset between OS/OD labels
+        // for frames that have labels in both cameras.
+        if (cameraNames.length < 2) return;
+        const cam0 = cameraNames[0];
+        const cam1 = cameraNames[1];
+        const dxValues = [];
+        const dyValues = [];
+
+        // Find frames that have labels in both cameras
+        const frameNums = new Set();
+        labels.forEach((_, key) => {
+            const [f] = key.split('_');
+            frameNums.add(f);
+        });
+
+        for (const f of frameNums) {
+            const lbl0 = labels.get(`${f}_${cam0}`);
+            const lbl1 = labels.get(`${f}_${cam1}`);
+            if (!lbl0 || !lbl1) continue;
+
+            for (const bp of bodyparts) {
+                const c0 = lbl0[bp];
+                const c1 = lbl1[bp];
+                if (c0 && c0[0] != null && c1 && c1[0] != null) {
+                    dxValues.push(c1[0] - c0[0]);
+                    dyValues.push(c1[1] - c0[1]);
+                }
+            }
+        }
+
+        if (dxValues.length > 0) {
+            computedCameraShiftX = dxValues.reduce((a, b) => a + b, 0) / dxValues.length;
+            computedCameraShiftY = dyValues.reduce((a, b) => a + b, 0) / dyValues.length;
+        }
+    }
+
+    function cycleReviewMode() {
+        if (!reviewBp) {
+            reviewBp = bodyparts[0];
+        } else {
+            const idx = bodyparts.indexOf(reviewBp);
+            if (idx < bodyparts.length - 1) {
+                reviewBp = bodyparts[idx + 1];
+            } else {
+                reviewBp = null;
+            }
+        }
+        updateReviewIndicator();
+        // Re-zoom to current frame's labels with new mode
+        if (reviewBp) {
+            zoomToLabels(currentFrame, currentSide);
+            render();
+        }
+    }
+
+    function updateReviewIndicator() {
+        const el = document.getElementById('labelInfo');
+        if (reviewBp) {
+            const idx = bodyparts.indexOf(reviewBp);
+            el.textContent = `Review mode: ${reviewBp}`;
+            el.style.color = bpColor(idx);
+        } else {
+            el.textContent = 'Click to place keypoints';
+            el.style.color = '';
+        }
+    }
+
+    function getTrialForFrame(frame) {
+        for (let i = 0; i < trials.length; i++) {
+            if (frame >= trials[i].start_frame && frame <= trials[i].end_frame) {
+                return i;
+            }
+        }
+        return 0;
+    }
+
     function toggleSide() {
         const idx = cameraNames.indexOf(currentSide);
-        currentSide = cameraNames[(idx + 1) % cameraNames.length];
+        const newIdx = (idx + 1) % cameraNames.length;
+
+        // Shift viewport to keep targets roughly centered when switching cameras.
+        // Uses computed shift from paired labels, falls back to 7% horizontal default.
+        if (hasUserZoom && imgW) {
+            let shiftX, shiftY;
+            if (computedCameraShiftX != null) {
+                shiftX = computedCameraShiftX;
+                shiftY = computedCameraShiftY || 0;
+            } else {
+                shiftX = imgW * 0.07;
+                shiftY = 0;
+            }
+            // cam0→cam1: targets move by shift, compensate viewport in opposite direction
+            const direction = (newIdx > idx) ? -1 : 1;
+            offsetX += direction * shiftX * scale;
+            offsetY += direction * shiftY * scale;
+        }
+
+        currentSide = cameraNames[newIdx];
         document.getElementById('sideToggle').textContent = currentSide;
         goToFrame(currentFrame);
     }
@@ -708,32 +936,179 @@ const labeler = (() => {
         if (playing) {
             btn.innerHTML = '&#9646;&#9646;';
             playbackRate = parseFloat(document.getElementById('playbackRate').value);
-            const fps = trials.length > 0 ? trials[0].fps : 30;
-            const interval = 1000 / (fps * playbackRate);
-            playTimer = setInterval(() => {
-                if (currentFrame < totalFrames - 1) {
-                    goToFrame(currentFrame + 1);
-                } else {
-                    togglePlay();
-                }
-            }, interval);
+            startVideoPlayback();
         } else {
             btn.innerHTML = '&#9654;';
-            clearInterval(playTimer);
-            playTimer = null;
+            stopVideoPlayback();
         }
     }
 
+    function startVideoPlayback() {
+        if (!videoEl) {
+            fallbackPlay();
+            return;
+        }
+
+        const trialIdx = getTrialForFrame(currentFrame);
+        const trial = trials[trialIdx];
+        if (!trial) return;
+
+        const localFrame = currentFrame - trial.start_frame;
+        const startTime = localFrame / trial.fps;
+
+        // Load video for this trial if not already loaded
+        if (currentTrialIdx !== trialIdx) {
+            videoEl.src = `/api/labeling/sessions/${sessionId}/video?trial=${trialIdx}`;
+            currentTrialIdx = trialIdx;
+        }
+
+        videoEl.playbackRate = playbackRate;
+        videoEl.currentTime = startTime;
+        videoPlaying = true;
+
+        videoEl.play().then(() => {
+            requestAnimationFrame(videoDrawLoop);
+        }).catch(e => {
+            console.error('Video play failed, falling back to frame-by-frame', e);
+            videoPlaying = false;
+            fallbackPlay();
+        });
+
+        // Handle trial end — stop or advance to next trial
+        videoEl.onended = () => {
+            const nextTrialIdx = trialIdx + 1;
+            if (nextTrialIdx < trials.length && playing) {
+                currentFrame = trials[nextTrialIdx].start_frame;
+                currentTrialIdx = nextTrialIdx;
+                videoEl.src = `/api/labeling/sessions/${sessionId}/video?trial=${nextTrialIdx}`;
+                videoEl.currentTime = 0;
+                videoEl.play();
+            } else {
+                playing = false;
+                videoPlaying = false;
+                document.getElementById('playBtn').innerHTML = '&#9654;';
+            }
+        };
+    }
+
+    function videoDrawLoop() {
+        if (!videoPlaying || !playing) return;
+
+        const trial = trials[currentTrialIdx];
+        if (!trial) return;
+
+        // Calculate current global frame from video time
+        const localFrame = Math.floor(videoEl.currentTime * trial.fps);
+        currentFrame = trial.start_frame + Math.min(localFrame, trial.frame_count - 1);
+
+        // Draw video frame to canvas (cropped to correct camera half)
+        const cw = containerEl.clientWidth;
+        const ch = containerEl.clientHeight;
+        canvas.width = cw;
+        canvas.height = ch;
+        ctx.clearRect(0, 0, cw, ch);
+
+        const vw = videoEl.videoWidth;
+        const vh = videoEl.videoHeight;
+        if (vw > 0 && vh > 0) {
+            const midline = Math.floor(vw / 2);
+            // Source crop: left half or right half of stereo video
+            let sx, sw;
+            if (cameraNames.length >= 2 && currentSide === cameraNames[1]) {
+                sx = midline; sw = vw - midline;
+            } else {
+                sx = 0; sw = midline;
+            }
+
+            imgW = sw;
+            imgH = vh;
+            if (!hasUserZoom) fitImage();
+
+            ctx.save();
+            ctx.translate(offsetX, offsetY);
+            ctx.scale(scale, scale);
+            ctx.drawImage(videoEl, sx, 0, sw, vh, 0, 0, sw, vh);
+            ctx.restore();
+        }
+
+        // Draw labels overlay
+        const key = `${currentFrame}_${currentSide}`;
+        const lbl = labels.get(key);
+        if (lbl) {
+            const placedBps = [];
+            bodyparts.forEach((bp, idx) => {
+                const coords = lbl[bp];
+                if (coords && coords[0] != null && coords[1] != null) {
+                    drawPoint(coords[0], coords[1], bpColor(idx), bpLetter(bp));
+                    placedBps.push({ bp, x: coords[0], y: coords[1] });
+                }
+            });
+            for (let i = 1; i < placedBps.length; i++) {
+                const a = placedBps[i - 1];
+                const b = placedBps[i];
+                ctx.beginPath();
+                ctx.moveTo(a.x * scale + offsetX, a.y * scale + offsetY);
+                ctx.lineTo(b.x * scale + offsetX, b.y * scale + offsetY);
+                ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+        }
+
+        updateFrameDisplay();
+        renderTimeline();
+
+        requestAnimationFrame(videoDrawLoop);
+    }
+
+    function stopVideoPlayback() {
+        videoPlaying = false;
+        if (videoEl) videoEl.pause();
+        // Load the precise frame via image API for labeling
+        goToFrame(currentFrame);
+    }
+
+    function fallbackPlay() {
+        // Fallback: frame-by-frame if video streaming fails
+        playbackRate = parseFloat(document.getElementById('playbackRate').value);
+        const fps = trials.length > 0 ? trials[0].fps : 30;
+        const interval = 1000 / (fps * playbackRate);
+        (async function playLoop() {
+            while (playing && currentFrame < totalFrames - 1) {
+                const start = performance.now();
+                await goToFrame(currentFrame + 1);
+                const elapsed = performance.now() - start;
+                const wait = Math.max(0, interval - elapsed);
+                await new Promise(r => setTimeout(r, wait));
+            }
+            if (playing) {
+                playing = false;
+                document.getElementById('playBtn').innerHTML = '&#9654;';
+            }
+        })();
+    }
+
     function resetZoom() {
+        hasUserZoom = false;
         fitImage();
         render();
     }
 
     // ── Keyboard shortcuts ────────────────────────────
+    // Letter keys for deleting bodyparts (first two get D/F, rest use number keys)
+    const DELETE_KEYS = { 'd': 0, 'f': 1 };
+
     function setupKeyboard() {
         document.addEventListener('keydown', (e) => {
             // Ignore if typing in input
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+
+            // Ctrl+Z: undo
+            if (e.key === 'z' && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                undo();
+                return;
+            }
 
             switch (e.key) {
                 case 'a': case 'ArrowLeft':
@@ -743,6 +1118,18 @@ const labeler = (() => {
                 case 's': case 'ArrowRight':
                     e.preventDefault();
                     nextFrame();
+                    break;
+                case 'q':
+                    e.preventDefault();
+                    prevLabel();
+                    break;
+                case 'w':
+                    e.preventDefault();
+                    nextLabel();
+                    break;
+                case 'r':
+                    e.preventDefault();
+                    cycleReviewMode();
                     break;
                 case 'e':
                     e.preventDefault();
@@ -757,6 +1144,15 @@ const labeler = (() => {
                     togglePlay();
                     break;
                 default:
+                    // D/F: delete bodypart by letter
+                    if (e.key in DELETE_KEYS) {
+                        const idx = DELETE_KEYS[e.key];
+                        if (idx < bodyparts.length) {
+                            e.preventDefault();
+                            removeLabel(bodyparts[idx]);
+                        }
+                        break;
+                    }
                     // Number keys 1-9: delete bodypart by index
                     if (e.key >= '1' && e.key <= '9') {
                         const idx = parseInt(e.key) - 1;
@@ -785,12 +1181,14 @@ const labeler = (() => {
         }
         document.getElementById('trialDisplay').textContent = `Trial: ${trialName}`;
 
-        // Show distance for current frame
-        const distInfo = document.getElementById('labelInfo');
-        if (distances && distances[currentFrame] !== null && distances[currentFrame] !== undefined) {
-            distInfo.textContent = `Distance: ${distances[currentFrame].toFixed(1)} mm`;
-        } else {
-            distInfo.textContent = 'Click to place keypoints';
+        // Show distance for current frame (unless in review mode)
+        if (!reviewBp) {
+            const distInfo = document.getElementById('labelInfo');
+            if (distances && distances[currentFrame] !== null && distances[currentFrame] !== undefined) {
+                distInfo.textContent = `Distance: ${distances[currentFrame].toFixed(1)} mm`;
+            } else {
+                distInfo.textContent = 'Click to place keypoints';
+            }
         }
     }
 
@@ -808,20 +1206,27 @@ const labeler = (() => {
         const el = document.getElementById('shortcutList');
         if (!el) return;
 
+        const deleteLetters = ['D', 'F'];
         let html = `
             <div><kbd>A</kbd> / <kbd>&larr;</kbd> Prev frame</div>
             <div><kbd>S</kbd> / <kbd>&rarr;</kbd> Next frame</div>
+            <div><kbd>Q</kbd> Prev label</div>
+            <div><kbd>W</kbd> Next label</div>
         `;
         bodyparts.forEach((bp, idx) => {
-            html += `<div><kbd>${idx + 1}</kbd> Delete ${bp}</div>`;
+            const letter = deleteLetters[idx] ? `<kbd>${deleteLetters[idx]}</kbd> / ` : '';
+            html += `<div>${letter}<kbd>${idx + 1}</kbd> Delete ${bp}</div>`;
         });
         html += `
+            <div><kbd>Ctrl+Z</kbd> Undo</div>
+            <div><kbd>R</kbd> Review mode (cycle)</div>
             <div><kbd>E</kbd> Toggle ${cameraNames.join('/')}</div>
             <div><kbd>Z</kbd> Reset zoom</div>
             <div><kbd>Space</kbd> Play/pause</div>
             <div><kbd>Scroll</kbd> Zoom at cursor</div>
             <div><kbd>Click</kbd> Place / accept MP</div>
-            <div><kbd>Drag</kbd> Move label</div>
+            <div><kbd>Drag image</kbd> Pan</div>
+            <div><kbd>Drag label</kbd> Move label</div>
             <div><kbd>Right-click</kbd> Remove label</div>
         `;
         el.innerHTML = html;
@@ -1077,7 +1482,7 @@ const labeler = (() => {
     return {
         init,
         nextFrame, prevFrame, nextLabel, prevLabel,
-        toggleSide, togglePlay, resetZoom,
+        toggleSide, togglePlay, resetZoom, cycleReviewMode,
         saveLabels, commitSession,
     };
 })();
