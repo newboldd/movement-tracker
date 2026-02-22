@@ -47,6 +47,60 @@ function setTagValues(containerId, values) {
     values.forEach(v => addTag(containerId, v));
 }
 
+// ── Calibration rows ──────────────────────────────────────────
+function addCalibrationRow(name, path) {
+    const container = document.getElementById('calibrationRows');
+    const row = document.createElement('div');
+    row.className = 'calib-row';
+    row.innerHTML = `
+        <input type="text" class="calib-name" placeholder="Camera name" value="${name}">
+        <input type="text" class="calib-path" placeholder="/path/to/calibration.yaml" value="${path}">
+        <span class="calib-status" title="Not checked"></span>
+        <button class="btn btn-sm" onclick="validateCalibRow(this)">Check</button>
+        <button class="btn btn-sm" onclick="this.closest('.calib-row').remove()" style="color:var(--red);">&times;</button>
+    `;
+    container.appendChild(row);
+}
+
+function getCalibrations() {
+    const rows = document.querySelectorAll('.calib-row');
+    const calibs = {};
+    rows.forEach(row => {
+        const name = row.querySelector('.calib-name').value.trim();
+        const path = row.querySelector('.calib-path').value.trim();
+        if (name && path) calibs[name] = path;
+    });
+    return calibs;
+}
+
+function setCalibrations(calibrations) {
+    const container = document.getElementById('calibrationRows');
+    container.innerHTML = '';
+    if (calibrations) {
+        Object.entries(calibrations).forEach(([name, path]) => addCalibrationRow(name, path));
+    }
+}
+
+async function validateCalibRow(btn) {
+    const row = btn.closest('.calib-row');
+    const path = row.querySelector('.calib-path').value.trim();
+    const dot = row.querySelector('.calib-status');
+    if (!path) { dot.className = 'calib-status invalid'; dot.title = 'No path'; return; }
+    btn.disabled = true;
+    btn.textContent = '...';
+    try {
+        const resp = await API.post('/api/settings/validate-calibration', { path });
+        dot.className = resp.valid ? 'calib-status valid' : 'calib-status invalid';
+        dot.title = resp.valid ? 'Valid' : (resp.error || 'Invalid');
+    } catch (e) {
+        dot.className = 'calib-status invalid';
+        dot.title = e.message;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Check';
+    }
+}
+
 // ── Init ──────────────────────────────────────────────────────
 setupTagInput('camera_names_tags', 'camera_names_input');
 setupTagInput('bodyparts_tags', 'bodyparts_input');
@@ -81,6 +135,9 @@ async function loadSettings() {
         // Tag inputs
         setTagValues('camera_names_tags', settings.camera_names || []);
         setTagValues('bodyparts_tags', settings.bodyparts || []);
+
+        // Calibrations
+        setCalibrations(settings.calibrations || {});
 
         // Status banner
         renderStatus(status);
@@ -126,6 +183,7 @@ function _gatherSettings() {
         remote_work_dir: document.getElementById('remote_work_dir').value.trim(),
         remote_ssh_key: document.getElementById('remote_ssh_key').value.trim(),
         remote_ssh_port: parseInt(document.getElementById('remote_ssh_port').value) || 22,
+        calibrations: getCalibrations(),
     };
 }
 

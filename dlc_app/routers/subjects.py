@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException
 from ..config import get_settings
 from ..db import get_db_ctx
 from ..models import (
-    SubjectCreate, SubjectResponse, SubjectDetail,
+    SubjectCreate, SubjectUpdate, SubjectResponse, SubjectDetail,
     STAGE_INDEX,
 )
 from ..services.discovery import scan_all_subjects, infer_stage, _find_videos, _has_snapshots, _has_labeled_data
@@ -68,6 +68,23 @@ def create_subject(req: SubjectCreate) -> dict:
         row = db.execute(
             "SELECT * FROM subjects WHERE name = ?", (req.name,)
         ).fetchone()
+    return _subject_row_to_response(row)
+
+
+@router.patch("/{subject_id}")
+def update_subject(subject_id: int, req: SubjectUpdate) -> dict:
+    """Update subject fields (e.g. camera_name)."""
+    with get_db_ctx() as db:
+        row = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Subject not found")
+        # camera_name: empty string → NULL
+        camera_val = req.camera_name if req.camera_name else None
+        db.execute(
+            "UPDATE subjects SET camera_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (camera_val, subject_id),
+        )
+        row = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
     return _subject_row_to_response(row)
 
 

@@ -3,6 +3,7 @@
 let subjects = [];
 let activeJobs = [];
 let appStatus = { configured: true, has_calibration: false };
+let calibrationNames = [];
 
 // ── Check settings status ────────────────────────────────
 async function checkStatus() {
@@ -108,6 +109,22 @@ function getActions(subject) {
     return btns.join(' ');
 }
 
+// ── Calibration helpers ──────────────────────────────
+async function loadCalibrationNames() {
+    try {
+        const settings = await API.get('/api/settings');
+        calibrationNames = Object.keys(settings.calibrations || {});
+    } catch (e) { calibrationNames = []; }
+}
+
+async function updateSubjectCamera(subjectId, cameraName) {
+    try {
+        await API.patch(`/api/subjects/${subjectId}`, { camera_name: cameraName });
+    } catch (e) {
+        alert('Error updating camera: ' + e.message);
+    }
+}
+
 // ── Detail panel ─────────────────────────────────────
 async function showDetail(subjectId) {
     try {
@@ -126,6 +143,12 @@ async function showDetail(subjectId) {
                 <div class="info-row"><span class="label">Iteration</span><span>${detail.iteration}</span></div>
                 <div class="info-row"><span class="label">Videos</span><span>${detail.video_count}</span></div>
                 <div class="info-row"><span class="label">DLC Dir</span><span style="font-size:11px;word-break:break-all">${detail.dlc_dir || 'N/A'}</span></div>
+                <div class="info-row"><span class="label">Camera</span><span>
+                    <select id="cameraSelect" onchange="updateSubjectCamera(${detail.id}, this.value)" style="padding:2px 6px;font-size:13px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);">
+                        <option value="">None</option>
+                        ${calibrationNames.map(n => `<option value="${n}"${n === (detail.camera_name || '') ? ' selected' : ''}>${n}</option>`).join('')}
+                    </select>
+                </span></div>
             </div>
             <div class="detail-section">
                 <h3>Trials</h3>
@@ -325,4 +348,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ── Init ─────────────────────────────────────────────
-checkStatus().then(() => loadSubjects());
+checkStatus().then(() => {
+    loadCalibrationNames();
+    loadSubjects();
+});

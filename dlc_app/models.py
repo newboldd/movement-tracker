@@ -40,6 +40,10 @@ class SubjectCreate(BaseModel):
     video_pattern: Optional[str] = None
 
 
+class SubjectUpdate(BaseModel):
+    camera_name: Optional[str] = None
+
+
 class SubjectResponse(BaseModel):
     id: int
     name: str

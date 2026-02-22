@@ -37,6 +37,19 @@ const API = {
         return resp.json();
     },
 
+    async patch(url, body) {
+        const resp = await fetch(url, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+            throw new Error(err.detail || resp.statusText);
+        }
+        return resp.json();
+    },
+
     async del(url) {
         const resp = await fetch(url, { method: 'DELETE' });
         if (!resp.ok) {

@@ -23,6 +23,25 @@ _camera_assignments = None
 _calib_cache = {}
 
 
+def clear_calibration_cache():
+    """Clear all cached calibration data. Called when settings change."""
+    global _camera_assignments, _calib_cache
+    _camera_assignments = None
+    _calib_cache = {}
+
+
+def _get_subject_camera_name(subject_name: str) -> str | None:
+    """Look up the camera_name assigned to a subject in the DB."""
+    from ..db import get_db_ctx
+    with get_db_ctx() as db:
+        row = db.execute(
+            "SELECT camera_name FROM subjects WHERE name = ?", (subject_name,)
+        ).fetchone()
+    if row and row["camera_name"]:
+        return row["camera_name"]
+    return None
+
+
 def load_calibration(yaml_path: str) -> dict:
     """Load stereo calibration from OpenCV YAML file.
 
@@ -70,25 +89,44 @@ def _load_camera_assignments() -> dict:
     return _camera_assignments
 
 
+def _load_from_settings_calibrations(camera_name: str) -> dict | None:
+    """Try to load calibration from settings.calibrations[camera_name]."""
+    settings = get_settings()
+    calib_path = settings.calibrations.get(camera_name)
+    if not calib_path:
+        return None
+    if camera_name not in _calib_cache:
+        if not os.path.exists(calib_path):
+            logger.warning(f"Calibration file not found: {calib_path}")
+            return None
+        _calib_cache[camera_name] = load_calibration(calib_path)
+        logger.info(f'Loaded calibration for {camera_name}: {calib_path}')
+    return _calib_cache[camera_name]
+
+
 def get_calibration_for_subject(subject_name: str) -> dict | None:
     """Load the correct stereo calibration for a subject.
 
-    Looks up calibration/camera_assignments.yaml:
-      1. Check subject_overrides (e.g. MSA10 -> dysaut_cam2)
-      2. Fall back to prefix_defaults (e.g. PD -> camera1)
+    Lookup order:
+      1. DB camera_name → settings.calibrations path
+      2. camera_assignments.yaml (subject_overrides → prefix_defaults)
 
     Returns calibration dict or None if not available.
     """
+    # --- Step 1: Check DB assignment + settings.calibrations ---
+    db_camera = _get_subject_camera_name(subject_name)
+    if db_camera:
+        calib = _load_from_settings_calibrations(db_camera)
+        if calib is not None:
+            return calib
+        logger.debug(f"DB camera '{db_camera}' for {subject_name} not in settings.calibrations, trying YAML fallback")
+
+    # --- Step 2: Fall back to camera_assignments.yaml ---
     try:
         assignments = _load_camera_assignments()
     except FileNotFoundError:
         logger.warning("No camera_assignments.yaml found")
         return None
-
-    settings = get_settings()
-    calib_dir = settings.calibration_dir
-    if not calib_dir:
-        calib_dir = str(PROJECT_DIR / "calibration")
 
     # Extract subject prefix + number (e.g. "MSA10" from "MSA10")
     match = re.match(r'([A-Za-z]+\d*)', subject_name)

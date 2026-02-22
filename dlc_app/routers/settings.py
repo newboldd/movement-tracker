@@ -3,7 +3,7 @@
 from pathlib import Path
 from fastapi import APIRouter
 from pydantic import BaseModel
-from typing import Optional
+from typing import Dict, Optional
 
 from ..config import get_settings
 
@@ -27,6 +27,7 @@ class SettingsUpdate(BaseModel):
     remote_work_dir: Optional[str] = None
     remote_ssh_key: Optional[str] = None
     remote_ssh_port: Optional[int] = None
+    calibrations: Optional[Dict[str, str]] = None
 
 
 @router.get("")
@@ -41,6 +42,9 @@ def update_settings(req: SettingsUpdate) -> dict:
     settings = get_settings()
     data = req.model_dump(exclude_none=True)
     settings.update(data)
+    # Clear calibration cache so new paths take effect
+    from ..services.calibration import clear_calibration_cache
+    clear_calibration_cache()
     return settings.to_dict()
 
 
@@ -65,10 +69,32 @@ def settings_status() -> dict:
 
     return {
         "configured": settings.is_configured,
-        "has_calibration": bool(settings.calibration_3d_config),
+        "has_calibration": bool(settings.calibrations) or bool(settings.calibration_3d_config),
         "remote_enabled": settings.remote_enabled,
         "issues": issues,
     }
+
+
+class CalibrationValidate(BaseModel):
+    path: str
+
+
+@router.post("/validate-calibration")
+def validate_calibration(req: CalibrationValidate) -> dict:
+    """Check that a calibration YAML file exists and contains K1."""
+    import cv2
+    p = Path(req.path)
+    if not p.exists():
+        return {"valid": False, "error": f"File not found: {req.path}"}
+    try:
+        fs = cv2.FileStorage(str(p), cv2.FILE_STORAGE_READ)
+        k1 = fs.getNode("K1").mat()
+        fs.release()
+        if k1 is None:
+            return {"valid": False, "error": "No K1 matrix found in file"}
+        return {"valid": True, "error": None}
+    except Exception as e:
+        return {"valid": False, "error": str(e)}
 
 
 @router.post("/test-remote")

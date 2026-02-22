@@ -88,6 +88,39 @@
         }
         .status-ok { background: rgba(76,175,80,0.15); color: var(--green); }
         .status-warn { background: rgba(255,152,0,0.15); color: var(--orange); }
+        .calib-row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+        .calib-row input.calib-name {
+            width: 140px;
+            padding: 6px 10px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            color: var(--text);
+            font-size: 13px;
+        }
+        .calib-row input.calib-path {
+            flex: 1;
+            padding: 6px 10px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            color: var(--text);
+            font-size: 13px;
+        }
+        .calib-status {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--border);
+            flex-shrink: 0;
+        }
+        .calib-status.valid { background: var(--green); }
+        .calib-status.invalid { background: var(--red); }
     </style>
 </head>
 <body>
@@ -167,14 +200,12 @@
                 </div>
             </div>
 
-            <!-- Calibration (optional) -->
+            <!-- Stereo Calibrations -->
             <div class="form-section">
-                <h3>Calibration (Optional)</h3>
-                <div class="form-row">
-                    <label>3D Calibration Config Path</label>
-                    <input type="text" id="calibration_3d_config" placeholder="/path/to/config3d.yaml">
-                    <div class="help">Path to DLC 3D calibration config. Leave empty to disable triangulation.</div>
-                </div>
+                <h3>Stereo Calibrations</h3>
+                <div id="calibrationRows"></div>
+                <button class="btn btn-sm" onclick="addCalibrationRow('', '')" style="margin-top:8px;">+ Add Calibration</button>
+                <div class="help" style="margin-top:6px;">Map camera names to OpenCV YAML calibration files (K1, K2, R, T). Assign cameras to subjects from the dashboard.</div>
             </div>
 
             <!-- Remote Training (Optional) -->
@@ -213,6 +244,11 @@
             <!-- Advanced -->
             <div class="form-section">
                 <h3>Advanced</h3>
+                <div class="form-row">
+                    <label>3D Calibration Config Path (legacy)</label>
+                    <input type="text" id="calibration_3d_config" placeholder="/path/to/config3d.yaml">
+                    <div class="help">Legacy DLC 3D calibration config. Prefer Stereo Calibrations above.</div>
+                </div>
                 <div class="form-row">
                     <label>Python Executable</label>
                     <input type="text" id="python_executable" placeholder="python">

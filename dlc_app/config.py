@@ -37,6 +37,7 @@ class Settings:
         self.dlc_date: str = "Sep16"
         self.dlc_net_type: str = "resnet_50"
         self.calibration_dir: str = ""  # path to calibration/ with camera_assignments.yaml
+        self.calibrations: dict = {}    # camera_name -> YAML calibration file path
         self.host: str = "127.0.0.1"
         self.port: int = 8080
 
@@ -126,6 +127,8 @@ class Settings:
             self.camera_names = data["camera_names"]
         if "bodyparts" in data and isinstance(data["bodyparts"], list):
             self.bodyparts = data["bodyparts"]
+        if "calibrations" in data and isinstance(data["calibrations"], dict):
+            self.calibrations = data["calibrations"]
         if "port" in data and data["port"] is not None:
             self.port = int(data["port"])
         if "remote_ssh_port" in data and data["remote_ssh_port"] is not None:
@@ -181,6 +184,7 @@ class Settings:
             "dlc_date": self.dlc_date,
             "dlc_net_type": self.dlc_net_type,
             "calibration_dir": self.calibration_dir,
+            "calibrations": self.calibrations,
             "host": self.host,
             "port": self.port,
             "remote_host": self.remote_host,
