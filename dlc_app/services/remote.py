@@ -243,6 +243,25 @@ def remote_train_monitor(
                 capture_output=True, timeout=15,
             )
 
+            # ── Convert CSV labels to H5 (DLC 3.0 expects .h5) ──
+            csv_to_h5_script = (
+                f"\"import pandas as pd, glob; "
+                f"csvs = glob.glob(r'{remote_project_dir}/labeled-data/*/CollectedData_*.csv'); "
+                f"[pd.read_csv(c, header=[0,1,2], index_col=[0,1,2])"
+                f".to_hdf(c.replace('.csv','.h5'), key='df_with_missing', mode='w') "
+                f"for c in csvs]; "
+                f"print(f'Converted {{len(csvs)}} CSV(s) to H5')\""
+            )
+            result = subprocess.run(
+                _py_cmd(cfg, csv_to_h5_script),
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0:
+                logfile.write(f"=== {result.stdout.strip()} ===\n")
+            else:
+                logfile.write(f"Warning: CSV to H5 conversion failed: {result.stderr.strip()[:200]}\n")
+            logfile.flush()
+
             # ── Phase 1b: Detect shuffle and ensure pytorch config exists ─
             remote_config = f"{remote_project_dir}/config.yaml"
 
