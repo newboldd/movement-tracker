@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from typing import List
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
@@ -118,7 +119,7 @@ def get_frame(
 
 
 @router.get("/sessions/{session_id}/labels")
-def get_labels(session_id: int) -> list[dict]:
+def get_labels(session_id: int) -> List[dict]:
     """Get all labels for this session."""
     with get_db_ctx() as db:
         labels = db.execute(
