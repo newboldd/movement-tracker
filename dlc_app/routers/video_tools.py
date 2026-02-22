@@ -38,6 +38,7 @@ class SegmentDef(BaseModel):
 class ProcessSubjectRequest(BaseModel):
     subject_name: str
     segments: list[SegmentDef]
+    blur_faces: bool = True
 
 
 # ── Probe ─────────────────────────────────────────────────────────────────
@@ -246,20 +247,31 @@ def process_subject(req: ProcessSubjectRequest) -> dict:
         subject_name=req.subject_name,
         segments=[s.model_dump() for s in req.segments],
         log_path=log_path,
+        blur_faces=req.blur_faces,
     )
 
     return {"job_id": job["id"], "status": "running", "subject_id": subj["id"]}
 
 
+def _update_job_progress(job_id: int, pct: float, logfile=None, msg: str = ""):
+    """Helper: update job progress in DB (and optionally log)."""
+    with get_db_ctx() as db:
+        db.execute("UPDATE jobs SET progress_pct = ? WHERE id = ?", (round(pct, 1), job_id))
+    if logfile and msg:
+        logfile.write(f"  {msg} ({pct:.0f}%)\n")
+        logfile.flush()
+
+
 def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
-                         segments: list[dict], log_path: str):
+                         segments: list[dict], log_path: str,
+                         blur_faces: bool = True):
     """Background thread: trim + blur each segment."""
 
     def _run():
         try:
             with get_db_ctx() as db:
                 db.execute(
-                    "UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    "UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP, progress_pct = 1 WHERE id = ?",
                     (job_id,),
                 )
 
@@ -268,6 +280,9 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
             os.makedirs(str(output_dir), exist_ok=True)
 
             total_segments = len(segments)
+            # Each segment gets an equal slice of 0-100%.
+            # Within a segment: trim = 5%, blur = 95%.
+            seg_span = 100.0 / total_segments
 
             with open(log_path, "w") as logfile:
                 for i, seg in enumerate(segments):
@@ -275,55 +290,73 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
                     output_name = f"{subject_name}_{trial}.mp4"
                     output_path = str(output_dir / output_name)
 
+                    seg_base = i * seg_span  # start pct for this segment
+                    trim_pct = seg_base + seg_span * 0.05  # 5% for trim
+                    blur_start = trim_pct
+                    blur_span = seg_span * 0.95  # 95% for blur
+
                     logfile.write(f"=== Segment {i+1}/{total_segments}: {trial} ===\n")
                     logfile.flush()
 
-                    # Step 1: Trim
-                    temp_trimmed = str(output_dir / f"_temp_trim_{subject_name}_{trial}.mp4")
-                    logfile.write(f"  Trimming {seg['source_path']} [{seg['start_time']:.1f}-{seg['end_time']:.1f}s]\n")
-                    logfile.flush()
+                    # Initial progress for this segment
+                    _update_job_progress(job_id, seg_base + 1, logfile, f"Starting {trial}")
 
-                    try:
-                        _ffmpeg_trim(seg["source_path"], seg["start_time"],
-                                    seg["end_time"], temp_trimmed)
-                    except Exception as e:
-                        logfile.write(f"  Trim failed: {e}\n")
-                        continue
+                    if blur_faces:
+                        # Trim to temp, then blur to output
+                        temp_trimmed = str(output_dir / f"_temp_trim_{subject_name}_{trial}.mp4")
+                        logfile.write(f"  Trimming {seg['source_path']} [{seg['start_time']:.1f}-{seg['end_time']:.1f}s]\n")
+                        logfile.flush()
 
-                    # Step 2: Face blur
-                    logfile.write(f"  Running face blur...\n")
-                    logfile.flush()
+                        try:
+                            _ffmpeg_trim(seg["source_path"], seg["start_time"],
+                                        seg["end_time"], temp_trimmed)
+                        except Exception as e:
+                            logfile.write(f"  Trim failed: {e}\n")
+                            continue
 
-                    try:
-                        from ..services.deidentify import deidentify_video
-                        deidentify_video(temp_trimmed, output_path)
-                        logfile.write(f"  Saved {output_path}\n")
-                    except ImportError:
-                        # Deidentify not available — just rename trimmed as output
-                        logfile.write(f"  Deidentify not available, using trimmed video\n")
-                        import shutil
-                        shutil.move(temp_trimmed, output_path)
-                        temp_trimmed = None  # already moved
-                    except Exception as e:
-                        logfile.write(f"  Blur failed: {e}, using trimmed video\n")
-                        import shutil
-                        shutil.move(temp_trimmed, output_path)
-                        temp_trimmed = None
+                        _update_job_progress(job_id, trim_pct, logfile, "Trim done")
 
-                    # Step 3: Clean up temp
-                    if temp_trimmed and os.path.exists(temp_trimmed):
-                        os.remove(temp_trimmed)
+                        # Face blur — progress callback maps 0-100 to this segment's blur range
+                        logfile.write(f"  Running face blur...\n")
+                        logfile.flush()
 
-                    # Update progress
-                    pct = ((i + 1) / total_segments) * 100
-                    with get_db_ctx() as db:
-                        db.execute(
-                            "UPDATE jobs SET progress_pct = ? WHERE id = ?",
-                            (pct, job_id),
-                        )
+                        def _blur_progress(blur_pct, _blur_start=blur_start, _blur_span=blur_span):
+                            overall = _blur_start + (blur_pct / 100.0) * _blur_span
+                            _update_job_progress(job_id, overall)
 
-                    logfile.write(f"  Done ({pct:.0f}%)\n")
-                    logfile.flush()
+                        try:
+                            from ..services.deidentify import deidentify_video
+                            deidentify_video(temp_trimmed, output_path,
+                                            progress_callback=_blur_progress)
+                            logfile.write(f"  Saved {output_path}\n")
+                        except ImportError:
+                            logfile.write(f"  Deidentify not available, using trimmed video\n")
+                            import shutil
+                            shutil.move(temp_trimmed, output_path)
+                            temp_trimmed = None
+                        except Exception as e:
+                            logfile.write(f"  Blur failed: {e}, using trimmed video\n")
+                            import shutil
+                            shutil.move(temp_trimmed, output_path)
+                            temp_trimmed = None
+
+                        # Clean up temp
+                        if temp_trimmed and os.path.exists(temp_trimmed):
+                            os.remove(temp_trimmed)
+                    else:
+                        # No blur — trim directly to output
+                        logfile.write(f"  Trimming {seg['source_path']} [{seg['start_time']:.1f}-{seg['end_time']:.1f}s] (no blur)\n")
+                        logfile.flush()
+
+                        try:
+                            _ffmpeg_trim(seg["source_path"], seg["start_time"],
+                                        seg["end_time"], output_path)
+                        except Exception as e:
+                            logfile.write(f"  Trim failed: {e}\n")
+                            continue
+
+                    pct = seg_base + seg_span
+                    _update_job_progress(job_id, pct, logfile, f"Done {trial}")
 
             # Mark complete
             with get_db_ctx() as db:

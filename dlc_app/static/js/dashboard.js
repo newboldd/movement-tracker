@@ -300,29 +300,6 @@ async function loadJobs() {
     } catch (e) { /* ignore */ }
 }
 
-// ── Add subject ──────────────────────────────────────
-function showAddModal() {
-    document.getElementById('addModal').classList.add('active');
-    document.getElementById('newSubjectName').focus();
-}
-function hideAddModal() {
-    document.getElementById('addModal').classList.remove('active');
-}
-
-async function addSubject() {
-    const name = document.getElementById('newSubjectName').value.trim();
-    if (!name) return alert('Enter a subject name');
-
-    try {
-        await API.post('/api/subjects', { name });
-        hideAddModal();
-        document.getElementById('newSubjectName').value = '';
-        loadSubjects();
-    } catch (e) {
-        alert('Error: ' + e.message);
-    }
-}
-
 async function syncSubjects() {
     try {
         const result = await API.post('/api/subjects/sync');
@@ -357,11 +334,6 @@ async function openLabeling(subjectId) {
 // ── Event listeners ──────────────────────────────────
 document.getElementById('filterInput').addEventListener('input', renderTable);
 document.getElementById('stageFilter').addEventListener('change', renderTable);
-
-// Escape closes modal
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') hideAddModal();
-});
 
 // ── Init ─────────────────────────────────────────────
 checkStatus().then(async () => {

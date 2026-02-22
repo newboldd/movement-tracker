@@ -289,7 +289,7 @@ def deidentify_video(input_path: str, output_path: str,
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             faces_raw.append(_detect_faces_in_half(rgb, face_det, full_w, h))
 
-        if progress_callback and t % 50 == 0:
+        if progress_callback and t % 10 == 0:
             progress_callback(t / n_frames * 40)  # Pass 1 = 0-40%
 
     face_det.close()
@@ -349,7 +349,7 @@ def deidentify_video(input_path: str, output_path: str,
 
         writer.write(out_frame)
 
-        if progress_callback and t % 50 == 0:
+        if progress_callback and t % 10 == 0:
             progress_callback(40 + t / n_frames * 60)  # Pass 2 = 40-100%
 
     cap.release()

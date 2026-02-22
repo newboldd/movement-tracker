@@ -140,8 +140,14 @@
                 <h3>Review & Process</h3>
             </div>
             <div id="reviewSegments"></div>
-            <div style="margin-top:12px;display:flex;gap:8px;">
-                <button class="btn btn-primary" onclick="onboard.startProcessing()">
+            <div style="margin-top:12px;">
+                <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:12px;">
+                    <input type="checkbox" id="blurFaces" checked>
+                    <span>Blur faces (de-identify)</span>
+                </label>
+            </div>
+            <div style="display:flex;gap:8px;">
+                <button class="btn btn-primary" id="processBtn" onclick="onboard.startProcessing()">
                     Trim, Blur Faces & Create Subject
                 </button>
                 <button class="btn" onclick="window.location.href='/'">Cancel</button>
@@ -156,6 +162,6 @@
     </div>
 
     <script src="/static/js/api.js?v=8"></script>
-    <script src="/static/js/onboarding.js?v=1"></script>
+    <script src="/static/js/onboarding.js?v=2"></script>
 </body>
 </html>

@@ -76,10 +76,12 @@ const onboard = (() => {
                         <span>${item.name}</span>
                     </div>`;
                 } else {
+                    const dateStr = item.created ? new Date(item.created).toLocaleDateString(undefined, {year:'numeric',month:'short',day:'numeric'}) : '';
                     html += `<div class="fb-item" id="fi-${item.name}" onclick="onboard.selectFile('${escPath(item.path)}', this)">
                         <span class="icon">&#127909;</span>
                         <span>${item.name}</span>
-                        <span class="size">${item.size_mb} MB</span>
+                        <span style="color:var(--text-muted);font-size:11px;margin-left:auto;">${dateStr}</span>
+                        <span class="size" style="min-width:60px;text-align:right;">${item.size_mb} MB</span>
                     </div>`;
                 }
             }
@@ -249,7 +251,7 @@ const onboard = (() => {
             const review = document.getElementById('reviewSegments');
             review.innerHTML = `
                 <p style="margin-bottom:8px;">Subject: <strong>${subjectName}</strong></p>
-                <p style="margin-bottom:8px;">${segments.length} segment(s) will be trimmed, face-blurred, and saved.</p>
+                <p style="margin-bottom:8px;">${segments.length} segment(s) will be trimmed and saved.</p>
             ` + segments.map(s => `
                 <div class="segment-item">
                     <span class="trial">${s.trial_label}</span>
@@ -258,9 +260,21 @@ const onboard = (() => {
                     <span style="color:var(--text-muted);font-size:11px;">&#8594; ${subjectName}_${s.trial_label}.mp4</span>
                 </div>
             `).join('');
+
+            updateProcessButton();
         } else {
             step4.style.display = 'none';
             document.getElementById('step3Num').classList.remove('done');
+        }
+    }
+
+    function updateProcessButton() {
+        const blur = document.getElementById('blurFaces');
+        const btn = document.getElementById('processBtn');
+        if (blur && btn) {
+            btn.textContent = blur.checked
+                ? 'Trim, Blur Faces & Create Subject'
+                : 'Trim & Create Subject';
         }
     }
 
@@ -276,8 +290,10 @@ const onboard = (() => {
         msgEl.textContent = 'Starting...';
 
         try {
+            const blurFaces = document.getElementById('blurFaces').checked;
             const result = await API.post('/api/video-tools/process-subject', {
                 subject_name: subjectName,
+                blur_faces: blurFaces,
                 segments: segments.map(s => ({
                     source_path: s.source_path,
                     start_time: s.start_time,
@@ -290,8 +306,9 @@ const onboard = (() => {
                 // Track job progress
                 API.streamJob(result.job_id,
                     (data) => {
-                        fillEl.style.width = `${data.progress_pct || 0}%`;
-                        msgEl.textContent = `Processing: ${(data.progress_pct || 0).toFixed(0)}%`;
+                        const pct = data.progress_pct || 0;
+                        fillEl.style.width = `${pct}%`;
+                        msgEl.textContent = pct < 2 ? 'Initializing...' : `Processing: ${pct.toFixed(0)}%`;
                     },
                     (data) => {
                         if (data.status === 'completed') {
@@ -310,6 +327,13 @@ const onboard = (() => {
             msgEl.style.color = 'var(--red)';
         }
     }
+
+    // ── Checkbox listener ─────────────────────────────────
+
+    document.addEventListener('DOMContentLoaded', () => {
+        const blur = document.getElementById('blurFaces');
+        if (blur) blur.addEventListener('change', updateProcessButton);
+    });
 
     // ── Keyboard shortcuts ────────────────────────────────
 

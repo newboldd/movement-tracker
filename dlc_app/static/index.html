@@ -45,8 +45,7 @@
             </div>
             <div style="display: flex; gap: 8px;">
                 <button class="btn btn-sm" onclick="syncSubjects()">Sync from disk</button>
-                <button class="btn btn-sm btn-primary" onclick="showAddModal()">+ Add Subject</button>
-                <a href="/onboarding" class="btn btn-sm" style="text-decoration:none;">Import Videos</a>
+                <a href="/onboarding" class="btn btn-sm btn-primary" style="text-decoration:none;">+ Add Subject</a>
             </div>
         </div>
 
@@ -95,21 +94,6 @@
                 <button class="btn btn-sm" onclick="closeLogModal()">Close</button>
             </div>
             <pre id="logContent" style="max-height:60vh;overflow:auto;background:var(--bg);padding:12px;border-radius:var(--radius);font-size:12px;white-space:pre-wrap;word-break:break-all;margin:0;"></pre>
-        </div>
-    </div>
-
-    <!-- Add Subject Modal -->
-    <div class="modal-overlay" id="addModal">
-        <div class="modal">
-            <h3>Add New Subject</h3>
-            <div class="form-group">
-                <label>Subject Name (e.g. MSA20, Con10, PD15)</label>
-                <input type="text" id="newSubjectName" placeholder="Subject name">
-            </div>
-            <div class="actions">
-                <button class="btn" onclick="hideAddModal()">Cancel</button>
-                <button class="btn btn-primary" onclick="addSubject()">Create</button>
-            </div>
         </div>
     </div>
 

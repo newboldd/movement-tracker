@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
 
@@ -53,32 +54,43 @@ def list_directory(
     if not dir_path.is_dir():
         raise HTTPException(400, f"Not a directory: {path}")
 
-    items = []
+    dirs = []
+    videos = []
     try:
-        for entry in sorted(dir_path.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower())):
+        for entry in dir_path.iterdir():
             if entry.name.startswith("."):
                 continue
 
             if entry.is_dir():
-                items.append({
+                dirs.append({
                     "name": entry.name,
                     "path": str(entry),
                     "type": "dir",
                 })
             elif entry.is_file() and entry.suffix.lower() in VIDEO_EXTENSIONS:
                 try:
-                    size = entry.stat().st_size
+                    stat = entry.stat()
+                    size = stat.st_size
+                    ctime = stat.st_ctime
                 except OSError:
                     size = 0
-                items.append({
+                    ctime = 0.0
+                videos.append({
                     "name": entry.name,
                     "path": str(entry),
                     "type": "video",
                     "size": size,
                     "size_mb": round(size / (1024 * 1024), 1),
+                    "created": datetime.fromtimestamp(ctime, tz=timezone.utc).isoformat(),
+                    "created_ts": ctime,
                 })
     except PermissionError:
         raise HTTPException(403, f"Permission denied: {path}")
+
+    # Dirs alphabetical, videos by creation date (newest first)
+    dirs.sort(key=lambda d: d["name"].lower())
+    videos.sort(key=lambda v: v["created_ts"], reverse=True)
+    items = dirs + videos
 
     # Build breadcrumbs
     parts = dir_path.parts
