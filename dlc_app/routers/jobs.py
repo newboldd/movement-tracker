@@ -59,7 +59,10 @@ async def stream_job(job_id: int) -> StreamingResponse:
         while True:
             with get_db_ctx() as db:
                 current = db.execute(
-                    "SELECT status, progress_pct, error_msg, remote_host FROM jobs WHERE id = ?",
+                    """SELECT j.status, j.progress_pct, j.error_msg, j.remote_host,
+                              j.job_type, s.name AS subject_name
+                       FROM jobs j LEFT JOIN subjects s ON j.subject_id = s.id
+                       WHERE j.id = ?""",
                     (job_id,),
                 ).fetchone()
 

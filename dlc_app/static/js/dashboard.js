@@ -218,7 +218,8 @@ function updateJobDisplay(jobId, data) {
     el.innerHTML = `
         <div style="display:flex;align-items:center;gap:12px;">
             <span class="job-indicator job-${data.status}"></span>
-            <span>Job #${jobId}</span>
+            <span style="font-weight:600;">${data.subject_name || '?'}</span>
+            <span style="color:var(--text-muted);">${(data.job_type || '').replace(/_/g, ' ')}</span>
             ${remoteBadge}
             <div class="progress-bar" style="flex:1;max-width:200px;">
                 <div class="fill" style="width:${data.progress_pct || 0}%"></div>
