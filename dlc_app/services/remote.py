@@ -233,8 +233,37 @@ def remote_train_monitor(
                 capture_output=True, timeout=15,
             )
 
-            # ── Phase 2: Training ────────────────────────────────────
+            # ── Phase 1b: Create training dataset on remote ─────────
             remote_config = f"{remote_project_dir}/config.yaml"
+            create_ds_cmd = _py_cmd(
+                cfg,
+                f"\"from deeplabcut.core.engine import Engine; import deeplabcut; deeplabcut.create_training_dataset(r'{remote_config}', engine=Engine.PYTORCH)\"",
+            )
+
+            logfile.write(f"=== Phase 1b: Creating training dataset on {cfg.host} ===\n")
+            logfile.flush()
+
+            proc = subprocess.Popen(
+                create_ds_cmd,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            )
+            registry._processes[job_id] = proc
+
+            for line in proc.stdout:
+                logfile.write(line)
+                logfile.flush()
+
+            proc.wait()
+            if proc.returncode != 0:
+                _fail(f"Create training dataset failed (exit {proc.returncode})")
+                if on_complete:
+                    on_complete(job_id, proc.returncode)
+                return
+
+            logfile.write("=== Training dataset created ===\n")
+            logfile.flush()
+
+            # ── Phase 2: Training ────────────────────────────────────
             train_cmd = _py_cmd(
                 cfg,
                 f"\"from deeplabcut.core.engine import Engine; import deeplabcut; deeplabcut.train_network(r'{remote_config}', engine=Engine.PYTORCH)\"",
