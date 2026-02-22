@@ -156,6 +156,12 @@ def commit_labels_to_dlc(
         # Non-fatal — CSV is the primary format; H5 needs DeepLabCut
         print(f"Warning: CSV to H5 conversion skipped ({e}). Install DeepLabCut for H5 support.")
 
+    # Update crop params in config.yaml from MP + manual corrections
+    try:
+        _update_crop_params(subject_name, config_path)
+    except Exception as e:
+        print(f"Warning: Could not update crop params ({e})")
+
     return {
         "dlc_dir": str(dlc_path),
         "labeled_data_dir": str(labeled_data_dir),
@@ -234,3 +240,45 @@ batch_size: 8
 """
     config_path.write_text(config_content)
     return str(config_path)
+
+
+def _update_crop_params(subject_name: str, config_path: Path):
+    """Update DLC config.yaml video_sets crop params from MP + manual corrections.
+
+    Computes bounding box of all detected thumb/index positions per camera,
+    adds margin, and writes crop: x1, x2, y1, y2 into config.yaml video_sets.
+    """
+    from .mediapipe_prelabel import compute_optimal_crop
+
+    crops = compute_optimal_crop(subject_name)
+
+    if not any(v is not None for v in crops.values()):
+        return
+
+    if not config_path.exists():
+        return
+
+    # Read existing config
+    text = config_path.read_text()
+    lines = text.splitlines(keepends=True)
+
+    # Find and update crop lines in video_sets section
+    # The crop format in DLC config is: crop: x1, x2, y1, y2
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("crop:"):
+            # Use first camera's crop (since DLC trains on cropped single-camera images)
+            settings = get_settings()
+            cam = settings.camera_names[0] if settings.camera_names else None
+            crop = crops.get(cam) if cam else None
+            if crop:
+                x1, x2, y1, y2 = crop
+                indent = line[:len(line) - len(line.lstrip())]
+                new_lines.append(f"{indent}crop: {x1}, {x2}, {y1}, {y2}\n")
+            else:
+                new_lines.append(line)
+        else:
+            new_lines.append(line)
+
+    config_path.write_text("".join(new_lines))

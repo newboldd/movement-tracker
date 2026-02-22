@@ -35,6 +35,7 @@ class Settings:
         self.dlc_scorer: str = "labels"
         self.dlc_date: str = "Sep16"
         self.dlc_net_type: str = "resnet_50"
+        self.calibration_dir: str = ""  # path to calibration/ with camera_assignments.yaml
         self.host: str = "127.0.0.1"
         self.port: int = 8080
 
@@ -113,6 +114,7 @@ class Settings:
         for key in [
             "video_dir", "dlc_dir", "calibration_3d_config",
             "python_executable", "dlc_scorer", "dlc_date", "dlc_net_type",
+            "calibration_dir",
             "host",
             "remote_host", "remote_python", "remote_work_dir", "remote_ssh_key",
         ]:
@@ -138,6 +140,7 @@ class Settings:
             "DLC_APP_DLC_SCORER": "dlc_scorer",
             "DLC_APP_DLC_DATE": "dlc_date",
             "DLC_APP_DLC_NET_TYPE": "dlc_net_type",
+            "DLC_APP_CALIBRATION_DIR": "calibration_dir",
             "DLC_APP_HOST": "host",
             "DLC_APP_REMOTE_HOST": "remote_host",
             "DLC_APP_REMOTE_PYTHON": "remote_python",
@@ -176,6 +179,7 @@ class Settings:
             "dlc_scorer": self.dlc_scorer,
             "dlc_date": self.dlc_date,
             "dlc_net_type": self.dlc_net_type,
+            "calibration_dir": self.calibration_dir,
             "host": self.host,
             "port": self.port,
             "remote_host": self.remote_host,

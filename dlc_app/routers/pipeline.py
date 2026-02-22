@@ -20,11 +20,13 @@ from ..services.dlc_wrapper import (
 from ..services.jobs import registry, parse_dlc_training_progress
 from ..services.remote import remote_train_monitor
 from ..services.video import get_subject_videos
+from ..services.mediapipe_prelabel import run_mediapipe
 
 router = APIRouter(prefix="/api/subjects", tags=["pipeline"])
 
 # Valid pipeline steps in order
 VALID_STEPS = [
+    "mediapipe",
     "create_training_dataset",
     "train",
     "crop",
@@ -33,7 +35,7 @@ VALID_STEPS = [
     "triangulate",
 ]
 
-# Steps that require DeepLabCut (crop is pure OpenCV)
+# Steps that require DeepLabCut (crop and mediapipe are pure OpenCV/mediapipe)
 DLC_STEPS = {"create_training_dataset", "train", "analyze", "create_labeled_video", "triangulate"}
 
 
@@ -97,6 +99,11 @@ def run_step(subject_id: int, req: RunStepRequest) -> dict:
     subject_name = subj["name"]
     dlc_dir = settings.dlc_path
     cam_names = settings.camera_names
+
+    if req.step == "mediapipe":
+        # MediaPipe prelabeling runs inline in a thread (no DLC needed)
+        _do_mediapipe(subject_name, job["id"])
+        return {"job_id": job["id"], "status": "running"}
 
     try:
         config_path = fix_project_path(subject_name)
@@ -207,6 +214,49 @@ def run_step(subject_id: int, req: RunStepRequest) -> dict:
     )
 
     return {"job_id": job["id"], "status": "running"}
+
+
+def _do_mediapipe(subject_name: str, job_id: int):
+    """Run MediaPipe prelabeling in a background thread."""
+    import threading
+
+    def _run():
+        try:
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (job_id,),
+                )
+
+            def progress_cb(pct):
+                with get_db_ctx() as db:
+                    db.execute(
+                        "UPDATE jobs SET progress_pct = ? WHERE id = ?",
+                        (pct, job_id),
+                    )
+
+            run_mediapipe(subject_name, progress_callback=progress_cb)
+
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'completed', progress_pct = 100,
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (job_id,),
+                )
+                db.execute(
+                    "UPDATE subjects SET stage = 'prelabeled', updated_at = CURRENT_TIMESTAMP WHERE id = (SELECT subject_id FROM jobs WHERE id = ?)",
+                    (job_id,),
+                )
+        except Exception as e:
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'failed', error_msg = ?,
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (str(e), job_id),
+                )
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
 
 
 def _do_crop(subject_name: str, job_id: int):

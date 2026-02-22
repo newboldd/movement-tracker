@@ -83,6 +83,12 @@ function getActions(subject) {
     btns.push(`<button class="btn btn-sm" onclick="openLabeling(${subject.id})">Label</button>`);
 
     // Stage-specific actions
+    if (s === 'videos_linked' || s === 'created') {
+        btns.push(`<button class="btn btn-sm btn-primary" onclick="runStep(${subject.id}, 'mediapipe')">Run MediaPipe</button>`);
+    }
+    if (s === 'prelabeled') {
+        btns.push(`<button class="btn btn-sm" onclick="runStep(${subject.id}, 'mediapipe')">Re-run MP</button>`);
+    }
     if (s === 'committed' || s === 'labeled') {
         btns.push(`<button class="btn btn-sm" onclick="runStep(${subject.id}, 'create_training_dataset')">Create Dataset</button>`);
     }

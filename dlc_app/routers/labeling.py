@@ -1,4 +1,4 @@
-"""Labeling session endpoints: frame serving, label CRUD, commit."""
+"""Labeling session endpoints: frame serving, label CRUD, commit, MediaPipe prelabels."""
 
 import json
 
@@ -12,6 +12,10 @@ from ..services.video import (
     extract_frame, build_trial_map, get_total_frames, get_subject_videos,
 )
 from ..services.labels import commit_labels_to_dlc
+from ..services.mediapipe_prelabel import (
+    get_mediapipe_for_session,
+    recompute_distance_for_frame,
+)
 
 router = APIRouter(prefix="/api/labeling", tags=["labeling"])
 
@@ -130,15 +134,47 @@ def get_labels(session_id: int) -> list[dict]:
     return labels
 
 
-@router.put("/sessions/{session_id}/labels")
-def save_labels(session_id: int, req: LabelBatchSave) -> dict:
-    """Batch-save labels (upsert)."""
+@router.get("/sessions/{session_id}/mediapipe")
+def get_mediapipe(session_id: int) -> dict:
+    """Return MediaPipe prelabel predictions for this session's subject.
+
+    Response shape:
+    {
+        "OS": {"thumb": [[x,y], null, ...], "index": [[x,y], ...]},
+        "OD": {"thumb": [[x,y], ...], "index": [[x,y], ...]},
+        "distances": [d0, null, d2, ...]
+    }
+    """
     with get_db_ctx() as db:
         session = db.execute(
             "SELECT * FROM label_sessions WHERE id = ?", (session_id,)
         ).fetchone()
         if not session:
             raise HTTPException(404, "Session not found")
+        subj = db.execute(
+            "SELECT * FROM subjects WHERE id = ?", (session["subject_id"],)
+        ).fetchone()
+
+    data = get_mediapipe_for_session(subj["name"])
+    if data is None:
+        return {}
+
+    return data
+
+
+@router.put("/sessions/{session_id}/labels")
+def save_labels(session_id: int, req: LabelBatchSave) -> dict:
+    """Batch-save labels (upsert). Returns updated distances for affected frames."""
+    with get_db_ctx() as db:
+        session = db.execute(
+            "SELECT * FROM label_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not session:
+            raise HTTPException(404, "Session not found")
+
+        subj = db.execute(
+            "SELECT * FROM subjects WHERE id = ?", (session["subject_id"],)
+        ).fetchone()
 
         for label in req.labels:
             kp_json = json.dumps(label.keypoints)
@@ -156,7 +192,22 @@ def save_labels(session_id: int, req: LabelBatchSave) -> dict:
                 ),
             )
 
-    return {"saved": len(req.labels)}
+    # Recompute distances for affected frames
+    updated_distances = {}
+    if subj:
+        # Group labels by frame to get both cameras' data
+        frame_labels = {}
+        for label in req.labels:
+            if label.frame_num not in frame_labels:
+                frame_labels[label.frame_num] = {}
+            frame_labels[label.frame_num][label.side] = label.keypoints
+
+        for frame_num, sides in frame_labels.items():
+            dist = recompute_distance_for_frame(subj["name"], frame_num, sides)
+            if dist is not None:
+                updated_distances[str(frame_num)] = dist
+
+    return {"saved": len(req.labels), "updated_distances": updated_distances}
 
 
 @router.delete("/sessions/{session_id}/labels/{frame_num}")

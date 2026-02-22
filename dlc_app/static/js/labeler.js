@@ -1,4 +1,5 @@
-/* Canvas labeling engine for DLC finger-tapping keypoint annotation */
+/* Canvas labeling engine for DLC finger-tapping keypoint annotation
+   with MediaPipe ghost markers, click-to-accept, and 3D distance trace */
 
 const labeler = (() => {
     // ── State ──────────────────────────────────────────
@@ -21,6 +22,12 @@ const labeler = (() => {
     // frameKey = `${frame}_${side}`
     const labels = new Map();
 
+    // MediaPipe prelabels: {OS: {thumb: [...], index: [...]}, OD: {...}, distances: [...]}
+    let mpLabels = null;
+
+    // 3D distance trace
+    let distances = null;
+
     // Color palette for bodyparts
     const COLORS = [
         '#ff4444', '#222222', '#4a9eff', '#4caf50',
@@ -33,6 +40,7 @@ const labeler = (() => {
     // Canvas state
     let canvas, ctx;
     let timeline, tlCtx;
+    let distCanvas, distCtx;
     let containerEl;
     let currentImage = null;
     let imgW = 0, imgH = 0;
@@ -67,10 +75,13 @@ const labeler = (() => {
         ctx = canvas.getContext('2d');
         timeline = document.getElementById('timelineCanvas');
         tlCtx = timeline.getContext('2d');
+        distCanvas = document.getElementById('distanceTraceCanvas');
+        distCtx = distCanvas ? distCanvas.getContext('2d') : null;
         containerEl = document.getElementById('canvasContainer');
 
         setupCanvasEvents();
         setupTimeline();
+        if (distCanvas) setupDistanceTrace();
 
         loadSession();
     }
@@ -102,6 +113,22 @@ const labeler = (() => {
                 const key = `${l.frame_num}_${l.side}`;
                 labels.set(key, l.keypoints || {});
             });
+
+            // Load MediaPipe prelabels
+            try {
+                const mpData = await API.get(`/api/labeling/sessions/${sessionId}/mediapipe`);
+                if (mpData && Object.keys(mpData).length > 0) {
+                    mpLabels = mpData;
+                    distances = mpData.distances || null;
+                    // Show distance trace if we have data
+                    if (distances && distances.some(d => d !== null)) {
+                        const traceContainer = document.getElementById('distanceTraceContainer');
+                        if (traceContainer) traceContainer.style.display = 'block';
+                    }
+                }
+            } catch (e) {
+                console.log('No MediaPipe prelabels available');
+            }
 
             updateLabelCount();
             goToFrame(0);
@@ -163,6 +190,7 @@ const labeler = (() => {
 
         updateFrameDisplay();
         renderTimeline();
+        renderDistanceTrace();
     }
 
     function fitImage() {
@@ -172,6 +200,24 @@ const labeler = (() => {
         scale = Math.min(cw / imgW, ch / imgH);
         offsetX = (cw - imgW * scale) / 2;
         offsetY = (ch - imgH * scale) / 2;
+    }
+
+    // ── MediaPipe ghost helpers ───────────────────────
+    function getMpLabel(frame, side, bodypart) {
+        if (!mpLabels) return null;
+        const camData = mpLabels[side];
+        if (!camData) return null;
+        const arr = camData[bodypart];
+        if (!arr || frame >= arr.length) return null;
+        return arr[frame]; // [x, y] or null
+    }
+
+    function hasManualLabel(frame, side, bodypart) {
+        const key = `${frame}_${side}`;
+        const lbl = labels.get(key);
+        if (!lbl) return false;
+        const coords = lbl[bodypart];
+        return coords && coords[0] != null;
     }
 
     // ── Rendering ─────────────────────────────────────
@@ -194,31 +240,43 @@ const labeler = (() => {
         // Draw labels for current frame + side
         const key = `${currentFrame}_${currentSide}`;
         const lbl = labels.get(key);
-        if (lbl) {
-            const placedBps = [];
-            bodyparts.forEach((bp, idx) => {
-                const coords = lbl[bp];
-                if (coords && coords[0] != null && coords[1] != null) {
-                    drawPoint(coords[0], coords[1], bpColor(idx), bpLetter(bp));
-                    placedBps.push({ bp, x: coords[0], y: coords[1] });
-                }
-            });
+        const placedBps = [];
 
-            // Draw lines between consecutive placed bodyparts
-            for (let i = 1; i < placedBps.length; i++) {
-                const a = placedBps[i - 1];
-                const b = placedBps[i];
-                const ax = a.x * scale + offsetX;
-                const ay = a.y * scale + offsetY;
-                const bx = b.x * scale + offsetX;
-                const by = b.y * scale + offsetY;
-                ctx.beginPath();
-                ctx.moveTo(ax, ay);
-                ctx.lineTo(bx, by);
-                ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-                ctx.lineWidth = 1;
-                ctx.stroke();
+        bodyparts.forEach((bp, idx) => {
+            const manualCoords = lbl ? lbl[bp] : null;
+            const hasManual = manualCoords && manualCoords[0] != null && manualCoords[1] != null;
+
+            if (hasManual) {
+                // Draw solid manual label
+                drawPoint(manualCoords[0], manualCoords[1], bpColor(idx), bpLetter(bp));
+                placedBps.push({ bp, x: manualCoords[0], y: manualCoords[1] });
+            } else {
+                // Draw ghost MP marker if available
+                const mpCoords = getMpLabel(currentFrame, currentSide, bp);
+                if (mpCoords) {
+                    drawGhostPoint(mpCoords[0], mpCoords[1], bpColor(idx), 'MP');
+                    placedBps.push({ bp, x: mpCoords[0], y: mpCoords[1], ghost: true });
+                }
             }
+        });
+
+        // Draw lines between consecutive placed bodyparts
+        for (let i = 1; i < placedBps.length; i++) {
+            const a = placedBps[i - 1];
+            const b = placedBps[i];
+            const ax = a.x * scale + offsetX;
+            const ay = a.y * scale + offsetY;
+            const bx = b.x * scale + offsetX;
+            const by = b.y * scale + offsetY;
+            const isGhost = a.ghost || b.ghost;
+            ctx.beginPath();
+            ctx.moveTo(ax, ay);
+            ctx.lineTo(bx, by);
+            ctx.strokeStyle = isGhost ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.3)';
+            ctx.lineWidth = 1;
+            if (isGhost) ctx.setLineDash([4, 4]);
+            ctx.stroke();
+            ctx.setLineDash([]);
         }
     }
 
@@ -262,6 +320,36 @@ const labeler = (() => {
         ctx.stroke();
     }
 
+    function drawGhostPoint(imgX, imgY, color, letter) {
+        const sx = imgX * scale + offsetX;
+        const sy = imgY * scale + offsetY;
+        const r = POINT_RADIUS;
+
+        // Dashed outer ring (ghost style)
+        ctx.beginPath();
+        ctx.arc(sx, sy, r + 2, 0, Math.PI * 2);
+        ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Semi-transparent filled circle
+        ctx.beginPath();
+        ctx.arc(sx, sy, r, 0, Math.PI * 2);
+        ctx.globalAlpha = 0.4;
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.globalAlpha = 1.0;
+
+        // Letter label
+        ctx.fillStyle = 'rgba(255,255,255,0.6)';
+        ctx.font = 'bold 9px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(letter, sx, sy);
+    }
+
     // ── Screen <-> Image coordinate conversion ────────
     function screenToImage(sx, sy) {
         return {
@@ -277,19 +365,32 @@ const labeler = (() => {
         };
     }
 
-    // ── Hit testing ───────────────────────────────────
+    // ── Hit testing (manual labels + ghost markers) ───
     function hitTest(sx, sy) {
         const key = `${currentFrame}_${currentSide}`;
         const lbl = labels.get(key);
-        if (!lbl) return null;
 
-        for (const bp of bodyparts) {
-            const coords = lbl[bp];
-            if (coords && coords[0] != null) {
-                const p = imageToScreen(coords[0], coords[1]);
-                if (Math.hypot(sx - p.x, sy - p.y) < HIT_RADIUS) return bp;
+        // Check manual labels first
+        if (lbl) {
+            for (const bp of bodyparts) {
+                const coords = lbl[bp];
+                if (coords && coords[0] != null) {
+                    const p = imageToScreen(coords[0], coords[1]);
+                    if (Math.hypot(sx - p.x, sy - p.y) < HIT_RADIUS) return { bp, ghost: false };
+                }
             }
         }
+
+        // Check ghost markers
+        for (const bp of bodyparts) {
+            if (hasManualLabel(currentFrame, currentSide, bp)) continue;
+            const mpCoords = getMpLabel(currentFrame, currentSide, bp);
+            if (mpCoords) {
+                const p = imageToScreen(mpCoords[0], mpCoords[1]);
+                if (Math.hypot(sx - p.x, sy - p.y) < HIT_RADIUS) return { bp, ghost: true };
+            }
+        }
+
         return null;
     }
 
@@ -307,6 +408,7 @@ const labeler = (() => {
                 fitImage();
                 render();
                 renderTimeline();
+                renderDistanceTrace();
             }
         });
         ro.observe(containerEl);
@@ -320,16 +422,38 @@ const labeler = (() => {
 
         const hit = hitTest(sx, sy);
         if (hit) {
-            // Start dragging existing point
-            dragging = hit;
-            const key = `${currentFrame}_${currentSide}`;
-            const lbl = labels.get(key);
-            const coords = lbl[hit];
-            dragOrigX = coords[0];
-            dragOrigY = coords[1];
-            dragStartX = sx;
-            dragStartY = sy;
-            canvas.style.cursor = 'grabbing';
+            if (hit.ghost) {
+                // Click on ghost marker: accept MP position as manual label
+                const mpCoords = getMpLabel(currentFrame, currentSide, hit.bp);
+                if (mpCoords) {
+                    const key = `${currentFrame}_${currentSide}`;
+                    let lbl = labels.get(key);
+                    if (!lbl) { lbl = {}; labels.set(key, lbl); }
+                    lbl[hit.bp] = [mpCoords[0], mpCoords[1]];
+
+                    // Enter drag mode immediately for refine
+                    dragging = hit.bp;
+                    dragOrigX = mpCoords[0];
+                    dragOrigY = mpCoords[1];
+                    dragStartX = sx;
+                    dragStartY = sy;
+                    canvas.style.cursor = 'grabbing';
+
+                    render();
+                    updateLabelCount();
+                }
+            } else {
+                // Start dragging existing manual point
+                dragging = hit.bp;
+                const key = `${currentFrame}_${currentSide}`;
+                const lbl = labels.get(key);
+                const coords = lbl[hit.bp];
+                dragOrigX = coords[0];
+                dragOrigY = coords[1];
+                dragStartX = sx;
+                dragStartY = sy;
+                canvas.style.cursor = 'grabbing';
+            }
         } else {
             // Check if click is within image bounds
             const img = screenToImage(sx, sy);
@@ -385,9 +509,10 @@ const labeler = (() => {
         const sy = e.clientY - rect.top;
 
         const hit = hitTest(sx, sy);
-        if (hit) {
-            removeLabel(hit);
+        if (hit && !hit.ghost) {
+            removeLabel(hit.bp);
         }
+        // Right-click on ghost marker: no-op
     }
 
     function onWheel(e) {
@@ -506,7 +631,17 @@ const labeler = (() => {
         if (batch.length === 0) return;
 
         try {
-            await API.put(`/api/labeling/sessions/${sessionId}/labels`, { labels: batch });
+            const result = await API.put(`/api/labeling/sessions/${sessionId}/labels`, { labels: batch });
+            // Update distances from server response
+            if (result.updated_distances && distances) {
+                for (const [frameStr, dist] of Object.entries(result.updated_distances)) {
+                    const frame = parseInt(frameStr);
+                    if (frame >= 0 && frame < distances.length) {
+                        distances[frame] = dist;
+                    }
+                }
+                renderDistanceTrace();
+            }
         } catch (e) {
             console.error('Save failed:', e);
         }
@@ -649,6 +784,14 @@ const labeler = (() => {
             }
         }
         document.getElementById('trialDisplay').textContent = `Trial: ${trialName}`;
+
+        // Show distance for current frame
+        const distInfo = document.getElementById('labelInfo');
+        if (distances && distances[currentFrame] !== null && distances[currentFrame] !== undefined) {
+            distInfo.textContent = `Distance: ${distances[currentFrame].toFixed(1)} mm`;
+        } else {
+            distInfo.textContent = 'Click to place keypoints';
+        }
     }
 
     function updateLabelCount() {
@@ -677,7 +820,7 @@ const labeler = (() => {
             <div><kbd>Z</kbd> Reset zoom</div>
             <div><kbd>Space</kbd> Play/pause</div>
             <div><kbd>Scroll</kbd> Zoom at cursor</div>
-            <div><kbd>Click</kbd> Place label</div>
+            <div><kbd>Click</kbd> Place / accept MP</div>
             <div><kbd>Drag</kbd> Move label</div>
             <div><kbd>Right-click</kbd> Remove label</div>
         `;
@@ -738,7 +881,39 @@ const labeler = (() => {
             tlCtx.stroke();
         }
 
-        // Label dots
+        // MP coverage bars (thin dim blue lines where MP detected hand)
+        if (mpLabels) {
+            cameraNames.forEach(cam => {
+                const camData = mpLabels[cam];
+                if (!camData) return;
+                const thumbArr = camData.thumb;
+                if (!thumbArr) return;
+
+                const yBase = labelY[cam];
+                const barY = yBase + rowH / 2;
+
+                tlCtx.beginPath();
+                let inSegment = false;
+                for (let f = 0; f < totalFrames && f < thumbArr.length; f++) {
+                    const x = barX + (f / totalFrames) * barW;
+                    if (thumbArr[f] !== null) {
+                        if (!inSegment) {
+                            tlCtx.moveTo(x, barY);
+                            inSegment = true;
+                        } else {
+                            tlCtx.lineTo(x, barY);
+                        }
+                    } else {
+                        inSegment = false;
+                    }
+                }
+                tlCtx.strokeStyle = 'rgba(74, 158, 255, 0.2)';
+                tlCtx.lineWidth = Math.max(rowH * 0.4, 3);
+                tlCtx.stroke();
+            });
+        }
+
+        // Manual label dots (bright, on top of MP bars)
         labels.forEach((lbl, key) => {
             const [frameStr, side] = key.split('_');
             const frame = parseInt(frameStr);
@@ -751,7 +926,7 @@ const labeler = (() => {
                 if (coords && coords[0] != null) {
                     const dotY = yBase + rowH / 2 + (idx - bodyparts.length / 2) * 6;
                     tlCtx.beginPath();
-                    tlCtx.arc(x, dotY, 2, 0, Math.PI * 2);
+                    tlCtx.arc(x, dotY, 2.5, 0, Math.PI * 2);
                     tlCtx.fillStyle = bpColor(idx);
                     tlCtx.fill();
                 }
@@ -766,6 +941,136 @@ const labeler = (() => {
         tlCtx.strokeStyle = '#ff4444';
         tlCtx.lineWidth = 2;
         tlCtx.stroke();
+    }
+
+    // ── Distance Trace ────────────────────────────────
+    function setupDistanceTrace() {
+        distCanvas.addEventListener('click', onDistanceTraceClick);
+
+        const container = distCanvas.parentElement;
+        const ro = new ResizeObserver(() => renderDistanceTrace());
+        ro.observe(container);
+    }
+
+    function onDistanceTraceClick(e) {
+        if (!distances || totalFrames === 0) return;
+        const rect = distCanvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const padL = 40;
+        const padR = 8;
+        const plotW = rect.width - padL - padR;
+        const frame = Math.floor(((x - padL) / plotW) * totalFrames);
+        goToFrame(Math.max(0, Math.min(frame, totalFrames - 1)));
+    }
+
+    function renderDistanceTrace() {
+        if (!distCanvas || !distCtx || !distances) return;
+
+        const container = distCanvas.parentElement;
+        const w = container.clientWidth;
+        const h = container.clientHeight;
+        distCanvas.width = w;
+        distCanvas.height = h;
+
+        if (totalFrames === 0) return;
+
+        const padL = 40, padR = 8, padT = 16, padB = 4;
+        const plotW = w - padL - padR;
+        const plotH = h - padT - padB;
+
+        // Find data range
+        let minD = Infinity, maxD = -Infinity;
+        for (const d of distances) {
+            if (d !== null && d !== undefined) {
+                minD = Math.min(minD, d);
+                maxD = Math.max(maxD, d);
+            }
+        }
+        if (minD === Infinity) return;
+
+        // Add some padding to range
+        const range = maxD - minD || 10;
+        minD = Math.max(0, minD - range * 0.05);
+        maxD = maxD + range * 0.05;
+
+        // Background
+        distCtx.fillStyle = '#16213e';
+        distCtx.fillRect(0, 0, w, h);
+
+        // Y-axis labels
+        distCtx.fillStyle = '#8892a0';
+        distCtx.font = '9px sans-serif';
+        distCtx.textAlign = 'right';
+        const nTicks = 3;
+        for (let i = 0; i <= nTicks; i++) {
+            const val = minD + (maxD - minD) * (1 - i / nTicks);
+            const y = padT + (i / nTicks) * plotH;
+            distCtx.fillText(val.toFixed(0), padL - 4, y + 3);
+            // Grid line
+            distCtx.beginPath();
+            distCtx.moveTo(padL, y);
+            distCtx.lineTo(w - padR, y);
+            distCtx.strokeStyle = 'rgba(42, 58, 92, 0.5)';
+            distCtx.lineWidth = 0.5;
+            distCtx.stroke();
+        }
+
+        // Draw distance line
+        distCtx.beginPath();
+        let started = false;
+        for (let f = 0; f < totalFrames && f < distances.length; f++) {
+            const d = distances[f];
+            if (d === null || d === undefined) {
+                started = false;
+                continue;
+            }
+            const x = padL + (f / totalFrames) * plotW;
+            const y = padT + ((maxD - d) / (maxD - minD)) * plotH;
+            if (!started) {
+                distCtx.moveTo(x, y);
+                started = true;
+            } else {
+                distCtx.lineTo(x, y);
+            }
+        }
+        distCtx.strokeStyle = 'rgba(74, 158, 255, 0.7)';
+        distCtx.lineWidth = 1;
+        distCtx.stroke();
+
+        // Draw dots for frames with manual corrections
+        labels.forEach((lbl, key) => {
+            const [frameStr, side] = key.split('_');
+            const frame = parseInt(frameStr);
+            if (frame >= distances.length) return;
+            const d = distances[frame];
+            if (d === null || d === undefined) return;
+
+            const x = padL + (frame / totalFrames) * plotW;
+            const y = padT + ((maxD - d) / (maxD - minD)) * plotH;
+            distCtx.beginPath();
+            distCtx.arc(x, y, 2.5, 0, Math.PI * 2);
+            distCtx.fillStyle = '#4caf50';
+            distCtx.fill();
+        });
+
+        // Current frame cursor
+        const cx = padL + (currentFrame / totalFrames) * plotW;
+        distCtx.beginPath();
+        distCtx.moveTo(cx, padT);
+        distCtx.lineTo(cx, h - padB);
+        distCtx.strokeStyle = '#ff4444';
+        distCtx.lineWidth = 1.5;
+        distCtx.stroke();
+
+        // Show value at current frame
+        const curD = distances[currentFrame];
+        if (curD !== null && curD !== undefined) {
+            const y = padT + ((maxD - curD) / (maxD - minD)) * plotH;
+            distCtx.beginPath();
+            distCtx.arc(cx, y, 4, 0, Math.PI * 2);
+            distCtx.fillStyle = '#ff4444';
+            distCtx.fill();
+        }
     }
 
     // ── Public API ────────────────────────────────────

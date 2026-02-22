@@ -1,4 +1,4 @@
-"""Remote DLC training via SSH: upload project, run training, download results."""
+"""Remote DLC training via SSH: upload project, train, crop, analyze, download results."""
 
 import logging
 import os
@@ -151,11 +151,14 @@ def remote_train_monitor(
     on_complete,
     registry,
 ):
-    """3-phase remote training lifecycle. Runs in a daemon thread.
+    """7-phase remote training lifecycle. Runs in a daemon thread.
 
-    Phase 1 (0-5%):   scp local DLC dir to remote
-    Phase 2 (5-95%):  ssh training command, parse stdout for epoch progress
-    Phase 3 (95-100%): scp trained model back to local
+    Phase 1 (0-3%):    scp local DLC dir to remote
+    Phase 1b (3-5%):   fix config, detect shuffle, create dataset if needed
+    Phase 2 (5-75%):   ssh training command, parse stdout for epoch progress
+    Phase 3 (75-80%):  crop stereo videos into L/R halves on remote
+    Phase 4 (80-90%):  run DLC analyze_videos + convert H5 to CSV on remote
+    Phase 5 (90-100%): download model + CSV results to local
 
     Args:
         job_id: Database job ID
@@ -183,6 +186,21 @@ def remote_train_monitor(
                 (msg, job_id),
             )
 
+    def _run_remote_proc(cmd, logfile, phase_name):
+        """Run a remote command, log output, return process."""
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        registry._processes[job_id] = proc
+
+        for line in proc.stdout:
+            logfile.write(line)
+            logfile.flush()
+
+        proc.wait()
+        return proc
+
     try:
         with open(log_path, "w") as logfile:
             # ── Phase 1: Upload ──────────────────────────────────────
@@ -199,24 +217,15 @@ def remote_train_monitor(
                 str(local_dlc_dir),
                 f"{cfg.host}:{cfg.work_dir}/",
             ]
-            proc = subprocess.Popen(
-                upload_cmd,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            )
-            registry._processes[job_id] = proc
+            proc = _run_remote_proc(upload_cmd, logfile, "Upload")
 
-            for line in proc.stdout:
-                logfile.write(line)
-                logfile.flush()
-
-            proc.wait()
             if proc.returncode != 0:
                 _fail(f"Upload failed (exit {proc.returncode})")
                 if on_complete:
                     on_complete(job_id, proc.returncode)
                 return
 
-            _update_progress(5.0)
+            _update_progress(3.0)
             logfile.write("=== Upload complete ===\n")
             logfile.flush()
 
@@ -261,17 +270,8 @@ def remote_train_monitor(
                     cfg,
                     f"\"from deeplabcut.core.engine import Engine; import deeplabcut; deeplabcut.create_training_dataset(r'{remote_config}', engine=Engine.PYTORCH)\"",
                 )
-                proc = subprocess.Popen(
-                    create_ds_cmd,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                )
-                registry._processes[job_id] = proc
+                proc = _run_remote_proc(create_ds_cmd, logfile, "Create dataset")
 
-                for line in proc.stdout:
-                    logfile.write(line)
-                    logfile.flush()
-
-                proc.wait()
                 if proc.returncode != 0:
                     _fail(f"Create training dataset failed (exit {proc.returncode})")
                     if on_complete:
@@ -292,6 +292,8 @@ def remote_train_monitor(
                         on_complete(job_id, 1)
                     return
                 shuffle = int(result.stdout.strip())
+
+            _update_progress(5.0)
 
             # ── Phase 2: Training ────────────────────────────────────
             train_cmd = _py_cmd(
@@ -315,8 +317,8 @@ def remote_train_monitor(
                 if progress_parser:
                     raw_pct = progress_parser(line)
                     if raw_pct is not None:
-                        # Scale 0-100% training progress to 5-95% overall
-                        scaled = 5.0 + (raw_pct / 100.0) * 90.0
+                        # Scale 0-100% training progress to 5-75% overall
+                        scaled = 5.0 + (raw_pct / 100.0) * 70.0
                         _update_progress(scaled)
 
             proc.wait()
@@ -326,38 +328,129 @@ def remote_train_monitor(
                     on_complete(job_id, proc.returncode)
                 return
 
-            _update_progress(95.0)
+            _update_progress(75.0)
             logfile.write("=== Training complete ===\n")
             logfile.flush()
 
-            # ── Phase 3: Download trained model ──────────────────────
-            logfile.write(f"=== Phase 3: Downloading model from {cfg.host} ===\n")
+            # ── Phase 3: Crop stereo videos on remote ────────────────
+            logfile.write("=== Phase 3: Cropping stereo videos on remote ===\n")
+            logfile.flush()
+
+            from ..config import get_settings
+            settings = get_settings()
+
+            # Find local videos for this subject
+            from .video import get_subject_videos
+            local_videos = get_subject_videos(subject_name)
+
+            if local_videos:
+                # Create remote output directory
+                remote_labels_dir = f"{remote_project_dir}/labels_v1"
+                subprocess.run(
+                    _py_cmd(cfg, f"\"import os; os.makedirs(r'{remote_labels_dir}', exist_ok=True)\""),
+                    capture_output=True, timeout=15,
+                )
+
+                cam_names = settings.camera_names
+                cam_names_str = repr(cam_names)
+
+                # Upload source videos first
+                for vid_path in local_videos:
+                    upload_vid_cmd = _scp_base_args(cfg) + [
+                        vid_path,
+                        f"{cfg.host}:{cfg.work_dir}/",
+                    ]
+                    proc = _run_remote_proc(upload_vid_cmd, logfile, "Upload video")
+                    if proc.returncode != 0:
+                        logfile.write(f"Warning: Failed to upload {vid_path}\n")
+
+                # Build crop script
+                crop_script = (
+                    f"\"import cv2, os, pathlib; "
+                    f"cam_names = {cam_names_str}; "
+                    f"video_dir = r'{cfg.work_dir}'; "
+                    f"out_dir = pathlib.Path(r'{remote_labels_dir}'); "
+                    f"out_dir.mkdir(exist_ok=True); "
+                    f"import glob; "
+                    f"videos = sorted(glob.glob(os.path.join(video_dir, '{subject_name}_*.mp4'))); "
+                    f"print(f'Found {{len(videos)}} videos'); "
+                    f"[exec('"
+                    f"cap = cv2.VideoCapture(v);\\n"
+                    f"fps = int(cap.get(cv2.CAP_PROP_FPS));\\n"
+                    f"n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT));\\n"
+                    f"ret, f0 = cap.read();\\n"
+                    f"h, w = f0.shape[:2];\\n"
+                    f"mid = w // 2;\\n"
+                    f"cap.set(cv2.CAP_PROP_POS_FRAMES, 0);\\n"
+                    f"stem = pathlib.Path(v).stem;\\n"
+                    f"ext = pathlib.Path(v).suffix;\\n"
+                    f"wL = cv2.VideoWriter(str(out_dir / f\\'{{stem}}_{{cam_names[0]}}{{ext}}\\'), cv2.VideoWriter_fourcc(*\\'avc1\\'), fps, (mid, h));\\n"
+                    f"wR = cv2.VideoWriter(str(out_dir / f\\'{{stem}}_{{cam_names[1]}}{{ext}}\\'), cv2.VideoWriter_fourcc(*\\'avc1\\'), fps, (w-mid, h)) if len(cam_names) > 1 else None;\\n"
+                    f"[exec(\\'ret, fr = cap.read();\\\\nwL.write(fr[:, :mid]) if ret else None;\\\\nwR.write(fr[:, mid:]) if ret and wR else None\\') for _ in range(n)];\\n"
+                    f"cap.release(); wL.release();\\n"
+                    f"wR.release() if wR else None;\\n"
+                    f"print(f\\'Cropped {{stem}}: {{n}} frames\\')"
+                    f"') for v in videos]; "
+                    f"print('Crop complete')\""
+                )
+
+                # Run crop on remote
+                proc = _run_remote_proc(_py_cmd(cfg, crop_script), logfile, "Crop")
+                if proc.returncode != 0:
+                    logfile.write(f"Warning: Remote crop failed (exit {proc.returncode}), continuing...\n")
+
+            _update_progress(80.0)
+            logfile.write("=== Crop complete ===\n")
+            logfile.flush()
+
+            # ── Phase 4: Analyze videos on remote ────────────────────
+            logfile.write("=== Phase 4: Analyzing videos on remote ===\n")
+            logfile.flush()
+
+            remote_labels_dir = f"{remote_project_dir}/labels_v1"
+            analyze_script = (
+                f"\"from deeplabcut.core.engine import Engine; "
+                f"import deeplabcut; "
+                f"deeplabcut.analyze_videos(r'{remote_config}', r'{remote_labels_dir}', shuffle={shuffle}, engine=Engine.PYTORCH); "
+                f"print('Analysis complete'); "
+                f"deeplabcut.analyze_videos_converth5_to_csv(r'{remote_labels_dir}'); "
+                f"print('H5 to CSV conversion complete')\""
+            )
+
+            proc = _run_remote_proc(_py_cmd(cfg, analyze_script), logfile, "Analyze")
+            if proc.returncode != 0:
+                logfile.write(f"Warning: Remote analysis failed (exit {proc.returncode}), continuing to download...\n")
+
+            _update_progress(90.0)
+            logfile.write("=== Analysis complete ===\n")
+            logfile.flush()
+
+            # ── Phase 5: Download model + CSV results ────────────────
+            logfile.write(f"=== Phase 5: Downloading results from {cfg.host} ===\n")
             logfile.flush()
 
             # Download dlc-models-pytorch directory back to local (PyTorch engine)
             remote_models = f"{cfg.host}:{remote_project_dir}/dlc-models-pytorch"
-            local_models = local_dlc_dir / "dlc-models-pytorch"
-
             download_cmd = _scp_base_args(cfg) + [
                 remote_models,
                 str(local_dlc_dir) + "/",
             ]
-            proc = subprocess.Popen(
-                download_cmd,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            )
-            registry._processes[job_id] = proc
-
-            for line in proc.stdout:
-                logfile.write(line)
-                logfile.flush()
-
-            proc.wait()
+            proc = _run_remote_proc(download_cmd, logfile, "Download models")
             if proc.returncode != 0:
-                _fail(f"Download failed (exit {proc.returncode})")
-                if on_complete:
-                    on_complete(job_id, proc.returncode)
-                return
+                logfile.write(f"Warning: Model download failed (exit {proc.returncode})\n")
+
+            # Download labels_v1 directory (cropped videos + CSV analysis results)
+            remote_labels = f"{cfg.host}:{remote_project_dir}/labels_v1"
+            local_labels_dir = local_dlc_dir / "labels_v1"
+            local_labels_dir.mkdir(exist_ok=True)
+
+            download_labels_cmd = _scp_base_args(cfg) + [
+                remote_labels,
+                str(local_dlc_dir) + "/",
+            ]
+            proc = _run_remote_proc(download_labels_cmd, logfile, "Download labels_v1")
+            if proc.returncode != 0:
+                logfile.write(f"Warning: labels_v1 download failed\n")
 
             _update_progress(100.0)
             logfile.write("=== Download complete ===\n")

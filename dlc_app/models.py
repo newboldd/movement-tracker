@@ -8,6 +8,7 @@ from typing import Optional
 STAGES = [
     "created",
     "videos_linked",
+    "prelabeled",
     "labeling",
     "labeled",
     "committed",
