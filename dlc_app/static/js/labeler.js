@@ -1193,6 +1193,7 @@ const labeler = (() => {
 
         updateFrameDisplay();
         renderTimeline();
+        renderDistanceTrace();
 
         requestAnimationFrame(videoDrawLoop);
     }

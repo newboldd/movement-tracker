@@ -130,14 +130,14 @@ def _ffmpeg_trim(source_path: str, start_time: float, end_time: float,
     """Trim a video segment using ffmpeg. Tries stream copy first, falls back to re-encode."""
     duration = end_time - start_time
 
-    # Try stream copy first (fast, no quality loss)
+    # Try stream copy first (fast, no quality loss).
+    # -ss after -i avoids black first frame (cuts at nearest keyframe >= start).
     cmd = [
         "ffmpeg", "-y",
-        "-ss", f"{start_time:.3f}",
         "-i", source_path,
+        "-ss", f"{start_time:.3f}",
         "-t", f"{duration:.3f}",
         "-c", "copy",
-        "-avoid_negative_ts", "make_zero",
         output_path,
     ]
 
