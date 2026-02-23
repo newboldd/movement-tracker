@@ -303,15 +303,28 @@ def save_labels(session_id: int, req: LabelBatchSave) -> dict:
                 ),
             )
 
-    # Recompute distances for affected frames
+    # Recompute distances for affected frames.
+    # Merge in any other saved labels for the same frames (e.g. the other
+    # camera's correction) so triangulation has both cameras' manual data.
     updated_distances = {}
     if subj:
-        # Group labels by frame to get both cameras' data
+        affected_frames = {label.frame_num for label in req.labels}
+
         frame_labels = {}
-        for label in req.labels:
-            if label.frame_num not in frame_labels:
-                frame_labels[label.frame_num] = {}
-            frame_labels[label.frame_num][label.side] = label.keypoints
+        with get_db_ctx() as db2:
+            for frame_num in affected_frames:
+                saved = db2.execute(
+                    "SELECT side, keypoints FROM frame_labels "
+                    "WHERE session_id = ? AND frame_num = ?",
+                    (session_id, frame_num),
+                ).fetchall()
+                sides = {}
+                for row in saved:
+                    kp = row["keypoints"]
+                    if isinstance(kp, str):
+                        kp = json.loads(kp)
+                    sides[row["side"]] = kp
+                frame_labels[frame_num] = sides
 
         for frame_num, sides in frame_labels.items():
             dist = recompute_distance_for_frame(subj["name"], frame_num, sides)

@@ -17,6 +17,24 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="DLC Labeler", version="0.2.0")
 
+
+# Disable browser caching for all responses (dev tool — always serve fresh)
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+
+
+class NoCacheMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/static") or request.url.path in (
+            "/", "/labeling", "/results", "/settings", "/onboarding"
+        ):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return response
+
+
+app.add_middleware(NoCacheMiddleware)
+
 # Mount routers
 app.include_router(subjects.router)
 app.include_router(labeling.router)
