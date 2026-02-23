@@ -71,22 +71,32 @@ def _parse_dlc_csv(csv_path: Path, likelihood_threshold: float = 0.6) -> dict:
 def _match_csv_to_trial(csv_name: str, subject_name: str, cam_names: list[str]) -> tuple[str | None, str | None]:
     """Match a DLC CSV filename to (camera_name, trial_name).
 
-    DLC CSV names follow pattern:
-        {Subject}_{Trial}_{Camera}DLC_*.csv
-    e.g. Con07_L1_OSDLC_resnet50_labelsSep16shuffle1_100000.csv
+    Handles two naming conventions:
+        1. {Subject}_{Trial}_{Camera}DLC_*.csv
+           e.g. Con07_L1_OSDLC_resnet50_labelsSep16shuffle1_100000.csv
+        2. {Subject}_{Trial}_DLC_{Camera}.csv
+           e.g. Con01_R1_DLC_OS.csv
     """
     stem = csv_name.replace(".csv", "")
+    prefix = f"{subject_name}_"
+    if not stem.startswith(prefix):
+        return None, None
 
     for cam in cam_names:
-        # Look for camera name followed by 'DLC'
-        pattern = f"_{cam}DLC"
-        if pattern in stem:
-            # Extract trial: everything between subject_ and _camDLC
-            prefix = f"{subject_name}_"
-            if stem.startswith(prefix):
-                trial_part = stem[len(prefix):stem.index(pattern)]
-                trial_name = f"{subject_name}_{trial_part}"
-                return cam, trial_name
+        # Pattern 1: {Subject}_{Trial}_{Camera}DLC_*
+        pattern1 = f"_{cam}DLC"
+        if pattern1 in stem:
+            trial_part = stem[len(prefix):stem.index(pattern1)]
+            trial_name = f"{subject_name}_{trial_part}"
+            return cam, trial_name
+
+        # Pattern 2: {Subject}_{Trial}_DLC_{Camera}
+        pattern2 = f"_DLC_{cam}"
+        if stem.endswith(pattern2) or f"{pattern2}_" in stem:
+            trial_part = stem[len(prefix):stem.index(pattern2)]
+            trial_name = f"{subject_name}_{trial_part}"
+            return cam, trial_name
+
     return None, None
 
 
