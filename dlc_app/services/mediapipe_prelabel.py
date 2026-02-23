@@ -386,10 +386,14 @@ def recompute_distance_for_frame(subject_name: str, frame_num: int,
     settings = get_settings()
     cam_names = settings.camera_names
 
+    # Load DLC predictions as additional fallback
+    from .dlc_predictions import get_dlc_predictions_for_session
+    dlc_data = get_dlc_predictions_for_session(subject_name)
+
     # Map bodypart names to joint indices
     bp_to_joint = {"thumb": THUMB_TIP, "index": INDEX_TIP}
 
-    # Get coords for each camera: prefer manual, fall back to MP
+    # Get coords for each camera: prefer manual, fall back to MP, then DLC
     def _get_coords(side_idx, bodypart):
         side = cam_names[side_idx]
         # Check manual labels first
@@ -405,6 +409,12 @@ def recompute_distance_for_frame(subject_name: str, frame_num: int,
                 pt = mp_data[lm_key][frame_num, joint_idx]
                 if not np.isnan(pt[0]):
                     return pt
+        # Fall back to DLC predictions
+        if dlc_data is not None:
+            dlc_cam = dlc_data.get(side, {})
+            dlc_coords = dlc_cam.get(bodypart, [])
+            if frame_num < len(dlc_coords) and dlc_coords[frame_num] is not None:
+                return np.array(dlc_coords[frame_num], dtype=np.float64)
         return None
 
     thumb_L = _get_coords(0, "thumb") if len(cam_names) >= 1 else None

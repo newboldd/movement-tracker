@@ -6,7 +6,10 @@ import logging
 import re
 from pathlib import Path
 
+import numpy as np
+
 from ..config import get_settings
+from .calibration import get_calibration_for_subject, triangulate_points
 from .video import build_trial_map, get_subject_videos
 
 logger = logging.getLogger(__name__)
@@ -181,4 +184,58 @@ def get_dlc_predictions_for_session(subject_name: str) -> dict | None:
         for bp in settings.bodyparts
     )
 
-    return result if has_data else None
+    if not has_data:
+        return None
+
+    # Compute 3D distances from DLC thumb/index via stereo triangulation
+    dlc_distances = _compute_dlc_distances(result, cam_names, subject_name, total_frames)
+    if dlc_distances is not None:
+        result["distances"] = dlc_distances
+
+    return result
+
+
+def _compute_dlc_distances(predictions: dict, cam_names: list[str],
+                           subject_name: str, total_frames: int) -> list | None:
+    """Compute 3D thumb-index distances from DLC predictions via stereo triangulation.
+
+    Returns list of float|None per frame, or None if calibration unavailable.
+    """
+    if len(cam_names) < 2:
+        return None
+
+    calib = get_calibration_for_subject(subject_name)
+    if calib is None:
+        return None
+
+    os_thumb = predictions.get(cam_names[0], {}).get("thumb", [])
+    os_index = predictions.get(cam_names[0], {}).get("index", [])
+    od_thumb = predictions.get(cam_names[1], {}).get("thumb", [])
+    od_index = predictions.get(cam_names[1], {}).get("index", [])
+
+    if not os_thumb:
+        return None
+
+    distances = []
+    valid_count = 0
+    for i in range(total_frames):
+        if (os_thumb[i] is None or os_index[i] is None or
+                od_thumb[i] is None or od_index[i] is None):
+            distances.append(None)
+            continue
+
+        pts_L = np.array([os_thumb[i], os_index[i]], dtype=np.float64)
+        pts_R = np.array([od_thumb[i], od_index[i]], dtype=np.float64)
+        pts_3d = triangulate_points(pts_L, pts_R, calib)
+
+        if np.any(np.isnan(pts_3d)):
+            distances.append(None)
+        else:
+            distances.append(round(float(np.linalg.norm(pts_3d[0] - pts_3d[1])), 2))
+            valid_count += 1
+
+    if valid_count == 0:
+        return None
+
+    logger.info(f"Computed DLC distances for {subject_name}: {valid_count}/{total_frames} frames")
+    return distances
