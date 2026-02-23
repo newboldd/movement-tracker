@@ -35,6 +35,79 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ── Frame extraction helpers ──────────────────────────────────────────
+
+def ensure_labeled_data_pngs(config_path: str, video_dir: str,
+                              subject_name: str):
+    """Regenerate missing PNGs in labeled-data subdirs from stereo video.
+
+    For each labeled-data subdir that has label_metadata.json but is
+    missing PNG files, extract frames from the stereo video (split at
+    midline by side=OS/OD).
+    """
+    import cv2
+
+    config_dir = os.path.dirname(config_path)
+    labeled_data_root = os.path.join(config_dir, "labeled-data")
+    if not os.path.isdir(labeled_data_root):
+        return
+
+    for subdir in os.listdir(labeled_data_root):
+        ld_path = os.path.join(labeled_data_root, subdir)
+        meta_path = os.path.join(ld_path, "label_metadata.json")
+        if not os.path.isfile(meta_path):
+            continue
+
+        with open(meta_path) as f:
+            meta = json.load(f)
+
+        # Check if PNGs are missing
+        missing = [name for name in meta if not os.path.isfile(
+            os.path.join(ld_path, name))]
+        if not missing:
+            continue
+
+        logger.info(f"Regenerating {len(missing)}/{len(meta)} PNGs "
+                     f"in labeled-data/{subdir}")
+
+        # Find stereo video
+        pattern = os.path.join(video_dir, f"{subject_name}_*.mp4")
+        videos = sorted(glob.glob(pattern))
+        if not videos:
+            logger.warning(f"No stereo video found matching {pattern}, "
+                           f"cannot regenerate PNGs")
+            continue
+
+        video_path = videos[0]  # Use first matching video
+        cap = cv2.VideoCapture(video_path)
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        mid = w // 2
+
+        # Group missing frames by frame_num to minimize seeking
+        by_frame = {}
+        for img_name in missing:
+            info = meta[img_name]
+            fn = info["frame_num"]
+            by_frame.setdefault(fn, []).append((img_name, info["side"]))
+
+        count = 0
+        for frame_num in sorted(by_frame.keys()):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+            ret, frame = cap.read()
+            if not ret:
+                logger.warning(f"Cannot read frame {frame_num}")
+                continue
+            left = frame[:, :mid]
+            right = frame[:, mid:]
+            for img_name, side in by_frame[frame_num]:
+                half = left if side == "OS" else right
+                cv2.imwrite(os.path.join(ld_path, img_name), half)
+                count += 1
+
+        cap.release()
+        logger.info(f"Extracted {count} PNGs for labeled-data/{subdir}")
+
+
 # ── Status helpers ──────────────────────────────────────────────────────
 
 def _write_status(status_file: str, phase: str, status: str,
@@ -141,6 +214,11 @@ def run_pipeline(config_path: str, shuffle: int, labels_dir: str,
                  status_file: str):
     """Run the full train → crop → analyze pipeline."""
     os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+    # ── Pre-flight: ensure labeled-data PNGs exist ─────────────────
+    logger.info("=== Pre-flight: checking labeled-data PNGs ===")
+    _write_status(status_file, "train", "running", 2.0)
+    ensure_labeled_data_pngs(config_path, video_dir, subject_name)
 
     # ── Phase: Train ────────────────────────────────────────────────
     logger.info("=== Phase: Training ===")
