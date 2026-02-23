@@ -58,17 +58,25 @@ def startup():
         failed = 0
 
         for job in stale_jobs:
-            tmux_session = job.get("tmux_session")
+            session_info = job.get("tmux_session") or ""
             remote_host = job.get("remote_host")
 
-            if tmux_session and remote_host and remote_cfg:
-                # Check if tmux session is still alive on remote
-                from .services.remote import _check_tmux_alive, _read_remote_status, remote_train_monitor
+            # Parse PID from session_info (format: "pid:12345" or legacy "dlc_job_N")
+            remote_pid = None
+            if session_info.startswith("pid:"):
+                try:
+                    remote_pid = int(session_info.split(":")[1])
+                except (ValueError, IndexError):
+                    pass
+
+            if session_info and remote_host and remote_cfg:
+                # Check if remote process is still alive
+                from .services.remote import _check_remote_pid_alive, _read_remote_status, remote_train_monitor
                 from .services.jobs import registry
 
-                if _check_tmux_alive(remote_cfg, tmux_session):
-                    # Tmux alive — resume monitoring
-                    logger.info(f"Job {job['id']}: tmux '{tmux_session}' alive, resuming monitor")
+                if remote_pid and _check_remote_pid_alive(remote_cfg, remote_pid):
+                    # Process alive — resume monitoring
+                    logger.info(f"Job {job['id']}: remote PID {remote_pid} alive, resuming monitor")
 
                     # Look up subject name for this job
                     with get_db_ctx() as db:
@@ -115,7 +123,7 @@ def startup():
                         resumed += 1
                         continue
                 else:
-                    # Tmux dead — check final status.json
+                    # Process dead or PID unknown — check final status.json
                     with get_db_ctx() as db:
                         subj = db.execute(
                             "SELECT name FROM subjects WHERE id = ?",
@@ -126,7 +134,7 @@ def startup():
                         remote_status = _read_remote_status(remote_cfg, status_file)
                         if remote_status and remote_status.get("status") == "completed":
                             # Completed while we were down — spawn download-only thread
-                            logger.info(f"Job {job['id']}: tmux exited but status=completed, spawning download")
+                            logger.info(f"Job {job['id']}: process exited but status=completed, spawning download")
                             subject_name = subj["name"]
                             local_dlc_dir = s.dlc_path / subject_name
                             log_path = job["log_path"] or str(s.dlc_path / ".logs" / f"job_train_{job['subject_id']}.log")
@@ -164,7 +172,7 @@ def startup():
                             resumed += 1
                             continue
 
-            # No tmux or tmux dead with no good status — mark failed
+            # No remote session or process dead with no good status — mark failed
             with get_db_ctx() as db:
                 db.execute(
                     "UPDATE jobs SET status = 'failed', error_msg = 'Server restarted', "

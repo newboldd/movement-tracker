@@ -136,7 +136,7 @@ class JobRegistry:
                 )
             return True
 
-        # Kill remote tmux session if one exists
+        # Kill remote process if one exists
         with get_db_ctx() as db:
             job = db.execute(
                 "SELECT tmux_session, remote_host FROM jobs WHERE id = ?",
@@ -144,12 +144,18 @@ class JobRegistry:
             ).fetchone()
 
         if job and job.get("tmux_session") and job.get("remote_host"):
-            from ..config import get_settings
-            from .remote import _kill_tmux_session
-            remote_cfg = get_settings().get_remote_config()
-            if remote_cfg:
-                _kill_tmux_session(remote_cfg, job["tmux_session"])
-                # The monitoring thread will detect tmux death on its next poll
+            session_info = job["tmux_session"]
+            if session_info.startswith("pid:"):
+                try:
+                    remote_pid = int(session_info.split(":")[1])
+                    from ..config import get_settings
+                    from .remote import _kill_remote_pid
+                    remote_cfg = get_settings().get_remote_config()
+                    if remote_cfg:
+                        _kill_remote_pid(remote_cfg, remote_pid)
+                        # The monitoring thread will detect process death on its next poll
+                except (ValueError, IndexError):
+                    pass
 
         # Try cancel event (thread-based jobs)
         evt = self._cancel_events.get(job_id)

@@ -144,14 +144,24 @@ def test_connection(cfg: RemoteConfig) -> dict:
     }
 
 
-def _check_tmux_alive(cfg: RemoteConfig, session_name: str) -> bool:
-    """Check if a tmux session exists on the remote host."""
+def _check_remote_pid_alive(cfg: RemoteConfig, pid: int) -> bool:
+    """Check if a process with the given PID is running on the remote host."""
     try:
+        script = (
+            f"\"import psutil; print(psutil.pid_exists({pid}))\""
+            if False else  # psutil may not be installed; use os-level check
+            f"\"import os; "
+            f"alive = False; "
+            f"exec('try:\\n import ctypes\\n k = ctypes.windll.kernel32\\n h = k.OpenProcess(0x100000, False, {pid})\\n alive = h != 0\\n if h: k.CloseHandle(h)\\nexcept: pass') "
+            f"if os.name == 'nt' else "
+            f"exec('try:\\n os.kill({pid}, 0); alive = True\\nexcept (ProcessLookupError, PermissionError): pass'); "
+            f"print(alive)\""
+        )
         result = subprocess.run(
-            _ssh_base_args(cfg) + [cfg.host, "tmux", "has-session", "-t", session_name],
+            _py_cmd(cfg, script),
             capture_output=True, text=True, timeout=15,
         )
-        return result.returncode == 0
+        return result.returncode == 0 and "True" in result.stdout
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return False
 
@@ -202,11 +212,17 @@ def _tail_remote_log(cfg: RemoteConfig, log_file: str, offset: int) -> tuple[str
     return "", offset
 
 
-def _kill_tmux_session(cfg: RemoteConfig, session_name: str):
-    """Kill a tmux session on the remote host (best-effort)."""
+def _kill_remote_pid(cfg: RemoteConfig, pid: int):
+    """Kill a process on the remote host by PID (best-effort)."""
     try:
+        script = (
+            f"\"import os, signal; "
+            f"exec('try:\\n import ctypes\\n k = ctypes.windll.kernel32\\n h = k.OpenProcess(1, False, {pid})\\n k.TerminateProcess(h, 1) if h else None\\n k.CloseHandle(h) if h else None\\nexcept: pass') "
+            f"if os.name == 'nt' else "
+            f"exec('try:\\n os.kill({pid}, signal.SIGTERM)\\nexcept: pass')\""
+        )
         subprocess.run(
-            _ssh_base_args(cfg) + [cfg.host, "tmux", "kill-session", "-t", session_name],
+            _py_cmd(cfg, script),
             capture_output=True, timeout=15,
         )
     except (subprocess.TimeoutExpired, OSError):
@@ -225,17 +241,17 @@ def remote_train_monitor(
     cam_names: list[str] | None = None,
     resume: bool = False,
 ):
-    """Remote training lifecycle via tmux. Runs in a daemon thread.
+    """Remote training lifecycle. Runs in a daemon thread.
 
     Uploads the DLC project and a self-contained training script to the remote,
-    launches it inside a tmux session, then polls status.json for progress.
+    launches it as a detached process, then polls status.json for progress.
     The remote process survives SSH disconnections and app restarts.
 
     Phase 1 (0-3%):    scp local DLC dir to remote (skip if resume)
     Phase 1b (3-5%):   fix config, detect shuffle, create dataset (skip if resume)
     Phase 1c (5-7%):   upload subject videos for cropping (skip if resume)
-    Phase 1d (7-8%):   upload training script, start tmux (skip if resume)
-    Monitor (8-90%):   poll tmux + status.json every 10s
+    Phase 1d (7-8%):   upload training script, launch detached (skip if resume)
+    Monitor (8-90%):   poll status.json + remote log every 10s
     Phase 5 (90-100%): download model + CSV results to local
 
     Args:
@@ -244,7 +260,7 @@ def remote_train_monitor(
         local_dlc_dir: Local path to subject's DLC project directory
         subject_name: Subject name (used for remote path)
         log_path: Path for log file
-        progress_parser: callable(line) -> float|None (unused in tmux mode, kept for API compat)
+        progress_parser: callable(line) -> float|None (unused, kept for API compat)
         on_complete: callable(job_id, returncode) for post-completion
         registry: JobRegistry instance
         cam_names: Camera names for cropping (e.g. ['OS', 'OD'])
@@ -256,7 +272,7 @@ def remote_train_monitor(
     remote_labels_dir = f"{remote_project_dir}/labels_v1"
     remote_log_file = f"{remote_project_dir}/train.log"
     remote_status_file = f"{remote_project_dir}/status.json"
-    session_name = f"dlc_job_{job_id}"
+    remote_pid = None
 
     cancel_event = registry.register_cancel_event(job_id)
 
@@ -431,9 +447,9 @@ def remote_train_monitor(
                 logfile.write("=== Video upload complete ===\n")
                 logfile.flush()
 
-                # ── Phase 1d: Upload training script, start tmux ─────
+                # ── Phase 1d: Upload training script, launch detached ──
                 _check_cancel()
-                logfile.write("=== Phase 1d: Starting tmux session ===\n")
+                logfile.write("=== Phase 1d: Starting remote training process ===\n")
                 logfile.flush()
 
                 # Upload remote_train_script.py
@@ -449,52 +465,64 @@ def remote_train_monitor(
                         on_complete(job_id, 1)
                     return
 
-                # Build the tmux command:
-                # tmux new-session -d -s <name> '<python> -u <script> <args> 2>&1 | tee <log>'
-                cam_args = " ".join(cam_names)
+                # Launch the training script as a detached process on remote.
+                # Works on both Windows (PowerShell) and Linux (bash) remotes.
+                # The script writes its PID to status.json; we poll that + the log.
                 remote_script = f"{cfg.work_dir}/remote_train_script.py"
-                train_cmd_str = (
-                    f"{cfg.python_executable} -u {remote_script}"
-                    f" --config-path {remote_config}"
-                    f" --shuffle {shuffle}"
-                    f" --labels-dir {remote_labels_dir}"
-                    f" --video-dir {cfg.work_dir}"
-                    f" --subject-name {subject_name}"
-                    f" --cam-names {cam_args}"
-                    f" --status-file {remote_status_file}"
-                    f" 2>&1 | tee {remote_log_file}"
+                # Build cam_names as separate list items for argparse nargs="+"
+                cam_list_str = ", ".join(f"'{c}'" for c in cam_names)
+                launch_script = (
+                    f"\"import subprocess, sys, os; "
+                    f"log = open(r'{remote_log_file}', 'w'); "
+                    f"args = [r'{cfg.python_executable}', '-u', r'{remote_script}', "
+                    f"'--config-path', r'{remote_config}', "
+                    f"'--shuffle', '{shuffle}', "
+                    f"'--labels-dir', r'{remote_labels_dir}', "
+                    f"'--video-dir', r'{cfg.work_dir}', "
+                    f"'--subject-name', '{subject_name}', "
+                    f"'--cam-names', {cam_list_str}, "
+                    f"'--status-file', r'{remote_status_file}']; "
+                    f"kw = dict(stdout=log, stderr=subprocess.STDOUT); "
+                    f"kw['creationflags'] = (0x00000008 | 0x00000200) if os.name == 'nt' else None; "
+                    f"kw = {{k:v for k,v in kw.items() if v is not None}}; "
+                    f"p = subprocess.Popen(args, **kw); "
+                    f"print(p.pid)\""
                 )
-
-                tmux_cmd = _ssh_base_args(cfg) + [
-                    cfg.host,
-                    "tmux", "new-session", "-d", "-s", session_name,
-                    train_cmd_str,
-                ]
 
                 result = subprocess.run(
-                    tmux_cmd, capture_output=True, text=True, timeout=30,
+                    _py_cmd(cfg, launch_script),
+                    capture_output=True, text=True, timeout=30,
                 )
                 if result.returncode != 0:
-                    _fail(f"Failed to start tmux session: {result.stderr.strip()[:200]}")
+                    _fail(f"Failed to start remote training: {result.stderr.strip()[:200]}")
                     if on_complete:
                         on_complete(job_id, 1)
                     return
 
-                # Store tmux session name in DB
+                # Parse the remote PID
+                try:
+                    remote_pid = int(result.stdout.strip().splitlines()[-1])
+                except (ValueError, IndexError):
+                    _fail(f"Could not parse remote PID from: {result.stdout.strip()[:100]}")
+                    if on_complete:
+                        on_complete(job_id, 1)
+                    return
+
+                # Store session info in DB (reuse tmux_session column for PID)
                 with get_db_ctx() as db:
                     db.execute(
                         "UPDATE jobs SET tmux_session = ? WHERE id = ?",
-                        (session_name, job_id),
+                        (f"pid:{remote_pid}", job_id),
                     )
 
                 _update_progress(8.0)
-                logfile.write(f"=== tmux session '{session_name}' started ===\n")
+                logfile.write(f"=== Remote process started (PID {remote_pid}) ===\n")
                 logfile.flush()
 
             # ── Monitor loop (8-90%) ─────────────────────────────────
             # Both fresh and resume paths converge here
             if resume:
-                logfile.write(f"\n=== Resuming monitoring of tmux session '{session_name}' ===\n")
+                logfile.write(f"\n=== Resuming monitoring (PID {remote_pid}) ===\n")
                 logfile.flush()
 
             log_offset = 0
@@ -507,11 +535,15 @@ def remote_train_monitor(
                 time.sleep(poll_interval)
                 _check_cancel()
 
-                # Check tmux alive
-                tmux_alive = _check_tmux_alive(cfg, session_name)
-
-                # Read status.json
+                # Read status.json (also gives us latest PID if it changed)
                 status = _read_remote_status(cfg, remote_status_file)
+
+                # Update remote_pid from status if available
+                if status and status.get("pid"):
+                    remote_pid = status["pid"]
+
+                # Check remote process alive
+                proc_alive = _check_remote_pid_alive(cfg, remote_pid) if remote_pid else False
 
                 # Tail remote log → append to local log
                 new_log, log_offset = _tail_remote_log(cfg, remote_log_file, log_offset)
@@ -539,23 +571,23 @@ def remote_train_monitor(
                         if on_complete:
                             on_complete(job_id, 1)
                         return
-                    elif not tmux_alive:
-                        # Status exists but not completed/failed, yet tmux died
-                        error = status.get("error", "tmux session exited unexpectedly")
+                    elif not proc_alive:
+                        # Status exists but not completed/failed, yet process died
+                        error = status.get("error", "Remote process exited unexpectedly")
                         phase = status.get("phase", "unknown")
-                        _fail(f"tmux exited during phase '{phase}': {error}")
+                        _fail(f"Process exited during phase '{phase}': {error}")
                         if on_complete:
                             on_complete(job_id, 1)
                         return
 
-                elif not tmux_alive:
-                    # No status.json and tmux dead — SSH connectivity issue?
+                elif not proc_alive:
+                    # No status.json and process dead — SSH connectivity issue?
                     ssh_fail_count += 1
-                    logfile.write(f"Warning: tmux not found and no status.json, attempt {ssh_fail_count}/{max_ssh_failures}\n")
+                    logfile.write(f"Warning: process not found and no status.json, attempt {ssh_fail_count}/{max_ssh_failures}\n")
                     logfile.flush()
 
                     if ssh_fail_count >= max_ssh_failures:
-                        _fail("tmux session died and no status.json found")
+                        _fail("Remote process died and no status.json found")
                         if on_complete:
                             on_complete(job_id, 1)
                         return
@@ -604,8 +636,9 @@ def remote_train_monitor(
             on_complete(job_id, 0)
 
     except InterruptedError:
-        logger.info(f"Job {job_id} cancelled — killing tmux session")
-        _kill_tmux_session(cfg, session_name)
+        logger.info(f"Job {job_id} cancelled — killing remote process")
+        if remote_pid:
+            _kill_remote_pid(cfg, remote_pid)
         with get_db_ctx() as db:
             db.execute(
                 """UPDATE jobs SET status = 'cancelled',
