@@ -50,6 +50,13 @@ const labeler = (() => {
     let canvas, ctx;
     let timeline, tlCtx;
     let distCanvas, distCtx;
+    // Distance trace viewport (zoomed ~10s window)
+    let distViewStart = 0;      // first visible frame
+    let distViewFrames = 0;     // number of frames in visible window (set from fps)
+    let distDragging = false;
+    let distDragStartX = 0;
+    let distDragStartView = 0;
+    let distAutoScroll = true; // false while user is manually panning the trace
     let containerEl;
     let currentImage = null;
     let imgW = 0, imgH = 0;
@@ -83,6 +90,8 @@ const labeler = (() => {
 
     // Deleted frame/side keys — sent to server on save so DB stays in sync
     const deletedKeys = new Set();
+    // Dirty (modified since last save) keys — only these are sent to server
+    const dirtyKeys = new Set();
 
     // Prefetch cache
     const imageCache = new Map();
@@ -236,6 +245,7 @@ const labeler = (() => {
     async function goToFrame(frame) {
         if (frame < 0 || frame >= totalFrames) return;
         currentFrame = frame;
+        distAutoScroll = true; // frame navigation re-enables auto-scroll
 
         try {
             currentImage = await loadImage(frame, currentSide);
@@ -522,6 +532,7 @@ const labeler = (() => {
                     if (!lbl) { lbl = {}; labels.set(key, lbl); }
                     pushUndo(key, hit.bp, null);
                     lbl[hit.bp] = [ghostCoords[0], ghostCoords[1]];
+                    dirtyKeys.add(key);
 
                     // Enter drag mode immediately for refine
                     dragging = hit.bp;
@@ -603,6 +614,7 @@ const labeler = (() => {
             // Finished dragging a bodypart point — record undo with pre-drag position
             const key = `${currentFrame}_${currentSide}`;
             pushUndo(key, dragging, [dragOrigX, dragOrigY]);
+            dirtyKeys.add(key);
             scheduleSave();
             recomputeCameraShift();
         }
@@ -660,6 +672,7 @@ const labeler = (() => {
             lbl[bp] = prev;
             // If restoring a label, it's no longer deleted
             deletedKeys.delete(key);
+            dirtyKeys.add(key);
         } else {
             // Was a new placement — remove it
             if (lbl) {
@@ -668,6 +681,8 @@ const labeler = (() => {
                 if (!hasAny) {
                     labels.delete(key);
                     deletedKeys.add(key);
+                } else {
+                    dirtyKeys.add(key);
                 }
             }
         }
@@ -796,6 +811,7 @@ const labeler = (() => {
             }
         }
 
+        dirtyKeys.add(key);
         render();
         updateLabelCount();
         scheduleSave();
@@ -817,6 +833,8 @@ const labeler = (() => {
             labels.delete(key);
             // Track deletion so the server removes it too
             deletedKeys.add(key);
+        } else {
+            dirtyKeys.add(key);
         }
 
         render();
@@ -851,7 +869,9 @@ const labeler = (() => {
 
         const batch = [];
 
+        // Only send labels that have been modified since last save
         labels.forEach((lbl, key) => {
+            if (!dirtyKeys.has(key)) return;
             const [frameStr, side] = key.split('_');
             const frame = parseInt(frameStr);
             // Determine trial index
@@ -869,6 +889,7 @@ const labeler = (() => {
                 keypoints: lbl,
             });
         });
+        dirtyKeys.clear();
 
         if (batch.length === 0) return;
 
@@ -1508,23 +1529,93 @@ const labeler = (() => {
 
     // ── Distance Trace ────────────────────────────────
     function setupDistanceTrace() {
-        distCanvas.addEventListener('click', onDistanceTraceClick);
+        // Set window size to ~10 seconds of video
+        const fps = trials.length > 0 ? trials[0].fps : 30;
+        distViewFrames = Math.round(fps * 10);
+
+        distCanvas.addEventListener('mousedown', onDistTraceMouseDown);
+        distCanvas.addEventListener('wheel', onDistTraceWheel, { passive: false });
 
         const container = distCanvas.parentElement;
         const ro = new ResizeObserver(() => renderDistanceTrace());
         ro.observe(container);
     }
 
-    function onDistanceTraceClick(e) {
-        if (!distances || totalFrames === 0) return;
+    function clampDistView() {
+        const maxStart = Math.max(0, totalFrames - distViewFrames);
+        distViewStart = Math.max(0, Math.min(distViewStart, maxStart));
+    }
+
+    /** Ensure currentFrame is inside the visible window, scrolling if needed. */
+    function ensureFrameVisible() {
+        if (distViewFrames <= 0 || totalFrames === 0) return;
+        const margin = Math.round(distViewFrames * 0.15);
+        if (currentFrame < distViewStart + margin) {
+            distViewStart = currentFrame - margin;
+        } else if (currentFrame > distViewStart + distViewFrames - margin) {
+            distViewStart = currentFrame - distViewFrames + margin;
+        }
+        clampDistView();
+    }
+
+    function distXToFrame(clientX) {
         const rect = distCanvas.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        const padL = 40;
-        const padR = 8;
+        const x = clientX - rect.left;
+        const padL = 40, padR = 8;
         const plotW = rect.width - padL - padR;
-        const frame = Math.max(0, Math.min(Math.floor(((x - padL) / plotW) * totalFrames), totalFrames - 1));
-        autoZoomForFrame(frame, currentSide);
-        goToFrame(frame);
+        const frac = (x - padL) / plotW;
+        return Math.max(0, Math.min(
+            Math.floor(distViewStart + frac * distViewFrames),
+            totalFrames - 1));
+    }
+
+    function onDistTraceMouseDown(e) {
+        if (!distances || totalFrames === 0) return;
+        e.preventDefault();
+        distDragging = true;
+        distDragStartX = e.clientX;
+        distDragStartView = distViewStart;
+        distCanvas.style.cursor = 'grabbing';
+
+        const onMove = (ev) => {
+            if (!distDragging) return;
+            distAutoScroll = false;
+            const rect = distCanvas.getBoundingClientRect();
+            const padL = 40, padR = 8;
+            const plotW = rect.width - padL - padR;
+            const dx = ev.clientX - distDragStartX;
+            const dFrames = Math.round((-dx / plotW) * distViewFrames);
+            distViewStart = distDragStartView + dFrames;
+            clampDistView();
+            renderDistanceTrace();
+        };
+
+        const onUp = (ev) => {
+            const moved = Math.abs(ev.clientX - distDragStartX) > 4;
+            distDragging = false;
+            distCanvas.style.cursor = 'pointer';
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+            if (!moved) {
+                // Click — navigate to frame
+                const frame = distXToFrame(ev.clientX);
+                autoZoomForFrame(frame, currentSide);
+                goToFrame(frame);
+            }
+        };
+
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+    }
+
+    function onDistTraceWheel(e) {
+        if (!distances || totalFrames === 0) return;
+        e.preventDefault();
+        distAutoScroll = false;
+        const step = Math.max(1, Math.round(distViewFrames * 0.15));
+        distViewStart += e.deltaY > 0 ? step : -step;
+        clampDistView();
+        renderDistanceTrace();
     }
 
     function renderDistanceTrace() {
@@ -1536,18 +1627,37 @@ const labeler = (() => {
         distCanvas.width = w;
         distCanvas.height = h;
 
-        if (totalFrames === 0) return;
+        if (totalFrames === 0 || distViewFrames === 0) return;
 
-        const padL = 40, padR = 8, padT = 16, padB = 4;
+        // Auto-scroll so current frame stays visible (unless user is manually panning)
+        if (distAutoScroll) ensureFrameVisible();
+
+        const vStart = distViewStart;
+        const vEnd = Math.min(vStart + distViewFrames, totalFrames);
+
+        const padL = 40, padR = 8, padT = 16, padB = 14;
         const plotW = w - padL - padR;
         const plotH = h - padT - padB;
 
-        // Find data range
+        // Map frame to x-pixel within the visible window
+        const fToX = (f) => padL + ((f - vStart) / distViewFrames) * plotW;
+
+        // Find data range over visible window
         let minD = Infinity, maxD = -Infinity;
-        for (const d of distances) {
+        for (let f = vStart; f < vEnd && f < distances.length; f++) {
+            const d = distances[f];
             if (d !== null && d !== undefined) {
                 minD = Math.min(minD, d);
                 maxD = Math.max(maxD, d);
+            }
+        }
+        if (minD === Infinity) {
+            // Fall back to global range
+            for (const d of distances) {
+                if (d !== null && d !== undefined) {
+                    minD = Math.min(minD, d);
+                    maxD = Math.max(maxD, d);
+                }
             }
         }
         if (minD === Infinity) return;
@@ -1556,6 +1666,8 @@ const labeler = (() => {
         const range = maxD - minD || 10;
         minD = Math.max(0, minD - range * 0.05);
         maxD = maxD + range * 0.05;
+
+        const dToY = (d) => padT + ((maxD - d) / (maxD - minD)) * plotH;
 
         // Background
         distCtx.fillStyle = '#16213e';
@@ -1570,7 +1682,6 @@ const labeler = (() => {
             const val = minD + (maxD - minD) * (1 - i / nTicks);
             const y = padT + (i / nTicks) * plotH;
             distCtx.fillText(val.toFixed(0), padL - 4, y + 3);
-            // Grid line
             distCtx.beginPath();
             distCtx.moveTo(padL, y);
             distCtx.lineTo(w - padR, y);
@@ -1579,28 +1690,30 @@ const labeler = (() => {
             distCtx.stroke();
         }
 
-        // Trial boundaries
+        // Trial boundaries within view
         for (const t of trials) {
-            const x = padL + (t.start_frame / totalFrames) * plotW;
-            distCtx.beginPath();
-            distCtx.moveTo(x, padT);
-            distCtx.lineTo(x, h - padB);
-            distCtx.strokeStyle = 'rgba(42, 58, 92, 0.8)';
-            distCtx.lineWidth = 1;
-            distCtx.stroke();
+            if (t.start_frame >= vStart && t.start_frame < vEnd) {
+                const x = fToX(t.start_frame);
+                distCtx.beginPath();
+                distCtx.moveTo(x, padT);
+                distCtx.lineTo(x, h - padB);
+                distCtx.strokeStyle = 'rgba(42, 58, 92, 0.8)';
+                distCtx.lineWidth = 1;
+                distCtx.stroke();
+            }
         }
 
-        // Draw distance line
+        // Draw distance line (only visible portion)
         distCtx.beginPath();
         let started = false;
-        for (let f = 0; f < totalFrames && f < distances.length; f++) {
+        for (let f = Math.max(0, vStart - 1); f < vEnd + 1 && f < distances.length; f++) {
             const d = distances[f];
             if (d === null || d === undefined) {
                 started = false;
                 continue;
             }
-            const x = padL + (f / totalFrames) * plotW;
-            const y = padT + ((maxD - d) / (maxD - minD)) * plotH;
+            const x = fToX(f);
+            const y = dToY(d);
             if (!started) {
                 distCtx.moveTo(x, y);
                 started = true;
@@ -1609,23 +1722,22 @@ const labeler = (() => {
             }
         }
         distCtx.strokeStyle = 'rgba(74, 158, 255, 0.7)';
-        distCtx.lineWidth = 1;
+        distCtx.lineWidth = 1.5;
         distCtx.stroke();
 
-        // Draw dots for frames with manual corrections on the trace line
-        // and camera indicator ticks at the bottom
+        // Draw dots for frames with manual corrections (visible only)
         labels.forEach((lbl, key) => {
             const [frameStr, side] = key.split('_');
             const frame = parseInt(frameStr);
-            const x = padL + (frame / totalFrames) * plotW;
+            if (frame < vStart || frame >= vEnd) return;
+            const x = fToX(frame);
 
             // Green dot on the distance line if distance exists
             if (frame < distances.length) {
                 const d = distances[frame];
                 if (d !== null && d !== undefined) {
-                    const y = padT + ((maxD - d) / (maxD - minD)) * plotH;
                     distCtx.beginPath();
-                    distCtx.arc(x, y, 2.5, 0, Math.PI * 2);
+                    distCtx.arc(x, dToY(d), 3, 0, Math.PI * 2);
                     distCtx.fillStyle = '#4caf50';
                     distCtx.fill();
                 }
@@ -1639,7 +1751,7 @@ const labeler = (() => {
         });
 
         // Current frame cursor
-        const cx = padL + (currentFrame / totalFrames) * plotW;
+        const cx = fToX(currentFrame);
         distCtx.beginPath();
         distCtx.moveTo(cx, padT);
         distCtx.lineTo(cx, h - padB);
@@ -1650,12 +1762,24 @@ const labeler = (() => {
         // Show value at current frame
         const curD = distances[currentFrame];
         if (curD !== null && curD !== undefined) {
-            const y = padT + ((maxD - curD) / (maxD - minD)) * plotH;
+            const y = dToY(curD);
             distCtx.beginPath();
             distCtx.arc(cx, y, 4, 0, Math.PI * 2);
             distCtx.fillStyle = '#ff4444';
             distCtx.fill();
         }
+
+        // Scrollbar: show position within total timeline
+        const sbY = h - 3;
+        const sbH = 3;
+        // Track background
+        distCtx.fillStyle = 'rgba(42, 58, 92, 0.5)';
+        distCtx.fillRect(padL, sbY, plotW, sbH);
+        // Thumb
+        const thumbL = padL + (vStart / totalFrames) * plotW;
+        const thumbW = Math.max(6, (distViewFrames / totalFrames) * plotW);
+        distCtx.fillStyle = 'rgba(74, 158, 255, 0.5)';
+        distCtx.fillRect(thumbL, sbY, thumbW, sbH);
     }
 
     // ── Public API ────────────────────────────────────

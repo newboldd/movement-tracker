@@ -28,6 +28,9 @@ router = APIRouter(prefix="/api/labeling", tags=["labeling"])
 def create_session(subject_id: int, req: SessionCreate) -> dict:
     """Create a new labeling session for a subject.
 
+    If an active session of the same type already exists, returns it
+    (resumes work-in-progress instead of creating a duplicate).
+
     For 'initial' sessions: copies labels from previous committed session.
     For 'refine' sessions: starts fresh (DLC predictions serve as ghost markers),
     increments iteration, doesn't change subject stage.
@@ -38,6 +41,24 @@ def create_session(subject_id: int, req: SessionCreate) -> dict:
         ).fetchone()
         if not subj:
             raise HTTPException(404, "Subject not found")
+
+        # Resume existing active session of the same type if one exists.
+        # Prefer the session with the most labels (handles case where an
+        # accidental blank session was created alongside one with work).
+        existing = db.execute(
+            """SELECT ls.*, COUNT(fl.id) AS label_count
+               FROM label_sessions ls
+               LEFT JOIN frame_labels fl ON fl.session_id = ls.id
+               WHERE ls.subject_id = ? AND ls.session_type = ? AND ls.status = 'active'
+               GROUP BY ls.id
+               ORDER BY label_count DESC, ls.id DESC
+               LIMIT 1""",
+            (subject_id, req.session_type),
+        ).fetchone()
+        if existing:
+            result = dict(existing)
+            result.pop("label_count", None)
+            return result
 
         is_refine = req.session_type == "refine"
         iteration = subj["iteration"] + 1 if is_refine else subj["iteration"]
