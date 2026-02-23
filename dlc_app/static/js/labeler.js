@@ -188,13 +188,15 @@ const labeler = (() => {
                 console.log('No DLC predictions available');
             }
 
+            // Always initialize the distance trace window size from fps
+            initDistanceTraceWindow();
+
             // Show distance trace if we have data; hide timeline to save space
             if (distances && distances.some(d => d !== null)) {
                 const traceContainer = document.getElementById('distanceTraceContainer');
                 if (traceContainer) traceContainer.style.display = 'block';
                 const timelineContainer = document.querySelector('.timeline-container');
                 if (timelineContainer) timelineContainer.style.display = 'none';
-                initDistanceTraceWindow();
             }
 
             recomputeCameraShift();
@@ -1632,21 +1634,24 @@ const labeler = (() => {
         distCanvas.height = h;
 
         if (totalFrames === 0) return;
-        // If window not yet initialized, show everything
-        if (distViewFrames === 0 || distViewFrames >= totalFrames) distViewFrames = totalFrames;
+        // If window not yet initialized, show everything (but don't mutate distViewFrames
+        // — the ResizeObserver can fire before initDistanceTraceWindow, and once set to
+        // totalFrames the >= check would permanently trap it there).
+        const effectiveViewFrames = (distViewFrames > 0 && distViewFrames < totalFrames)
+            ? distViewFrames : totalFrames;
 
         // Auto-scroll so current frame stays visible (unless user is manually panning)
         if (distAutoScroll) ensureFrameVisible();
 
         const vStart = distViewStart;
-        const vEnd = Math.min(vStart + distViewFrames, totalFrames);
+        const vEnd = Math.min(vStart + effectiveViewFrames, totalFrames);
 
         const padL = 40, padR = 8, padT = 16, padB = 14;
         const plotW = w - padL - padR;
         const plotH = h - padT - padB;
 
         // Map frame to x-pixel within the visible window
-        const fToX = (f) => padL + ((f - vStart) / distViewFrames) * plotW;
+        const fToX = (f) => padL + ((f - vStart) / effectiveViewFrames) * plotW;
 
         // Find data range over visible window
         let minD = Infinity, maxD = -Infinity;
@@ -1783,7 +1788,7 @@ const labeler = (() => {
         distCtx.fillRect(padL, sbY, plotW, sbH);
         // Thumb
         const thumbL = padL + (vStart / totalFrames) * plotW;
-        const thumbW = Math.max(6, (distViewFrames / totalFrames) * plotW);
+        const thumbW = Math.max(6, (effectiveViewFrames / totalFrames) * plotW);
         distCtx.fillStyle = 'rgba(74, 158, 255, 0.5)';
         distCtx.fillRect(thumbL, sbY, thumbW, sbH);
     }
