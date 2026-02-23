@@ -59,6 +59,25 @@ const API = {
         return resp.json();
     },
 
+    // SSE helper for live log streaming
+    streamJobLog(jobId, onText, onDone) {
+        const source = new EventSource(`/api/jobs/${jobId}/log-stream`);
+        source.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.done) {
+                source.close();
+                if (onDone) onDone(data);
+            } else if (data.text) {
+                onText(data.text);
+            }
+        };
+        source.onerror = () => {
+            source.close();
+            if (onDone) onDone({ done: true, status: 'error' });
+        };
+        return source;
+    },
+
     // SSE helper for job progress streaming
     streamJob(jobId, onData, onDone) {
         const source = new EventSource(`/api/jobs/${jobId}/stream`);

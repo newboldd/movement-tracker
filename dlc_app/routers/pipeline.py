@@ -120,7 +120,7 @@ def run_step(subject_id: int, req: RunStepRequest) -> dict:
     if req.step == "create_training_dataset":
         cmd = cmd_create_training_dataset(config_path)
         progress_parser = None
-        next_stage = "training_dataset_created"
+        next_stage = "committed"
 
     elif req.step == "train":
         next_stage = "trained"
@@ -139,7 +139,7 @@ def run_step(subject_id: int, req: RunStepRequest) -> dict:
                     )
 
         if remote_cfg:
-            # Remote training via SSH
+            # Remote training via SSH + tmux
             with get_db_ctx() as db:
                 db.execute(
                     "UPDATE jobs SET remote_host = ?, status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -157,6 +157,7 @@ def run_step(subject_id: int, req: RunStepRequest) -> dict:
                     progress_parser=parse_dlc_training_progress,
                     on_complete=on_train_complete,
                     registry=registry,
+                    cam_names=cam_names,
                 ),
                 daemon=True,
             )
@@ -204,7 +205,7 @@ def run_step(subject_id: int, req: RunStepRequest) -> dict:
         _setup_3d_config(config_path, config_3d)
         cmd = cmd_triangulate(config_3d, labels_dir)
         progress_parser = None
-        next_stage = "triangulated"
+        next_stage = "analyzed"
 
     def on_complete(jid, returncode):
         if returncode == 0:
@@ -447,7 +448,7 @@ def _do_crop(subject_name: str, job_id: int):
             (job_id,),
         )
         db.execute(
-            "UPDATE subjects SET stage = 'cropped', updated_at = CURRENT_TIMESTAMP WHERE id = (SELECT subject_id FROM jobs WHERE id = ?)",
+            "UPDATE subjects SET stage = 'trained', updated_at = CURRENT_TIMESTAMP WHERE id = (SELECT subject_id FROM jobs WHERE id = ?)",
             (job_id,),
         )
 

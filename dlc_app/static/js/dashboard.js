@@ -100,20 +100,11 @@ function getActions(subject) {
     }
 
     // Stage-specific actions
-    if (s === 'committed' || s === 'labeled' || s === 'training_dataset_created') {
+    if (s === 'committed' || s === 'labeled') {
         btns.push(`<button class="btn btn-sm btn-primary" onclick="runStep(${subject.id}, 'train')">Train</button>`);
     }
-    if (s === 'trained') {
-        btns.push(`<button class="btn btn-sm" onclick="runStep(${subject.id}, 'crop')">Crop Videos</button>`);
-    }
-    if (s === 'cropped') {
-        btns.push(`<button class="btn btn-sm" onclick="runStep(${subject.id}, 'analyze')">Analyze</button>`);
-    }
-    if (s === 'analyzed' && appStatus.has_calibration) {
-        btns.push(`<button class="btn btn-sm" onclick="runStep(${subject.id}, 'triangulate')">Triangulate</button>`);
-    }
     // Refine available for analyzed and beyond
-    const refineStages = ['analyzed', 'triangulated', 'complete', 'retrained'];
+    const refineStages = ['analyzed', 'refined', 'corrected'];
     if (refineStages.includes(s)) {
         btns.push(`<button class="btn btn-sm" onclick="openRefine(${subject.id})">Refine</button>`);
     }
@@ -144,10 +135,6 @@ async function showDetail(subjectId) {
         const panel = document.getElementById('detailPanel');
         document.getElementById('detailName').textContent = detail.name;
 
-        const triangulateBtn = appStatus.has_calibration
-            ? `<button class="btn btn-sm" onclick="runStep(${detail.id}, 'triangulate')">Triangulate</button>`
-            : '';
-
         document.getElementById('detailContent').innerHTML = `
             <div class="detail-section">
                 <h3>Info</h3>
@@ -175,9 +162,6 @@ async function showDetail(subjectId) {
                     <button class="btn btn-sm" onclick="runStep(${detail.id}, 'mediapipe')">Run MediaPipe</button>
                     <button class="btn btn-sm" onclick="runStep(${detail.id}, 'deidentify')">Blur Faces</button>
                     <button class="btn btn-sm btn-primary" onclick="runStep(${detail.id}, 'train')">Train</button>
-                    <button class="btn btn-sm" onclick="runStep(${detail.id}, 'crop')">Crop Videos</button>
-                    <button class="btn btn-sm" onclick="runStep(${detail.id}, 'analyze')">Analyze</button>
-                    ${triangulateBtn}
                     <button class="btn btn-sm btn-danger" onclick="removeSubject(${detail.id}, '${detail.name}')" style="margin-left:auto;">Remove</button>
                 </div>
             </div>
@@ -249,9 +233,11 @@ function updateJobDisplay(jobId, data) {
     const errorMsg = (data.status === 'failed' && data.error_msg)
         ? `<div style="color:var(--red);font-size:12px;margin-top:4px;">${data.error_msg}</div>`
         : '';
-    const logBtn = (data.status === 'failed')
-        ? `<button class="btn btn-sm" onclick="viewJobLog(${jobId})">View Log</button>`
-        : '';
+    const logBtn = (data.status === 'running')
+        ? `<button class="btn btn-sm" onclick="viewJobLogLive(${jobId})">View Log</button>`
+        : (data.status === 'failed')
+            ? `<button class="btn btn-sm" onclick="viewJobLog(${jobId})">View Log</button>`
+            : '';
 
     el.innerHTML = `
         <div style="display:flex;align-items:center;gap:12px;">
@@ -280,6 +266,8 @@ async function cancelJob(jobId) {
     }
 }
 
+let _logStream = null;  // Active log SSE connection
+
 async function viewJobLog(jobId) {
     const modal = document.getElementById('logModal');
     const pre = document.getElementById('logContent');
@@ -294,7 +282,34 @@ async function viewJobLog(jobId) {
     }
 }
 
+function viewJobLogLive(jobId) {
+    const modal = document.getElementById('logModal');
+    const pre = document.getElementById('logContent');
+    pre.textContent = '';
+    modal.classList.add('active');
+
+    _logStream = API.streamJobLog(jobId,
+        (text) => {
+            pre.textContent += text;
+            pre.scrollTop = pre.scrollHeight;
+        },
+        (data) => {
+            _logStream = null;
+            if (data.status === 'failed') {
+                pre.textContent += '\n\n--- Job failed ---\n';
+            } else if (data.status === 'completed') {
+                pre.textContent += '\n\n--- Job completed ---\n';
+            }
+            pre.scrollTop = pre.scrollHeight;
+        }
+    );
+}
+
 function closeLogModal() {
+    if (_logStream) {
+        _logStream.close();
+        _logStream = null;
+    }
     document.getElementById('logModal').classList.remove('active');
 }
 

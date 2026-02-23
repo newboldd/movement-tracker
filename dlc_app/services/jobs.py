@@ -118,7 +118,7 @@ class JobRegistry:
         self._cancel_events.pop(job_id, None)
 
     def cancel(self, job_id: int) -> bool:
-        """Cancel a running job (subprocess or thread-based)."""
+        """Cancel a running job (subprocess, tmux remote, or thread-based)."""
         # Try subprocess first
         proc = self._processes.get(job_id)
         if proc is not None:
@@ -135,6 +135,21 @@ class JobRegistry:
                     (job_id,),
                 )
             return True
+
+        # Kill remote tmux session if one exists
+        with get_db_ctx() as db:
+            job = db.execute(
+                "SELECT tmux_session, remote_host FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+
+        if job and job.get("tmux_session") and job.get("remote_host"):
+            from ..config import get_settings
+            from .remote import _kill_tmux_session
+            remote_cfg = get_settings().get_remote_config()
+            if remote_cfg:
+                _kill_tmux_session(remote_cfg, job["tmux_session"])
+                # The monitoring thread will detect tmux death on its next poll
 
         # Try cancel event (thread-based jobs)
         evt = self._cancel_events.get(job_id)

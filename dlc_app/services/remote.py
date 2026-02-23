@@ -1,11 +1,13 @@
 """Remote DLC training and preprocessing via SSH."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -142,6 +144,75 @@ def test_connection(cfg: RemoteConfig) -> dict:
     }
 
 
+def _check_tmux_alive(cfg: RemoteConfig, session_name: str) -> bool:
+    """Check if a tmux session exists on the remote host."""
+    try:
+        result = subprocess.run(
+            _ssh_base_args(cfg) + [cfg.host, "tmux", "has-session", "-t", session_name],
+            capture_output=True, text=True, timeout=15,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+
+
+def _read_remote_status(cfg: RemoteConfig, status_file: str) -> dict | None:
+    """Read status.json from remote host. Returns parsed dict or None."""
+    try:
+        result = subprocess.run(
+            _py_cmd(cfg, f"\"import pathlib; p = pathlib.Path(r'{status_file}'); print(p.read_text()) if p.exists() else None\""),
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip() and result.stdout.strip() != "None":
+            return json.loads(result.stdout.strip())
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        pass
+    return None
+
+
+def _tail_remote_log(cfg: RemoteConfig, log_file: str, offset: int) -> tuple[str, int]:
+    """Read new log content from remote file starting at byte offset.
+
+    Returns (new_content, new_offset).
+    """
+    try:
+        script = (
+            f"\"import os; "
+            f"p = r'{log_file}'; "
+            f"sz = os.path.getsize(p) if os.path.exists(p) else 0; "
+            f"f = open(p, 'r') if sz > {offset} else None; "
+            f"f.seek({offset}) if f else None; "
+            f"data = f.read() if f else ''; "
+            f"f.close() if f else None; "
+            f"print(f'OFFSET:{{sz}}'); "
+            f"print(data, end='')\""
+        )
+        result = subprocess.run(
+            _py_cmd(cfg, script),
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0 and result.stdout:
+            lines = result.stdout.split("\n", 1)
+            if lines[0].startswith("OFFSET:"):
+                new_offset = int(lines[0].split(":")[1])
+                content = lines[1] if len(lines) > 1 else ""
+                return content, new_offset
+    except (subprocess.TimeoutExpired, ValueError, OSError):
+        pass
+    return "", offset
+
+
+def _kill_tmux_session(cfg: RemoteConfig, session_name: str):
+    """Kill a tmux session on the remote host (best-effort)."""
+    try:
+        subprocess.run(
+            _ssh_base_args(cfg) + [cfg.host, "tmux", "kill-session", "-t", session_name],
+            capture_output=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+
 def remote_train_monitor(
     job_id: int,
     cfg: RemoteConfig,
@@ -151,14 +222,20 @@ def remote_train_monitor(
     progress_parser,
     on_complete,
     registry,
+    cam_names: list[str] | None = None,
+    resume: bool = False,
 ):
-    """7-phase remote training lifecycle. Runs in a daemon thread.
+    """Remote training lifecycle via tmux. Runs in a daemon thread.
 
-    Phase 1 (0-3%):    scp local DLC dir to remote
-    Phase 1b (3-5%):   fix config, detect shuffle, create dataset if needed
-    Phase 2 (5-75%):   ssh training command, parse stdout for epoch progress
-    Phase 3 (75-80%):  crop stereo videos into L/R halves on remote
-    Phase 4 (80-90%):  run DLC analyze_videos + convert H5 to CSV on remote
+    Uploads the DLC project and a self-contained training script to the remote,
+    launches it inside a tmux session, then polls status.json for progress.
+    The remote process survives SSH disconnections and app restarts.
+
+    Phase 1 (0-3%):    scp local DLC dir to remote (skip if resume)
+    Phase 1b (3-5%):   fix config, detect shuffle, create dataset (skip if resume)
+    Phase 1c (5-7%):   upload subject videos for cropping (skip if resume)
+    Phase 1d (7-8%):   upload training script, start tmux (skip if resume)
+    Monitor (8-90%):   poll tmux + status.json every 10s
     Phase 5 (90-100%): download model + CSV results to local
 
     Args:
@@ -167,16 +244,30 @@ def remote_train_monitor(
         local_dlc_dir: Local path to subject's DLC project directory
         subject_name: Subject name (used for remote path)
         log_path: Path for log file
-        progress_parser: callable(line) -> float|None for training progress
+        progress_parser: callable(line) -> float|None (unused in tmux mode, kept for API compat)
         on_complete: callable(job_id, returncode) for post-completion
-        registry: JobRegistry instance (to register subprocesses for cancel)
+        registry: JobRegistry instance
+        cam_names: Camera names for cropping (e.g. ['OS', 'OD'])
+        resume: If True, skip upload phases and go straight to monitoring
     """
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     remote_project_dir = f"{cfg.work_dir}/{subject_name}"
+    remote_config = f"{remote_project_dir}/config.yaml"
+    remote_labels_dir = f"{remote_project_dir}/labels_v1"
+    remote_log_file = f"{remote_project_dir}/train.log"
+    remote_status_file = f"{remote_project_dir}/status.json"
+    session_name = f"dlc_job_{job_id}"
+
+    cancel_event = registry.register_cancel_event(job_id)
+
+    if cam_names is None:
+        from ..config import get_settings
+        cam_names = get_settings().camera_names
 
     def _update_progress(pct):
         with get_db_ctx() as db:
-            db.execute("UPDATE jobs SET progress_pct = ? WHERE id = ?", (pct, job_id))
+            db.execute("UPDATE jobs SET progress_pct = ? WHERE id = ?",
+                       (round(pct, 1), job_id))
 
     def _fail(msg):
         logger.error(f"Job {job_id} remote training failed: {msg}")
@@ -186,6 +277,10 @@ def remote_train_monitor(
                    finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
                 (msg, job_id),
             )
+
+    def _check_cancel():
+        if cancel_event.is_set():
+            raise InterruptedError("Job cancelled")
 
     def _run_remote_proc(cmd, logfile, phase_name):
         """Run a remote command, log output, return process."""
@@ -200,256 +295,277 @@ def remote_train_monitor(
             logfile.flush()
 
         proc.wait()
+        registry._processes.pop(job_id, None)
         return proc
 
     try:
-        with open(log_path, "w") as logfile:
-            # ── Phase 1: Upload ──────────────────────────────────────
-            logfile.write(f"=== Phase 1: Uploading {local_dlc_dir} to {cfg.host}:{remote_project_dir} ===\n")
-            logfile.flush()
+        with open(log_path, "a" if resume else "w") as logfile:
 
-            # Ensure remote dir exists (Python — shell-agnostic)
-            subprocess.run(
-                _py_cmd(cfg, f"\"import os; os.makedirs(r'{cfg.work_dir}', exist_ok=True)\""),
-                capture_output=True, timeout=15,
-            )
-
-            upload_cmd = _scp_base_args(cfg) + [
-                str(local_dlc_dir),
-                f"{cfg.host}:{cfg.work_dir}/",
-            ]
-            proc = _run_remote_proc(upload_cmd, logfile, "Upload")
-
-            if proc.returncode != 0:
-                _fail(f"Upload failed (exit {proc.returncode})")
-                if on_complete:
-                    on_complete(job_id, proc.returncode)
-                return
-
-            _update_progress(3.0)
-            logfile.write("=== Upload complete ===\n")
-            logfile.flush()
-
-            # ── Fix remote config.yaml project_path (Python — shell-agnostic) ──
-            fix_script = (
-                f"\"import re, pathlib; "
-                f"p = pathlib.Path(r'{remote_project_dir}/config.yaml'); "
-                f"t = p.read_text(); "
-                f"t = re.sub(r'(?m)^project_path:.*', r'project_path: {remote_project_dir}', t); "
-                f"p.write_text(t)\""
-            )
-            subprocess.run(
-                _py_cmd(cfg, fix_script),
-                capture_output=True, timeout=15,
-            )
-
-            # ── Convert CSV labels to H5 (DLC 3.0 expects .h5) ──
-            csv_to_h5_script = (
-                f"\"import pandas as pd, glob; "
-                f"csvs = glob.glob(r'{remote_project_dir}/labeled-data/*/CollectedData_*.csv'); "
-                f"[pd.read_csv(c, header=[0,1,2], index_col=[0,1,2])"
-                f".to_hdf(c.replace('.csv','.h5'), key='df_with_missing', mode='w') "
-                f"for c in csvs]; "
-                f"print(f'Converted {{len(csvs)}} CSV(s) to H5')\""
-            )
-            result = subprocess.run(
-                _py_cmd(cfg, csv_to_h5_script),
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode == 0:
-                logfile.write(f"=== {result.stdout.strip()} ===\n")
-            else:
-                logfile.write(f"Warning: CSV to H5 conversion failed: {result.stderr.strip()[:200]}\n")
-            logfile.flush()
-
-            # ── Phase 1b: Detect shuffle and ensure pytorch config exists ─
-            remote_config = f"{remote_project_dir}/config.yaml"
-
-            # Detect shuffle number from dlc-models-pytorch, or create dataset if missing
-            detect_script = (
-                f"\"import glob, re, sys; "
-                f"hits = glob.glob(r'{remote_project_dir}/dlc-models-pytorch/iteration-*/*/train/pytorch_config.yaml'); "
-                f"shuffles = [int(m.group(1)) for h in hits if (m := re.search(r'shuffle(\\d+)', h))]; "
-                f"print(max(shuffles)) if shuffles else sys.exit(1)\""
-            )
-            result = subprocess.run(
-                _py_cmd(cfg, detect_script),
-                capture_output=True, text=True, timeout=30,
-            )
-
-            if result.returncode == 0:
-                shuffle = int(result.stdout.strip())
-                logfile.write(f"=== Detected existing pytorch config (shuffle {shuffle}) ===\n")
+            if not resume:
+                # ── Phase 1: Upload DLC dir ──────────────────────────
+                logfile.write(f"=== Phase 1: Uploading {local_dlc_dir} to {cfg.host}:{remote_project_dir} ===\n")
                 logfile.flush()
-            else:
-                # No pytorch config found — create training dataset on remote
-                logfile.write(f"=== Creating training dataset on {cfg.host} ===\n")
-                logfile.flush()
+                _check_cancel()
 
-                create_ds_cmd = _py_cmd(
-                    cfg,
-                    f"\"from deeplabcut.core.engine import Engine; import deeplabcut; deeplabcut.create_training_dataset(r'{remote_config}', engine=Engine.PYTORCH)\"",
+                subprocess.run(
+                    _py_cmd(cfg, f"\"import os; os.makedirs(r'{cfg.work_dir}', exist_ok=True)\""),
+                    capture_output=True, timeout=15,
                 )
-                proc = _run_remote_proc(create_ds_cmd, logfile, "Create dataset")
+
+                upload_cmd = _scp_base_args(cfg) + [
+                    str(local_dlc_dir),
+                    f"{cfg.host}:{cfg.work_dir}/",
+                ]
+                proc = _run_remote_proc(upload_cmd, logfile, "Upload")
 
                 if proc.returncode != 0:
-                    _fail(f"Create training dataset failed (exit {proc.returncode})")
+                    _fail(f"Upload failed (exit {proc.returncode})")
                     if on_complete:
                         on_complete(job_id, proc.returncode)
                     return
 
-                logfile.write("=== Training dataset created ===\n")
+                _update_progress(3.0)
+                logfile.write("=== Upload complete ===\n")
                 logfile.flush()
 
-                # Re-detect shuffle after creation
+                # ── Fix remote config.yaml project_path ──────────────
+                fix_script = (
+                    f"\"import re, pathlib; "
+                    f"p = pathlib.Path(r'{remote_project_dir}/config.yaml'); "
+                    f"t = p.read_text(); "
+                    f"t = re.sub(r'(?m)^project_path:.*', r'project_path: {remote_project_dir}', t); "
+                    f"p.write_text(t)\""
+                )
+                subprocess.run(
+                    _py_cmd(cfg, fix_script),
+                    capture_output=True, timeout=15,
+                )
+
+                # ── Convert CSV labels to H5 ─────────────────────────
+                csv_to_h5_script = (
+                    f"\"import pandas as pd, glob; "
+                    f"csvs = glob.glob(r'{remote_project_dir}/labeled-data/*/CollectedData_*.csv'); "
+                    f"[pd.read_csv(c, header=[0,1,2], index_col=[0,1,2])"
+                    f".to_hdf(c.replace('.csv','.h5'), key='df_with_missing', mode='w') "
+                    f"for c in csvs]; "
+                    f"print(f'Converted {{len(csvs)}} CSV(s) to H5')\""
+                )
+                result = subprocess.run(
+                    _py_cmd(cfg, csv_to_h5_script),
+                    capture_output=True, text=True, timeout=30,
+                )
+                if result.returncode == 0:
+                    logfile.write(f"=== {result.stdout.strip()} ===\n")
+                else:
+                    logfile.write(f"Warning: CSV to H5 conversion failed: {result.stderr.strip()[:200]}\n")
+                logfile.flush()
+
+                # ── Phase 1b: Detect shuffle ─────────────────────────
+                _check_cancel()
+                detect_script = (
+                    f"\"import glob, re, sys; "
+                    f"hits = glob.glob(r'{remote_project_dir}/dlc-models-pytorch/iteration-*/*/train/pytorch_config.yaml'); "
+                    f"shuffles = [int(m.group(1)) for h in hits if (m := re.search(r'shuffle(\\d+)', h))]; "
+                    f"print(max(shuffles)) if shuffles else sys.exit(1)\""
+                )
                 result = subprocess.run(
                     _py_cmd(cfg, detect_script),
                     capture_output=True, text=True, timeout=30,
                 )
-                if result.returncode != 0:
-                    _fail("Could not detect shuffle number after creating training dataset")
+
+                if result.returncode == 0:
+                    shuffle = int(result.stdout.strip())
+                    logfile.write(f"=== Detected existing pytorch config (shuffle {shuffle}) ===\n")
+                    logfile.flush()
+                else:
+                    logfile.write(f"=== Creating training dataset on {cfg.host} ===\n")
+                    logfile.flush()
+
+                    create_ds_cmd = _py_cmd(
+                        cfg,
+                        f"\"from deeplabcut.core.engine import Engine; import deeplabcut; deeplabcut.create_training_dataset(r'{remote_config}', engine=Engine.PYTORCH)\"",
+                    )
+                    proc = _run_remote_proc(create_ds_cmd, logfile, "Create dataset")
+
+                    if proc.returncode != 0:
+                        _fail(f"Create training dataset failed (exit {proc.returncode})")
+                        if on_complete:
+                            on_complete(job_id, proc.returncode)
+                        return
+
+                    logfile.write("=== Training dataset created ===\n")
+                    logfile.flush()
+
+                    result = subprocess.run(
+                        _py_cmd(cfg, detect_script),
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    if result.returncode != 0:
+                        _fail("Could not detect shuffle number after creating training dataset")
+                        if on_complete:
+                            on_complete(job_id, 1)
+                        return
+                    shuffle = int(result.stdout.strip())
+
+                _update_progress(5.0)
+
+                # ── Phase 1c: Upload subject videos for cropping ─────
+                _check_cancel()
+                logfile.write("=== Phase 1c: Uploading subject videos ===\n")
+                logfile.flush()
+
+                from .video import get_subject_videos
+                local_videos = get_subject_videos(subject_name)
+
+                if local_videos:
+                    for vid_path in local_videos:
+                        upload_vid_cmd = _scp_base_args(cfg) + [
+                            vid_path,
+                            f"{cfg.host}:{cfg.work_dir}/",
+                        ]
+                        proc = _run_remote_proc(upload_vid_cmd, logfile, "Upload video")
+                        if proc.returncode != 0:
+                            logfile.write(f"Warning: Failed to upload {vid_path}\n")
+
+                _update_progress(7.0)
+                logfile.write("=== Video upload complete ===\n")
+                logfile.flush()
+
+                # ── Phase 1d: Upload training script, start tmux ─────
+                _check_cancel()
+                logfile.write("=== Phase 1d: Starting tmux session ===\n")
+                logfile.flush()
+
+                # Upload remote_train_script.py
+                train_script_path = Path(__file__).parent / "remote_train_script.py"
+                upload_script_cmd = _scp_base_args(cfg) + [
+                    str(train_script_path),
+                    f"{cfg.host}:{cfg.work_dir}/",
+                ]
+                proc = _run_remote_proc(upload_script_cmd, logfile, "Upload training script")
+                if proc.returncode != 0:
+                    _fail("Failed to upload training script")
                     if on_complete:
                         on_complete(job_id, 1)
                     return
-                shuffle = int(result.stdout.strip())
 
-            _update_progress(5.0)
+                # Build the tmux command:
+                # tmux new-session -d -s <name> '<python> -u <script> <args> 2>&1 | tee <log>'
+                cam_args = " ".join(cam_names)
+                remote_script = f"{cfg.work_dir}/remote_train_script.py"
+                train_cmd_str = (
+                    f"{cfg.python_executable} -u {remote_script}"
+                    f" --config-path {remote_config}"
+                    f" --shuffle {shuffle}"
+                    f" --labels-dir {remote_labels_dir}"
+                    f" --video-dir {cfg.work_dir}"
+                    f" --subject-name {subject_name}"
+                    f" --cam-names {cam_args}"
+                    f" --status-file {remote_status_file}"
+                    f" 2>&1 | tee {remote_log_file}"
+                )
 
-            # ── Phase 2: Training ────────────────────────────────────
-            train_cmd = _py_cmd(
-                cfg,
-                f"\"from deeplabcut.core.engine import Engine; import deeplabcut; deeplabcut.train_network(r'{remote_config}', shuffle={shuffle}, engine=Engine.PYTORCH)\"",
-            )
+                tmux_cmd = _ssh_base_args(cfg) + [
+                    cfg.host,
+                    "tmux", "new-session", "-d", "-s", session_name,
+                    train_cmd_str,
+                ]
 
-            logfile.write(f"=== Phase 2: Training on {cfg.host} ===\n")
-            logfile.flush()
+                result = subprocess.run(
+                    tmux_cmd, capture_output=True, text=True, timeout=30,
+                )
+                if result.returncode != 0:
+                    _fail(f"Failed to start tmux session: {result.stderr.strip()[:200]}")
+                    if on_complete:
+                        on_complete(job_id, 1)
+                    return
 
-            proc = subprocess.Popen(
-                train_cmd,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            )
-            registry._processes[job_id] = proc
+                # Store tmux session name in DB
+                with get_db_ctx() as db:
+                    db.execute(
+                        "UPDATE jobs SET tmux_session = ? WHERE id = ?",
+                        (session_name, job_id),
+                    )
 
-            for line in proc.stdout:
-                logfile.write(line)
+                _update_progress(8.0)
+                logfile.write(f"=== tmux session '{session_name}' started ===\n")
                 logfile.flush()
 
-                if progress_parser:
-                    raw_pct = progress_parser(line)
-                    if raw_pct is not None:
-                        # Scale 0-100% training progress to 5-75% overall
-                        scaled = 5.0 + (raw_pct / 100.0) * 70.0
-                        _update_progress(scaled)
+            # ── Monitor loop (8-90%) ─────────────────────────────────
+            # Both fresh and resume paths converge here
+            if resume:
+                logfile.write(f"\n=== Resuming monitoring of tmux session '{session_name}' ===\n")
+                logfile.flush()
 
-            proc.wait()
-            if proc.returncode != 0:
-                _fail(f"Training failed (exit {proc.returncode})")
-                if on_complete:
-                    on_complete(job_id, proc.returncode)
-                return
+            log_offset = 0
+            ssh_fail_count = 0
+            max_ssh_failures = 30  # 30 × 10s = 5min tolerance
+            poll_interval = 10  # seconds
 
-            _update_progress(75.0)
-            logfile.write("=== Training complete ===\n")
-            logfile.flush()
+            while True:
+                _check_cancel()
+                time.sleep(poll_interval)
+                _check_cancel()
 
-            # ── Phase 3: Crop stereo videos on remote ────────────────
-            logfile.write("=== Phase 3: Cropping stereo videos on remote ===\n")
-            logfile.flush()
+                # Check tmux alive
+                tmux_alive = _check_tmux_alive(cfg, session_name)
 
-            from ..config import get_settings
-            settings = get_settings()
+                # Read status.json
+                status = _read_remote_status(cfg, remote_status_file)
 
-            # Find local videos for this subject
-            from .video import get_subject_videos
-            local_videos = get_subject_videos(subject_name)
+                # Tail remote log → append to local log
+                new_log, log_offset = _tail_remote_log(cfg, remote_log_file, log_offset)
+                if new_log:
+                    logfile.write(new_log)
+                    logfile.flush()
+                    ssh_fail_count = 0  # successful SSH = reset counter
 
-            if local_videos:
-                # Create remote output directory
-                remote_labels_dir = f"{remote_project_dir}/labels_v1"
-                subprocess.run(
-                    _py_cmd(cfg, f"\"import os; os.makedirs(r'{remote_labels_dir}', exist_ok=True)\""),
-                    capture_output=True, timeout=15,
-                )
+                # Update progress from status
+                if status:
+                    ssh_fail_count = 0
+                    pct = status.get("progress_pct", 0)
+                    # Scale remote 0-100% to local 8-90%
+                    scaled = 8.0 + (pct / 100.0) * 82.0
+                    _update_progress(scaled)
 
-                cam_names = settings.camera_names
-                cam_names_str = repr(cam_names)
+                    remote_status_val = status.get("status", "")
+                    if remote_status_val == "completed":
+                        logfile.write("=== Remote pipeline completed ===\n")
+                        logfile.flush()
+                        break
+                    elif remote_status_val == "failed":
+                        error = status.get("error", "Unknown error")
+                        _fail(f"Remote pipeline failed: {error}")
+                        if on_complete:
+                            on_complete(job_id, 1)
+                        return
+                    elif not tmux_alive:
+                        # Status exists but not completed/failed, yet tmux died
+                        error = status.get("error", "tmux session exited unexpectedly")
+                        phase = status.get("phase", "unknown")
+                        _fail(f"tmux exited during phase '{phase}': {error}")
+                        if on_complete:
+                            on_complete(job_id, 1)
+                        return
 
-                # Upload source videos first
-                for vid_path in local_videos:
-                    upload_vid_cmd = _scp_base_args(cfg) + [
-                        vid_path,
-                        f"{cfg.host}:{cfg.work_dir}/",
-                    ]
-                    proc = _run_remote_proc(upload_vid_cmd, logfile, "Upload video")
-                    if proc.returncode != 0:
-                        logfile.write(f"Warning: Failed to upload {vid_path}\n")
+                elif not tmux_alive:
+                    # No status.json and tmux dead — SSH connectivity issue?
+                    ssh_fail_count += 1
+                    logfile.write(f"Warning: tmux not found and no status.json, attempt {ssh_fail_count}/{max_ssh_failures}\n")
+                    logfile.flush()
 
-                # Build crop script
-                crop_script = (
-                    f"\"import cv2, os, pathlib; "
-                    f"cam_names = {cam_names_str}; "
-                    f"video_dir = r'{cfg.work_dir}'; "
-                    f"out_dir = pathlib.Path(r'{remote_labels_dir}'); "
-                    f"out_dir.mkdir(exist_ok=True); "
-                    f"import glob; "
-                    f"videos = sorted(glob.glob(os.path.join(video_dir, '{subject_name}_*.mp4'))); "
-                    f"print(f'Found {{len(videos)}} videos'); "
-                    f"[exec('"
-                    f"cap = cv2.VideoCapture(v);\\n"
-                    f"fps = int(cap.get(cv2.CAP_PROP_FPS));\\n"
-                    f"n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT));\\n"
-                    f"ret, f0 = cap.read();\\n"
-                    f"h, w = f0.shape[:2];\\n"
-                    f"mid = w // 2;\\n"
-                    f"cap.set(cv2.CAP_PROP_POS_FRAMES, 0);\\n"
-                    f"stem = pathlib.Path(v).stem;\\n"
-                    f"ext = pathlib.Path(v).suffix;\\n"
-                    f"wL = cv2.VideoWriter(str(out_dir / f\\'{{stem}}_{{cam_names[0]}}{{ext}}\\'), cv2.VideoWriter_fourcc(*\\'avc1\\'), fps, (mid, h));\\n"
-                    f"wR = cv2.VideoWriter(str(out_dir / f\\'{{stem}}_{{cam_names[1]}}{{ext}}\\'), cv2.VideoWriter_fourcc(*\\'avc1\\'), fps, (w-mid, h)) if len(cam_names) > 1 else None;\\n"
-                    f"[exec(\\'ret, fr = cap.read();\\\\nwL.write(fr[:, :mid]) if ret else None;\\\\nwR.write(fr[:, mid:]) if ret and wR else None\\') for _ in range(n)];\\n"
-                    f"cap.release(); wL.release();\\n"
-                    f"wR.release() if wR else None;\\n"
-                    f"print(f\\'Cropped {{stem}}: {{n}} frames\\')"
-                    f"') for v in videos]; "
-                    f"print('Crop complete')\""
-                )
-
-                # Run crop on remote
-                proc = _run_remote_proc(_py_cmd(cfg, crop_script), logfile, "Crop")
-                if proc.returncode != 0:
-                    logfile.write(f"Warning: Remote crop failed (exit {proc.returncode}), continuing...\n")
-
-            _update_progress(80.0)
-            logfile.write("=== Crop complete ===\n")
-            logfile.flush()
-
-            # ── Phase 4: Analyze videos on remote ────────────────────
-            logfile.write("=== Phase 4: Analyzing videos on remote ===\n")
-            logfile.flush()
-
-            remote_labels_dir = f"{remote_project_dir}/labels_v1"
-            analyze_script = (
-                f"\"from deeplabcut.core.engine import Engine; "
-                f"import deeplabcut; "
-                f"deeplabcut.analyze_videos(r'{remote_config}', r'{remote_labels_dir}', shuffle={shuffle}, engine=Engine.PYTORCH); "
-                f"print('Analysis complete'); "
-                f"deeplabcut.analyze_videos_converth5_to_csv(r'{remote_labels_dir}'); "
-                f"print('H5 to CSV conversion complete')\""
-            )
-
-            proc = _run_remote_proc(_py_cmd(cfg, analyze_script), logfile, "Analyze")
-            if proc.returncode != 0:
-                logfile.write(f"Warning: Remote analysis failed (exit {proc.returncode}), continuing to download...\n")
-
-            _update_progress(90.0)
-            logfile.write("=== Analysis complete ===\n")
-            logfile.flush()
+                    if ssh_fail_count >= max_ssh_failures:
+                        _fail("tmux session died and no status.json found")
+                        if on_complete:
+                            on_complete(job_id, 1)
+                        return
 
             # ── Phase 5: Download model + CSV results ────────────────
             logfile.write(f"=== Phase 5: Downloading results from {cfg.host} ===\n")
             logfile.flush()
+            _update_progress(90.0)
 
-            # Download dlc-models-pytorch directory back to local (PyTorch engine)
+            # Download dlc-models-pytorch directory
             remote_models = f"{cfg.host}:{remote_project_dir}/dlc-models-pytorch"
             download_cmd = _scp_base_args(cfg) + [
                 remote_models,
@@ -459,7 +575,7 @@ def remote_train_monitor(
             if proc.returncode != 0:
                 logfile.write(f"Warning: Model download failed (exit {proc.returncode})\n")
 
-            # Download labels_v1 directory (cropped videos + CSV analysis results)
+            # Download labels_v1 directory
             remote_labels = f"{cfg.host}:{remote_project_dir}/labels_v1"
             local_labels_dir = local_dlc_dir / "labels_v1"
             local_labels_dir.mkdir(exist_ok=True)
@@ -487,12 +603,22 @@ def remote_train_monitor(
         if on_complete:
             on_complete(job_id, 0)
 
+    except InterruptedError:
+        logger.info(f"Job {job_id} cancelled — killing tmux session")
+        _kill_tmux_session(cfg, session_name)
+        with get_db_ctx() as db:
+            db.execute(
+                """UPDATE jobs SET status = 'cancelled',
+                   finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                (job_id,),
+            )
     except Exception as e:
         logger.exception(f"Job {job_id} remote training error")
         _fail(str(e))
     finally:
         registry._processes.pop(job_id, None)
         registry._threads.pop(job_id, None)
+        registry.unregister_cancel_event(job_id)
 
 
 def remote_preprocess_batch(

@@ -93,14 +93,16 @@ def _has_deidentified(dlc_path: Path) -> bool:
     return (dlc_path / ".deidentified").exists()
 
 
-def _has_labeled_videos(dlc_path: Path) -> bool:
-    """Check if labeled_videos directory exists (post-analysis)."""
-    return (dlc_path / "labeled_videos").exists()
+def _has_labels_v2(dlc_path: Path) -> bool:
+    """Check if labels_v2 (refined DLC outputs) exist."""
+    d = dlc_path / "labels_v2"
+    return d.exists() and d.is_dir()
 
 
-def _has_training_datasets(dlc_path: Path) -> bool:
-    """Check if training-datasets directory exists."""
-    return (dlc_path / "training-datasets").exists()
+def _has_corrections(dlc_path: Path) -> bool:
+    """Check if corrections (manually corrected DLC outputs) exist."""
+    d = dlc_path / "corrections"
+    return d.exists() and d.is_dir()
 
 
 def _get_camera_name(dlc_path: Path) -> str | None:
@@ -133,33 +135,24 @@ def infer_stage(dlc_path: Path) -> str:
     """Infer pipeline stage from filesystem artifacts.
 
     Priority order (highest to lowest):
-    - Has labeled_videos/ -> complete (or analyzed)
-    - Has labels_v1/ -> triangulated (post-analysis cropped outputs)
+    - Has corrections/ -> corrected
+    - Has labels_v2/ -> refined
+    - Has labels_v1/ -> analyzed
     - Has snapshots -> trained
-    - Has training-datasets/ -> training_dataset_created
     - Has labeled-data/ with CSV -> committed
     - Has config.yaml -> created
     """
-    has_config = (dlc_path / "config.yaml").exists()
-    has_labels = _has_labeled_data(dlc_path)
-    has_training = _has_training_datasets(dlc_path)
-    has_snaps = _has_snapshots(dlc_path)
-    has_lv1 = _has_labels_v1(dlc_path)
-    has_lv = _has_labeled_videos(dlc_path)
-
-    if has_lv and has_lv1:
-        return "complete"
-    if has_lv1:
-        return "triangulated"
-    if has_lv:
+    if _has_corrections(dlc_path):
+        return "corrected"
+    if _has_labels_v2(dlc_path):
+        return "refined"
+    if _has_labels_v1(dlc_path):
         return "analyzed"
-    if has_snaps:
+    if _has_snapshots(dlc_path):
         return "trained"
-    if has_training:
-        return "training_dataset_created"
-    if has_labels:
+    if _has_labeled_data(dlc_path):
         return "committed"
-    if has_config:
+    if (dlc_path / "config.yaml").exists():
         return "created"
     return "created"
 

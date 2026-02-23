@@ -84,6 +84,59 @@ async def stream_job(job_id: int) -> StreamingResponse:
     )
 
 
+@router.get("/{job_id}/log-stream")
+async def stream_job_log(job_id: int) -> StreamingResponse:
+    """SSE stream that tails the job log file in real time."""
+    with get_db_ctx() as db:
+        job = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if not job:
+        raise HTTPException(404, "Job not found")
+    log_path = job.get("log_path")
+    if not log_path:
+        raise HTTPException(400, "No log file for this job")
+
+    async def event_generator():
+        offset = 0
+        while True:
+            # Read any new content from the log file
+            try:
+                with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                    f.seek(offset)
+                    new_text = f.read()
+                    if new_text:
+                        offset = f.tell()
+                        yield f"data: {json.dumps({'text': new_text})}\n\n"
+            except FileNotFoundError:
+                pass  # Log file not created yet
+
+            # Check if job is still active
+            with get_db_ctx() as db:
+                current = db.execute(
+                    "SELECT status FROM jobs WHERE id = ?", (job_id,)
+                ).fetchone()
+            if not current or current["status"] in ("completed", "failed", "cancelled"):
+                # Flush any remaining content
+                try:
+                    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                        f.seek(offset)
+                        remaining = f.read()
+                        if remaining:
+                            yield f"data: {json.dumps({'text': remaining})}\n\n"
+                except FileNotFoundError:
+                    pass
+                status = current["status"] if current else "unknown"
+                yield f"data: {json.dumps({'done': True, 'status': status})}\n\n"
+                break
+
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.post("/{job_id}/cancel")
 def cancel_job(job_id: int) -> dict:
     """Cancel a running job."""

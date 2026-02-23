@@ -92,6 +92,8 @@ body {
 .badge-cropped     { background: #4a148c; color: #ce93d8; }
 .badge-analyzing,
 .badge-analyzed    { background: #0d47a1; color: #64b5f6; }
+.badge-refined     { background: #006064; color: #4dd0e1; }
+.badge-corrected   { background: #2e7d32; color: #a5d6a7; }
 .badge-triangulating,
 .badge-triangulated { background: #006064; color: #4dd0e1; }
 .badge-complete    { background: #2e7d32; color: #a5d6a7; }

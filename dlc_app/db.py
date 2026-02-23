@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     progress_pct REAL DEFAULT 0,
     remote_host TEXT,
     pid INTEGER,
+    tmux_session TEXT,
     error_msg TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     started_at TIMESTAMP,
@@ -154,6 +155,14 @@ def _migrate_frame_labels(conn):
     logger.info(f"Migrated {len(rows)} label rows to JSON keypoints")
 
 
+def _migrate_add_tmux_session(conn):
+    """Add tmux_session column to jobs table if missing."""
+    columns = _get_table_columns(conn, "jobs")
+    if "tmux_session" not in columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN tmux_session TEXT")
+        logger.info("Added tmux_session column to jobs table")
+
+
 def _migrate_relative_dlc_dir(conn):
     """Convert absolute dlc_dir paths to relative (subject name only)."""
     rows = conn.execute("SELECT id, dlc_dir FROM subjects WHERE dlc_dir IS NOT NULL").fetchall()
@@ -183,6 +192,10 @@ def init_db():
 
     if "frame_labels" in tables:
         _migrate_frame_labels(conn)
+        conn.commit()
+
+    if "jobs" in tables:
+        _migrate_add_tmux_session(conn)
         conn.commit()
 
     if "subjects" in tables:
