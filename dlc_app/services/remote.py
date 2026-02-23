@@ -377,10 +377,23 @@ def remote_train_monitor(
                 logfile.flush()
 
                 # ── Phase 1b: Detect shuffle ─────────────────────────
+                # Read iteration from config.yaml so we look for the right
+                # iteration-N directory (a refine bumps iteration).
                 _check_cancel()
+                iter_script = (
+                    f"\"import yaml; "
+                    f"cfg = yaml.safe_load(open(r'{remote_config}')); "
+                    f"print(cfg.get('iteration', 0))\""
+                )
+                iter_result = subprocess.run(
+                    _py_cmd(cfg, iter_script),
+                    capture_output=True, text=True, timeout=15,
+                )
+                remote_iteration = int(iter_result.stdout.strip()) if iter_result.returncode == 0 else 0
+
                 detect_script = (
                     f"\"import glob, re, sys; "
-                    f"hits = glob.glob(r'{remote_project_dir}/dlc-models-pytorch/iteration-*/*/train/pytorch_config.yaml'); "
+                    f"hits = glob.glob(r'{remote_project_dir}/dlc-models-pytorch/iteration-{remote_iteration}/*/train/pytorch_config.yaml'); "
                     f"shuffles = [int(m.group(1)) for h in hits if (m := re.search(r'shuffle(\\d+)', h))]; "
                     f"print(max(shuffles)) if shuffles else sys.exit(1)\""
                 )
