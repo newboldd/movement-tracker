@@ -194,6 +194,7 @@ const labeler = (() => {
                 if (traceContainer) traceContainer.style.display = 'block';
                 const timelineContainer = document.querySelector('.timeline-container');
                 if (timelineContainer) timelineContainer.style.display = 'none';
+                initDistanceTraceWindow();
             }
 
             recomputeCameraShift();
@@ -1529,16 +1530,19 @@ const labeler = (() => {
 
     // ── Distance Trace ────────────────────────────────
     function setupDistanceTrace() {
-        // Set window size to ~10 seconds of video
-        const fps = trials.length > 0 ? trials[0].fps : 30;
-        distViewFrames = Math.round(fps * 10);
-
         distCanvas.addEventListener('mousedown', onDistTraceMouseDown);
         distCanvas.addEventListener('wheel', onDistTraceWheel, { passive: false });
 
         const container = distCanvas.parentElement;
         const ro = new ResizeObserver(() => renderDistanceTrace());
         ro.observe(container);
+    }
+
+    /** Called after trials are loaded so we know the real fps. */
+    function initDistanceTraceWindow() {
+        const fps = trials.length > 0 ? trials[0].fps : 30;
+        distViewFrames = Math.round(fps * 10);
+        console.log(`Distance trace: ${distViewFrames} frame window (${fps} fps × 10s), ${totalFrames} total frames`);
     }
 
     function clampDistView() {
@@ -1627,7 +1631,9 @@ const labeler = (() => {
         distCanvas.width = w;
         distCanvas.height = h;
 
-        if (totalFrames === 0 || distViewFrames === 0) return;
+        if (totalFrames === 0) return;
+        // If window not yet initialized, show everything
+        if (distViewFrames === 0 || distViewFrames >= totalFrames) distViewFrames = totalFrames;
 
         // Auto-scroll so current frame stays visible (unless user is manually panning)
         if (distAutoScroll) ensureFrameVisible();
