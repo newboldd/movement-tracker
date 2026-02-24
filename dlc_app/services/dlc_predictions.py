@@ -116,23 +116,22 @@ def get_dlc_predictions_for_session(subject_name: str) -> dict | None:
     dlc_dir = settings.dlc_path / subject_name
     cam_names = settings.camera_names
 
-    # Find best available label directory (highest quality first)
+    # Find best available label directory that has DLC CSVs (highest quality first)
     labels_dir = None
+    csv_files = []
     for name in ["corrections", "labels_v2", "labels_v1", "labels_v1.0", "labels_v0.1"]:
         candidate = dlc_dir / name
         if candidate.exists() and candidate.is_dir():
-            labels_dir = candidate
-            break
+            found = sorted(candidate.glob("*DLC*.csv"))
+            if found:
+                labels_dir = candidate
+                csv_files = found
+                break
 
     if not labels_dir:
         return None
 
     logger.info(f"Using label source '{labels_dir.name}' for {subject_name}")
-
-    # Find DLC CSV files
-    csv_files = sorted(labels_dir.glob("*DLC*.csv"))
-    if not csv_files:
-        return None
 
     # Build trial map to know frame offsets
     trials = build_trial_map(subject_name)
