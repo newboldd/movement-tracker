@@ -273,6 +273,48 @@ def get_dlc_predictions(session_id: int) -> dict:
     return data
 
 
+@router.get("/sessions/{session_id}/committed_labels")
+def get_committed_labels(session_id: int) -> List[dict]:
+    """Get all manually labeled frames from committed sessions for this subject.
+
+    For refine sessions, these represent frames the user already hand-labeled
+    in earlier rounds. They should take priority over DLC predictions as ghost
+    markers so that human corrections are preserved.
+
+    Returns list of {frame_num, trial_idx, side, keypoints} dicts.
+    """
+    with get_db_ctx() as db:
+        session = db.execute(
+            "SELECT * FROM label_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not session:
+            raise HTTPException(404, "Session not found")
+
+        # Find all committed sessions for this subject (excluding current)
+        labels = db.execute(
+            """SELECT fl.frame_num, fl.trial_idx, fl.side, fl.keypoints
+               FROM frame_labels fl
+               JOIN label_sessions ls ON ls.id = fl.session_id
+               WHERE ls.subject_id = ? AND ls.status = 'committed'
+               ORDER BY ls.committed_at DESC, fl.frame_num""",
+            (session["subject_id"],),
+        ).fetchall()
+
+    # De-duplicate: keep the most recently committed label for each frame/side
+    seen = set()
+    result = []
+    for lbl in labels:
+        key = (lbl["frame_num"], lbl["side"])
+        if key in seen:
+            continue
+        seen.add(key)
+        if isinstance(lbl["keypoints"], str):
+            lbl["keypoints"] = json.loads(lbl["keypoints"])
+        result.append(lbl)
+
+    return result
+
+
 @router.put("/sessions/{session_id}/labels")
 def save_labels(session_id: int, req: LabelBatchSave) -> dict:
     """Batch-save labels (upsert). Returns updated distances for affected frames."""

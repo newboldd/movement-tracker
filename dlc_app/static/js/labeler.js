@@ -28,10 +28,14 @@ const labeler = (() => {
     // DLC analysis predictions: same shape as mpLabels
     let dlcLabels = null;
 
+    // Committed manual labels from prior sessions: Map<frameKey, {[bodypart]: [x, y]}>
+    // These take priority over DLC predictions for frames the user already hand-labeled
+    let committedLabels = new Map();
+
     // 3D distance trace
     let distances = null;
 
-    // True for refine sessions: ghost priority = DLC > MP, distances from DLC
+    // True for refine sessions: ghost priority = committed > DLC > MP, distances from DLC
     let isRefine = false;
 
     // Committed frame count from DLC labeled-data/
@@ -188,6 +192,24 @@ const labeler = (() => {
                 console.log('No DLC predictions available');
             }
 
+            // Load committed manual labels from prior sessions (refine mode)
+            if (isRefine) {
+                try {
+                    const committed = await API.get(`/api/labeling/sessions/${sessionId}/committed_labels`);
+                    if (committed && committed.length > 0) {
+                        committed.forEach(l => {
+                            const key = `${l.frame_num}_${l.side}`;
+                            if (!committedLabels.has(key)) {
+                                committedLabels.set(key, l.keypoints || {});
+                            }
+                        });
+                        console.log(`Loaded ${committedLabels.size} committed manual labels`);
+                    }
+                } catch (e) {
+                    console.log('No committed labels available');
+                }
+            }
+
             // Always initialize the distance trace window size from fps
             initDistanceTraceWindow();
 
@@ -297,6 +319,15 @@ const labeler = (() => {
         return arr[frame]; // [x, y] or null
     }
 
+    function getCommittedLabel(frame, side, bodypart) {
+        const key = `${frame}_${side}`;
+        const lbl = committedLabels.get(key);
+        if (!lbl) return null;
+        const coords = lbl[bodypart];
+        if (!coords || coords[0] == null) return null;
+        return coords; // [x, y]
+    }
+
     function hasManualLabel(frame, side, bodypart) {
         const key = `${frame}_${side}`;
         const lbl = labels.get(key);
@@ -336,19 +367,27 @@ const labeler = (() => {
                 drawPoint(manualCoords[0], manualCoords[1], bpColor(idx), bpLetter(bp));
                 placedBps.push({ bp, x: manualCoords[0], y: manualCoords[1] });
             } else {
-                // Ghost priority: refine uses DLC > MP, initial uses MP > DLC
+                // Ghost priority:
+                //   Refine: committed manual > DLC > MP
+                //   Initial: MP > DLC
                 const mpCoords = getMpLabel(currentFrame, currentSide, bp);
                 const dlcCoords = getDlcLabel(currentFrame, currentSide, bp);
-                const primary = isRefine ? dlcCoords : mpCoords;
-                const secondary = isRefine ? mpCoords : dlcCoords;
-                const primaryTag = isRefine ? 'D' : 'MP';
-                const secondaryTag = isRefine ? 'MP' : 'D';
-                if (primary) {
-                    drawGhostPoint(primary[0], primary[1], bpColor(idx), primaryTag);
-                    placedBps.push({ bp, x: primary[0], y: primary[1], ghost: true });
-                } else if (secondary) {
-                    drawGhostPoint(secondary[0], secondary[1], bpColor(idx), secondaryTag);
-                    placedBps.push({ bp, x: secondary[0], y: secondary[1], ghost: true });
+                const comCoords = isRefine ? getCommittedLabel(currentFrame, currentSide, bp) : null;
+
+                let ghostCoords = null;
+                let ghostTag = '';
+                if (isRefine) {
+                    if (comCoords) { ghostCoords = comCoords; ghostTag = 'M'; }
+                    else if (dlcCoords) { ghostCoords = dlcCoords; ghostTag = 'D'; }
+                    else if (mpCoords) { ghostCoords = mpCoords; ghostTag = 'MP'; }
+                } else {
+                    if (mpCoords) { ghostCoords = mpCoords; ghostTag = 'MP'; }
+                    else if (dlcCoords) { ghostCoords = dlcCoords; ghostTag = 'D'; }
+                }
+
+                if (ghostCoords) {
+                    drawGhostPoint(ghostCoords[0], ghostCoords[1], bpColor(idx), ghostTag);
+                    placedBps.push({ bp, x: ghostCoords[0], y: ghostCoords[1], ghost: true });
                 }
             }
         });
@@ -474,22 +513,27 @@ const labeler = (() => {
             }
         }
 
-        // Check ghost markers (refine: DLC first; initial: MP first)
+        // Check ghost markers (refine: committed > DLC > MP; initial: MP > DLC)
         for (const bp of bodyparts) {
             if (hasManualLabel(currentFrame, currentSide, bp)) continue;
             const mpCoords = getMpLabel(currentFrame, currentSide, bp);
             const dlcCoords = getDlcLabel(currentFrame, currentSide, bp);
-            const primary = isRefine ? dlcCoords : mpCoords;
-            const secondary = isRefine ? mpCoords : dlcCoords;
-            const primarySource = isRefine ? 'dlc' : 'mp';
-            const secondarySource = isRefine ? 'mp' : 'dlc';
-            if (primary) {
-                const p = imageToScreen(primary[0], primary[1]);
-                if (Math.hypot(sx - p.x, sy - p.y) < HIT_RADIUS) return { bp, ghost: true, source: primarySource };
+            const comCoords = isRefine ? getCommittedLabel(currentFrame, currentSide, bp) : null;
+
+            // Build priority list
+            const candidates = [];
+            if (isRefine) {
+                if (comCoords) candidates.push({ coords: comCoords, source: 'committed' });
+                if (dlcCoords) candidates.push({ coords: dlcCoords, source: 'dlc' });
+                if (mpCoords) candidates.push({ coords: mpCoords, source: 'mp' });
+            } else {
+                if (mpCoords) candidates.push({ coords: mpCoords, source: 'mp' });
+                if (dlcCoords) candidates.push({ coords: dlcCoords, source: 'dlc' });
             }
-            if (secondary) {
-                const p = imageToScreen(secondary[0], secondary[1]);
-                if (Math.hypot(sx - p.x, sy - p.y) < HIT_RADIUS) return { bp, ghost: true, source: secondarySource };
+
+            for (const c of candidates) {
+                const p = imageToScreen(c.coords[0], c.coords[1]);
+                if (Math.hypot(sx - p.x, sy - p.y) < HIT_RADIUS) return { bp, ghost: true, source: c.source };
             }
         }
 
@@ -528,7 +572,8 @@ const labeler = (() => {
                 // Click on ghost marker: accept position as manual label
                 const mpCoords = getMpLabel(currentFrame, currentSide, hit.bp);
                 const dlcCoords = getDlcLabel(currentFrame, currentSide, hit.bp);
-                const ghostCoords = isRefine ? (dlcCoords || mpCoords) : (mpCoords || dlcCoords);
+                const comCoords = isRefine ? getCommittedLabel(currentFrame, currentSide, hit.bp) : null;
+                const ghostCoords = isRefine ? (comCoords || dlcCoords || mpCoords) : (mpCoords || dlcCoords);
                 if (ghostCoords) {
                     const key = `${currentFrame}_${currentSide}`;
                     let lbl = labels.get(key);
@@ -710,12 +755,17 @@ const labeler = (() => {
             if (manual && manual[0] != null) {
                 pts.push(manual);
             } else {
-                const mp = getMpLabel(frame, side, bp);
-                if (mp) {
-                    pts.push(mp);
+                const com = isRefine ? getCommittedLabel(frame, side, bp) : null;
+                if (com) {
+                    pts.push(com);
                 } else {
-                    const dlc = getDlcLabel(frame, side, bp);
-                    if (dlc) pts.push(dlc);
+                    const mp = getMpLabel(frame, side, bp);
+                    if (mp) {
+                        pts.push(mp);
+                    } else {
+                        const dlc = getDlcLabel(frame, side, bp);
+                        if (dlc) pts.push(dlc);
+                    }
                 }
             }
         }

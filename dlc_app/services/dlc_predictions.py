@@ -103,7 +103,9 @@ def _match_csv_to_trial(csv_name: str, subject_name: str, cam_names: list[str]) 
 def get_dlc_predictions_for_session(subject_name: str) -> dict | None:
     """Load DLC analysis predictions for a subject.
 
-    Looks in the subject's labels_v1/ directory for DLC CSV outputs.
+    Searches for the best available label directory in priority order:
+    corrections/ > labels_v2/ > labels_v1/ (and variants).
+
     Returns dict in same format as mediapipe prelabels:
         {camera: {bodypart: [[x,y]|null, ...]}}
 
@@ -114,9 +116,9 @@ def get_dlc_predictions_for_session(subject_name: str) -> dict | None:
     dlc_dir = settings.dlc_path / subject_name
     cam_names = settings.camera_names
 
-    # Find labels_v1 directory
+    # Find best available label directory (highest quality first)
     labels_dir = None
-    for name in ["labels_v1", "labels_v1.0", "labels_v0.1"]:
+    for name in ["corrections", "labels_v2", "labels_v1", "labels_v1.0", "labels_v0.1"]:
         candidate = dlc_dir / name
         if candidate.exists() and candidate.is_dir():
             labels_dir = candidate
@@ -124,6 +126,8 @@ def get_dlc_predictions_for_session(subject_name: str) -> dict | None:
 
     if not labels_dir:
         return None
+
+    logger.info(f"Using label source '{labels_dir.name}' for {subject_name}")
 
     # Find DLC CSV files
     csv_files = sorted(labels_dir.glob("*DLC*.csv"))
