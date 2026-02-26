@@ -86,18 +86,9 @@ function getActions(subject) {
     const btns = [];
     const s = subject.stage;
 
-    // Always show label button
-    btns.push(`<button class="btn btn-sm" onclick="openLabeling(${subject.id})">Label</button>`);
-
-    // MediaPipe always available (useful for refining labels at any stage)
-    const mpLabel = subject.has_mediapipe ? 'Re-run MP' : 'Run MP';
-    btns.push(`<button class="btn btn-sm" onclick="runStep(${subject.id}, 'mediapipe')">${mpLabel}</button>`);
-
-    // Blur faces available for any subject with videos
-    if (subject.video_count > 0) {
-        const blurLabel = subject.has_blur ? 'Re-blur' : 'Blur Faces';
-        btns.push(`<button class="btn btn-sm" onclick="runStep(${subject.id}, 'deidentify')">${blurLabel}</button>`);
-    }
+    // Label / Restart button (always visible)
+    const labelText = subject.has_labels ? 'Restart' : 'Label';
+    btns.push(`<button class="btn btn-sm" onclick="openLabeling(${subject.id})">${labelText}</button>`);
 
     // Stage-specific actions
     if (s === 'committed' || s === 'labeled') {
@@ -107,6 +98,7 @@ function getActions(subject) {
     const refineStages = ['analyzed', 'refined', 'corrected'];
     if (refineStages.includes(s)) {
         btns.push(`<button class="btn btn-sm" onclick="openRefine(${subject.id})">Refine</button>`);
+        btns.push(`<button class="btn btn-sm" onclick="openCorrections(${subject.id})">Corrections</button>`);
     }
 
     return btns.join(' ');
@@ -355,6 +347,16 @@ async function removeSubject(subjectId, subjectName) {
 async function openRefine(subjectId) {
     try {
         const session = await API.post(`/api/labeling/${subjectId}/sessions`, { session_type: 'refine' });
+        window.location.href = `/labeling?session=${session.id}`;
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+// ── Corrections navigation ───────────────────────────
+async function openCorrections(subjectId) {
+    try {
+        const session = await API.post(`/api/labeling/${subjectId}/sessions`, { session_type: 'corrections' });
         window.location.href = `/labeling?session=${session.id}`;
     } catch (e) {
         alert('Error: ' + e.message);

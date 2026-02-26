@@ -41,6 +41,21 @@ const labeler = (() => {
     // Committed frame count from DLC labeled-data/
     let committedFrameCount = 0;
 
+    // Corrections mode state
+    let isCorrections = false;
+    let activeDisplayStage = null;  // 'mp' | 'labels' | 'dlc' | 'refine' | 'corrections'
+    let availableStages = [];
+    const stageData = {};           // cache: {stage: {camera: {bodypart: [...]}}}
+
+    const STAGE_CHAIN = ['corrections', 'refine', 'dlc', 'labels', 'mp'];
+    const STAGE_LABELS = {
+        'mp': 'MediaPipe',
+        'labels': 'Manual Labels',
+        'dlc': 'DLC',
+        'refine': 'Refine',
+        'corrections': 'Corrections',
+    };
+
     // Color palette for bodyparts
     const COLORS = [
         '#ff4444', '#222222', '#4a9eff', '#4caf50',
@@ -143,13 +158,22 @@ const labeler = (() => {
             currentSide = cameraNames[0] || 'OS';
 
             isRefine = sessionInfo.session && sessionInfo.session.session_type === 'refine';
-            document.getElementById('headerTitle').textContent =
-                isRefine ? `Refine: ${sessionInfo.subject.name}` : `Labeling: ${sessionInfo.subject.name}`;
+            isCorrections = sessionInfo.session && sessionInfo.session.session_type === 'corrections';
 
-            // Update commit button text for refine sessions
+            const subjectName = sessionInfo.subject.name;
+            if (isCorrections) {
+                document.getElementById('headerTitle').textContent = `Corrections: ${subjectName}`;
+            } else if (isRefine) {
+                document.getElementById('headerTitle').textContent = `Refine: ${subjectName}`;
+            } else {
+                document.getElementById('headerTitle').textContent = `Labeling: ${subjectName}`;
+            }
+
+            // Update commit button text
             const commitBtn = document.querySelector('[onclick="labeler.commitSession()"]');
-            if (commitBtn && isRefine) {
-                commitBtn.textContent = 'Commit & Retrain';
+            if (commitBtn) {
+                if (isCorrections) commitBtn.textContent = 'Save Corrections';
+                else if (isRefine) commitBtn.textContent = 'Commit & Retrain';
             }
 
             // Update sidebar with dynamic shortcuts
@@ -159,54 +183,69 @@ const labeler = (() => {
             // Setup keyboard after bodyparts are known
             setupKeyboard();
 
-            // Load existing labels
+            // Load existing labels (user edits in this session)
             const saved = await API.get(`/api/labeling/sessions/${sessionId}/labels`);
             saved.forEach(l => {
                 const key = `${l.frame_num}_${l.side}`;
                 labels.set(key, l.keypoints || {});
             });
 
-            // Load MediaPipe prelabels
-            try {
-                const mpData = await API.get(`/api/labeling/sessions/${sessionId}/mediapipe`);
-                if (mpData && Object.keys(mpData).length > 0) {
-                    mpLabels = mpData;
-                    if (!isRefine) {
+            if (isCorrections) {
+                // Corrections mode: load stage data, no ghosts
+                try {
+                    const stagesResp = await API.get(`/api/labeling/sessions/${sessionId}/available_stages`);
+                    availableStages = stagesResp.stages || [];
+                } catch (e) {
+                    console.log('Could not load available stages');
+                    availableStages = [];
+                }
+
+                buildStageSelector();
+
+                // Default to highest-priority stage with data
+                const defaultStage = getDefaultStage();
+                if (defaultStage) {
+                    await switchDisplayStage(defaultStage);
+                }
+            } else {
+                // Initial / Refine mode: load MP + DLC + committed labels as before
+                try {
+                    const mpData = await API.get(`/api/labeling/sessions/${sessionId}/mediapipe`);
+                    if (mpData && Object.keys(mpData).length > 0) {
+                        mpLabels = mpData;
                         distances = mpData.distances || null;
                     }
+                } catch (e) {
+                    console.log('No MediaPipe prelabels available');
                 }
-            } catch (e) {
-                console.log('No MediaPipe prelabels available');
-            }
 
-            // Load DLC predictions as ghost markers (+ distances for refine)
-            try {
-                const dlcData = await API.get(`/api/labeling/sessions/${sessionId}/dlc_predictions`);
-                if (dlcData && Object.keys(dlcData).length > 0) {
-                    dlcLabels = dlcData;
-                    if (isRefine) {
-                        distances = dlcData.distances || null;
-                    }
-                }
-            } catch (e) {
-                console.log('No DLC predictions available');
-            }
-
-            // Load committed manual labels from prior sessions (refine mode)
-            if (isRefine) {
                 try {
-                    const committed = await API.get(`/api/labeling/sessions/${sessionId}/committed_labels`);
-                    if (committed && committed.length > 0) {
-                        committed.forEach(l => {
-                            const key = `${l.frame_num}_${l.side}`;
-                            if (!committedLabels.has(key)) {
-                                committedLabels.set(key, l.keypoints || {});
-                            }
-                        });
-                        console.log(`Loaded ${committedLabels.size} committed manual labels`);
+                    const dlcData = await API.get(`/api/labeling/sessions/${sessionId}/dlc_predictions`);
+                    if (dlcData && Object.keys(dlcData).length > 0) {
+                        dlcLabels = dlcData;
+                        if (isRefine && dlcData.distances) {
+                            distances = dlcData.distances;
+                        }
                     }
                 } catch (e) {
-                    console.log('No committed labels available');
+                    console.log('No DLC predictions available');
+                }
+
+                if (isRefine) {
+                    try {
+                        const committed = await API.get(`/api/labeling/sessions/${sessionId}/committed_labels`);
+                        if (committed && committed.length > 0) {
+                            committed.forEach(l => {
+                                const key = `${l.frame_num}_${l.side}`;
+                                if (!committedLabels.has(key)) {
+                                    committedLabels.set(key, l.keypoints || {});
+                                }
+                            });
+                            console.log(`Loaded ${committedLabels.size} committed manual labels`);
+                        }
+                    } catch (e) {
+                        console.log('No committed labels available');
+                    }
                 }
             }
 
@@ -336,6 +375,106 @@ const labeler = (() => {
         return coords && coords[0] != null;
     }
 
+    // ── Corrections mode: stage selector + fallback ───
+    function buildStageSelector() {
+        const container = document.getElementById('stageSelector');
+        if (!container || availableStages.length === 0) return;
+
+        container.innerHTML = '';
+        container.style.display = 'flex';
+
+        availableStages.forEach(stage => {
+            const label = document.createElement('label');
+            const radio = document.createElement('input');
+            radio.type = 'radio';
+            radio.name = 'displayStage';
+            radio.value = stage;
+            radio.addEventListener('change', () => switchDisplayStage(stage));
+
+            label.appendChild(radio);
+            label.appendChild(document.createTextNode(STAGE_LABELS[stage] || stage));
+            container.appendChild(label);
+        });
+    }
+
+    function getDefaultStage() {
+        // Highest-priority available stage
+        for (const s of STAGE_CHAIN) {
+            if (availableStages.includes(s)) return s;
+        }
+        return availableStages[0] || null;
+    }
+
+    async function ensureStageLoaded(stage) {
+        if (stageData[stage] !== undefined) return;
+        try {
+            const data = await API.get(`/api/labeling/sessions/${sessionId}/stage_data?stage=${stage}`);
+            stageData[stage] = (data && Object.keys(data).length > 0) ? data : null;
+        } catch (e) {
+            console.log(`Failed to load stage ${stage}:`, e);
+            stageData[stage] = null;
+        }
+    }
+
+    async function switchDisplayStage(stage) {
+        activeDisplayStage = stage;
+
+        // Update radio selection
+        document.querySelectorAll('input[name="displayStage"]').forEach(r => {
+            r.checked = r.value === stage;
+        });
+
+        // Load the selected stage + all lower stages for fallback
+        const startIdx = STAGE_CHAIN.indexOf(stage);
+        const chain = startIdx >= 0 ? STAGE_CHAIN.slice(startIdx) : [stage];
+        const loadPromises = chain
+            .filter(s => availableStages.includes(s))
+            .map(s => ensureStageLoaded(s));
+        await Promise.all(loadPromises);
+
+        // Update distances from the best available source in the chain
+        distances = null;
+        for (const s of chain) {
+            if (!availableStages.includes(s)) continue;
+            const sd = stageData[s];
+            if (sd && sd.distances && sd.distances.some(d => d !== null)) {
+                distances = sd.distances;
+                break;
+            }
+        }
+
+        // Show/hide distance trace
+        if (distances && distances.some(d => d !== null)) {
+            const traceContainer = document.getElementById('distanceTraceContainer');
+            if (traceContainer) traceContainer.style.display = 'block';
+            const timelineContainer = document.querySelector('.timeline-container');
+            if (timelineContainer) timelineContainer.style.display = 'none';
+        }
+
+        render();
+        renderDistanceTrace();
+        updateLabelCount();
+    }
+
+    function getStageLabel(frame, side, bodypart) {
+        /** Look up label from the active display stage with fallback to lower stages. */
+        if (!isCorrections || !activeDisplayStage) return null;
+
+        const startIdx = STAGE_CHAIN.indexOf(activeDisplayStage);
+        const chain = startIdx >= 0 ? STAGE_CHAIN.slice(startIdx) : [activeDisplayStage];
+
+        for (const stage of chain) {
+            if (!availableStages.includes(stage)) continue;
+            const sd = stageData[stage];
+            if (!sd || !sd[side]) continue;
+            const arr = sd[side][bodypart];
+            if (arr && frame < arr.length && arr[frame] != null) {
+                return arr[frame];
+            }
+        }
+        return null;
+    }
+
     // ── Rendering ─────────────────────────────────────
     function render() {
         const cw = containerEl.clientWidth;
@@ -366,6 +505,13 @@ const labeler = (() => {
                 // Draw solid manual label
                 drawPoint(manualCoords[0], manualCoords[1], bpColor(idx), bpLetter(bp));
                 placedBps.push({ bp, x: manualCoords[0], y: manualCoords[1] });
+            } else if (isCorrections) {
+                // Corrections mode: show stage-sourced labels as solid (no ghosts)
+                const stageCoords = getStageLabel(currentFrame, currentSide, bp);
+                if (stageCoords) {
+                    drawPoint(stageCoords[0], stageCoords[1], bpColor(idx), bpLetter(bp));
+                    placedBps.push({ bp, x: stageCoords[0], y: stageCoords[1], stageSource: true });
+                }
             } else {
                 // Ghost priority:
                 //   Refine: committed manual > DLC > MP
@@ -513,6 +659,21 @@ const labeler = (() => {
             }
         }
 
+        // Corrections mode: check stage-sourced labels (displayed as solid points)
+        if (isCorrections) {
+            for (const bp of bodyparts) {
+                if (hasManualLabel(currentFrame, currentSide, bp)) continue;
+                const stageCoords = getStageLabel(currentFrame, currentSide, bp);
+                if (stageCoords) {
+                    const p = imageToScreen(stageCoords[0], stageCoords[1]);
+                    if (Math.hypot(sx - p.x, sy - p.y) < HIT_RADIUS) {
+                        return { bp, ghost: false, stageSource: true };
+                    }
+                }
+            }
+            return null;
+        }
+
         // Check ghost markers (refine: committed > DLC > MP; initial: MP > DLC)
         for (const bp of bodyparts) {
             if (hasManualLabel(currentFrame, currentSide, bp)) continue;
@@ -587,6 +748,28 @@ const labeler = (() => {
                     didDrag = false;
                     dragOrigX = ghostCoords[0];
                     dragOrigY = ghostCoords[1];
+                    dragStartX = sx;
+                    dragStartY = sy;
+                    canvas.style.cursor = 'grabbing';
+
+                    render();
+                    updateLabelCount();
+                }
+            } else if (hit.stageSource) {
+                // Corrections mode: click on stage-sourced label — promote to manual
+                const stageCoords = getStageLabel(currentFrame, currentSide, hit.bp);
+                if (stageCoords) {
+                    const key = `${currentFrame}_${currentSide}`;
+                    let lbl = labels.get(key);
+                    if (!lbl) { lbl = {}; labels.set(key, lbl); }
+                    pushUndo(key, hit.bp, null);
+                    lbl[hit.bp] = [stageCoords[0], stageCoords[1]];
+                    dirtyKeys.add(key);
+
+                    dragging = hit.bp;
+                    didDrag = false;
+                    dragOrigX = stageCoords[0];
+                    dragOrigY = stageCoords[1];
                     dragStartX = sx;
                     dragStartY = sy;
                     canvas.style.cursor = 'grabbing';
@@ -678,10 +861,10 @@ const labeler = (() => {
         const sy = e.clientY - rect.top;
 
         const hit = hitTest(sx, sy);
-        if (hit && !hit.ghost) {
+        if (hit && !hit.ghost && !hit.stageSource) {
             removeLabel(hit.bp);
         }
-        // Right-click on ghost marker: no-op
+        // Right-click on ghost / stage-sourced marker: no-op
     }
 
     function onWheel(e) {
@@ -754,6 +937,9 @@ const labeler = (() => {
             const manual = lbl ? lbl[bp] : null;
             if (manual && manual[0] != null) {
                 pts.push(manual);
+            } else if (isCorrections) {
+                const sc = getStageLabel(frame, side, bp);
+                if (sc) pts.push(sc);
             } else {
                 const com = isRefine ? getCommittedLabel(frame, side, bp) : null;
                 if (com) {
@@ -1048,6 +1234,20 @@ const labeler = (() => {
                 if (c0 && c0[0] != null && c1 && c1[0] != null) {
                     dxValues.push(c1[0] - c0[0]);
                     dyValues.push(c1[1] - c0[1]);
+                }
+            }
+        }
+
+        // 2a. Corrections mode: use stage labels for camera shift estimation
+        if (dxValues.length < 4 && isCorrections && activeDisplayStage) {
+            for (let f = 0; f < totalFrames; f += 10) {
+                for (const bp of bodyparts) {
+                    const c0 = getStageLabel(f, cam0, bp);
+                    const c1 = getStageLabel(f, cam1, bp);
+                    if (c0 && c1) {
+                        dxValues.push(c1[0] - c0[0]);
+                        dyValues.push(c1[1] - c0[1]);
+                    }
                 }
             }
         }

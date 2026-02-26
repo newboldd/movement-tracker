@@ -298,3 +298,123 @@ def _update_crop_params(subject_name: str, config_path: Path):
             new_lines.append(line)
 
     config_path.write_text("".join(new_lines))
+
+
+def save_corrections_to_csv(
+    subject_name: str,
+    session_labels: list[dict],
+) -> dict:
+    """Write correction labels as DLC-format CSVs in corrections/ directory.
+
+    Creates one CSV per (trial, camera) pair, matching the naming pattern
+    recognized by _match_csv_to_trial(): {Subject}_{Trial}_DLC_{Camera}.csv
+
+    Args:
+        subject_name: Subject identifier
+        session_labels: list of dicts from frame_labels table
+
+    Returns:
+        dict with paths and counts
+    """
+    settings = get_settings()
+    corrections_dir = settings.dlc_path / subject_name / "corrections"
+    corrections_dir.mkdir(parents=True, exist_ok=True)
+
+    trials = build_trial_map(subject_name)
+    if not trials:
+        return {"corrections_dir": str(corrections_dir), "csv_count": 0, "frame_count": 0}
+
+    bodyparts = settings.bodyparts
+    scorer = settings.dlc_scorer
+
+    # Group labels by (trial_idx, side)
+    groups: dict[tuple[int, str], list[dict]] = {}
+    for label in session_labels:
+        kp = label.get("keypoints", {})
+        if isinstance(kp, str):
+            kp = json.loads(kp)
+
+        # Skip labels without any coordinates
+        has_any = any(
+            coords and len(coords) >= 2 and coords[0] is not None
+            for coords in kp.values()
+        )
+        if not has_any:
+            continue
+
+        key = (label["trial_idx"], label["side"])
+        if key not in groups:
+            groups[key] = []
+        groups[key].append({
+            "frame_num": label["frame_num"],
+            "keypoints": kp,
+        })
+
+    csv_count = 0
+    total_frames = 0
+
+    for (trial_idx, side), frame_labels in groups.items():
+        if trial_idx >= len(trials):
+            continue
+
+        trial = trials[trial_idx]
+        trial_name = trial["trial_name"]
+        # Strip subject prefix to get trial part: "MSA01_L1" -> "L1"
+        trial_part = trial_name
+        if trial_name.startswith(f"{subject_name}_"):
+            trial_part = trial_name[len(f"{subject_name}_"):]
+
+        # Build full-trial-length arrays (one row per frame in the trial)
+        n_frames = trial["frame_count"]
+        start_frame = trial["start_frame"]
+
+        # Initialize all frames as empty
+        frame_data = [None] * n_frames
+
+        for fl in frame_labels:
+            local_frame = fl["frame_num"] - start_frame
+            if 0 <= local_frame < n_frames:
+                frame_data[local_frame] = fl["keypoints"]
+
+        # Write CSV: {Subject}_{TrialPart}_DLC_{Camera}.csv
+        csv_name = f"{subject_name}_{trial_part}_DLC_{side}.csv"
+        csv_path = corrections_dir / csv_name
+
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            n_bp = len(bodyparts)
+
+            # DLC multi-header rows
+            scorer_row = ["scorer"] + [scorer] * (n_bp * 3)
+            bp_row = ["bodyparts"]
+            for bp in bodyparts:
+                bp_row.extend([bp, bp, bp])
+            coords_row = ["coords"] + ["x", "y", "likelihood"] * n_bp
+
+            writer.writerow(scorer_row)
+            writer.writerow(bp_row)
+            writer.writerow(coords_row)
+
+            # Data rows — one per frame in the trial
+            for local_frame in range(n_frames):
+                row = [local_frame]
+                kp = frame_data[local_frame]
+                for bp in bodyparts:
+                    if kp:
+                        coords = kp.get(bp)
+                        if coords and len(coords) >= 2 and coords[0] is not None:
+                            row.extend([coords[0], coords[1], 1.0])
+                        else:
+                            row.extend(["", "", 0.0])
+                    else:
+                        row.extend(["", "", 0.0])
+                writer.writerow(row)
+
+        csv_count += 1
+        total_frames += len(frame_labels)
+
+    return {
+        "corrections_dir": str(corrections_dir),
+        "csv_count": csv_count,
+        "frame_count": total_frames,
+    }

@@ -13,13 +13,17 @@ from ..models import LabelBatchSave, SessionCreate, SessionResponse, STAGE_INDEX
 from ..services.video import (
     extract_frame, build_trial_map, get_total_frames, get_subject_videos,
 )
-from ..services.labels import commit_labels_to_dlc
+from ..services.labels import commit_labels_to_dlc, save_corrections_to_csv
 from ..services.mediapipe_prelabel import (
     get_mediapipe_for_session,
     recompute_distance_for_frame,
 )
-from ..services.discovery import _count_labeled_frames
-from ..services.dlc_predictions import get_dlc_predictions_for_session
+from ..services.discovery import _count_labeled_frames, _has_mediapipe
+from ..services.dlc_predictions import (
+    get_dlc_predictions_for_session,
+    get_dlc_predictions_for_stage,
+    has_stage_data,
+)
 
 router = APIRouter(prefix="/api/labeling", tags=["labeling"])
 
@@ -34,6 +38,8 @@ def create_session(subject_id: int, req: SessionCreate) -> dict:
     For 'initial' sessions: copies labels from previous committed session.
     For 'refine' sessions: starts fresh (DLC predictions serve as ghost markers),
     increments iteration, doesn't change subject stage.
+    For 'corrections' sessions: starts fresh, doesn't increment iteration or
+    change subject stage. Stage data loaded on demand via /stage_data endpoint.
     """
     with get_db_ctx() as db:
         subj = db.execute(
@@ -61,6 +67,7 @@ def create_session(subject_id: int, req: SessionCreate) -> dict:
             return result
 
         is_refine = req.session_type == "refine"
+        is_corrections = req.session_type == "corrections"
         iteration = subj["iteration"] + 1 if is_refine else subj["iteration"]
 
         db.execute(
@@ -73,7 +80,7 @@ def create_session(subject_id: int, req: SessionCreate) -> dict:
             (subject_id,),
         ).fetchone()
 
-        if not is_refine:
+        if not is_refine and not is_corrections:
             # Copy labels from the most recent committed session (if any)
             prev_session = db.execute(
                 """SELECT id FROM label_sessions
@@ -97,6 +104,7 @@ def create_session(subject_id: int, req: SessionCreate) -> dict:
                     "UPDATE subjects SET stage = 'labeling', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                     (subject_id,),
                 )
+        # Corrections sessions: no label copy, no stage change
 
     return session
 
@@ -315,6 +323,170 @@ def get_committed_labels(session_id: int) -> List[dict]:
     return result
 
 
+@router.get("/sessions/{session_id}/available_stages")
+def get_available_stages(session_id: int) -> dict:
+    """Return which processing stages have data for this subject.
+
+    Used by corrections mode to build the stage selector radio buttons.
+    Returns {"stages": ["mp", "labels", "dlc", "refine", "corrections"]}
+    (only stages that have actual data).
+    """
+    with get_db_ctx() as db:
+        session = db.execute(
+            "SELECT * FROM label_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not session:
+            raise HTTPException(404, "Session not found")
+        subj = db.execute(
+            "SELECT * FROM subjects WHERE id = ?", (session["subject_id"],)
+        ).fetchone()
+
+    settings = get_settings()
+    subject_name = subj["name"]
+    dlc_path = settings.dlc_path / subject_name if subject_name else None
+
+    stages = []
+
+    # MP: check for mediapipe_prelabels.npz
+    if dlc_path and _has_mediapipe(dlc_path):
+        stages.append("mp")
+
+    # Labels: check for committed label sessions in DB
+    with get_db_ctx() as db:
+        committed = db.execute(
+            """SELECT COUNT(*) AS cnt FROM frame_labels fl
+               JOIN label_sessions ls ON ls.id = fl.session_id
+               WHERE ls.subject_id = ? AND ls.status = 'committed'
+               AND ls.session_type != 'corrections'""",
+            (subj["id"],),
+        ).fetchone()
+    if committed and committed["cnt"] > 0:
+        stages.append("labels")
+
+    # DLC / Refine / Corrections: check for CSV directories
+    for stage_name in ("dlc", "refine", "corrections"):
+        if has_stage_data(subject_name, stage_name):
+            stages.append(stage_name)
+
+    return {"stages": stages}
+
+
+@router.get("/sessions/{session_id}/stage_data")
+def get_stage_data(
+    session_id: int,
+    stage: str = Query(..., description="Processing stage: mp, labels, dlc, refine, corrections"),
+) -> dict:
+    """Return label data for a specific processing stage.
+
+    Response format matches mediapipe/dlc_predictions:
+    {camera: {bodypart: [[x,y]|null, ...]}, distances: [...]}
+    """
+    valid_stages = ("mp", "labels", "dlc", "refine", "corrections")
+    if stage not in valid_stages:
+        raise HTTPException(400, f"stage must be one of {valid_stages}")
+
+    with get_db_ctx() as db:
+        session = db.execute(
+            "SELECT * FROM label_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not session:
+            raise HTTPException(404, "Session not found")
+        subj = db.execute(
+            "SELECT * FROM subjects WHERE id = ?", (session["subject_id"],)
+        ).fetchone()
+
+    subject_name = subj["name"]
+
+    if stage == "mp":
+        data = get_mediapipe_for_session(subject_name)
+        return data if data else {}
+
+    if stage == "labels":
+        data = _committed_labels_to_array(subj)
+        return data if data else {}
+
+    # dlc, refine, corrections — load from specific directory
+    data = get_dlc_predictions_for_stage(subject_name, stage)
+    return data if data else {}
+
+
+def _committed_labels_to_array(subj: dict) -> dict | None:
+    """Convert committed manual labels from DB to array format matching MP/DLC.
+
+    Returns {camera: {bodypart: [[x,y]|null, ...]}, distances: [...]}
+    """
+    settings = get_settings()
+    subject_name = subj["name"]
+    cam_names = settings.camera_names
+
+    trials = build_trial_map(subject_name)
+    if not trials:
+        return None
+
+    total_frames = trials[-1]["end_frame"] + 1
+
+    # Query all committed labels (excluding corrections sessions)
+    with get_db_ctx() as db:
+        rows = db.execute(
+            """SELECT fl.frame_num, fl.side, fl.keypoints
+               FROM frame_labels fl
+               JOIN label_sessions ls ON ls.id = fl.session_id
+               WHERE ls.subject_id = ? AND ls.status = 'committed'
+               AND ls.session_type != 'corrections'
+               ORDER BY ls.committed_at DESC""",
+            (subj["id"],),
+        ).fetchall()
+
+    if not rows:
+        return None
+
+    # Initialize result structure
+    result = {}
+    for cam in cam_names:
+        result[cam] = {}
+        for bp in settings.bodyparts:
+            result[cam][bp] = [None] * total_frames
+
+    # De-duplicate: keep most recently committed per (frame, side)
+    seen = set()
+    for row in rows:
+        key = (row["frame_num"], row["side"])
+        if key in seen:
+            continue
+        seen.add(key)
+
+        frame_num = row["frame_num"]
+        side = row["side"]
+        if side not in cam_names or frame_num >= total_frames:
+            continue
+
+        kp = row["keypoints"]
+        if isinstance(kp, str):
+            kp = json.loads(kp)
+
+        for bp in settings.bodyparts:
+            coords = kp.get(bp)
+            if coords and coords[0] is not None:
+                result[side][bp][frame_num] = coords
+
+    # Check if we have any data
+    has_data = any(
+        any(c is not None for c in result[cam][bp])
+        for cam in cam_names
+        for bp in settings.bodyparts
+    )
+    if not has_data:
+        return None
+
+    # Compute distances
+    from ..services.dlc_predictions import _compute_dlc_distances
+    distances = _compute_dlc_distances(result, cam_names, subject_name, total_frames)
+    if distances is not None:
+        result["distances"] = distances
+
+    return result
+
+
 @router.put("/sessions/{session_id}/labels")
 def save_labels(session_id: int, req: LabelBatchSave) -> dict:
     """Batch-save labels (upsert). Returns updated distances for affected frames."""
@@ -413,13 +585,31 @@ def commit_session(session_id: int) -> dict:
     if not labels:
         raise HTTPException(400, "No labels to commit")
 
+    is_refine = session["session_type"] == "refine"
+    is_corrections = session["session_type"] == "corrections"
+
+    if is_corrections:
+        # Corrections: write DLC-format CSVs to corrections/ directory
+        result = save_corrections_to_csv(
+            subject_name=subj["name"],
+            session_labels=labels,
+        )
+        with get_db_ctx() as db:
+            db.execute(
+                "UPDATE label_sessions SET status = 'committed', committed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (session_id,),
+            )
+            db.execute(
+                "UPDATE subjects SET stage = 'corrected', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (session["subject_id"],),
+            )
+        return result
+
     result = commit_labels_to_dlc(
         subject_name=subj["name"],
         session_labels=labels,
         iteration=session["iteration"],
     )
-
-    is_refine = session["session_type"] == "refine"
 
     # Update session and subject status
     with get_db_ctx() as db:

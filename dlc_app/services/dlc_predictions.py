@@ -100,40 +100,38 @@ def _match_csv_to_trial(csv_name: str, subject_name: str, cam_names: list[str]) 
     return None, None
 
 
-def get_dlc_predictions_for_session(subject_name: str) -> dict | None:
-    """Load DLC analysis predictions for a subject.
+def _find_label_dir(dlc_dir: Path, dir_names: list[str]) -> tuple[Path | None, list[Path]]:
+    """Find the first label directory with DLC CSVs.
 
-    Searches for the best available label directory in priority order:
-    corrections/ > labels_v2/ > labels_v1/ (and variants).
+    Args:
+        dlc_dir: Subject's DLC directory.
+        dir_names: Directory names to search in priority order.
 
-    Returns dict in same format as mediapipe prelabels:
-        {camera: {bodypart: [[x,y]|null, ...]}}
-
-    Coordinates are in the cropped single-camera frame space (same as
-    what DLC analyzed). The labeler already works with per-camera coords.
+    Returns:
+        (labels_dir, csv_files) or (None, []) if not found.
     """
-    settings = get_settings()
-    dlc_dir = settings.dlc_path / subject_name
-    cam_names = settings.camera_names
-
-    # Find best available label directory that has DLC CSVs (highest quality first)
-    labels_dir = None
-    csv_files = []
-    for name in ["corrections", "labels_v2", "labels_v1", "labels_v1.0", "labels_v0.1"]:
+    for name in dir_names:
         candidate = dlc_dir / name
         if candidate.exists() and candidate.is_dir():
             found = sorted(candidate.glob("*DLC*.csv"))
             if found:
-                labels_dir = candidate
-                csv_files = found
-                break
+                return candidate, found
+    return None, []
 
-    if not labels_dir:
-        return None
 
-    logger.info(f"Using label source '{labels_dir.name}' for {subject_name}")
+def _load_from_label_dir(
+    subject_name: str, labels_dir: Path, csv_files: list[Path],
+) -> dict | None:
+    """Load DLC predictions from a specific label directory.
 
-    # Build trial map to know frame offsets
+    Parses CSVs, maps to global frame indices via trial map, computes 3D distances.
+
+    Returns dict: {camera: {bodypart: [[x,y]|null, ...]}, distances: [...]}
+    or None if no usable data.
+    """
+    settings = get_settings()
+    cam_names = settings.camera_names
+
     trials = build_trial_map(subject_name)
     if not trials:
         return None
@@ -172,14 +170,12 @@ def get_dlc_predictions_for_session(subject_name: str) -> dict | None:
             logger.debug(f"No trial match for CSV {csv_path.name}")
             continue
 
-        # Parse CSV
         parsed = _parse_dlc_csv(csv_path)
         if not parsed:
             continue
 
         start_frame = matching_trial["start_frame"]
 
-        # Map bodypart names (DLC may use different names)
         for bp in settings.bodyparts:
             dlc_coords = parsed.get(bp)
             if not dlc_coords:
@@ -200,12 +196,82 @@ def get_dlc_predictions_for_session(subject_name: str) -> dict | None:
     if not has_data:
         return None
 
-    # Compute 3D distances from DLC thumb/index via stereo triangulation
+    # Compute 3D distances
     dlc_distances = _compute_dlc_distances(result, cam_names, subject_name, total_frames)
     if dlc_distances is not None:
         result["distances"] = dlc_distances
 
     return result
+
+
+def get_dlc_predictions_for_session(subject_name: str) -> dict | None:
+    """Load DLC analysis predictions for a subject.
+
+    Searches for the best available label directory in priority order:
+    corrections/ > labels_v2/ > labels_v1/ (and variants).
+
+    Returns dict in same format as mediapipe prelabels:
+        {camera: {bodypart: [[x,y]|null, ...]}}
+
+    Coordinates are in the cropped single-camera frame space (same as
+    what DLC analyzed). The labeler already works with per-camera coords.
+    """
+    settings = get_settings()
+    dlc_dir = settings.dlc_path / subject_name
+
+    labels_dir, csv_files = _find_label_dir(
+        dlc_dir, ["corrections", "labels_v2", "labels_v1", "labels_v1.0", "labels_v0.1"]
+    )
+    if not labels_dir:
+        return None
+
+    logger.info(f"Using label source '{labels_dir.name}' for {subject_name}")
+    return _load_from_label_dir(subject_name, labels_dir, csv_files)
+
+
+# Stage name → directory names mapping for per-stage loading
+STAGE_DIR_MAP = {
+    "dlc": ["labels_v1", "labels_v1.0", "labels_v0.1"],
+    "refine": ["labels_v2"],
+    "corrections": ["corrections"],
+}
+
+
+def get_dlc_predictions_for_stage(subject_name: str, stage: str) -> dict | None:
+    """Load DLC predictions from a specific processing stage only.
+
+    Args:
+        subject_name: Subject identifier.
+        stage: One of 'dlc', 'refine', 'corrections'.
+
+    Returns:
+        dict in labeler format, or None if no data for this stage.
+    """
+    dir_names = STAGE_DIR_MAP.get(stage)
+    if not dir_names:
+        return None
+
+    settings = get_settings()
+    dlc_dir = settings.dlc_path / subject_name
+
+    labels_dir, csv_files = _find_label_dir(dlc_dir, dir_names)
+    if not labels_dir:
+        return None
+
+    logger.info(f"Loading stage '{stage}' from '{labels_dir.name}' for {subject_name}")
+    return _load_from_label_dir(subject_name, labels_dir, csv_files)
+
+
+def has_stage_data(subject_name: str, stage: str) -> bool:
+    """Check whether a specific processing stage has data for a subject."""
+    dir_names = STAGE_DIR_MAP.get(stage)
+    if not dir_names:
+        return False
+
+    settings = get_settings()
+    dlc_dir = settings.dlc_path / subject_name
+    labels_dir, _ = _find_label_dir(dlc_dir, dir_names)
+    return labels_dir is not None
 
 
 def _compute_dlc_distances(predictions: dict, cam_names: list[str],

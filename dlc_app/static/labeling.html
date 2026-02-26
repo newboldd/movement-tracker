@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DLC Labeling</title>
-    <link rel="stylesheet" href="/static/css/main.css?v=2">
+    <link rel="stylesheet" href="/static/css/main.css?v=3">
     <style>
         body { overflow: hidden; }
     </style>
@@ -83,6 +83,8 @@
             <div class="canvas-container" id="canvasContainer">
                 <canvas id="labelCanvas"></canvas>
                 <video id="videoPlayer" style="display:none;" muted preload="auto"></video>
+                <!-- Stage selector (corrections mode only) -->
+                <div id="stageSelector" class="stage-selector" style="display:none;"></div>
             </div>
 
             <!-- Controls bar -->
@@ -106,7 +108,7 @@
         </div>
     </div>
 
-    <script src="/static/js/api.js?v=8"></script>
-    <script src="/static/js/labeler.js?v=8"></script>
+    <script src="/static/js/api.js?v=9"></script>
+    <script src="/static/js/labeler.js?v=9"></script>
 </body>
 </html>
