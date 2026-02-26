@@ -43,9 +43,9 @@ const labeler = (() => {
 
     // Corrections mode state
     let isCorrections = false;
-    let activeDisplayStage = null;  // 'mp' | 'labels' | 'dlc' | 'refine' | 'corrections'
     let availableStages = [];
-    const stageData = {};           // cache: {stage: {camera: {bodypart: [...]}}}
+    const enabledStages = new Set();  // which stages are toggled on (checkboxes)
+    const stageData = {};             // cache: {stage: {camera: {bodypart: [...]}}}
 
     const STAGE_CHAIN = ['corrections', 'refine', 'dlc', 'labels', 'mp'];
     const STAGE_LABELS = {
@@ -54,6 +54,13 @@ const labeler = (() => {
         'dlc': 'DLC',
         'refine': 'Refine',
         'corrections': 'Corrections',
+    };
+    const STAGE_COLORS = {
+        'mp': '#ff9800',          // orange
+        'labels': '#4caf50',      // green
+        'dlc': '#4a9eff',         // blue
+        'refine': '#ce93d8',      // purple
+        'corrections': '#4dd0e1', // cyan
     };
 
     // Color palette for bodyparts
@@ -200,13 +207,10 @@ const labeler = (() => {
                     availableStages = [];
                 }
 
+                // Enable all stages by default, build checkboxes, load data
+                enableAllStages();
                 buildStageSelector();
-
-                // Default to highest-priority stage with data
-                const defaultStage = getDefaultStage();
-                if (defaultStage) {
-                    await switchDisplayStage(defaultStage);
-                }
+                await loadAllEnabledStages();
             } else {
                 // Initial / Refine mode: load MP + DLC + committed labels as before
                 try {
@@ -383,26 +387,33 @@ const labeler = (() => {
         container.innerHTML = '';
         container.style.display = 'flex';
 
-        availableStages.forEach(stage => {
+        // Show stages in display order (highest priority first)
+        const ordered = STAGE_CHAIN.filter(s => availableStages.includes(s));
+        ordered.forEach(stage => {
             const label = document.createElement('label');
-            const radio = document.createElement('input');
-            radio.type = 'radio';
-            radio.name = 'displayStage';
-            radio.value = stage;
-            radio.addEventListener('change', () => switchDisplayStage(stage));
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.value = stage;
+            cb.checked = enabledStages.has(stage);
+            cb.addEventListener('change', () => toggleStage(stage, cb.checked));
 
-            label.appendChild(radio);
-            label.appendChild(document.createTextNode(STAGE_LABELS[stage] || stage));
+            // Color swatch
+            const swatch = document.createElement('span');
+            swatch.style.cssText = `display:inline-block;width:10px;height:10px;border-radius:2px;background:${STAGE_COLORS[stage] || '#888'}`;
+
+            label.appendChild(cb);
+            label.appendChild(swatch);
+            label.appendChild(document.createTextNode(' ' + (STAGE_LABELS[stage] || stage)));
             container.appendChild(label);
         });
     }
 
-    function getDefaultStage() {
-        // Highest-priority available stage
-        for (const s of STAGE_CHAIN) {
-            if (availableStages.includes(s)) return s;
+    function enableAllStages() {
+        // Enable all available stages by default
+        enabledStages.clear();
+        for (const s of availableStages) {
+            enabledStages.add(s);
         }
-        return availableStages[0] || null;
     }
 
     async function ensureStageLoaded(stage) {
@@ -416,26 +427,34 @@ const labeler = (() => {
         }
     }
 
-    async function switchDisplayStage(stage) {
-        activeDisplayStage = stage;
+    async function toggleStage(stage, enabled) {
+        if (enabled) {
+            enabledStages.add(stage);
+            await ensureStageLoaded(stage);
+        } else {
+            enabledStages.delete(stage);
+        }
 
-        // Update radio selection
-        document.querySelectorAll('input[name="displayStage"]').forEach(r => {
-            r.checked = r.value === stage;
-        });
+        // Recompute primary distances from highest-priority enabled stage
+        updatePrimaryDistances();
 
-        // Load the selected stage + all lower stages for fallback
-        const startIdx = STAGE_CHAIN.indexOf(stage);
-        const chain = startIdx >= 0 ? STAGE_CHAIN.slice(startIdx) : [stage];
-        const loadPromises = chain
-            .filter(s => availableStages.includes(s))
-            .map(s => ensureStageLoaded(s));
+        render();
+        renderDistanceTrace();
+        updateLabelCount();
+    }
+
+    async function loadAllEnabledStages() {
+        const loadPromises = [...enabledStages].map(s => ensureStageLoaded(s));
         await Promise.all(loadPromises);
+        updatePrimaryDistances();
+    }
 
-        // Update distances from the best available source in the chain
+    function updatePrimaryDistances() {
+        // Primary distances = highest priority enabled stage that has distance data
+        // (used for the current-frame indicator and label info, not for multi-trace)
         distances = null;
-        for (const s of chain) {
-            if (!availableStages.includes(s)) continue;
+        for (const s of STAGE_CHAIN) {
+            if (!enabledStages.has(s)) continue;
             const sd = stageData[s];
             if (sd && sd.distances && sd.distances.some(d => d !== null)) {
                 distances = sd.distances;
@@ -443,28 +462,25 @@ const labeler = (() => {
             }
         }
 
-        // Show/hide distance trace
-        if (distances && distances.some(d => d !== null)) {
+        // Show/hide distance trace container
+        const anyDist = [...enabledStages].some(s => {
+            const sd = stageData[s];
+            return sd && sd.distances && sd.distances.some(d => d !== null);
+        });
+        if (anyDist) {
             const traceContainer = document.getElementById('distanceTraceContainer');
             if (traceContainer) traceContainer.style.display = 'block';
             const timelineContainer = document.querySelector('.timeline-container');
             if (timelineContainer) timelineContainer.style.display = 'none';
         }
-
-        render();
-        renderDistanceTrace();
-        updateLabelCount();
     }
 
     function getStageLabel(frame, side, bodypart) {
-        /** Look up label from the active display stage with fallback to lower stages. */
-        if (!isCorrections || !activeDisplayStage) return null;
+        /** Look up label from enabled stages, highest priority first (fallback chain). */
+        if (!isCorrections || enabledStages.size === 0) return null;
 
-        const startIdx = STAGE_CHAIN.indexOf(activeDisplayStage);
-        const chain = startIdx >= 0 ? STAGE_CHAIN.slice(startIdx) : [activeDisplayStage];
-
-        for (const stage of chain) {
-            if (!availableStages.includes(stage)) continue;
+        for (const stage of STAGE_CHAIN) {
+            if (!enabledStages.has(stage)) continue;
             const sd = stageData[stage];
             if (!sd || !sd[side]) continue;
             const arr = sd[side][bodypart];
@@ -1239,7 +1255,7 @@ const labeler = (() => {
         }
 
         // 2a. Corrections mode: use stage labels for camera shift estimation
-        if (dxValues.length < 4 && isCorrections && activeDisplayStage) {
+        if (dxValues.length < 4 && isCorrections && enabledStages.size > 0) {
             for (let f = 0; f < totalFrames; f += 10) {
                 for (const bp of bodyparts) {
                     const c0 = getStageLabel(f, cam0, bp);
@@ -1875,7 +1891,26 @@ const labeler = (() => {
     }
 
     function renderDistanceTrace() {
-        if (!distCanvas || !distCtx || !distances) return;
+        if (!distCanvas || !distCtx) return;
+
+        // In corrections mode, gather all enabled stages' distances
+        // In normal mode, just use the single `distances` array
+        const stageTraces = [];  // [{stage, distances, color}]
+        if (isCorrections) {
+            // Draw in reverse priority order so highest priority is on top
+            const drawOrder = [...STAGE_CHAIN].reverse();
+            for (const s of drawOrder) {
+                if (!enabledStages.has(s)) continue;
+                const sd = stageData[s];
+                if (sd && sd.distances && sd.distances.some(d => d !== null)) {
+                    stageTraces.push({ stage: s, distances: sd.distances, color: STAGE_COLORS[s] || '#888' });
+                }
+            }
+        } else if (distances) {
+            stageTraces.push({ stage: 'single', distances, color: 'rgba(74, 158, 255, 0.7)' });
+        }
+
+        if (stageTraces.length === 0 && !distances) return;
 
         const container = distCanvas.parentElement;
         const w = container.clientWidth;
@@ -1884,13 +1919,9 @@ const labeler = (() => {
         distCanvas.height = h;
 
         if (totalFrames === 0) return;
-        // If window not yet initialized, show everything (but don't mutate distViewFrames
-        // — the ResizeObserver can fire before initDistanceTraceWindow, and once set to
-        // totalFrames the >= check would permanently trap it there).
         const effectiveViewFrames = (distViewFrames > 0 && distViewFrames < totalFrames)
             ? distViewFrames : totalFrames;
 
-        // Auto-scroll so current frame stays visible (unless user is manually panning)
         if (distAutoScroll) ensureFrameVisible();
 
         const vStart = distViewStart;
@@ -1900,30 +1931,32 @@ const labeler = (() => {
         const plotW = w - padL - padR;
         const plotH = h - padT - padB;
 
-        // Map frame to x-pixel within the visible window
         const fToX = (f) => padL + ((f - vStart) / effectiveViewFrames) * plotW;
 
-        // Find data range over visible window
+        // Find data range across ALL visible traces
         let minD = Infinity, maxD = -Infinity;
-        for (let f = vStart; f < vEnd && f < distances.length; f++) {
-            const d = distances[f];
-            if (d !== null && d !== undefined) {
-                minD = Math.min(minD, d);
-                maxD = Math.max(maxD, d);
-            }
-        }
-        if (minD === Infinity) {
-            // Fall back to global range
-            for (const d of distances) {
+        for (const trace of stageTraces) {
+            for (let f = vStart; f < vEnd && f < trace.distances.length; f++) {
+                const d = trace.distances[f];
                 if (d !== null && d !== undefined) {
                     minD = Math.min(minD, d);
                     maxD = Math.max(maxD, d);
                 }
             }
         }
+        if (minD === Infinity) {
+            // Fall back to global range across all traces
+            for (const trace of stageTraces) {
+                for (const d of trace.distances) {
+                    if (d !== null && d !== undefined) {
+                        minD = Math.min(minD, d);
+                        maxD = Math.max(maxD, d);
+                    }
+                }
+            }
+        }
         if (minD === Infinity) return;
 
-        // Add some padding to range
         const range = maxD - minD || 10;
         minD = Math.max(0, minD - range * 0.05);
         maxD = maxD + range * 0.05;
@@ -1951,7 +1984,7 @@ const labeler = (() => {
             distCtx.stroke();
         }
 
-        // Trial boundaries within view
+        // Trial boundaries
         for (const t of trials) {
             if (t.start_frame >= vStart && t.start_frame < vEnd) {
                 const x = fToX(t.start_frame);
@@ -1964,27 +1997,31 @@ const labeler = (() => {
             }
         }
 
-        // Draw distance line (only visible portion)
-        distCtx.beginPath();
-        let started = false;
-        for (let f = Math.max(0, vStart - 1); f < vEnd + 1 && f < distances.length; f++) {
-            const d = distances[f];
-            if (d === null || d === undefined) {
-                started = false;
-                continue;
+        // Draw each stage's distance trace
+        for (const trace of stageTraces) {
+            distCtx.beginPath();
+            let started = false;
+            for (let f = Math.max(0, vStart - 1); f < vEnd + 1 && f < trace.distances.length; f++) {
+                const d = trace.distances[f];
+                if (d === null || d === undefined) {
+                    started = false;
+                    continue;
+                }
+                const x = fToX(f);
+                const y = dToY(d);
+                if (!started) {
+                    distCtx.moveTo(x, y);
+                    started = true;
+                } else {
+                    distCtx.lineTo(x, y);
+                }
             }
-            const x = fToX(f);
-            const y = dToY(d);
-            if (!started) {
-                distCtx.moveTo(x, y);
-                started = true;
-            } else {
-                distCtx.lineTo(x, y);
-            }
+            distCtx.strokeStyle = trace.color;
+            distCtx.lineWidth = 1.5;
+            distCtx.globalAlpha = 0.8;
+            distCtx.stroke();
+            distCtx.globalAlpha = 1.0;
         }
-        distCtx.strokeStyle = 'rgba(74, 158, 255, 0.7)';
-        distCtx.lineWidth = 1.5;
-        distCtx.stroke();
 
         // Draw dots for frames with manual corrections (visible only)
         labels.forEach((lbl, key) => {
@@ -1993,8 +2030,8 @@ const labeler = (() => {
             if (frame < vStart || frame >= vEnd) return;
             const x = fToX(frame);
 
-            // Green dot on the distance line if distance exists
-            if (frame < distances.length) {
+            // Green dot on primary distance line if distance exists
+            if (distances && frame < distances.length) {
                 const d = distances[frame];
                 if (d !== null && d !== undefined) {
                     distCtx.beginPath();
@@ -2020,23 +2057,23 @@ const labeler = (() => {
         distCtx.lineWidth = 1.5;
         distCtx.stroke();
 
-        // Show value at current frame
-        const curD = distances[currentFrame];
-        if (curD !== null && curD !== undefined) {
-            const y = dToY(curD);
-            distCtx.beginPath();
-            distCtx.arc(cx, y, 4, 0, Math.PI * 2);
-            distCtx.fillStyle = '#ff4444';
-            distCtx.fill();
+        // Show value at current frame on primary trace
+        if (distances) {
+            const curD = distances[currentFrame];
+            if (curD !== null && curD !== undefined) {
+                const y = dToY(curD);
+                distCtx.beginPath();
+                distCtx.arc(cx, y, 4, 0, Math.PI * 2);
+                distCtx.fillStyle = '#ff4444';
+                distCtx.fill();
+            }
         }
 
-        // Scrollbar: show position within total timeline
+        // Scrollbar
         const sbY = h - 3;
         const sbH = 3;
-        // Track background
         distCtx.fillStyle = 'rgba(42, 58, 92, 0.5)';
         distCtx.fillRect(padL, sbY, plotW, sbH);
-        // Thumb
         const thumbL = padL + (vStart / totalFrames) * plotW;
         const thumbW = Math.max(6, (effectiveViewFrames / totalFrames) * plotW);
         distCtx.fillStyle = 'rgba(74, 158, 255, 0.5)';
