@@ -421,11 +421,18 @@ const labeler = (() => {
 
         select.addEventListener('change', () => {
             selectedStage = select.value;
+            select.blur();
             updateCsvList();
             computeMergedDistances();
             render();
             renderDistanceTrace();
         });
+
+        // Default to corrections stage if available
+        if (availableStages.includes('corrections')) {
+            select.value = 'corrections';
+            selectedStage = 'corrections';
+        }
 
         updateCsvList();
     }
@@ -1886,8 +1893,10 @@ const labeler = (() => {
         distAutoScroll = false;
         // Use horizontal scroll (deltaX) if available, fall back to vertical (deltaY)
         const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-        const step = Math.max(1, Math.round(distViewFrames * 0.15));
-        distViewStart += delta > 0 ? step : -step;
+        // Scale by actual delta magnitude for smooth trackpad scrolling
+        const pxPerFrame = (distCanvas.getBoundingClientRect().width - 48) / distViewFrames;
+        const frameDelta = Math.round(delta / Math.max(1, pxPerFrame));
+        distViewStart += Math.sign(frameDelta) * Math.max(1, Math.abs(frameDelta));
         clampDistView();
         renderDistanceTrace();
     }
@@ -1916,21 +1925,12 @@ const labeler = (() => {
 
         const fToX = (f) => padL + ((f - vStart) / effectiveViewFrames) * plotW;
 
-        // Find data range over visible window
+        // Use global data range so Y-axis stays constant while scrolling
         let minD = Infinity, maxD = -Infinity;
-        for (let f = vStart; f < vEnd && f < distances.length; f++) {
-            const d = distances[f];
+        for (const d of distances) {
             if (d !== null && d !== undefined) {
                 minD = Math.min(minD, d);
                 maxD = Math.max(maxD, d);
-            }
-        }
-        if (minD === Infinity) {
-            for (const d of distances) {
-                if (d !== null && d !== undefined) {
-                    minD = Math.min(minD, d);
-                    maxD = Math.max(maxD, d);
-                }
             }
         }
         if (minD === Infinity) return;

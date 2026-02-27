@@ -15,6 +15,55 @@ from .video import build_trial_map, get_subject_videos
 logger = logging.getLogger(__name__)
 
 
+def _parse_simple_corrections_csv(csv_path: Path) -> dict:
+    """Parse a simple corrections CSV (header: thumb_x,thumb_y,index_x,index_y,...).
+
+    Returns:
+        dict mapping bodypart -> list of [x, y] or None per frame,
+        or {} if the file isn't in this format.
+    """
+    with open(csv_path, newline="") as f:
+        reader = csv.reader(f)
+        rows = list(reader)
+
+    if len(rows) < 2:
+        return {}
+
+    header = rows[0]
+
+    # Detect simple format: header cells are like "thumb_x", "thumb_y", "index_x", ...
+    col_map = {}  # {bodypart: {"x": col_idx, "y": col_idx}}
+    for col_idx, col_name in enumerate(header):
+        if "_x" in col_name:
+            bp = col_name.rsplit("_x", 1)[0]
+            col_map.setdefault(bp, {})["x"] = col_idx
+        elif "_y" in col_name:
+            bp = col_name.rsplit("_y", 1)[0]
+            col_map.setdefault(bp, {})["y"] = col_idx
+
+    if not col_map or not any("x" in v and "y" in v for v in col_map.values()):
+        return {}
+
+    result = {}
+    for bp, cols in col_map.items():
+        if "x" not in cols or "y" not in cols:
+            continue
+        coords = []
+        for row in rows[1:]:
+            try:
+                x = float(row[cols["x"]])
+                y = float(row[cols["y"]])
+                if x != x or y != y:  # NaN check
+                    coords.append(None)
+                else:
+                    coords.append([x, y])
+            except (IndexError, ValueError):
+                coords.append(None)
+        result[bp] = coords
+
+    return result
+
+
 def _parse_dlc_csv(csv_path: Path, likelihood_threshold: float = 0.6) -> dict:
     """Parse a DLC multi-header CSV into per-bodypart coordinate arrays.
 
@@ -23,12 +72,21 @@ def _parse_dlc_csv(csv_path: Path, likelihood_threshold: float = 0.6) -> dict:
         Row 1: bodypart names (repeated for x, y, likelihood)
         Row 2: 'x', 'y', 'likelihood' columns
 
+    Also handles simple corrections CSVs (thumb_x,thumb_y,...) as a fallback.
+
     Returns:
         dict mapping bodypart -> list of [x, y] or None per frame.
     """
     with open(csv_path, newline="") as f:
         reader = csv.reader(f)
         rows = list(reader)
+
+    if len(rows) < 2:
+        return {}
+
+    # Detect simple corrections format (header like "thumb_x,thumb_y,...")
+    if len(rows[0]) >= 2 and "_x" in rows[0][0]:
+        return _parse_simple_corrections_csv(csv_path)
 
     if len(rows) < 4:
         return {}
