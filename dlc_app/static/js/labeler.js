@@ -196,6 +196,11 @@ const labeler = (() => {
                     stageFiles = {};
                 }
 
+                // Default to corrections stage if available
+                if (availableStages.includes('corrections')) {
+                    selectedStage = 'corrections';
+                }
+
                 // Load all stage data and merge distances
                 await loadAllStages();
                 populateStageSelector();
@@ -428,10 +433,9 @@ const labeler = (() => {
             renderDistanceTrace();
         });
 
-        // Default to corrections stage if available
-        if (availableStages.includes('corrections')) {
-            select.value = 'corrections';
-            selectedStage = 'corrections';
+        // Sync dropdown to selectedStage (set before loadAllStages)
+        if (selectedStage !== 'auto') {
+            select.value = selectedStage;
         }
 
         updateCsvList();
