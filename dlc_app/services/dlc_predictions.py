@@ -97,6 +97,19 @@ def _match_csv_to_trial(csv_name: str, subject_name: str, cam_names: list[str]) 
             trial_name = f"{subject_name}_{trial_part}"
             return cam, trial_name
 
+        # Pattern 3: {Subject}_{Trial}_{Camera}_* (generic, no DLC in name)
+        remainder = stem[len(prefix):]
+        cam_sep = f"_{cam}_"
+        idx = remainder.find(cam_sep)
+        if idx >= 0:
+            trial_part = remainder[:idx]
+            if trial_part:
+                return cam, f"{subject_name}_{trial_part}"
+        if remainder.endswith(f"_{cam}"):
+            trial_part = remainder[:-(len(cam) + 1)]
+            if trial_part:
+                return cam, f"{subject_name}_{trial_part}"
+
     return None, None
 
 
@@ -114,6 +127,9 @@ def _find_label_dir(dlc_dir: Path, dir_names: list[str]) -> tuple[Path | None, l
         candidate = dlc_dir / name
         if candidate.exists() and candidate.is_dir():
             found = sorted(candidate.glob("*DLC*.csv"))
+            if not found:
+                # Fallback: any CSV (e.g. manual corrections without DLC in name)
+                found = sorted(candidate.glob("*.csv"))
             if found:
                 return candidate, found
     return None, []
