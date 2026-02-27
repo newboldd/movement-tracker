@@ -45,6 +45,8 @@ const labeler = (() => {
     let isCorrections = false;
     let availableStages = [];
     const stageData = {};             // cache: {stage: {camera: {bodypart: [...]}}}
+    let stageFiles = {};              // {stage: [csv_filename, ...]}
+    let selectedStage = 'auto';       // 'auto' or specific stage name
 
     const STAGE_CHAIN = ['corrections', 'refine', 'dlc', 'labels', 'mp'];
 
@@ -187,13 +189,16 @@ const labeler = (() => {
                 try {
                     const stagesResp = await API.get(`/api/labeling/sessions/${sessionId}/available_stages`);
                     availableStages = stagesResp.stages || [];
+                    stageFiles = stagesResp.stage_files || {};
                 } catch (e) {
                     console.log('Could not load available stages');
                     availableStages = [];
+                    stageFiles = {};
                 }
 
                 // Load all stage data and merge distances
                 await loadAllStages();
+                populateStageSelector();
             } else {
                 // Initial / Refine mode: load MP + DLC + committed labels as before
                 try {
@@ -380,13 +385,64 @@ const labeler = (() => {
         computeMergedDistances();
     }
 
+    function populateStageSelector() {
+        const container = document.getElementById('stageSelectorContainer');
+        const select = document.getElementById('stageSelector');
+        const csvList = document.getElementById('stageCsvList');
+        if (!container || !select) return;
+        if (!isCorrections || availableStages.length === 0) return;
+
+        container.style.display = 'block';
+        select.innerHTML = '<option value="auto">Auto (priority merge)</option>';
+
+        // Add available CSV-based stages
+        for (const stage of STAGE_CHAIN) {
+            if (!availableStages.includes(stage)) continue;
+            const files = stageFiles[stage];
+            const label = files
+                ? `${stage} (${files.length} csv${files.length > 1 ? 's' : ''})`
+                : stage;
+            const opt = document.createElement('option');
+            opt.value = stage;
+            opt.textContent = label;
+            select.appendChild(opt);
+        }
+
+        function updateCsvList() {
+            if (!csvList) return;
+            const stage = select.value;
+            const files = stageFiles[stage];
+            if (files && files.length > 0) {
+                csvList.textContent = files.join(', ');
+            } else {
+                csvList.textContent = '';
+            }
+        }
+
+        select.addEventListener('change', () => {
+            selectedStage = select.value;
+            updateCsvList();
+            computeMergedDistances();
+            render();
+            renderDistanceTrace();
+        });
+
+        updateCsvList();
+    }
+
     function computeMergedDistances() {
-        /** Build a single merged distance array: per frame, use highest-priority stage. */
+        /** Build a single merged distance array: per frame, use highest-priority stage
+         *  or a single selected stage. */
         distances = null;
+
+        // Determine which stages to consider
+        const stagesToUse = (selectedStage !== 'auto')
+            ? [selectedStage]
+            : STAGE_CHAIN.filter(s => availableStages.includes(s));
 
         // Find total frames from any stage that has distances
         let nFrames = 0;
-        for (const s of availableStages) {
+        for (const s of stagesToUse) {
             const sd = stageData[s];
             if (sd && sd.distances) {
                 nFrames = Math.max(nFrames, sd.distances.length);
@@ -396,8 +452,7 @@ const labeler = (() => {
 
         const merged = new Array(nFrames).fill(null);
         for (let f = 0; f < nFrames; f++) {
-            for (const s of STAGE_CHAIN) {
-                if (!availableStages.includes(s)) continue;
+            for (const s of stagesToUse) {
                 const sd = stageData[s];
                 if (!sd || !sd.distances) continue;
                 const d = sd.distances[f];
@@ -418,11 +473,14 @@ const labeler = (() => {
     }
 
     function getStageLabel(frame, side, bodypart) {
-        /** Look up label from all available stages, highest priority first. */
+        /** Look up label from selected stage or all stages (highest priority first). */
         if (!isCorrections) return null;
 
-        for (const stage of STAGE_CHAIN) {
-            if (!availableStages.includes(stage)) continue;
+        const stagesToUse = (selectedStage !== 'auto')
+            ? [selectedStage]
+            : STAGE_CHAIN.filter(s => availableStages.includes(s));
+
+        for (const stage of stagesToUse) {
             const sd = stageData[stage];
             if (!sd || !sd[side]) continue;
             const arr = sd[side][bodypart];
@@ -1826,8 +1884,10 @@ const labeler = (() => {
         if (!distances || totalFrames === 0) return;
         e.preventDefault();
         distAutoScroll = false;
+        // Use horizontal scroll (deltaX) if available, fall back to vertical (deltaY)
+        const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
         const step = Math.max(1, Math.round(distViewFrames * 0.15));
-        distViewStart += e.deltaY > 0 ? step : -step;
+        distViewStart += delta > 0 ? step : -step;
         clampDistView();
         renderDistanceTrace();
     }

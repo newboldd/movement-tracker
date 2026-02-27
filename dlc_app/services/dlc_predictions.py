@@ -290,6 +290,20 @@ def has_stage_data(subject_name: str, stage: str) -> bool:
     return labels_dir is not None
 
 
+def get_stage_csv_files(subject_name: str, stage: str) -> list[str]:
+    """Return CSV filenames for a specific processing stage."""
+    dir_names = STAGE_DIR_MAP.get(stage)
+    if not dir_names:
+        return []
+
+    settings = get_settings()
+    dlc_dir = settings.dlc_path / subject_name
+    labels_dir, csv_files = _find_label_dir(dlc_dir, dir_names)
+    if not labels_dir:
+        return []
+    return [f.name for f in csv_files]
+
+
 def _compute_dlc_distances(predictions: dict, cam_names: list[str],
                            subject_name: str, total_frames: int) -> list | None:
     """Compute 3D thumb-index distances from DLC predictions via stereo triangulation.

@@ -54,6 +54,12 @@
                 <h3 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">View</h3>
                 <button class="btn btn-sm" id="sideToggle" onclick="labeler.toggleSide()" title="Toggle camera (E)">OS</button>
                 <button class="btn btn-sm" onclick="labeler.resetZoom()" title="Reset zoom (Z)">Reset Zoom</button>
+                <div id="stageSelectorContainer" style="display:none;margin-top:8px;">
+                    <label style="font-size:12px;color:var(--text-muted);">Label source</label>
+                    <select id="stageSelector" style="width:100%;padding:4px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:12px;">
+                    </select>
+                    <div id="stageCsvList" style="font-size:10px;color:var(--text-muted);margin-top:4px;max-height:60px;overflow-y:auto;"></div>
+                </div>
             </div>
 
             <div style="margin-bottom: 16px;">

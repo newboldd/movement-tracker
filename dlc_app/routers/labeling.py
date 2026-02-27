@@ -22,6 +22,7 @@ from ..services.discovery import _count_labeled_frames, _has_mediapipe
 from ..services.dlc_predictions import (
     get_dlc_predictions_for_session,
     get_dlc_predictions_for_stage,
+    get_stage_csv_files,
     has_stage_data,
 )
 
@@ -364,11 +365,14 @@ def get_available_stages(session_id: int) -> dict:
         stages.append("labels")
 
     # DLC / Refine / Corrections: check for CSV directories
+    stage_files = {}
     for stage_name in ("dlc", "refine", "corrections"):
-        if has_stage_data(subject_name, stage_name):
+        csv_files = get_stage_csv_files(subject_name, stage_name)
+        if csv_files:
             stages.append(stage_name)
+            stage_files[stage_name] = csv_files
 
-    return {"stages": stages}
+    return {"stages": stages, "stage_files": stage_files}
 
 
 @router.get("/sessions/{session_id}/stage_data")
