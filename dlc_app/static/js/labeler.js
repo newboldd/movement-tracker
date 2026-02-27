@@ -519,7 +519,11 @@ const labeler = (() => {
             ctx.restore();
         }
 
-        // Draw labels for current frame + side
+        drawLabelsOverlay();
+    }
+
+    /** Draw labels for currentFrame/currentSide — used by both render() and videoDrawLoop(). */
+    function drawLabelsOverlay() {
         const key = `${currentFrame}_${currentSide}`;
         const lbl = labels.get(key);
         const placedBps = [];
@@ -529,11 +533,9 @@ const labeler = (() => {
             const hasManual = manualCoords && manualCoords[0] != null && manualCoords[1] != null;
 
             if (hasManual) {
-                // Draw solid manual label
                 drawPoint(manualCoords[0], manualCoords[1], bpColor(idx), bpLetter(bp));
                 placedBps.push({ bp, x: manualCoords[0], y: manualCoords[1] });
             } else if (isCorrections) {
-                // Corrections mode: show stage-sourced labels as solid (no ghosts)
                 const stageCoords = getStageLabel(currentFrame, currentSide, bp);
                 if (stageCoords) {
                     drawPoint(stageCoords[0], stageCoords[1], bpColor(idx), bpLetter(bp));
@@ -1486,35 +1488,7 @@ const labeler = (() => {
             ctx.restore();
         }
 
-        // Draw labels overlay (manual edits, then stage labels for corrections)
-        const key = `${currentFrame}_${currentSide}`;
-        const lbl = labels.get(key);
-        const placedBps = [];
-        bodyparts.forEach((bp, idx) => {
-            const manualCoords = lbl ? lbl[bp] : null;
-            const hasManual = manualCoords && manualCoords[0] != null && manualCoords[1] != null;
-
-            if (hasManual) {
-                drawPoint(manualCoords[0], manualCoords[1], bpColor(idx), bpLetter(bp));
-                placedBps.push({ bp, x: manualCoords[0], y: manualCoords[1] });
-            } else if (isCorrections) {
-                const stageCoords = getStageLabel(currentFrame, currentSide, bp);
-                if (stageCoords) {
-                    drawPoint(stageCoords[0], stageCoords[1], bpColor(idx), bpLetter(bp));
-                    placedBps.push({ bp, x: stageCoords[0], y: stageCoords[1] });
-                }
-            }
-        });
-        for (let i = 1; i < placedBps.length; i++) {
-            const a = placedBps[i - 1];
-            const b = placedBps[i];
-            ctx.beginPath();
-            ctx.moveTo(a.x * scale + offsetX, a.y * scale + offsetY);
-            ctx.lineTo(b.x * scale + offsetX, b.y * scale + offsetY);
-            ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-            ctx.lineWidth = 1;
-            ctx.stroke();
-        }
+        drawLabelsOverlay();
 
         updateFrameDisplay();
         renderTimeline();
