@@ -34,10 +34,15 @@ def get_video_info(video_path: str) -> VideoInfo:
 
 
 def get_subject_videos(subject_name: str) -> list[str]:
-    """Find all stereo video files for a subject."""
+    """Find all stereo video files for a subject.
+
+    Prefers deidentified videos from trials/deidentified/ when available.
+    """
     import glob
     settings = get_settings()
     video_dir = settings.video_path
+    deident_dir = video_dir / "deidentified"
+
     pattern = str(video_dir / f"{subject_name}_*.mp4")
     videos = sorted(glob.glob(pattern))
     if not videos:
@@ -47,6 +52,15 @@ def get_subject_videos(subject_name: str) -> list[str]:
             v for v in all_vids
             if Path(v).name.lower().startswith(prefix_lower)
         )
+
+    # Prefer deidentified versions when they exist
+    if deident_dir.is_dir():
+        result = []
+        for v in videos:
+            deident_path = deident_dir / Path(v).name
+            result.append(str(deident_path) if deident_path.exists() else v)
+        return result
+
     return videos
 
 

@@ -76,7 +76,7 @@ def cmd_analyze_videos(config_path: str, video_dir: str) -> list[str]:
     settings = get_settings()
     script = (
         f"{_DLC_PREAMBLE}"
-        f"deeplabcut.analyze_videos(r'{config_path}', r'{video_dir}')"
+        f"deeplabcut.analyze_videos(r'{config_path}', [r'{video_dir}'])"
     )
     return [settings.python_executable, "-c", script]
 

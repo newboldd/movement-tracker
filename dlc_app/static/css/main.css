@@ -276,6 +276,8 @@ body {
     padding: 16px;
     overflow-y: auto;
     flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
 }
 
 .labeling-main {
@@ -283,6 +285,7 @@ body {
     display: flex;
     flex-direction: column;
     min-width: 0;
+    position: relative;
 }
 
 .canvas-container {
@@ -386,6 +389,68 @@ body {
     color: var(--text-muted);
     pointer-events: none;
     z-index: 1;
+}
+
+/* ── Trial plots (final mode) ──────────────────────── */
+#trialPlotsContainer {
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    max-height: 240px;
+}
+
+.trial-plot-row {
+    flex-shrink: 0;
+    border-top: 1px solid var(--border);
+    background: var(--bg-card);
+    position: relative;
+    cursor: pointer;
+}
+
+.trial-plot-scroll {
+    overflow-x: auto;
+    height: 100%;
+}
+
+.trial-plot-row canvas {
+    height: 100%;
+    display: block;
+}
+
+.trial-plot-label {
+    position: absolute;
+    top: 3px;
+    left: 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+    pointer-events: none;
+    z-index: 1;
+}
+
+/* ── Subject navigation (labeling page) ────────────── */
+.subject-select {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 16px;
+    font-weight: 600;
+    padding: 2px 8px;
+    cursor: pointer;
+}
+.subject-select:focus { outline: 1px solid var(--blue); }
+
+.subject-nav-btns {
+    margin-top: auto;
+    padding-top: 16px;
+    display: flex;
+    gap: 4px;
+}
+.subject-nav-btns .btn:disabled {
+    opacity: 0.3;
+    cursor: default;
+    pointer-events: none;
 }
 
 /* ── Responsive ─────────────────────────────────────── */

@@ -28,9 +28,10 @@ N_JOINTS = 21
 
 
 def _extract_hands(results, width, height):
-    """Extract detected hands as list of (21,2) arrays + confidence scores."""
+    """Extract detected hands as list of (21,2) arrays + confidence scores + labels."""
     hands = []
     scores = []
+    labels = []
     if results.multi_hand_landmarks and results.multi_handedness:
         for hand_lm, hand_cls in zip(results.multi_hand_landmarks,
                                      results.multi_handedness):
@@ -38,13 +39,45 @@ def _extract_hands(results, width, height):
                            for lm in hand_lm.landmark])
             hands.append(kp)
             scores.append(hand_cls.classification[0].score)
+            labels.append(hand_cls.classification[0].label)
     elif results.multi_hand_landmarks:
         for hand_lm in results.multi_hand_landmarks:
             kp = np.array([(lm.x * width, lm.y * height)
                            for lm in hand_lm.landmark])
             hands.append(kp)
             scores.append(0.5)
-    return hands, scores
+            labels.append(None)
+    return hands, scores, labels
+
+
+def _select_hand(hands, labels, target_label, prev_wrist):
+    """Select the detected hand matching target_label.
+
+    MediaPipe handedness is mirrored (selfie-camera convention):
+      actual left hand  -> MP reports 'Right'
+      actual right hand -> MP reports 'Left'
+
+    Returns index into hands list, or None if no match.
+    """
+    if target_label:
+        matching = [i for i, lbl in enumerate(labels) if lbl == target_label]
+        if not matching:
+            return None  # wrong hand only — skip frame
+        if len(matching) == 1:
+            return matching[0]
+        # Multiple matches: pick closest to previous wrist
+        if prev_wrist is not None:
+            return matching[int(np.argmin([
+                np.linalg.norm(hands[i][WRIST] - prev_wrist) for i in matching
+            ]))]
+        return matching[0]
+
+    # No target label (shouldn't happen for named trials): first hand
+    if prev_wrist is not None and len(hands) > 1:
+        return int(np.argmin([
+            np.linalg.norm(hh[WRIST] - prev_wrist) for hh in hands
+        ]))
+    return 0
 
 
 def _target_hand_label(video_name: str) -> str | None:
@@ -113,14 +146,14 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
         # Create separate MediaPipe instances per camera half
+        # Always detect 2 hands so we can filter by handedness label
         mp_hands = mp_lib.solutions.hands
-        n_hands = 1 if target_label else 2
         det_L = mp_hands.Hands(
-            static_image_mode=False, max_num_hands=n_hands,
+            static_image_mode=False, max_num_hands=2,
             min_detection_confidence=0.5, min_tracking_confidence=0.5,
         )
         det_R = mp_hands.Hands(
-            static_image_mode=False, max_num_hands=n_hands,
+            static_image_mode=False, max_num_hands=2,
             min_detection_confidence=0.5, min_tracking_confidence=0.5,
         )
 
@@ -141,35 +174,27 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
             # Process left camera (OS)
             rgb_L = cv2.cvtColor(frame_L, cv2.COLOR_BGR2RGB)
             res_L = det_L.process(rgb_L)
-            hands_L, scores_L = _extract_hands(res_L, midline, h)
+            hands_L, scores_L, labels_L = _extract_hands(res_L, midline, h)
 
             # Process right camera (OD)
             rgb_R = cv2.cvtColor(frame_R, cv2.COLOR_BGR2RGB)
             res_R = det_R.process(rgb_R)
-            hands_R, scores_R = _extract_hands(res_R, full_w - midline, h)
+            hands_R, scores_R, labels_R = _extract_hands(res_R, full_w - midline, h)
 
-            # Track hand identity by wrist proximity
+            # Select target hand by handedness label, skip if wrong hand
             if hands_L:
-                if prev_wrist_L is not None and len(hands_L) > 1:
-                    idx = int(np.argmin([
-                        np.linalg.norm(hh[WRIST] - prev_wrist_L) for hh in hands_L
-                    ]))
-                else:
-                    idx = 0
-                OS_landmarks[global_frame] = hands_L[idx]  # all 21 joints
-                confidence_OS[global_frame] = scores_L[idx]
-                prev_wrist_L = hands_L[idx][WRIST].copy()
+                idx = _select_hand(hands_L, labels_L, target_label, prev_wrist_L)
+                if idx is not None:
+                    OS_landmarks[global_frame] = hands_L[idx]
+                    confidence_OS[global_frame] = scores_L[idx]
+                    prev_wrist_L = hands_L[idx][WRIST].copy()
 
             if hands_R:
-                if prev_wrist_R is not None and len(hands_R) > 1:
-                    idx = int(np.argmin([
-                        np.linalg.norm(hh[WRIST] - prev_wrist_R) for hh in hands_R
-                    ]))
-                else:
-                    idx = 0
-                OD_landmarks[global_frame] = hands_R[idx]  # all 21 joints
-                confidence_OD[global_frame] = scores_R[idx]
-                prev_wrist_R = hands_R[idx][WRIST].copy()
+                idx = _select_hand(hands_R, labels_R, target_label, prev_wrist_R)
+                if idx is not None:
+                    OD_landmarks[global_frame] = hands_R[idx]
+                    confidence_OD[global_frame] = scores_R[idx]
+                    prev_wrist_R = hands_R[idx][WRIST].copy()
 
             frames_processed += 1
             if progress_callback and frames_processed % 50 == 0:

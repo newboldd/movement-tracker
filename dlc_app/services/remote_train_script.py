@@ -170,15 +170,14 @@ def crop_stereo_videos(video_dir: str, subject_name: str,
         cap = cv2.VideoCapture(vpath)
         fps = int(cap.get(cv2.CAP_PROP_FPS))
         n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        ret, frame = cap.read()
-        if not ret:
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if w == 0 or h == 0:
             cap.release()
             logger.warning(f"Cannot read {vpath}")
             continue
 
-        h, w = frame.shape[:2]
         mid = w // 2
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
         # Use mp4v on Linux (remote), avc1 on macOS
         codec = "avc1" if sys.platform == "darwin" else "mp4v"
@@ -246,7 +245,7 @@ def run_pipeline(config_path: str, shuffle: int, labels_dir: str,
     logger.info("=== Phase: Analyzing ===")
     _write_status(status_file, "analyze", "running", 81.0)
 
-    deeplabcut.analyze_videos(config_path, labels_dir,
+    deeplabcut.analyze_videos(config_path, [labels_dir],
                               shuffle=shuffle, engine=Engine.PYTORCH)
     logger.info("Analysis complete")
 
@@ -277,6 +276,8 @@ def main():
                         help="Camera names for cropped output files")
     parser.add_argument("--status-file", default=None,
                         help="Path for status.json (default: labels-dir/../status.json)")
+    parser.add_argument("--log-file", default=None,
+                        help="Redirect stdout/stderr to this file (handled before argparse)")
     args = parser.parse_args()
 
     status_file = args.status_file or os.path.join(
@@ -304,4 +305,15 @@ def main():
 
 
 if __name__ == "__main__":
+    # Redirect stdout/stderr to --log-file BEFORE any imports or argparse,
+    # so even crash-on-import errors are captured.
+    for _i, _arg in enumerate(sys.argv):
+        if _arg == "--log-file" and _i + 1 < len(sys.argv):
+            _log_fh = open(sys.argv[_i + 1], "a")
+            sys.stdout = _log_fh
+            sys.stderr = _log_fh
+            for _h in logging.root.handlers:
+                if isinstance(_h, logging.StreamHandler):
+                    _h.stream = sys.stderr
+            break
     main()

@@ -69,6 +69,7 @@ def create_session(subject_id: int, req: SessionCreate) -> dict:
 
         is_refine = req.session_type == "refine"
         is_corrections = req.session_type == "corrections"
+        is_final = req.session_type == "final"
         iteration = subj["iteration"] + 1 if is_refine else subj["iteration"]
 
         db.execute(
@@ -81,7 +82,7 @@ def create_session(subject_id: int, req: SessionCreate) -> dict:
             (subject_id,),
         ).fetchone()
 
-        if not is_refine and not is_corrections:
+        if not is_refine and not is_corrections and not is_final:
             # Copy labels from the most recent committed session (if any)
             prev_session = db.execute(
                 """SELECT id FROM label_sessions

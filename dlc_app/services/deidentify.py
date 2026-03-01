@@ -230,14 +230,13 @@ def deidentify_video(input_path: str, output_path: str,
     cap = cv2.VideoCapture(input_path)
     n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
-    ret, frame0 = cap.read()
-    if not ret:
+    full_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if full_w == 0 or h == 0:
         cap.release()
         raise RuntimeError(f"Cannot read video: {input_path}")
 
-    h, full_w = frame0.shape[:2]
     is_stereo = (full_w / h) > 1.7
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
     if is_stereo:
         half_w = full_w // 2
@@ -302,13 +301,21 @@ def deidentify_video(input_path: str, output_path: str,
         faces = _smooth_face_detections(faces_raw, n_frames, full_w, h)
 
     # ── Pass 2: Render with hand protection ──
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    # Reopen video instead of seeking (seeking can be inaccurate with H.264)
+    cap.release()
+    cap = cv2.VideoCapture(input_path)
+    # Try avc1 (H.264 via VideoToolbox) on macOS, fall back to mp4v
     import sys
-    codec = "avc1" if sys.platform == "darwin" else "mp4v"
-    fourcc = cv2.VideoWriter_fourcc(*codec)
-    writer = cv2.VideoWriter(output_path, fourcc, fps, (full_w, h))
-    if not writer.isOpened():
-        raise RuntimeError(f"cv2.VideoWriter failed to open: {output_path} (codec={codec})")
+    writer = None
+    for codec in (["avc1", "mp4v"] if sys.platform == "darwin" else ["mp4v"]):
+        fourcc = cv2.VideoWriter_fourcc(*codec)
+        writer = cv2.VideoWriter(output_path, fourcc, fps, (full_w, h))
+        if writer.isOpened():
+            break
+        writer.release()
+        writer = None
+    if writer is None:
+        raise RuntimeError(f"cv2.VideoWriter failed to open: {output_path}")
 
     face_det_count = 0
 

@@ -74,11 +74,14 @@ def _has_labeled_data(dlc_path: Path) -> bool:
 
 
 def _has_labels_v1(dlc_path: Path) -> bool:
-    """Check if labels_v1 (cropped stereo analysis outputs) exist."""
-    # Various naming conventions
+    """Check if labels_v1 (DLC model prediction CSVs) exist.
+
+    Requires actual CSV files in the directory — an empty dir or one
+    with only mediapipe/training data does not count.
+    """
     for name in ["labels_v1", "labels_v1.0", "labels_v0.1"]:
         d = dlc_path / name
-        if d.exists() and d.is_dir():
+        if d.exists() and d.is_dir() and list(d.glob("*.csv")):
             return True
     return False
 

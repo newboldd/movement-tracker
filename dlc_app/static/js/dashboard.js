@@ -65,11 +65,8 @@ function renderTable() {
     tbody.innerHTML = filtered.map(s => `
         <tr>
             <td class="name-col" onclick="showDetail(${s.id})">${s.name}</td>
+            <td><button class="btn btn-sm" onclick="openFinal(${s.id})">View</button></td>
             <td><span class="badge badge-${s.stage}">${s.stage.replace(/_/g, ' ')}</span></td>
-            <td><select onchange="updateSubjectCamera(${s.id}, this.value)" style="font-size:12px;padding:2px 4px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);">
-                <option value="">--</option>
-                ${calibrationNames.map(n => `<option value="${n}"${n === (s.camera_name || '') ? ' selected' : ''}>${n}</option>`).join('')}
-            </select></td>
             <td>${s.video_count}</td>
             <td>${s.has_mediapipe ? '&check;' : '&mdash;'}</td>
             <td>${s.has_blur ? '&check;' : '&mdash;'}</td>
@@ -347,6 +344,16 @@ async function removeSubject(subjectId, subjectName) {
 async function openRefine(subjectId) {
     try {
         const session = await API.post(`/api/labeling/${subjectId}/sessions`, { session_type: 'refine' });
+        window.location.href = `/labeling?session=${session.id}`;
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+// ── Final (read-only) navigation ─────────────────────
+async function openFinal(subjectId) {
+    try {
+        const session = await API.post(`/api/labeling/${subjectId}/sessions`, { session_type: 'final' });
         window.location.href = `/labeling?session=${session.id}`;
     } catch (e) {
         alert('Error: ' + e.message);

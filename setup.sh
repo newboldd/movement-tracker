@@ -70,4 +70,4 @@ cd "$PROJECT_DIR"
 # Open browser after a short delay (background, non-fatal)
 (sleep 2 && open "http://localhost:$PORT" 2>/dev/null || xdg-open "http://localhost:$PORT" 2>/dev/null) &
 
-python -m uvicorn dlc_app.app:app --host 127.0.0.1 --port "$PORT"
+python -m uvicorn dlc_app.app:app --host 127.0.0.1 --port "$PORT" --reload

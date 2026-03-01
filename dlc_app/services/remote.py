@@ -892,7 +892,9 @@ def remote_preprocess_batch(
             # Upload face_blur_overrides.json if it exists (near video dir)
             remote_overrides_file = None
             overrides_candidates = [
+                settings.video_path.parent.parent / "face_blur_overrides.json",
                 settings.video_path.parent / "face_blur_overrides.json",
+                settings.video_path / "face_blur_overrides.json",
             ]
             for cand in overrides_candidates:
                 if cand.is_file():

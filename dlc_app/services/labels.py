@@ -306,6 +306,10 @@ def save_corrections_to_csv(
 ) -> dict:
     """Write correction labels as DLC-format CSVs in corrections/ directory.
 
+    Starts from the best available base data (refine > dlc > mp) and overlays
+    the user's manual corrections on top, so the output CSV is a complete set
+    of labels — not just the sparse frames the user touched.
+
     Creates one CSV per (trial, camera) pair, matching the naming pattern
     recognized by _match_csv_to_trial(): {Subject}_{Trial}_DLC_{Camera}.csv
 
@@ -316,6 +320,9 @@ def save_corrections_to_csv(
     Returns:
         dict with paths and counts
     """
+    from .dlc_predictions import get_dlc_predictions_for_stage
+    from .mediapipe_prelabel import get_mediapipe_for_session
+
     settings = get_settings()
     corrections_dir = settings.dlc_path / subject_name / "corrections"
     corrections_dir.mkdir(parents=True, exist_ok=True)
@@ -325,16 +332,29 @@ def save_corrections_to_csv(
         return {"corrections_dir": str(corrections_dir), "csv_count": 0, "frame_count": 0}
 
     bodyparts = settings.bodyparts
+    cam_names = settings.camera_names
     scorer = settings.dlc_scorer
+    total_frames_count = trials[-1]["end_frame"] + 1
 
-    # Group labels by (trial_idx, side)
-    groups: dict[tuple[int, str], list[dict]] = {}
+    # Load base data: existing corrections first (so previous commits are
+    # preserved), then fall back to refine > dlc > mp for first-time saves.
+    base_data = get_dlc_predictions_for_stage(subject_name, "corrections")
+    if not base_data:
+        for stage in ("refine", "dlc"):
+            base_data = get_dlc_predictions_for_stage(subject_name, stage)
+            if base_data:
+                break
+    if not base_data:
+        base_data = get_mediapipe_for_session(subject_name)
+
+    # Group manual corrections by (trial_idx, side)
+    correction_map: dict[tuple[int, str], dict[int, dict]] = {}
+    corrected_frame_count = 0
     for label in session_labels:
         kp = label.get("keypoints", {})
         if isinstance(kp, str):
             kp = json.loads(kp)
 
-        # Skip labels without any coordinates
         has_any = any(
             coords and len(coords) >= 2 and coords[0] is not None
             for coords in kp.values()
@@ -343,78 +363,94 @@ def save_corrections_to_csv(
             continue
 
         key = (label["trial_idx"], label["side"])
-        if key not in groups:
-            groups[key] = []
-        groups[key].append({
-            "frame_num": label["frame_num"],
-            "keypoints": kp,
-        })
+        if key not in correction_map:
+            correction_map[key] = {}
+        correction_map[key][label["frame_num"]] = kp
+        corrected_frame_count += 1
 
     csv_count = 0
-    total_frames = 0
 
-    for (trial_idx, side), frame_labels in groups.items():
-        if trial_idx >= len(trials):
-            continue
-
-        trial = trials[trial_idx]
+    # Write one CSV per (trial, camera) — all combinations that have any data
+    for trial_idx, trial in enumerate(trials):
         trial_name = trial["trial_name"]
-        # Strip subject prefix to get trial part: "MSA01_L1" -> "L1"
         trial_part = trial_name
         if trial_name.startswith(f"{subject_name}_"):
             trial_part = trial_name[len(f"{subject_name}_"):]
 
-        # Build full-trial-length arrays (one row per frame in the trial)
         n_frames = trial["frame_count"]
         start_frame = trial["start_frame"]
 
-        # Initialize all frames as empty
-        frame_data = [None] * n_frames
+        for side in cam_names:
+            corrections = correction_map.get((trial_idx, side), {})
 
-        for fl in frame_labels:
-            local_frame = fl["frame_num"] - start_frame
-            if 0 <= local_frame < n_frames:
-                frame_data[local_frame] = fl["keypoints"]
+            # Build frame data: base + per-bodypart corrections overlay
+            frame_data = [None] * n_frames
+            has_any_data = False
 
-        # Write CSV: {Subject}_{TrialPart}_DLC_{Camera}.csv
-        csv_name = f"{subject_name}_{trial_part}_DLC_{side}.csv"
-        csv_path = corrections_dir / csv_name
-
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            n_bp = len(bodyparts)
-
-            # DLC multi-header rows
-            scorer_row = ["scorer"] + [scorer] * (n_bp * 3)
-            bp_row = ["bodyparts"]
-            for bp in bodyparts:
-                bp_row.extend([bp, bp, bp])
-            coords_row = ["coords"] + ["x", "y", "likelihood"] * n_bp
-
-            writer.writerow(scorer_row)
-            writer.writerow(bp_row)
-            writer.writerow(coords_row)
-
-            # Data rows — one per frame in the trial
             for local_frame in range(n_frames):
-                row = [local_frame]
-                kp = frame_data[local_frame]
-                for bp in bodyparts:
-                    if kp:
-                        coords = kp.get(bp)
+                global_frame = start_frame + local_frame
+
+                # Start from base data
+                kp = {}
+                if base_data and side in base_data:
+                    for bp in bodyparts:
+                        arr = base_data[side].get(bp)
+                        if arr and global_frame < len(arr) and arr[global_frame] is not None:
+                            kp[bp] = arr[global_frame]
+
+                # Overlay manual corrections per-bodypart
+                manual = corrections.get(global_frame)
+                if manual:
+                    for bp in bodyparts:
+                        coords = manual.get(bp)
                         if coords and len(coords) >= 2 and coords[0] is not None:
-                            row.extend([coords[0], coords[1], 1.0])
+                            kp[bp] = coords
+
+                if kp:
+                    frame_data[local_frame] = kp
+                    has_any_data = True
+
+            if not has_any_data:
+                continue
+
+            # Write CSV: {Subject}_{TrialPart}_DLC_{Camera}.csv
+            csv_name = f"{subject_name}_{trial_part}_DLC_{side}.csv"
+            csv_path = corrections_dir / csv_name
+
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                n_bp = len(bodyparts)
+
+                # DLC multi-header rows
+                scorer_row = ["scorer"] + [scorer] * (n_bp * 3)
+                bp_row = ["bodyparts"]
+                for bp in bodyparts:
+                    bp_row.extend([bp, bp, bp])
+                coords_row = ["coords"] + ["x", "y", "likelihood"] * n_bp
+
+                writer.writerow(scorer_row)
+                writer.writerow(bp_row)
+                writer.writerow(coords_row)
+
+                # Data rows — one per frame in the trial
+                for local_frame in range(n_frames):
+                    row = [local_frame]
+                    kp = frame_data[local_frame]
+                    for bp in bodyparts:
+                        if kp:
+                            coords = kp.get(bp)
+                            if coords and len(coords) >= 2 and coords[0] is not None:
+                                row.extend([coords[0], coords[1], 1.0])
+                            else:
+                                row.extend(["", "", 0.0])
                         else:
                             row.extend(["", "", 0.0])
-                    else:
-                        row.extend(["", "", 0.0])
-                writer.writerow(row)
+                    writer.writerow(row)
 
-        csv_count += 1
-        total_frames += len(frame_labels)
+            csv_count += 1
 
     return {
         "corrections_dir": str(corrections_dir),
         "csv_count": csv_count,
-        "frame_count": total_frames,
+        "frame_count": corrected_frame_count,
     }

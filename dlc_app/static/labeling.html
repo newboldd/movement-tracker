@@ -4,18 +4,19 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DLC Labeling</title>
-    <link rel="stylesheet" href="/static/css/main.css?v=4">
+    <link rel="stylesheet" href="/static/css/main.css?v=6">
     <style>
         body { overflow: hidden; }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1 id="headerTitle">Labeling</h1>
+        <div style="display:flex;align-items:center;gap:8px;">
+            <span id="sessionTypeLabel" style="font-size:18px;font-weight:600;"></span>
+            <select id="subjectSelect" class="subject-select"></select>
+        </div>
         <nav>
             <a href="/">Dashboard</a>
-            <a href="/labeling" class="active">Labeling</a>
-            <a href="/results">Results</a>
             <a href="/settings">Settings</a>
         </nav>
     </div>
@@ -81,6 +82,12 @@
                     <div><kbd>Right-click</kbd> Remove label</div>
                 </div>
             </div>
+
+            <!-- Subject prev/next navigation -->
+            <div class="subject-nav-btns">
+                <button class="btn btn-sm" id="prevSubjectBtn" onclick="labeler.prevSubject()">&larr; Prev</button>
+                <button class="btn btn-sm" id="nextSubjectBtn" onclick="labeler.nextSubject()">Next &rarr;</button>
+            </div>
         </div>
 
         <!-- Main area -->
@@ -109,10 +116,13 @@
                 <span class="distance-trace-label">3D Distance (mm)</span>
                 <canvas id="distanceTraceCanvas"></canvas>
             </div>
+
+            <!-- Trial plots (final mode only) -->
+            <div id="trialPlotsContainer" style="display:none;"></div>
         </div>
     </div>
 
     <script src="/static/js/api.js?v=10"></script>
-    <script src="/static/js/labeler.js?v=10"></script>
+    <script src="/static/js/labeler.js?v=20"></script>
 </body>
 </html>

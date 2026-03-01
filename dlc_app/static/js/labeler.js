@@ -43,12 +43,18 @@ const labeler = (() => {
 
     // Corrections mode state
     let isCorrections = false;
+    // Final (read-only) mode state
+    let isFinal = false;
     let availableStages = [];
     const stageData = {};             // cache: {stage: {camera: {bodypart: [...]}}}
     let stageFiles = {};              // {stage: [csv_filename, ...]}
     let selectedStage = 'auto';       // 'auto' or specific stage name
 
     const STAGE_CHAIN = ['corrections', 'refine', 'dlc', 'labels', 'mp'];
+
+    // Subject navigation
+    let allSubjects = [];
+    let currentSubjectId = null;
 
     // Color palette for bodyparts
     const COLORS = [
@@ -58,6 +64,9 @@ const labeler = (() => {
 
     function bpColor(idx) { return COLORS[idx % COLORS.length]; }
     function bpLetter(name) { return name[0].toUpperCase(); }
+
+    // Final mode: per-camera crop boxes {cam: {x1, y1, x2, y2}}
+    let finalCropBoxes = null;
 
     // Canvas state
     let canvas, ctx;
@@ -105,6 +114,9 @@ const labeler = (() => {
     const deletedKeys = new Set();
     // Dirty (modified since last save) keys — only these are sent to server
     const dirtyKeys = new Set();
+    // Rejected stage labels: Set of "frame_side_bp" — suppresses stage label display
+    // so next-priority ghost can appear after user deletes a correction
+    const rejectedStageLabels = new Set();
 
     // Prefetch cache
     const imageCache = new Map();
@@ -153,20 +165,38 @@ const labeler = (() => {
 
             isRefine = sessionInfo.session && sessionInfo.session.session_type === 'refine';
             isCorrections = sessionInfo.session && sessionInfo.session.session_type === 'corrections';
+            isFinal = sessionInfo.session && sessionInfo.session.session_type === 'final';
 
-            const subjectName = sessionInfo.subject.name;
-            if (isCorrections) {
-                document.getElementById('headerTitle').textContent = `Corrections: ${subjectName}`;
-            } else if (isRefine) {
-                document.getElementById('headerTitle').textContent = `Refine: ${subjectName}`;
-            } else {
-                document.getElementById('headerTitle').textContent = `Labeling: ${subjectName}`;
+            // Populate subject navigation dropdown
+            currentSubjectId = sessionInfo.subject.id;
+            const typeLabel = document.getElementById('sessionTypeLabel');
+            if (isFinal) typeLabel.textContent = 'Final:';
+            else if (isCorrections) typeLabel.textContent = 'Corrections:';
+            else if (isRefine) typeLabel.textContent = 'Refine:';
+            else typeLabel.textContent = 'Labeling:';
+
+            try {
+                allSubjects = await API.get('/api/subjects');
+                const sel = document.getElementById('subjectSelect');
+                sel.innerHTML = '';
+                allSubjects.forEach(s => {
+                    const opt = document.createElement('option');
+                    opt.value = s.id;
+                    opt.textContent = s.name;
+                    if (s.id === currentSubjectId) opt.selected = true;
+                    sel.appendChild(opt);
+                });
+                sel.addEventListener('change', () => switchSubject(parseInt(sel.value)));
+                updateSubjectNavButtons();
+            } catch (e) {
+                console.log('Could not load subjects list for navigation');
             }
 
-            // Update commit button text
+            // Update commit button text (hide in final mode)
             const commitBtn = document.querySelector('[onclick="labeler.commitSession()"]');
             if (commitBtn) {
-                if (isCorrections) commitBtn.textContent = 'Save Corrections';
+                if (isFinal) commitBtn.style.display = 'none';
+                else if (isCorrections) commitBtn.textContent = 'Save Corrections';
                 else if (isRefine) commitBtn.textContent = 'Commit & Retrain';
             }
 
@@ -177,15 +207,17 @@ const labeler = (() => {
             // Setup keyboard after bodyparts are known
             setupKeyboard();
 
-            // Load existing labels (user edits in this session)
-            const saved = await API.get(`/api/labeling/sessions/${sessionId}/labels`);
-            saved.forEach(l => {
-                const key = `${l.frame_num}_${l.side}`;
-                labels.set(key, l.keypoints || {});
-            });
+            // Load existing labels (user edits in this session) — skip for final mode
+            if (!isFinal) {
+                const saved = await API.get(`/api/labeling/sessions/${sessionId}/labels`);
+                saved.forEach(l => {
+                    const key = `${l.frame_num}_${l.side}`;
+                    labels.set(key, l.keypoints || {});
+                });
+            }
 
-            if (isCorrections) {
-                // Corrections mode: load stage data, no ghosts
+            if (isCorrections || isFinal) {
+                // Corrections / Final mode: load stage data, no ghosts
                 try {
                     const stagesResp = await API.get(`/api/labeling/sessions/${sessionId}/available_stages`);
                     availableStages = stagesResp.stages || [];
@@ -204,6 +236,13 @@ const labeler = (() => {
                 // Load all stage data and merge distances
                 await loadAllStages();
                 populateStageSelector();
+
+                // Final mode: hide timeline/distance trace, build trial plots at bottom
+                if (isFinal) {
+                    const timelineContainer = document.querySelector('.timeline-container');
+                    if (timelineContainer) timelineContainer.style.display = 'none';
+                    buildTrialPlots();
+                }
             } else {
                 // Initial / Refine mode: load MP + DLC + committed labels as before
                 try {
@@ -250,7 +289,8 @@ const labeler = (() => {
             initDistanceTraceWindow();
 
             // Show distance trace if we have data; hide timeline to save space
-            if (distances && distances.some(d => d !== null)) {
+            // (in final mode: trial plots handle this instead)
+            if (distances && distances.some(d => d !== null) && !isFinal) {
                 const traceContainer = document.getElementById('distanceTraceContainer');
                 if (traceContainer) traceContainer.style.display = 'block';
                 const timelineContainer = document.querySelector('.timeline-container');
@@ -313,8 +353,16 @@ const labeler = (() => {
             imgW = currentImage.width;
             imgH = currentImage.height;
             if (!hasUserZoom) {
-                // Try to auto-zoom to visible points (manual or MP)
-                if (!autoZoomForFrame(frame, currentSide)) fitImage();
+                if (isFinal && finalCropBoxes) {
+                    // Final mode: zoom to crop box, then lock
+                    zoomToCropBox();
+                    hasUserZoom = true;
+                } else if (isFinal) {
+                    fitImage();
+                    hasUserZoom = true;
+                } else {
+                    if (!autoZoomForFrame(frame, currentSide)) fitImage();
+                }
             }
             render();
             prefetchFrames(frame);
@@ -388,6 +436,48 @@ const labeler = (() => {
         const loadPromises = availableStages.map(s => ensureStageLoaded(s));
         await Promise.all(loadPromises);
         computeMergedDistances();
+        if (isFinal) computeFinalCropBoxes();
+    }
+
+    function computeFinalCropBoxes() {
+        /** Compute a stable crop box per camera from stage data label positions. */
+        const MARGIN = 40;
+        const boxes = {};
+        for (const cam of cameraNames) {
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            // Scan the selected stage (or all via priority chain)
+            const stagesToUse = (selectedStage !== 'auto')
+                ? [selectedStage]
+                : STAGE_CHAIN.filter(s => availableStages.includes(s));
+
+            for (const stage of stagesToUse) {
+                const sd = stageData[stage];
+                if (!sd || !sd[cam]) continue;
+                for (const bp of bodyparts) {
+                    const arr = sd[cam][bp];
+                    if (!arr) continue;
+                    for (let f = 0; f < arr.length; f++) {
+                        const pt = arr[f];
+                        if (!pt) continue;
+                        if (pt[0] < minX) minX = pt[0];
+                        if (pt[1] < minY) minY = pt[1];
+                        if (pt[0] > maxX) maxX = pt[0];
+                        if (pt[1] > maxY) maxY = pt[1];
+                    }
+                }
+                if (minX < Infinity) break; // got data from this stage, stop
+            }
+
+            if (minX < Infinity) {
+                boxes[cam] = {
+                    x1: Math.max(0, Math.floor(minX - MARGIN)),
+                    y1: Math.max(0, Math.floor(minY - MARGIN)),
+                    x2: Math.ceil(maxX + MARGIN),
+                    y2: Math.ceil(maxY + MARGIN),
+                };
+            }
+        }
+        finalCropBoxes = Object.keys(boxes).length > 0 ? boxes : null;
     }
 
     function populateStageSelector() {
@@ -395,7 +485,7 @@ const labeler = (() => {
         const select = document.getElementById('stageSelector');
         const csvList = document.getElementById('stageCsvList');
         if (!container || !select) return;
-        if (!isCorrections || availableStages.length === 0) return;
+        if (!isFinal || availableStages.length === 0) return;
 
         container.style.display = 'block';
         select.innerHTML = '<option value="auto">Auto (priority merge)</option>';
@@ -429,8 +519,10 @@ const labeler = (() => {
             select.blur();
             updateCsvList();
             computeMergedDistances();
+            if (isFinal) computeFinalCropBoxes();
             render();
-            renderDistanceTrace();
+            if (isFinal) renderTrialPlots();
+            else renderDistanceTrace();
         });
 
         // Sync dropdown to selectedStage (set before loadAllStages)
@@ -442,11 +534,10 @@ const labeler = (() => {
     }
 
     function computeMergedDistances() {
-        /** Build a single merged distance array: per frame, use highest-priority stage
-         *  or a single selected stage. */
+        /** Build a single merged distance array from the selected stage or
+         *  priority chain.  Gaps in the selected stage stay as gaps. */
         distances = null;
 
-        // Determine which stages to consider
         const stagesToUse = (selectedStage !== 'auto')
             ? [selectedStage]
             : STAGE_CHAIN.filter(s => availableStages.includes(s));
@@ -476,27 +567,91 @@ const labeler = (() => {
 
         if (merged.some(d => d !== null)) {
             distances = merged;
-            const traceContainer = document.getElementById('distanceTraceContainer');
-            if (traceContainer) traceContainer.style.display = 'block';
-            const timelineContainer = document.querySelector('.timeline-container');
-            if (timelineContainer) timelineContainer.style.display = 'none';
+            if (!isFinal) {
+                const traceContainer = document.getElementById('distanceTraceContainer');
+                if (traceContainer) traceContainer.style.display = 'block';
+                const timelineContainer = document.querySelector('.timeline-container');
+                if (timelineContainer) timelineContainer.style.display = 'none';
+            } else {
+                renderTrialPlots();
+            }
         }
     }
 
-    function getStageLabel(frame, side, bodypart) {
-        /** Look up label from selected stage or all stages (highest priority first). */
-        if (!isCorrections) return null;
-
-        const stagesToUse = (selectedStage !== 'auto')
-            ? [selectedStage]
-            : STAGE_CHAIN.filter(s => availableStages.includes(s));
-
+    function getMergedLabel(frame, side, bodypart) {
+        /** Look up label from auto priority merge (all stages, highest priority first).
+         *  Respects rejections so deleted labels fall through to next priority. */
+        const stagesToUse = STAGE_CHAIN.filter(s => availableStages.includes(s));
+        const rejKey = `${frame}_${side}_${bodypart}`;
         for (const stage of stagesToUse) {
+            if (rejectedStageLabels.has(`${rejKey}_${stage}`)) continue;
             const sd = stageData[stage];
             if (!sd || !sd[side]) continue;
             const arr = sd[side][bodypart];
             if (arr && frame < arr.length && arr[frame] != null) {
                 return arr[frame];
+            }
+        }
+        return null;
+    }
+
+    function isGapFrame(frame, side) {
+        /** True if any bodypart is missing a label on this frame — either
+         *  no stage data, or the stage label was rejected and a ghost is showing. */
+
+        // If session has manual labels for all bodyparts, not a gap
+        const key = `${frame}_${side}`;
+        const lbl = labels.get(key);
+
+        for (const bp of bodyparts) {
+            const hasManual = lbl && lbl[bp] && lbl[bp][0] != null;
+            if (hasManual) continue;
+
+            const stageCoords = getStageLabel(frame, side, bp);
+            if (!stageCoords) return true; // missing or rejected — it's a gap
+        }
+        return false;
+    }
+
+    function getStageLabel(frame, side, bodypart) {
+        /** Look up label from selected stage or all stages (highest priority first).
+         *  Skips stages whose label was rejected by the user for this frame/side/bp. */
+        if (!isCorrections && !isFinal) return null;
+
+        const stagesToUse = (selectedStage !== 'auto')
+            ? [selectedStage]
+            : STAGE_CHAIN.filter(s => availableStages.includes(s));
+
+        const rejKey = `${frame}_${side}_${bodypart}`;
+        for (const stage of stagesToUse) {
+            // Skip this stage if user rejected its label
+            if (rejectedStageLabels.has(`${rejKey}_${stage}`)) continue;
+            const sd = stageData[stage];
+            if (!sd || !sd[side]) continue;
+            const arr = sd[side][bodypart];
+            if (arr && frame < arr.length && arr[frame] != null) {
+                return arr[frame];
+            }
+        }
+        return null;
+    }
+
+    function getStageLabelSource(frame, side, bodypart) {
+        /** Like getStageLabel but returns {coords, stage} or null. */
+        if (!isCorrections && !isFinal) return null;
+
+        const stagesToUse = (selectedStage !== 'auto')
+            ? [selectedStage]
+            : STAGE_CHAIN.filter(s => availableStages.includes(s));
+
+        const rejKey = `${frame}_${side}_${bodypart}`;
+        for (const stage of stagesToUse) {
+            if (rejectedStageLabels.has(`${rejKey}_${stage}`)) continue;
+            const sd = stageData[stage];
+            if (!sd || !sd[side]) continue;
+            const arr = sd[side][bodypart];
+            if (arr && frame < arr.length && arr[frame] != null) {
+                return { coords: arr[frame], stage };
             }
         }
         return null;
@@ -522,6 +677,20 @@ const labeler = (() => {
         drawLabelsOverlay();
     }
 
+    function zoomToCropBox() {
+        /** Zoom to the crop box for the current camera. */
+        const box = finalCropBoxes ? finalCropBoxes[currentSide] : null;
+        if (!box) { fitImage(); return; }
+
+        const cw = containerEl.clientWidth;
+        const ch = containerEl.clientHeight;
+        const bw = box.x2 - box.x1;
+        const bh = box.y2 - box.y1;
+        scale = Math.min(cw / bw, ch / bh);
+        offsetX = (cw - bw * scale) / 2 - box.x1 * scale;
+        offsetY = (ch - bh * scale) / 2 - box.y1 * scale;
+    }
+
     /** Draw labels for currentFrame/currentSide — used by both render() and videoDrawLoop(). */
     function drawLabelsOverlay() {
         const key = `${currentFrame}_${currentSide}`;
@@ -535,11 +704,25 @@ const labeler = (() => {
             if (hasManual) {
                 drawPoint(manualCoords[0], manualCoords[1], bpColor(idx), bpLetter(bp));
                 placedBps.push({ bp, x: manualCoords[0], y: manualCoords[1] });
+            } else if (isFinal) {
+                // Final mode: only show stage-sourced labels (read-only)
+                const stageCoords = getStageLabel(currentFrame, currentSide, bp);
+                if (stageCoords) {
+                    drawPoint(stageCoords[0], stageCoords[1], bpColor(idx), bpLetter(bp));
+                    placedBps.push({ bp, x: stageCoords[0], y: stageCoords[1] });
+                }
             } else if (isCorrections) {
                 const stageCoords = getStageLabel(currentFrame, currentSide, bp);
                 if (stageCoords) {
                     drawPoint(stageCoords[0], stageCoords[1], bpColor(idx), bpLetter(bp));
                     placedBps.push({ bp, x: stageCoords[0], y: stageCoords[1], stageSource: true });
+                } else {
+                    // Gap frame: show auto-merge as ghost
+                    const mergedCoords = getMergedLabel(currentFrame, currentSide, bp);
+                    if (mergedCoords) {
+                        drawGhostPoint(mergedCoords[0], mergedCoords[1], bpColor(idx), 'A');
+                        placedBps.push({ bp, x: mergedCoords[0], y: mergedCoords[1], ghost: true });
+                    }
                 }
             } else {
                 // Ghost priority:
@@ -688,7 +871,7 @@ const labeler = (() => {
             }
         }
 
-        // Corrections mode: check stage-sourced labels (displayed as solid points)
+        // Corrections mode: check stage-sourced labels and ghosts
         if (isCorrections) {
             for (const bp of bodyparts) {
                 if (hasManualLabel(currentFrame, currentSide, bp)) continue;
@@ -697,6 +880,15 @@ const labeler = (() => {
                     const p = imageToScreen(stageCoords[0], stageCoords[1]);
                     if (Math.hypot(sx - p.x, sy - p.y) < HIT_RADIUS) {
                         return { bp, ghost: false, stageSource: true };
+                    }
+                } else {
+                    // Check ghost (auto-merge) markers on gap frames
+                    const mergedCoords = getMergedLabel(currentFrame, currentSide, bp);
+                    if (mergedCoords) {
+                        const p = imageToScreen(mergedCoords[0], mergedCoords[1]);
+                        if (Math.hypot(sx - p.x, sy - p.y) < HIT_RADIUS) {
+                            return { bp, ghost: true, source: 'merge' };
+                        }
                     }
                 }
             }
@@ -756,14 +948,30 @@ const labeler = (() => {
         const sx = e.clientX - rect.left;
         const sy = e.clientY - rect.top;
 
+        // Final mode: only allow pan, no label interaction
+        if (isFinal) {
+            dragging = 'pending';
+            didDrag = false;
+            dragStartX = sx;
+            dragStartY = sy;
+            dragOrigX = offsetX;
+            dragOrigY = offsetY;
+            return;
+        }
+
         const hit = hitTest(sx, sy);
         if (hit) {
             if (hit.ghost) {
                 // Click on ghost marker: accept position as manual label
-                const mpCoords = getMpLabel(currentFrame, currentSide, hit.bp);
-                const dlcCoords = getDlcLabel(currentFrame, currentSide, hit.bp);
-                const comCoords = isRefine ? getCommittedLabel(currentFrame, currentSide, hit.bp) : null;
-                const ghostCoords = isRefine ? (comCoords || dlcCoords || mpCoords) : (mpCoords || dlcCoords);
+                let ghostCoords;
+                if (isCorrections) {
+                    ghostCoords = getMergedLabel(currentFrame, currentSide, hit.bp);
+                } else {
+                    const mpCoords = getMpLabel(currentFrame, currentSide, hit.bp);
+                    const dlcCoords = getDlcLabel(currentFrame, currentSide, hit.bp);
+                    const comCoords = isRefine ? getCommittedLabel(currentFrame, currentSide, hit.bp) : null;
+                    ghostCoords = isRefine ? (comCoords || dlcCoords || mpCoords) : (mpCoords || dlcCoords);
+                }
                 if (ghostCoords) {
                     const key = `${currentFrame}_${currentSide}`;
                     let lbl = labels.get(key);
@@ -772,7 +980,7 @@ const labeler = (() => {
                     lbl[hit.bp] = [ghostCoords[0], ghostCoords[1]];
                     dirtyKeys.add(key);
 
-                    // Enter drag mode immediately for refine
+                    // Enter drag mode immediately
                     dragging = hit.bp;
                     didDrag = false;
                     dragOrigX = ghostCoords[0];
@@ -863,10 +1071,12 @@ const labeler = (() => {
 
     function onMouseUp(e) {
         if (dragging === 'pending') {
-            // Mouse didn't move much — this is a click, place a label
-            const img = screenToImage(dragStartX, dragStartY);
-            if (img.x >= 0 && img.x < imgW && img.y >= 0 && img.y < imgH) {
-                placeLabel(img.x, img.y);
+            // Mouse didn't move much — this is a click
+            if (!isFinal) {
+                const img = screenToImage(dragStartX, dragStartY);
+                if (img.x >= 0 && img.x < imgW && img.y >= 0 && img.y < imgH) {
+                    placeLabel(img.x, img.y);
+                }
             }
         } else if (dragging === 'pan') {
             hasUserZoom = true;
@@ -885,15 +1095,15 @@ const labeler = (() => {
 
     function onRightClick(e) {
         e.preventDefault();
+        if (isFinal) return; // Read-only mode
         const rect = canvas.getBoundingClientRect();
         const sx = e.clientX - rect.left;
         const sy = e.clientY - rect.top;
 
         const hit = hitTest(sx, sy);
-        if (hit && !hit.ghost && !hit.stageSource) {
+        if (hit && !hit.ghost) {
             removeLabel(hit.bp);
         }
-        // Right-click on ghost / stage-sourced marker: no-op
     }
 
     function onWheel(e) {
@@ -1089,37 +1299,61 @@ const labeler = (() => {
     function removeLabel(which) {
         const key = `${currentFrame}_${currentSide}`;
         const lbl = labels.get(key);
-        if (!lbl) return;
 
-        const prev = lbl[which];
-        if (prev && prev[0] != null) pushUndo(key, which, [...prev]);
-        delete lbl[which];
+        if (lbl && lbl[which] && lbl[which][0] != null) {
+            // Remove manual label
+            const prev = lbl[which];
+            pushUndo(key, which, [...prev]);
+            delete lbl[which];
 
-        // Remove entry if all bodyparts are empty
-        const hasAny = bodyparts.some(bp => lbl[bp] && lbl[bp][0] != null);
-        if (!hasAny) {
-            labels.delete(key);
-            // Track deletion so the server removes it too
-            deletedKeys.add(key);
-        } else {
-            dirtyKeys.add(key);
+            const hasAny = bodyparts.some(bp => lbl[bp] && lbl[bp][0] != null);
+            if (!hasAny) {
+                labels.delete(key);
+                deletedKeys.add(key);
+            } else {
+                dirtyKeys.add(key);
+            }
+
+            render();
+            updateLabelCount();
+            scheduleSave();
+            return;
         }
 
+        // Corrections mode: reject the stage-sourced label so next-priority appears
+        if (isCorrections) {
+            rejectStageLabel(which);
+        }
+    }
+
+    function rejectStageLabel(bp) {
+        /** Reject the current stage label for a bodypart, exposing the next-priority one. */
+        const src = getStageLabelSource(currentFrame, currentSide, bp);
+        if (!src) return;
+        rejectedStageLabels.add(`${currentFrame}_${currentSide}_${bp}_${src.stage}`);
         render();
-        updateLabelCount();
-        scheduleSave();
     }
 
     // ── Auto-save ─────────────────────────────────────
     let saveTimeout = null;
+    let saveInFlight = false;
+    let saveQueued = false;
+    let savePromise = null;  // tracks the current in-flight save
 
     function scheduleSave() {
+        // Save immediately (next tick) with in-flight guard to prevent
+        // concurrent requests while still avoiding delays.
+        if (saveInFlight) {
+            saveQueued = true;
+            return;
+        }
         if (saveTimeout) clearTimeout(saveTimeout);
-        saveTimeout = setTimeout(saveLabels, 2000);
+        saveTimeout = setTimeout(() => { savePromise = saveLabels(); }, 0);
     }
 
     async function saveLabels() {
         if (saveTimeout) clearTimeout(saveTimeout);
+        saveInFlight = true;
 
         // Send DELETE requests for removed labels
         const deletePromises = [];
@@ -1159,12 +1393,21 @@ const labeler = (() => {
         });
         dirtyKeys.clear();
 
-        if (batch.length === 0) return;
+        if (batch.length === 0) {
+            saveInFlight = false;
+            return;
+        }
 
         try {
             const result = await API.put(`/api/labeling/sessions/${sessionId}/labels`, { labels: batch });
             // Update distances from server response
-            if (result.updated_distances && distances) {
+            if (result.updated_distances && Object.keys(result.updated_distances).length > 0) {
+                // Create distances array if it didn't exist yet
+                if (!distances) {
+                    distances = new Array(totalFrames).fill(null);
+                    const traceContainer = document.getElementById('distanceTraceContainer');
+                    if (traceContainer && !isFinal) traceContainer.style.display = 'block';
+                }
                 for (const [frameStr, dist] of Object.entries(result.updated_distances)) {
                     const frame = parseInt(frameStr);
                     if (frame >= 0 && frame < distances.length) {
@@ -1172,14 +1415,24 @@ const labeler = (() => {
                     }
                 }
                 renderDistanceTrace();
+                if (isFinal) renderTrialPlots();
             }
         } catch (e) {
             console.error('Save failed:', e);
+        } finally {
+            saveInFlight = false;
+            if (saveQueued) {
+                saveQueued = false;
+                scheduleSave();
+            }
         }
     }
 
     // ── Commit ────────────────────────────────────────
     async function commitSession() {
+        // Wait for any in-flight auto-save to complete first
+        if (savePromise) await savePromise;
+        // Then flush any remaining dirty keys
         await saveLabels();
 
         if (labels.size === 0) {
@@ -1218,6 +1471,111 @@ const labeler = (() => {
         if (prev !== undefined) {
             zoomToLabels(prev, currentSide);
             await goToFrame(prev);
+        }
+    }
+
+    async function nextGap() {
+        if (!isCorrections) return;
+        // Check both cameras at each frame, current camera first
+        const sides = [currentSide, ...cameraNames.filter(c => c !== currentSide)];
+        for (let f = currentFrame + 1; f < totalFrames; f++) {
+            for (const side of sides) {
+                if (isGapFrame(f, side)) {
+                    if (side !== currentSide) toggleSide();
+                    zoomToMergeLabels(f, side);
+                    await goToFrame(f);
+                    updateLabelInfo(`Gap frame ${f} (${side}) — Enter to accept merge`);
+                    return;
+                }
+            }
+        }
+        // Wrap: check frames before current
+        for (let f = 0; f <= currentFrame; f++) {
+            for (const side of sides) {
+                if (isGapFrame(f, side)) {
+                    if (side !== currentSide) toggleSide();
+                    zoomToMergeLabels(f, side);
+                    await goToFrame(f);
+                    updateLabelInfo(`Gap frame ${f} (${side}) — Enter to accept merge`);
+                    return;
+                }
+            }
+        }
+        updateLabelInfo('No more gaps');
+    }
+
+    async function prevGap() {
+        if (!isCorrections) return;
+        const sides = [currentSide, ...cameraNames.filter(c => c !== currentSide)];
+        for (let f = currentFrame - 1; f >= 0; f--) {
+            for (const side of sides) {
+                if (isGapFrame(f, side)) {
+                    if (side !== currentSide) toggleSide();
+                    zoomToMergeLabels(f, side);
+                    await goToFrame(f);
+                    updateLabelInfo(`Gap frame ${f} (${side}) — Enter to accept merge`);
+                    return;
+                }
+            }
+        }
+        // Wrap: check frames after current
+        for (let f = totalFrames - 1; f >= currentFrame; f--) {
+            for (const side of sides) {
+                if (isGapFrame(f, side)) {
+                    if (side !== currentSide) toggleSide();
+                    zoomToMergeLabels(f, side);
+                    await goToFrame(f);
+                    updateLabelInfo(`Gap frame ${f} (${side}) — Enter to accept merge`);
+                    return;
+                }
+            }
+        }
+        updateLabelInfo('No more gaps');
+    }
+
+    function zoomToMergeLabels(frame, side) {
+        /** Zoom to the candidate merge label positions for a gap frame. */
+        const pts = [];
+        for (const bp of bodyparts) {
+            if (hasManualLabel(frame, side, bp)) continue;
+            const merged = getMergedLabel(frame, side, bp);
+            if (merged) pts.push(merged);
+        }
+        if (pts.length > 0) {
+            zoomToPoints(pts, true);
+        }
+    }
+
+    function acceptMergedLabels() {
+        /** Accept auto-merge labels for current frame, promoting them to manual corrections.
+         *  Only operates on gap bodyparts (where getStageLabel returns null). */
+        if (!isCorrections) return;
+        const key = `${currentFrame}_${currentSide}`;
+        let lbl = labels.get(key);
+        if (!lbl) { lbl = {}; labels.set(key, lbl); }
+
+        let accepted = 0;
+        for (const bp of bodyparts) {
+            // Skip if already has manual label
+            if (lbl[bp] && lbl[bp][0] != null) continue;
+            // Only accept if this bodypart is a gap (no stage label)
+            if (getStageLabel(currentFrame, currentSide, bp)) continue;
+            const merged = getMergedLabel(currentFrame, currentSide, bp);
+            if (merged) {
+                pushUndo(key, bp, null);
+                lbl[bp] = [merged[0], merged[1]];
+                accepted++;
+            }
+        }
+
+        if (accepted > 0) {
+            dirtyKeys.add(key);
+            render();
+            updateLabelCount();
+            scheduleSave();
+            updateLabelInfo(`Accepted ${accepted} labels — W for next gap`);
+        } else {
+            updateLabelInfo('Nothing to accept');
         }
     }
 
@@ -1267,8 +1625,8 @@ const labeler = (() => {
             }
         }
 
-        // 2a. Corrections mode: use stage labels for camera shift estimation
-        if (dxValues.length < 4 && isCorrections && availableStages.length > 0) {
+        // 2a. Corrections/Final mode: use stage labels for camera shift estimation
+        if (dxValues.length < 4 && (isCorrections || isFinal) && availableStages.length > 0) {
             for (let f = 0; f < totalFrames; f += 10) {
                 for (const bp of bodyparts) {
                     const c0 = getStageLabel(f, cam0, bp);
@@ -1499,8 +1857,15 @@ const labeler = (() => {
 
     function stopVideoPlayback() {
         videoPlaying = false;
-        if (videoEl) videoEl.pause();
-        // Load the precise frame via image API for labeling
+        if (videoEl) {
+            videoEl.pause();
+            // Recalculate frame from actual paused video time
+            const trial = trials[currentTrialIdx];
+            if (trial) {
+                const localFrame = Math.round(videoEl.currentTime * trial.fps);
+                currentFrame = trial.start_frame + Math.min(Math.max(0, localFrame), trial.frame_count - 1);
+            }
+        }
         goToFrame(currentFrame);
     }
 
@@ -1539,10 +1904,10 @@ const labeler = (() => {
             // Ignore if typing in input
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
 
-            // Ctrl+Z: undo
+            // Ctrl+Z: undo (disabled in final mode)
             if (e.key === 'z' && (e.ctrlKey || e.metaKey)) {
                 e.preventDefault();
-                undo();
+                if (!isFinal) undo();
                 return;
             }
 
@@ -1557,11 +1922,13 @@ const labeler = (() => {
                     break;
                 case 'q':
                     e.preventDefault();
-                    prevLabel();
+                    if (isCorrections) prevGap();
+                    else prevLabel();
                     break;
                 case 'w':
                     e.preventDefault();
-                    nextLabel();
+                    if (isCorrections) nextGap();
+                    else nextLabel();
                     break;
                 case 'r':
                     e.preventDefault();
@@ -1575,11 +1942,18 @@ const labeler = (() => {
                     e.preventDefault();
                     resetZoom();
                     break;
+                case 'Enter':
+                    if (isCorrections) {
+                        e.preventDefault();
+                        acceptMergedLabels();
+                    }
+                    break;
                 case ' ':
                     e.preventDefault();
                     togglePlay();
                     break;
                 default:
+                    if (isFinal) break; // Read-only: no delete shortcuts
                     // D/F: delete bodypart by letter
                     if (e.key in DELETE_KEYS) {
                         const idx = DELETE_KEYS[e.key];
@@ -1643,13 +2017,36 @@ const labeler = (() => {
         const el = document.getElementById('shortcutList');
         if (!el) return;
 
+        if (isFinal) {
+            el.innerHTML = `
+                <div><kbd>A</kbd> / <kbd>&larr;</kbd> Prev frame</div>
+                <div><kbd>S</kbd> / <kbd>&rarr;</kbd> Next frame</div>
+                <div><kbd>E</kbd> Toggle ${cameraNames.join('/')}</div>
+                <div><kbd>Z</kbd> Reset zoom</div>
+                <div><kbd>Space</kbd> Play/pause</div>
+                <div><kbd>Scroll</kbd> Zoom at cursor</div>
+                <div><kbd>Drag</kbd> Pan</div>
+            `;
+            return;
+        }
+
         const deleteLetters = ['D', 'F'];
         let html = `
             <div><kbd>A</kbd> / <kbd>&larr;</kbd> Prev frame</div>
             <div><kbd>S</kbd> / <kbd>&rarr;</kbd> Next frame</div>
-            <div><kbd>Q</kbd> Prev label</div>
-            <div><kbd>W</kbd> Next label</div>
         `;
+        if (isCorrections) {
+            html += `
+                <div><kbd>Q</kbd> Prev gap</div>
+                <div><kbd>W</kbd> Next gap</div>
+                <div><kbd>Enter</kbd> Accept merge</div>
+            `;
+        } else {
+            html += `
+                <div><kbd>Q</kbd> Prev label</div>
+                <div><kbd>W</kbd> Next label</div>
+            `;
+        }
         bodyparts.forEach((bp, idx) => {
             const letter = deleteLetters[idx] ? `<kbd>${deleteLetters[idx]}</kbd> / ` : '';
             html += `<div>${letter}<kbd>${idx + 1}</kbd> Delete ${bp}</div>`;
@@ -1687,6 +2084,11 @@ const labeler = (() => {
     }
 
     function renderTimeline() {
+        if (isFinal) {
+            renderTrialPlots();
+            return;
+        }
+
         const container = timeline.parentElement;
         const w = container.clientWidth;
         const h = container.clientHeight;
@@ -1785,6 +2187,212 @@ const labeler = (() => {
         tlCtx.strokeStyle = '#ff4444';
         tlCtx.lineWidth = 2;
         tlCtx.stroke();
+    }
+
+    // ── Trial Plots (final mode) ────────────────────────
+    const trialCanvases = [];  // [{canvas, ctx, trialIdx}]
+
+    function buildTrialPlots() {
+        const container = document.getElementById('trialPlotsContainer');
+        if (!container || trials.length === 0) return;
+        container.style.display = 'flex';
+        container.innerHTML = '';
+        trialCanvases.length = 0;
+
+        for (let ti = 0; ti < trials.length; ti++) {
+            const t = trials[ti];
+            const row = document.createElement('div');
+            row.className = 'trial-plot-row';
+            row.style.height = '120px';
+
+            const label = document.createElement('span');
+            label.className = 'trial-plot-label';
+            // Strip subject prefix for compact label
+            let trialLabel = t.trial_name;
+            const subj = sessionInfo.subject.name;
+            if (trialLabel.startsWith(subj + '_')) trialLabel = trialLabel.slice(subj.length + 1);
+            label.textContent = trialLabel;
+            row.appendChild(label);
+
+            const scrollWrap = document.createElement('div');
+            scrollWrap.className = 'trial-plot-scroll';
+            const cvs = document.createElement('canvas');
+            scrollWrap.appendChild(cvs);
+            row.appendChild(scrollWrap);
+
+            const entry = { canvas: cvs, ctx: cvs.getContext('2d'), trialIdx: ti };
+            trialCanvases.push(entry);
+
+            // Click → navigate to frame (fixed 30s scale)
+            cvs.addEventListener('click', (e) => {
+                const rect = cvs.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const padL = 40;
+                const fps = t.fps || 30;
+                const pxPerFrame = (scrollWrap.clientWidth - padL - 8) / (fps * 15);
+                const localFrame = Math.floor((x - padL) / pxPerFrame);
+                const frame = t.start_frame + Math.max(0, Math.min(localFrame, t.frame_count - 1));
+                goToFrame(frame);
+            });
+
+            container.appendChild(row);
+        }
+
+        // Resize observer on container
+        const ro = new ResizeObserver(() => renderTrialPlots());
+        ro.observe(container);
+
+        renderTrialPlots();
+    }
+
+    function renderTrialPlots() {
+        if (trialCanvases.length === 0) return;
+        if (!distances) {
+            // Clear all canvases when no distance data for selected stage
+            for (const entry of trialCanvases) {
+                const { canvas: cvs, ctx: c } = entry;
+                const sw = cvs.parentElement;
+                cvs.width = sw.clientWidth;
+                cvs.height = sw.clientHeight;
+                cvs.style.width = cvs.width + 'px';
+                cvs.style.height = cvs.height + 'px';
+                c.fillStyle = '#16213e';
+                c.fillRect(0, 0, cvs.width, cvs.height);
+                c.fillStyle = '#8892a0';
+                c.font = '11px sans-serif';
+                c.textAlign = 'center';
+                c.fillText('No distance data', cvs.width / 2, cvs.height / 2);
+            }
+            return;
+        }
+
+        // Compute global Y range across all trials
+        let globalMin = Infinity, globalMax = -Infinity;
+        for (const d of distances) {
+            if (d !== null && d !== undefined) {
+                globalMin = Math.min(globalMin, d);
+                globalMax = Math.max(globalMax, d);
+            }
+        }
+        if (globalMin === Infinity) return;
+        const range = globalMax - globalMin || 10;
+        globalMin = Math.max(0, globalMin - range * 0.05);
+        globalMax = globalMax + range * 0.05;
+
+        // Fixed scale: 30 seconds = visible plot width
+        const padL = 40, padR = 8, padT = 16, padB = 22;
+
+        for (const entry of trialCanvases) {
+            const { canvas: cvs, ctx: c, trialIdx: ti } = entry;
+            const t = trials[ti];
+            const scrollWrap = cvs.parentElement;
+            const visibleW = scrollWrap.clientWidth;
+            const h = scrollWrap.clientHeight;
+
+            const fps = t.fps || 30;
+            const frames30s = fps * 15;
+            const visiblePlotW = visibleW - padL - padR;
+            const pxPerFrame = visiblePlotW / frames30s;
+
+            const trialPlotW = pxPerFrame * t.frame_count;
+            const canvasW = Math.max(visibleW, Math.ceil(padL + trialPlotW + padR));
+
+            cvs.width = canvasW;
+            cvs.height = h;
+            cvs.style.width = canvasW + 'px';
+            cvs.style.height = h + 'px';
+
+            const plotH = h - padT - padB;
+
+            const fToX = (f) => padL + (f - t.start_frame) * pxPerFrame;
+            const dToY = (d) => padT + ((globalMax - d) / (globalMax - globalMin)) * plotH;
+
+            // Background
+            c.fillStyle = '#16213e';
+            c.fillRect(0, 0, canvasW, h);
+
+            // Y-axis labels
+            c.fillStyle = '#8892a0';
+            c.font = '9px sans-serif';
+            c.textAlign = 'right';
+            for (let i = 0; i <= 2; i++) {
+                const val = globalMin + (globalMax - globalMin) * (1 - i / 2);
+                const y = padT + (i / 2) * plotH;
+                c.fillText(val.toFixed(0), padL - 4, y + 3);
+                c.beginPath();
+                c.moveTo(padL, y);
+                c.lineTo(padL + trialPlotW, y);
+                c.strokeStyle = 'rgba(42, 58, 92, 0.5)';
+                c.lineWidth = 0.5;
+                c.stroke();
+            }
+
+            // X-axis time labels (every 5 seconds)
+            c.fillStyle = '#8892a0';
+            c.font = '9px sans-serif';
+            c.textAlign = 'center';
+            const trialDurationSec = t.frame_count / fps;
+            for (let sec = 0; sec <= trialDurationSec; sec += 5) {
+                const x = padL + sec * fps * pxPerFrame;
+                if (x > padL + trialPlotW + 1) break;
+                c.fillText(sec + 's', x, h - 2);
+                c.beginPath();
+                c.moveTo(x, h - padB);
+                c.lineTo(x, h - padB + 3);
+                c.strokeStyle = '#8892a0';
+                c.lineWidth = 0.5;
+                c.stroke();
+            }
+
+            // Distance trace line
+            c.beginPath();
+            let started = false;
+            for (let f = t.start_frame; f <= t.end_frame && f < distances.length; f++) {
+                const d = distances[f];
+                if (d === null || d === undefined) { started = false; continue; }
+                const x = fToX(f);
+                const y = dToY(d);
+                if (!started) { c.moveTo(x, y); started = true; }
+                else { c.lineTo(x, y); }
+            }
+            c.strokeStyle = 'rgba(74, 158, 255, 0.8)';
+            c.lineWidth = 1.5;
+            c.stroke();
+
+            // Current frame cursor (if in this trial)
+            if (currentFrame >= t.start_frame && currentFrame <= t.end_frame) {
+                const cx = fToX(currentFrame);
+                c.beginPath();
+                c.moveTo(cx, padT);
+                c.lineTo(cx, h - padB);
+                c.strokeStyle = '#ff4444';
+                c.lineWidth = 2;
+                c.stroke();
+
+                // Dot on the line
+                const curD = distances[currentFrame];
+                if (curD !== null && curD !== undefined) {
+                    c.beginPath();
+                    c.arc(cx, dToY(curD), 4, 0, Math.PI * 2);
+                    c.fillStyle = '#ff4444';
+                    c.fill();
+                }
+
+                // Auto-scroll to keep cursor visible
+                const scrollLeft = scrollWrap.scrollLeft;
+                if (cx < scrollLeft + padL + 20 || cx > scrollLeft + visibleW - 20) {
+                    scrollWrap.scrollLeft = Math.max(0, cx - visibleW / 2);
+                }
+            }
+
+            // Dim border on right edge of trial data area
+            c.beginPath();
+            c.moveTo(padL + trialPlotW, padT);
+            c.lineTo(padL + trialPlotW, h - padB);
+            c.strokeStyle = 'rgba(42, 58, 92, 0.5)';
+            c.lineWidth = 1;
+            c.stroke();
+        }
     }
 
     // ── Distance Trace ────────────────────────────────
@@ -1981,23 +2589,12 @@ const labeler = (() => {
         distCtx.lineWidth = 1.5;
         distCtx.stroke();
 
-        // Draw dots for frames with manual corrections (visible only)
+        // Camera ticks for frames with manual corrections (visible only)
         labels.forEach((lbl, key) => {
             const [frameStr, side] = key.split('_');
             const frame = parseInt(frameStr);
             if (frame < vStart || frame >= vEnd) return;
             const x = fToX(frame);
-
-            // Green dot on the distance line if distance exists
-            if (frame < distances.length) {
-                const d = distances[frame];
-                if (d !== null && d !== undefined) {
-                    distCtx.beginPath();
-                    distCtx.arc(x, dToY(d), 3, 0, Math.PI * 2);
-                    distCtx.fillStyle = '#4caf50';
-                    distCtx.fill();
-                }
-            }
 
             // Camera tick at bottom edge
             const camIdx = cameraNames.indexOf(side);
@@ -2038,12 +2635,58 @@ const labeler = (() => {
         distCtx.fillRect(thumbL, sbY, thumbW, sbH);
     }
 
+    // ── Subject navigation ─────────────────────────────
+    function currentSessionType() {
+        if (isFinal) return 'final';
+        if (isCorrections) return 'corrections';
+        if (isRefine) return 'refine';
+        return 'initial';
+    }
+
+    async function switchSubject(subjectId) {
+        if (subjectId === currentSubjectId) return;
+        try {
+            const session = await API.post(`/api/labeling/${subjectId}/sessions`, {
+                session_type: currentSessionType(),
+            });
+            window.location.href = `/labeling?session=${session.id}`;
+        } catch (e) {
+            alert('Could not switch subject: ' + e.message);
+            // Reset dropdown to current
+            document.getElementById('subjectSelect').value = currentSubjectId;
+        }
+    }
+
+    function subjectIndex() {
+        return allSubjects.findIndex(s => s.id === currentSubjectId);
+    }
+
+    function prevSubject() {
+        const idx = subjectIndex();
+        if (idx > 0) switchSubject(allSubjects[idx - 1].id);
+    }
+
+    function nextSubject() {
+        const idx = subjectIndex();
+        if (idx >= 0 && idx < allSubjects.length - 1) switchSubject(allSubjects[idx + 1].id);
+    }
+
+    function updateSubjectNavButtons() {
+        const idx = subjectIndex();
+        const prevBtn = document.getElementById('prevSubjectBtn');
+        const nextBtn = document.getElementById('nextSubjectBtn');
+        if (prevBtn) prevBtn.disabled = idx <= 0;
+        if (nextBtn) nextBtn.disabled = idx >= allSubjects.length - 1;
+    }
+
     // ── Public API ────────────────────────────────────
     return {
         init,
         nextFrame, prevFrame, nextLabel, prevLabel,
+        nextGap, prevGap, acceptMergedLabels,
         toggleSide, togglePlay, resetZoom, cycleReviewMode,
         saveLabels, commitSession,
+        prevSubject, nextSubject,
     };
 })();
 
