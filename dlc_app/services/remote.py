@@ -447,7 +447,18 @@ def remote_train_monitor(
                 local_videos = get_subject_videos(subject_name)
 
                 if local_videos:
-                    for vid_path in local_videos:
+                    # Check which videos already exist on remote
+                    result = subprocess.run(
+                        _py_cmd(cfg, f"\"import os; print('\\n'.join(os.listdir(r'{cfg.work_dir}')))\""),
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    remote_files = set(result.stdout.strip().splitlines()) if result.returncode == 0 else set()
+
+                    to_upload = [v for v in local_videos if Path(v).name not in remote_files]
+                    if len(to_upload) < len(local_videos):
+                        logfile.write(f"  Skipping {len(local_videos) - len(to_upload)} already-uploaded videos\n")
+
+                    for vid_path in to_upload:
                         upload_vid_cmd = _scp_base_args(cfg) + [
                             vid_path,
                             f"{cfg.host}:{cfg.work_dir}/",
@@ -484,9 +495,14 @@ def remote_train_monitor(
                 remote_script = f"{cfg.work_dir}/remote_train_script.py"
                 # Build cam_names as separate list items for argparse nargs="+"
                 cam_list_str = ", ".join(f"'{c}'" for c in cam_names)
+                # CREATE_BREAKAWAY_FROM_JOB (0x01000000): escape sshd's Job
+                # Object so the process survives SSH disconnect.
+                # CREATE_NEW_PROCESS_GROUP (0x00000200): no Ctrl+C propagation.
+                # Redirect stdout/stderr to log file; launcher sleeps 3s so
+                # inherited handles are valid when child starts writing.
                 launch_script = (
-                    f"\"import subprocess, sys, os; "
-                    f"log = open(r'{remote_log_file}', 'w'); "
+                    f"\"import subprocess, os, time; "
+                    f"log_fh = open(r'{remote_log_file}', 'w'); "
                     f"args = [r'{cfg.python_executable}', '-u', r'{remote_script}', "
                     f"'--config-path', r'{remote_config}', "
                     f"'--shuffle', '{shuffle}', "
@@ -495,11 +511,10 @@ def remote_train_monitor(
                     f"'--subject-name', '{subject_name}', "
                     f"'--cam-names', {cam_list_str}, "
                     f"'--status-file', r'{remote_status_file}']; "
-                    f"kw = dict(stdout=log, stderr=subprocess.STDOUT); "
-                    f"kw['creationflags'] = (0x00000008 | 0x00000200) if os.name == 'nt' else None; "
-                    f"kw = {{k:v for k,v in kw.items() if v is not None}}; "
-                    f"p = subprocess.Popen(args, **kw); "
-                    f"print(p.pid)\""
+                    f"flags = 0x01000200 if os.name == 'nt' else 0; "
+                    f"p = subprocess.Popen(args, creationflags=flags, "
+                    f"stdin=subprocess.DEVNULL, stdout=log_fh, stderr=log_fh); "
+                    f"print(p.pid); time.sleep(3)\""
                 )
 
                 result = subprocess.run(
@@ -531,6 +546,24 @@ def remote_train_monitor(
                 _update_progress(8.0)
                 logfile.write(f"=== Remote process started (PID {remote_pid}) ===\n")
                 logfile.flush()
+
+                # Quick health check — fail fast if process dies on startup
+                time.sleep(5)
+                status = _read_remote_status(cfg, remote_status_file)
+                if not status:
+                    proc_alive = _check_remote_pid_alive(cfg, remote_pid)
+                    if not proc_alive:
+                        error_log, _ = _tail_remote_log(cfg, remote_log_file, 0)
+                        if error_log:
+                            logfile.write(f"=== Remote process crashed on startup ===\n{error_log}\n")
+                        else:
+                            logfile.write("=== Remote process crashed on startup (no log output) ===\n")
+                        logfile.flush()
+                        error_msg = error_log.strip()[-500:] if error_log else "no output in train.log"
+                        _fail(f"Remote process died immediately: {error_msg}")
+                        if on_complete:
+                            on_complete(job_id, 1)
+                        return
 
             # ── Monitor loop (8-90%) ─────────────────────────────────
             # Both fresh and resume paths converge here
@@ -678,14 +711,15 @@ def remote_preprocess_batch(
     """Batch remote preprocessing: upload videos, run MP/blur, download results.
 
     Runs in a daemon thread. Steps can include 'mediapipe' and/or 'blur'.
+    The remote processing is launched as a detached process (like training),
+    so it survives SSH disconnections and local app restarts.
 
     Phases:
       1. Upload videos to remote (only new ones)
       2. Upload preprocessing script
-      3. Run MediaPipe (if requested)
-      4. Run blur (if requested)
+      3. Launch detached preprocessing process on remote
+      Monitor: Poll status.json + remote log every 10s
       5. Download results (npz files, blurred videos)
-      6. Write local markers
 
     Args:
         job_id: Database job ID
@@ -706,20 +740,8 @@ def remote_preprocess_batch(
 
     cancel_event = registry.register_cancel_event(job_id)
 
-    # Progress allocation across phases
     do_mp = "mediapipe" in steps
     do_blur = "blur" in steps
-    # Upload: 0-5%, MP: 5-50%, Blur: 50-90%, Download: 90-100%
-    # Adjust ranges based on which steps are requested
-    if do_mp and do_blur:
-        mp_range = (5, 45)
-        blur_range = (45, 85)
-    elif do_mp:
-        mp_range = (5, 85)
-        blur_range = None
-    else:
-        mp_range = None
-        blur_range = (5, 85)
     download_start = 85
 
     def _update_progress(pct):
@@ -756,32 +778,6 @@ def remote_preprocess_batch(
         registry._processes.pop(job_id, None)
         return proc
 
-    def _run_remote_proc_with_progress(cmd, logfile, phase_name,
-                                        pct_start, pct_end):
-        """Run remote command, parse PROGRESS: lines, scale to pct range."""
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        )
-        registry._processes[job_id] = proc
-
-        for line in proc.stdout:
-            logfile.write(line)
-            logfile.flush()
-
-            # Parse PROGRESS:subject:pct
-            m = re.match(r"PROGRESS:([^:]+):([\d.]+)", line.strip())
-            if m:
-                raw_pct = float(m.group(2))
-                # Scale per-subject progress to overall range
-                # (crude: treats all subjects as equal weight)
-                scaled = pct_start + (raw_pct / 100.0) * (pct_end - pct_start)
-                _update_progress(scaled)
-
-        proc.wait()
-        registry._processes.pop(job_id, None)
-        return proc
-
     try:
         with open(log_path, "w") as logfile:
             # ── Phase 1: Upload videos ────────────────────────────
@@ -804,6 +800,8 @@ def remote_preprocess_batch(
 
             # Find local videos to upload
             from .video import get_subject_videos
+            from .discovery import _has_mediapipe, _has_deidentified
+
             all_videos = []
             if subjects:
                 for subj_name in subjects:
@@ -813,8 +811,48 @@ def remote_preprocess_batch(
                 import glob
                 all_videos = sorted(glob.glob(str(settings.video_path / "*.mp4")))
 
+            # Extract subject names from video filenames
+            all_subject_names = set()
+            for v in all_videos:
+                m = re.match(r'^(.+?)_[LR]\d', Path(v).stem)
+                if m:
+                    all_subject_names.add(m.group(1))
+
+            # Filter to subjects that still need each step
+            mp_subjects = []
+            blur_subjects = []
+            for subj_name in sorted(all_subject_names):
+                dlc_path = settings.dlc_path / subj_name
+                if do_mp and not _has_mediapipe(dlc_path):
+                    mp_subjects.append(subj_name)
+                if do_blur and not _has_deidentified(dlc_path):
+                    blur_subjects.append(subj_name)
+
+            needed_subjects = set(mp_subjects) | set(blur_subjects)
+            skipped = all_subject_names - needed_subjects
+
+            if skipped:
+                logfile.write(f"  Skipping {len(skipped)} already-completed: {', '.join(sorted(skipped))}\n")
+                logfile.flush()
+
+            if not needed_subjects:
+                logfile.write("=== All subjects already completed, nothing to do ===\n")
+                logfile.flush()
+                _update_progress(100.0)
+                with get_db_ctx() as db:
+                    db.execute(
+                        """UPDATE jobs SET status = 'completed', progress_pct = 100,
+                           finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                        (job_id,),
+                    )
+                return
+
+            # Only upload videos for subjects that need processing
+            all_videos = [v for v in all_videos
+                          if any(Path(v).stem.startswith(s + '_') for s in needed_subjects)]
+
             to_upload = [v for v in all_videos if Path(v).name not in remote_files]
-            logfile.write(f"  {len(all_videos)} videos total, {len(to_upload)} new to upload\n")
+            logfile.write(f"  {len(all_videos)} videos for {len(needed_subjects)} subjects, {len(to_upload)} new to upload\n")
             logfile.flush()
 
             for i, vid_path in enumerate(to_upload):
@@ -851,64 +889,216 @@ def remote_preprocess_batch(
                 _fail("Failed to upload preprocessing script")
                 return
 
+            # Upload face_blur_overrides.json if it exists (near video dir)
+            remote_overrides_file = None
+            overrides_candidates = [
+                settings.video_path.parent / "face_blur_overrides.json",
+            ]
+            for cand in overrides_candidates:
+                if cand.is_file():
+                    upload_ov_cmd = _scp_base_args(cfg) + [
+                        str(cand),
+                        f"{cfg.host}:{cfg.work_dir}/",
+                    ]
+                    proc = _run_remote_proc(upload_ov_cmd, logfile, "Upload overrides")
+                    if proc.returncode == 0:
+                        remote_overrides_file = f"{cfg.work_dir}/face_blur_overrides.json"
+                        logfile.write(f"  Uploaded face_blur_overrides.json from {cand}\n")
+                    else:
+                        logfile.write(f"  Warning: failed to upload face_blur_overrides.json\n")
+                    logfile.flush()
+                    break
+
             _update_progress(5.0)
 
-            # Build subject filter arg
-            subject_arg = ""
-            if subjects and len(subjects) == 1:
-                subject_arg = f" --subject {subjects[0]}"
+            # ── Phase 3: Launch detached preprocessing process ────
+            _check_cancel()
 
-            # ── Phase 3: MediaPipe ────────────────────────────────
-            if do_mp:
-                _check_cancel()
-                logfile.write(f"=== Phase 3: Running MediaPipe on {cfg.host} ===\n")
+            # Determine which steps to run (subject lists are passed per-step)
+            pipeline_steps = []
+            if do_mp and mp_subjects:
+                pipeline_steps.append("mp")
+            elif do_mp:
+                logfile.write("=== Skipping MediaPipe (all subjects already have MP) ===\n")
+                logfile.flush()
+            if do_blur and blur_subjects:
+                pipeline_steps.append("blur")
+            elif do_blur:
+                logfile.write("=== Skipping blur (all subjects already deidentified) ===\n")
                 logfile.flush()
 
-                mp_cmd = _ssh_base_args(cfg) + [
-                    cfg.host,
-                    cfg.python_executable, "-u",
-                    f"{cfg.work_dir}/remote_preprocess_script.py",
-                    "mp", remote_video_dir, remote_output_dir,
-                ] + (["--subject", subjects[0]] if subjects and len(subjects) == 1 else [])
+            if not pipeline_steps:
+                logfile.write("=== No processing steps needed ===\n")
+                logfile.flush()
+            else:
+                remote_script = f"{cfg.work_dir}/remote_preprocess_script.py"
+                remote_log_file = f"{cfg.work_dir}/preprocess.log"
+                remote_status_file = f"{cfg.work_dir}/preprocess_status.json"
+                remote_pid = None
 
-                proc = _run_remote_proc_with_progress(
-                    mp_cmd, logfile, "MediaPipe",
-                    mp_range[0], mp_range[1],
+                step_summary = []
+                if "mp" in pipeline_steps:
+                    step_summary.append(f"mp ({len(mp_subjects)} subjects)")
+                if "blur" in pipeline_steps:
+                    step_summary.append(f"blur ({len(blur_subjects)} subjects)")
+                logfile.write(f"=== Phase 3: Launching detached process for {', '.join(step_summary)} ===\n")
+                logfile.flush()
+
+                # Sanity check: run script import test via SSH to catch
+                # errors before detached launch (where stderr is lost)
+                test_result = subprocess.run(
+                    _ssh_base_args(cfg) + [
+                        cfg.host, cfg.python_executable, "-u", "-c",
+                        f"\"import importlib.util, sys; "
+                        f"spec = importlib.util.spec_from_file_location('test', r'{remote_script}'); "
+                        f"print('OK')\"",
+                    ],
+                    capture_output=True, text=True, timeout=60,
+                )
+                if test_result.returncode != 0 or "OK" not in test_result.stdout:
+                    error_detail = (test_result.stderr or test_result.stdout).strip()[-500:]
+                    logfile.write(f"=== Script sanity check failed ===\n{error_detail}\n")
+                    logfile.flush()
+                    _fail(f"Remote script failed to load: {error_detail}")
+                    return
+                logfile.write("  Script sanity check passed\n")
+                logfile.flush()
+
+                # Build launch command (same detached pattern as training).
+                # CREATE_BREAKAWAY_FROM_JOB (0x01000000): escape sshd's Job
+                # Object so the process survives SSH disconnect.
+                # CREATE_NEW_PROCESS_GROUP (0x00000200): no Ctrl+C propagation.
+                # Launcher sleeps 3s so inherited handles are valid at startup.
+                steps_list_str = ", ".join(f"'{s}'" for s in pipeline_steps)
+                # Build per-step subject lists so MP doesn't re-run on
+                # subjects that already have local mediapipe labels.
+                launch_args_parts = [
+                    f"'pipeline', r'{remote_video_dir}', r'{remote_output_dir}', "
+                    f"'--steps', {steps_list_str}",
+                ]
+                if mp_subjects:
+                    mp_list_str = ", ".join(f"'{s}'" for s in sorted(mp_subjects))
+                    launch_args_parts.append(f"'--mp-subjects', {mp_list_str}")
+                if blur_subjects:
+                    blur_list_str = ", ".join(f"'{s}'" for s in sorted(blur_subjects))
+                    launch_args_parts.append(f"'--blur-subjects', {blur_list_str}")
+                if remote_overrides_file:
+                    launch_args_parts.append(
+                        f"'--overrides-file', r'{remote_overrides_file}'")
+                launch_args_str = ", ".join(launch_args_parts)
+                # Popen stdout/stderr handles C-level AND Python-level output.
+                # Do NOT also pass --log-file (two handles to the same file
+                # causes C-level output to overwrite Python logger output).
+                launch_script = (
+                    f"\"import subprocess, os, time; "
+                    f"log_fh = open(r'{remote_log_file}', 'w'); "
+                    f"args = [r'{cfg.python_executable}', '-u', r'{remote_script}', "
+                    f"{launch_args_str}, "
+                    f"'--status-file', r'{remote_status_file}']; "
+                    f"flags = 0x01000200 if os.name == 'nt' else 0; "
+                    f"p = subprocess.Popen(args, creationflags=flags, "
+                    f"stdin=subprocess.DEVNULL, stdout=log_fh, stderr=log_fh); "
+                    f"print(p.pid); time.sleep(3)\""
                 )
 
-                if proc.returncode != 0:
-                    _fail(f"MediaPipe failed (exit {proc.returncode})")
-                    return
-
-                _update_progress(mp_range[1])
-                logfile.write("=== MediaPipe complete ===\n")
-                logfile.flush()
-
-            # ── Phase 4: Blur ─────────────────────────────────────
-            if do_blur:
-                _check_cancel()
-                logfile.write(f"=== Phase 4: Running blur on {cfg.host} ===\n")
-                logfile.flush()
-
-                blur_cmd = _ssh_base_args(cfg) + [
-                    cfg.host,
-                    cfg.python_executable, "-u",
-                    f"{cfg.work_dir}/remote_preprocess_script.py",
-                    "blur", remote_video_dir, remote_output_dir,
-                ] + (["--subject", subjects[0]] if subjects and len(subjects) == 1 else [])
-
-                proc = _run_remote_proc_with_progress(
-                    blur_cmd, logfile, "Blur",
-                    blur_range[0], blur_range[1],
+                result = subprocess.run(
+                    _py_cmd(cfg, launch_script),
+                    capture_output=True, text=True, timeout=30,
                 )
-
-                if proc.returncode != 0:
-                    _fail(f"Blur failed (exit {proc.returncode})")
+                if result.returncode != 0:
+                    _fail(f"Failed to start remote preprocessing: {result.stderr.strip()[:200]}")
                     return
 
-                _update_progress(blur_range[1])
-                logfile.write("=== Blur complete ===\n")
+                try:
+                    remote_pid = int(result.stdout.strip().splitlines()[-1])
+                except (ValueError, IndexError):
+                    _fail(f"Could not parse remote PID from: {result.stdout.strip()[:100]}")
+                    return
+
+                with get_db_ctx() as db:
+                    db.execute(
+                        "UPDATE jobs SET tmux_session = ? WHERE id = ?",
+                        (f"pid:{remote_pid}", job_id),
+                    )
+
+                _update_progress(7.0)
+                logfile.write(f"=== Remote process started (PID {remote_pid}) ===\n")
                 logfile.flush()
+
+                # Quick health check
+                time.sleep(5)
+                status = _read_remote_status(cfg, remote_status_file)
+                if not status:
+                    proc_alive = _check_remote_pid_alive(cfg, remote_pid)
+                    if not proc_alive:
+                        error_log, _ = _tail_remote_log(cfg, remote_log_file, 0)
+                        if error_log:
+                            logfile.write(f"=== Remote process crashed on startup ===\n{error_log}\n")
+                        else:
+                            logfile.write("=== Remote process crashed on startup (no log output) ===\n")
+                        logfile.flush()
+                        error_msg = error_log.strip()[-500:] if error_log else "no output in preprocess.log"
+                        _fail(f"Remote process died immediately: {error_msg}")
+                        return
+
+                # ── Monitor loop (7-85%) ──────────────────────────
+                log_offset = 0
+                ssh_fail_count = 0
+                max_ssh_failures = 30
+                poll_interval = 10
+
+                while True:
+                    _check_cancel()
+                    time.sleep(poll_interval)
+                    _check_cancel()
+
+                    status = _read_remote_status(cfg, remote_status_file)
+
+                    if status and status.get("pid"):
+                        remote_pid = status["pid"]
+
+                    proc_alive = _check_remote_pid_alive(cfg, remote_pid) if remote_pid else False
+
+                    new_log, log_offset = _tail_remote_log(cfg, remote_log_file, log_offset)
+                    if new_log:
+                        logfile.write(new_log)
+                        logfile.flush()
+                        ssh_fail_count = 0
+
+                    if status:
+                        ssh_fail_count = 0
+                        pct = status.get("progress_pct", 0)
+                        # Scale remote 0-100% to local 7-85%
+                        scaled = 7.0 + (pct / 100.0) * 78.0
+                        _update_progress(scaled)
+
+                        remote_status_val = status.get("status", "")
+                        if remote_status_val == "completed":
+                            error_info = status.get("error")
+                            if error_info:
+                                logfile.write(f"=== Remote preprocessing completed with errors: {error_info} ===\n")
+                            else:
+                                logfile.write("=== Remote preprocessing completed ===\n")
+                            logfile.flush()
+                            break
+                        elif remote_status_val == "failed":
+                            error = status.get("error", "Unknown error")
+                            _fail(f"Remote preprocessing failed: {error}")
+                            return
+                        elif not proc_alive:
+                            error = status.get("error", "Remote process exited unexpectedly")
+                            phase = status.get("phase", "unknown")
+                            _fail(f"Process exited during phase '{phase}': {error}")
+                            return
+
+                    elif not proc_alive:
+                        ssh_fail_count += 1
+                        logfile.write(f"Warning: process not found and no status.json, attempt {ssh_fail_count}/{max_ssh_failures}\n")
+                        logfile.flush()
+
+                        if ssh_fail_count >= max_ssh_failures:
+                            _fail("Remote process died and no status.json found")
+                            return
 
             # ── Phase 5: Download results ─────────────────────────
             _check_cancel()
@@ -991,6 +1181,16 @@ def remote_preprocess_batch(
 
     except InterruptedError:
         logger.info(f"Job {job_id} remote preprocess cancelled")
+        # Kill remote process if we launched one
+        try:
+            with get_db_ctx() as db:
+                row = db.execute("SELECT tmux_session FROM jobs WHERE id = ?",
+                                 (job_id,)).fetchone()
+                if row and row[0] and row[0].startswith("pid:"):
+                    pid = int(row[0].split(":")[1])
+                    _kill_remote_pid(cfg, pid)
+        except Exception:
+            pass
         with get_db_ctx() as db:
             db.execute(
                 """UPDATE jobs SET status = 'cancelled',
@@ -1002,4 +1202,5 @@ def remote_preprocess_batch(
         _fail(str(e))
     finally:
         registry._processes.pop(job_id, None)
+        registry._threads.pop(job_id, None)
         registry.unregister_cancel_event(job_id)
