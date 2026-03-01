@@ -669,18 +669,38 @@ def remote_train_monitor(
             if proc.returncode != 0:
                 logfile.write(f"Warning: Model download failed (exit {proc.returncode})\n")
 
-            # Download labels directory
-            remote_labels = f"{cfg.host}:{remote_project_dir}/{labels_dir_name}"
+            # Download analysis results only (CSV, H5, pickle) — skip cropped videos
+            remote_labels_path = f"{remote_project_dir}/{labels_dir_name}"
             local_labels_dir = local_dlc_dir / labels_dir_name
             local_labels_dir.mkdir(exist_ok=True)
 
-            download_labels_cmd = _scp_base_args(cfg) + [
-                remote_labels,
-                str(local_dlc_dir) + "/",
-            ]
-            proc = _run_remote_proc(download_labels_cmd, logfile, f"Download {labels_dir_name}")
-            if proc.returncode != 0:
-                logfile.write(f"Warning: {labels_dir_name} download failed\n")
+            # List files in remote labels dir, filter to analysis outputs
+            list_script = (
+                f"\"import os; d = r'{remote_labels_path}'; "
+                f"files = [f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)) "
+                f"and any(f.endswith(e) for e in ('.h5', '.csv', '.pickle'))] "
+                f"if os.path.isdir(d) else []; print('\\n'.join(files))\""
+            )
+            result = subprocess.run(
+                _py_cmd(cfg, list_script),
+                capture_output=True, text=True, timeout=15,
+            )
+            analysis_files = [f for f in result.stdout.strip().splitlines() if f]
+
+            if analysis_files:
+                logfile.write(f"  Downloading {len(analysis_files)} analysis files from {labels_dir_name}/\n")
+                for af in analysis_files:
+                    dl_cmd = _scp_base_args(cfg) + [
+                        f"{cfg.host}:{remote_labels_path}/{af}",
+                        str(local_labels_dir / af),
+                    ]
+                    proc = _run_remote_proc(dl_cmd, logfile, f"Download {af}")
+                    if proc.returncode == 0:
+                        logfile.write(f"  Downloaded {labels_dir_name}/{af}\n")
+                    else:
+                        logfile.write(f"  Warning: download failed for {af}\n")
+            else:
+                logfile.write(f"  Warning: no analysis files found in {labels_dir_name}/\n")
 
             _update_progress(100.0)
             logfile.write("=== Download complete ===\n")

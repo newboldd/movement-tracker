@@ -253,6 +253,13 @@ def run_pipeline(config_path: str, shuffle: int, labels_dir: str,
     logger.info("=== Phase: Analyzing ===")
     _write_status(status_file, "analyze", "running", 81.0)
 
+    # Remove existing analysis output files so DLC doesn't skip
+    # "already analyzed" videos (DLC checks for .h5/.pickle files)
+    for ext in ("*.h5", "*.pickle"):
+        for old_file in glob.glob(os.path.join(labels_dir, ext)):
+            logger.info(f"Removing old analysis file: {os.path.basename(old_file)}")
+            os.remove(old_file)
+
     deeplabcut.analyze_videos(config_path, [labels_dir],
                               shuffle=shuffle, engine=Engine.PYTORCH)
     logger.info("Analysis complete")
