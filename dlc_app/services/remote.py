@@ -240,6 +240,9 @@ def remote_train_monitor(
     registry,
     cam_names: list[str] | None = None,
     resume: bool = False,
+    skip_train: bool = False,
+    labels_dir_name: str = "labels_v1",
+    iteration: int | None = None,
 ):
     """Remote training lifecycle. Runs in a daemon thread.
 
@@ -265,11 +268,14 @@ def remote_train_monitor(
         registry: JobRegistry instance
         cam_names: Camera names for cropping (e.g. ['OS', 'OD'])
         resume: If True, skip upload phases and go straight to monitoring
+        skip_train: If True, pass --skip-train to remote script (crop+analyze only)
+        labels_dir_name: Output directory name for labels (e.g. 'labels_v1', 'labels_v2')
+        iteration: If set, override iteration in remote config.yaml (0 for v1 model)
     """
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     remote_project_dir = f"{cfg.work_dir}/{subject_name}"
     remote_config = f"{remote_project_dir}/config.yaml"
-    remote_labels_dir = f"{remote_project_dir}/labels_v1"
+    remote_labels_dir = f"{remote_project_dir}/{labels_dir_name}"
     remote_log_file = f"{remote_project_dir}/train.log"
     remote_status_file = f"{remote_project_dir}/status.json"
     remote_pid = None
@@ -345,11 +351,19 @@ def remote_train_monitor(
                 logfile.flush()
 
                 # ── Fix remote config.yaml project_path ──────────────
+                fix_fields = [
+                    f"t = re.sub(r'(?m)^project_path:.*', r'project_path: {remote_project_dir}', t)",
+                ]
+                if iteration is not None:
+                    fix_fields.append(
+                        f"t = re.sub(r'(?m)^iteration:.*', r'iteration: {iteration}', t)"
+                    )
+                fix_subs = "; ".join(fix_fields)
                 fix_script = (
                     f"\"import re, pathlib; "
                     f"p = pathlib.Path(r'{remote_project_dir}/config.yaml'); "
                     f"t = p.read_text(); "
-                    f"t = re.sub(r'(?m)^project_path:.*', r'project_path: {remote_project_dir}', t); "
+                    f"{fix_subs}; "
                     f"p.write_text(t)\""
                 )
                 subprocess.run(
@@ -500,6 +514,7 @@ def remote_train_monitor(
                 # CREATE_NEW_PROCESS_GROUP (0x00000200): no Ctrl+C propagation.
                 # Redirect stdout/stderr to log file; launcher sleeps 3s so
                 # inherited handles are valid when child starts writing.
+                skip_train_arg = "'--skip-train', " if skip_train else ""
                 launch_script = (
                     f"\"import subprocess, os, time; "
                     f"log_fh = open(r'{remote_log_file}', 'w'); "
@@ -510,7 +525,8 @@ def remote_train_monitor(
                     f"'--video-dir', r'{cfg.work_dir}', "
                     f"'--subject-name', '{subject_name}', "
                     f"'--cam-names', {cam_list_str}, "
-                    f"'--status-file', r'{remote_status_file}']; "
+                    f"'--status-file', r'{remote_status_file}', "
+                    f"{skip_train_arg}]; "
                     f"flags = 0x01000200 if os.name == 'nt' else 0; "
                     f"p = subprocess.Popen(args, creationflags=flags, "
                     f"stdin=subprocess.DEVNULL, stdout=log_fh, stderr=log_fh); "
@@ -653,18 +669,18 @@ def remote_train_monitor(
             if proc.returncode != 0:
                 logfile.write(f"Warning: Model download failed (exit {proc.returncode})\n")
 
-            # Download labels_v1 directory
-            remote_labels = f"{cfg.host}:{remote_project_dir}/labels_v1"
-            local_labels_dir = local_dlc_dir / "labels_v1"
+            # Download labels directory
+            remote_labels = f"{cfg.host}:{remote_project_dir}/{labels_dir_name}"
+            local_labels_dir = local_dlc_dir / labels_dir_name
             local_labels_dir.mkdir(exist_ok=True)
 
             download_labels_cmd = _scp_base_args(cfg) + [
                 remote_labels,
                 str(local_dlc_dir) + "/",
             ]
-            proc = _run_remote_proc(download_labels_cmd, logfile, "Download labels_v1")
+            proc = _run_remote_proc(download_labels_cmd, logfile, f"Download {labels_dir_name}")
             if proc.returncode != 0:
-                logfile.write(f"Warning: labels_v1 download failed\n")
+                logfile.write(f"Warning: {labels_dir_name} download failed\n")
 
             _update_progress(100.0)
             logfile.write("=== Download complete ===\n")
@@ -707,6 +723,7 @@ def remote_preprocess_batch(
     subjects: list[str],
     log_path: str,
     registry,
+    force: bool = False,
 ):
     """Batch remote preprocessing: upload videos, run MP/blur, download results.
 
@@ -728,6 +745,7 @@ def remote_preprocess_batch(
         subjects: List of subject names (empty = all discovered)
         log_path: Path for log file
         registry: JobRegistry instance
+        force: If True, skip already-done checks and re-run for all subjects
     """
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
@@ -818,14 +836,14 @@ def remote_preprocess_batch(
                 if m:
                     all_subject_names.add(m.group(1))
 
-            # Filter to subjects that still need each step
+            # Filter to subjects that still need each step (unless force=True)
             mp_subjects = []
             blur_subjects = []
             for subj_name in sorted(all_subject_names):
                 dlc_path = settings.dlc_path / subj_name
-                if do_mp and not _has_mediapipe(dlc_path):
+                if do_mp and (force or not _has_mediapipe(dlc_path)):
                     mp_subjects.append(subj_name)
-                if do_blur and not _has_deidentified(dlc_path):
+                if do_blur and (force or not _has_deidentified(dlc_path)):
                     blur_subjects.append(subj_name)
 
             needed_subjects = set(mp_subjects) | set(blur_subjects)
@@ -934,8 +952,8 @@ def remote_preprocess_batch(
                 logfile.flush()
             else:
                 remote_script = f"{cfg.work_dir}/remote_preprocess_script.py"
-                remote_log_file = f"{cfg.work_dir}/preprocess.log"
-                remote_status_file = f"{cfg.work_dir}/preprocess_status.json"
+                remote_log_file = f"{cfg.work_dir}/preprocess_{job_id}.log"
+                remote_status_file = f"{cfg.work_dir}/preprocess_{job_id}_status.json"
                 remote_pid = None
 
                 step_summary = []
@@ -1201,6 +1219,194 @@ def remote_preprocess_batch(
             )
     except Exception as e:
         logger.exception(f"Job {job_id} remote preprocess error")
+        _fail(str(e))
+    finally:
+        registry._processes.pop(job_id, None)
+        registry._threads.pop(job_id, None)
+        registry.unregister_cancel_event(job_id)
+
+
+def remote_preprocess_download(
+    job_id: int,
+    cfg: RemoteConfig,
+    steps: list[str],
+    subjects: list[str],
+    log_path: str,
+    registry,
+):
+    """Download-only variant of remote_preprocess_batch.
+
+    Skips upload/launch/monitor — just downloads results from the remote
+    preprocess_output directory for the given subjects. Runs in a daemon thread.
+
+    Args:
+        job_id: Database job ID
+        cfg: RemoteConfig with SSH details
+        steps: List of steps whose results to download ('mediapipe', 'blur')
+        subjects: List of subject names to download for
+        log_path: Path for log file
+        registry: JobRegistry instance
+    """
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+    from ..config import get_settings
+    settings = get_settings()
+
+    remote_output_dir = f"{cfg.work_dir}/preprocess_output"
+    do_mp = "mediapipe" in steps
+    do_blur = "blur" in steps
+
+    cancel_event = registry.register_cancel_event(job_id)
+
+    def _update_progress(pct):
+        with get_db_ctx() as db:
+            db.execute("UPDATE jobs SET progress_pct = ? WHERE id = ?",
+                       (round(pct, 1), job_id))
+
+    def _fail(msg):
+        logger.error(f"Job {job_id} redownload preprocess failed: {msg}")
+        with get_db_ctx() as db:
+            db.execute(
+                """UPDATE jobs SET status = 'failed', error_msg = ?,
+                   finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                (msg, job_id),
+            )
+
+    def _check_cancel():
+        if cancel_event.is_set():
+            raise InterruptedError("Job cancelled")
+
+    def _run_scp(cmd, logfile, label):
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        registry._processes[job_id] = proc
+        for line in proc.stdout:
+            logfile.write(line)
+            logfile.flush()
+        proc.wait()
+        registry._processes.pop(job_id, None)
+        return proc
+
+    try:
+        with open(log_path, "w") as logfile:
+            # Determine which subjects have remote output
+            download_subjects = list(subjects)
+            if not download_subjects:
+                # List all subject dirs in remote output
+                result = subprocess.run(
+                    _py_cmd(cfg, f"\"import os; dirs = [d for d in os.listdir(r'{remote_output_dir}') if os.path.isdir(os.path.join(r'{remote_output_dir}', d))]; print('\\n'.join(dirs))\""),
+                    capture_output=True, text=True, timeout=15,
+                )
+                download_subjects = [s for s in result.stdout.strip().splitlines() if s]
+
+            # Check which subjects actually have output on the remote
+            logfile.write(f"=== Checking remote output for {len(download_subjects)} subjects ===\n")
+            logfile.write(f"  Steps: {', '.join(steps)}\n")
+            logfile.flush()
+
+            result = subprocess.run(
+                _py_cmd(cfg, f"\"import os; d = r'{remote_output_dir}'; dirs = [x for x in os.listdir(d) if os.path.isdir(os.path.join(d, x))] if os.path.isdir(d) else []; print('\\n'.join(dirs))\""),
+                capture_output=True, text=True, timeout=15,
+            )
+            available_remote = set(result.stdout.strip().splitlines()) if result.returncode == 0 else set()
+
+            missing = [s for s in download_subjects if s not in available_remote]
+            if missing:
+                logfile.write(f"  Warning: no remote output for: {', '.join(missing)}\n")
+                logfile.flush()
+
+            download_subjects = [s for s in download_subjects if s in available_remote]
+            if not download_subjects:
+                msg = "No remote output found for any of the requested subjects"
+                logfile.write(f"=== {msg} ===\n")
+                logfile.flush()
+                _fail(msg)
+                return
+
+            logfile.write(f"  Found remote output for {len(download_subjects)} subjects\n")
+            logfile.flush()
+            _update_progress(5.0)
+
+            total_downloaded = 0
+
+            for i, subj_name in enumerate(download_subjects):
+                _check_cancel()
+
+                if do_mp:
+                    remote_npz = f"{cfg.host}:{remote_output_dir}/{subj_name}/mediapipe_prelabels.npz"
+                    local_dlc_dir = settings.dlc_path / subj_name
+                    local_dlc_dir.mkdir(parents=True, exist_ok=True)
+                    local_npz = str(local_dlc_dir / "mediapipe_prelabels.npz")
+
+                    dl_cmd = _scp_base_args(cfg) + [remote_npz, local_npz]
+                    proc = _run_scp(dl_cmd, logfile, f"Download npz {subj_name}")
+                    if proc.returncode == 0:
+                        logfile.write(f"  Downloaded {subj_name}/mediapipe_prelabels.npz\n")
+                        total_downloaded += 1
+                    else:
+                        logfile.write(f"  Warning: npz not found for {subj_name}\n")
+
+                if do_blur:
+                    # List deidentified video files on remote
+                    result = subprocess.run(
+                        _py_cmd(cfg, f"\"import os; d = r'{remote_output_dir}/{subj_name}/deidentified'; print('\\n'.join(os.listdir(d))) if os.path.isdir(d) else print('NO_DIR')\""),
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    raw_lines = result.stdout.strip().splitlines()
+                    if raw_lines == ["NO_DIR"]:
+                        logfile.write(f"  Warning: no deidentified/ dir for {subj_name}\n")
+                        deident_files = []
+                    else:
+                        deident_files = [f for f in raw_lines if f.endswith(".mp4")]
+
+                    local_deident_dir = settings.video_path / "deidentified"
+                    local_deident_dir.mkdir(parents=True, exist_ok=True)
+
+                    for df in deident_files:
+                        dl_cmd = _scp_base_args(cfg) + [
+                            f"{cfg.host}:{remote_output_dir}/{subj_name}/deidentified/{df}",
+                            str(local_deident_dir / df),
+                        ]
+                        proc = _run_scp(dl_cmd, logfile, f"Download blur {df}")
+                        if proc.returncode == 0:
+                            logfile.write(f"  Downloaded deidentified/{df}\n")
+                            total_downloaded += 1
+
+                    if deident_files:
+                        local_dlc_dir = settings.dlc_path / subj_name
+                        local_dlc_dir.mkdir(parents=True, exist_ok=True)
+                        (local_dlc_dir / ".deidentified").write_text("")
+                        logfile.write(f"  Wrote .deidentified marker for {subj_name}\n")
+
+                logfile.flush()
+                pct = 5.0 + (i + 1) / max(len(download_subjects), 1) * 90.0
+                _update_progress(pct)
+
+            _update_progress(100.0)
+            if total_downloaded == 0:
+                logfile.write("=== Warning: completed but no files were actually downloaded ===\n")
+            else:
+                logfile.write(f"=== Re-download complete: {total_downloaded} files ===\n")
+            logfile.flush()
+
+        with get_db_ctx() as db:
+            db.execute(
+                """UPDATE jobs SET status = 'completed', progress_pct = 100,
+                   finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                (job_id,),
+            )
+
+    except InterruptedError:
+        logger.info(f"Job {job_id} redownload cancelled")
+        with get_db_ctx() as db:
+            db.execute(
+                """UPDATE jobs SET status = 'cancelled',
+                   finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                (job_id,),
+            )
+    except Exception as e:
+        logger.exception(f"Job {job_id} redownload error")
         _fail(str(e))
     finally:
         registry._processes.pop(job_id, None)

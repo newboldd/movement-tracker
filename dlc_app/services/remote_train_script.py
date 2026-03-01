@@ -210,27 +210,35 @@ def crop_stereo_videos(video_dir: str, subject_name: str,
 
 def run_pipeline(config_path: str, shuffle: int, labels_dir: str,
                  video_dir: str, subject_name: str, cam_names: list[str],
-                 status_file: str):
-    """Run the full train → crop → analyze pipeline."""
+                 status_file: str, skip_train: bool = False):
+    """Run the full train → crop → analyze pipeline.
+
+    When skip_train is True, skip PNG pre-flight and training phases and
+    jump straight to crop → analyze (reuses an existing trained model).
+    """
     os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-
-    # ── Pre-flight: ensure labeled-data PNGs exist ─────────────────
-    logger.info("=== Pre-flight: checking labeled-data PNGs ===")
-    _write_status(status_file, "train", "running", 2.0)
-    ensure_labeled_data_pngs(config_path, video_dir, subject_name)
-
-    # ── Phase: Train ────────────────────────────────────────────────
-    logger.info("=== Phase: Training ===")
-    _write_status(status_file, "train", "running", 5.0)
 
     from deeplabcut.core.engine import Engine
     import deeplabcut
 
-    deeplabcut.train_network(config_path, shuffle=shuffle,
-                             engine=Engine.PYTORCH)
+    if not skip_train:
+        # ── Pre-flight: ensure labeled-data PNGs exist ─────────────────
+        logger.info("=== Pre-flight: checking labeled-data PNGs ===")
+        _write_status(status_file, "train", "running", 2.0)
+        ensure_labeled_data_pngs(config_path, video_dir, subject_name)
 
-    logger.info("=== Training complete ===")
-    _write_status(status_file, "train", "running", 75.0)
+        # ── Phase: Train ────────────────────────────────────────────────
+        logger.info("=== Phase: Training ===")
+        _write_status(status_file, "train", "running", 5.0)
+
+        deeplabcut.train_network(config_path, shuffle=shuffle,
+                                 engine=Engine.PYTORCH)
+
+        logger.info("=== Training complete ===")
+        _write_status(status_file, "train", "running", 75.0)
+    else:
+        logger.info("=== Skipping training (--skip-train) ===")
+        _write_status(status_file, "crop", "running", 75.0)
 
     # ── Phase: Crop ─────────────────────────────────────────────────
     logger.info("=== Phase: Cropping ===")
@@ -274,6 +282,8 @@ def main():
                         help="Subject name (for video filename matching)")
     parser.add_argument("--cam-names", nargs="+", default=["OS", "OD"],
                         help="Camera names for cropped output files")
+    parser.add_argument("--skip-train", action="store_true",
+                        help="Skip training, run crop + analyze only (reuse existing model)")
     parser.add_argument("--status-file", default=None,
                         help="Path for status.json (default: labels-dir/../status.json)")
     parser.add_argument("--log-file", default=None,
@@ -293,6 +303,7 @@ def main():
             subject_name=args.subject_name,
             cam_names=args.cam_names,
             status_file=status_file,
+            skip_train=args.skip_train,
         )
     except Exception as e:
         tb = traceback.format_exc()

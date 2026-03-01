@@ -151,6 +151,8 @@ async function showDetail(subjectId) {
                     <button class="btn btn-sm" onclick="runStep(${detail.id}, 'mediapipe')">Run MediaPipe</button>
                     <button class="btn btn-sm" onclick="runStep(${detail.id}, 'deidentify')">Blur Faces</button>
                     <button class="btn btn-sm btn-primary" onclick="runStep(${detail.id}, 'train')">Train</button>
+                    <button class="btn btn-sm" onclick="runStep(${detail.id}, 'analyze_v1')">Analyze v1</button>
+                    <button class="btn btn-sm" onclick="runStep(${detail.id}, 'analyze_v2')">Analyze v2</button>
                     <button class="btn btn-sm btn-danger" onclick="removeSubject(${detail.id}, '${detail.name}')" style="margin-left:auto;">Remove</button>
                 </div>
             </div>

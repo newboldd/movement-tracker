@@ -61,9 +61,24 @@ CREATE TABLE IF NOT EXISTS frame_labels (
     UNIQUE(session_id, frame_num, trial_idx, side)
 );
 
+CREATE TABLE IF NOT EXISTS job_queue (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_type    TEXT NOT NULL,
+    subject_ids TEXT NOT NULL,
+    resource    TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'queued',
+    job_id      INTEGER,
+    position    INTEGER NOT NULL,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    started_at  TIMESTAMP,
+    finished_at TIMESTAMP,
+    error_msg   TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_jobs_subject ON jobs(subject_id);
 CREATE INDEX IF NOT EXISTS idx_labels_session ON frame_labels(session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_subject ON label_sessions(subject_id);
+CREATE INDEX IF NOT EXISTS idx_job_queue_status ON job_queue(status, resource);
 """
 
 

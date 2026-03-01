@@ -31,14 +31,17 @@ VALID_STEPS = [
     "deidentify",
     "create_training_dataset",
     "train",
-    "crop",
     "analyze",
+    "analyze_v1",
+    "analyze_v2",
     "create_labeled_video",
     "triangulate",
 ]
 
 # Steps that require DeepLabCut (crop and mediapipe are pure OpenCV/mediapipe)
-DLC_STEPS = {"create_training_dataset", "train", "analyze", "create_labeled_video", "triangulate"}
+# analyze_v1/v2 are remote-only like "train" and bypass the local DLC check
+DLC_STEPS = {"create_training_dataset", "train", "analyze", "analyze_v1", "analyze_v2",
+             "create_labeled_video", "triangulate"}
 
 
 def _check_dlc_available():
@@ -84,9 +87,10 @@ def run_step(subject_id: int, req: RunStepRequest) -> dict:
     settings = get_settings()
     remote_cfg = settings.get_remote_config()
 
-    # Skip local DLC check for remote training
+    # Skip local DLC check for remote training / remote analyze
+    remote_only_steps = {"train", "analyze_v1", "analyze_v2"}
     if req.step in DLC_STEPS:
-        if not (req.step == "train" and remote_cfg):
+        if not (req.step in remote_only_steps and remote_cfg):
             _check_dlc_available()
 
     with get_db_ctx() as db:
@@ -176,6 +180,57 @@ def run_step(subject_id: int, req: RunStepRequest) -> dict:
                 on_complete=on_train_complete,
             )
             return {"job_id": job["id"], "status": "running"}
+
+    elif req.step in ("analyze_v1", "analyze_v2"):
+        if not remote_cfg:
+            raise HTTPException(400, "analyze_v1/v2 require remote training config")
+
+        is_v1 = req.step == "analyze_v1"
+        labels_dir_name = "labels_v1" if is_v1 else "labels_v2"
+        # v1 uses iteration 0 (initial model); v2 uses config.yaml's current iteration
+        analyze_iteration = 0 if is_v1 else None
+        next_stage = "analyzed"
+
+        def on_analyze_complete(jid, returncode):
+            if returncode == 0:
+                try:
+                    fix_project_path(subject_name)
+                except Exception:
+                    pass
+                with get_db_ctx() as db:
+                    db.execute(
+                        "UPDATE subjects SET stage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (next_stage, subject_id),
+                    )
+
+        with get_db_ctx() as db:
+            db.execute(
+                "UPDATE jobs SET remote_host = ?, status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (remote_cfg.host, job["id"]),
+            )
+
+        thread = threading.Thread(
+            target=remote_train_monitor,
+            kwargs=dict(
+                job_id=job["id"],
+                cfg=remote_cfg,
+                local_dlc_dir=dlc_dir / subject_name,
+                subject_name=subject_name,
+                log_path=job["log_path"],
+                progress_parser=parse_dlc_training_progress,
+                on_complete=on_analyze_complete,
+                registry=registry,
+                cam_names=cam_names,
+                skip_train=True,
+                labels_dir_name=labels_dir_name,
+                iteration=analyze_iteration,
+            ),
+            daemon=True,
+        )
+        thread.start()
+        registry._threads[job["id"]] = thread
+
+        return {"job_id": job["id"], "status": "running", "remote": True}
 
     elif req.step == "crop":
         # Crop is done inline (not a DLC call) — use our crop script

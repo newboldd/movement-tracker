@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 
 from .config import get_settings
 from .db import init_db
-from .routers import subjects, labeling, pipeline, jobs, results, settings, filebrowser, video_tools, batch
+from .routers import subjects, labeling, pipeline, jobs, results, settings, filebrowser, video_tools, batch, remote_jobs
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ class NoCacheMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
         if request.url.path.startswith("/static") or request.url.path in (
-            "/", "/labeling", "/results", "/settings", "/onboarding"
+            "/", "/labeling", "/results", "/settings", "/onboarding", "/remote"
         ):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return response
@@ -45,6 +45,7 @@ app.include_router(settings.router)
 app.include_router(filebrowser.router)
 app.include_router(video_tools.router)
 app.include_router(batch.router)
+app.include_router(remote_jobs.router)
 
 # Mount static files
 STATIC_DIR = Path(__file__).parent / "static"
@@ -207,6 +208,11 @@ def startup():
     removed = result.get('removed', 0)
     logger.info(f"Discovery: {result['created']} new, {result['updated']} updated, {removed} removed, {result['total']} total")
 
+    # Start queue manager
+    from .services.queue_manager import queue_manager
+    queue_manager.recover()
+    queue_manager.start()
+
 
 @app.get("/")
 def index():
@@ -230,6 +236,12 @@ def results_page():
 def settings_page():
     """Serve the settings page."""
     return FileResponse(str(STATIC_DIR / "settings.html"))
+
+
+@app.get("/remote")
+def remote_page():
+    """Serve the remote jobs page."""
+    return FileResponse(str(STATIC_DIR / "remote.html"))
 
 
 @app.get("/onboarding")
