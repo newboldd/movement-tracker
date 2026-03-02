@@ -1,6 +1,8 @@
 """Video frame extraction and stereo cropping."""
 from __future__ import annotations
 
+import json
+import logging
 import cv2
 import numpy as np
 from functools import lru_cache
@@ -9,13 +11,65 @@ from pathlib import Path
 from ..config import get_settings, JPEG_QUALITY, FRAME_CACHE_SIZE
 from ..db import get_db_ctx
 
+logger = logging.getLogger(__name__)
+
+
+def _get_actual_frame_count(video_path: str) -> int:
+    """Count actual decodable frames in a video, with persistent JSON cache.
+
+    cv2.CAP_PROP_FRAME_COUNT often returns inflated counts (4–43 extra trailing
+    frames that can't be decoded). This function reads until cap.read() fails
+    and caches the result in <video_dir>/.frame_counts.json, keyed by filename
+    and validated by file size.
+    """
+    p = Path(video_path)
+    cache_path = p.parent / ".frame_counts.json"
+
+    # Try cache
+    cache = {}
+    if cache_path.exists():
+        try:
+            cache = json.loads(cache_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            cache = {}
+
+    file_size = p.stat().st_size
+    entry = cache.get(p.name)
+    if entry and entry.get("size") == file_size:
+        return entry["count"]
+
+    # Cache miss — count actual decoded frames
+    cap = cv2.VideoCapture(video_path)
+    reported = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    actual = 0
+    for _ in range(reported + 100):  # overshoot in case reported is low
+        if not cap.read()[0]:
+            break
+        actual += 1
+    cap.release()
+
+    if reported != actual:
+        logger.warning(
+            f"Frame count mismatch for {p.name}: "
+            f"reported={reported}, actual={actual} (diff={reported - actual})"
+        )
+
+    # Save to cache
+    cache[p.name] = {"size": file_size, "count": actual}
+    try:
+        cache_path.write_text(json.dumps(cache, indent=2))
+    except OSError as e:
+        logger.warning(f"Could not write frame count cache: {e}")
+
+    return actual
+
 
 class VideoInfo:
     """Cached metadata about a video file."""
     def __init__(self, path: str):
         self.path = path
         cap = cv2.VideoCapture(path)
-        self.frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.frame_count = _get_actual_frame_count(path)
         self.fps = cap.get(cv2.CAP_PROP_FPS)
         self.width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))

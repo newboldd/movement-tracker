@@ -464,7 +464,6 @@ def _do_crop(subject_name: str, job_id: int):
 
         cap = cv2.VideoCapture(vid_path)
         fps = int(cap.get(cv2.CAP_PROP_FPS))
-        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         ret, frame = cap.read()
         if not ret:
             cap.release()
@@ -472,7 +471,6 @@ def _do_crop(subject_name: str, job_id: int):
 
         h, w = frame.shape[:2]
         midline = w // 2
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
         writer_left = cv2.VideoWriter(
             str(out_left), cv2.VideoWriter_fourcc(*"avc1"), fps, (midline, h)
@@ -483,7 +481,12 @@ def _do_crop(subject_name: str, job_id: int):
                 str(out_right), cv2.VideoWriter_fourcc(*"avc1"), fps, (w - midline, h)
             )
 
-        for _ in range(n_frames):
+        # Write first frame, then loop until read fails
+        writer_left.write(frame[:, :midline])
+        if writer_right:
+            writer_right.write(frame[:, midline:])
+
+        while True:
             ret, frame = cap.read()
             if not ret:
                 break

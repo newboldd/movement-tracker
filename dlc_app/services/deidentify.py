@@ -228,7 +228,7 @@ def deidentify_video(input_path: str, output_path: str,
     import mediapipe as mp_lib
 
     cap = cv2.VideoCapture(input_path)
-    n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    reported_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
     full_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -243,7 +243,8 @@ def deidentify_video(input_path: str, output_path: str,
     else:
         half_w = full_w
 
-    logger.info(f"Deidentifying: {n_frames} frames, {'stereo' if is_stereo else 'mono'}, {half_w}x{h}")
+    logger.info(f"Deidentifying: reported {reported_frames} frames, "
+                f"{'stereo' if is_stereo else 'mono'}, {half_w}x{h}")
 
     # Initialize MediaPipe
     face_det = mp_lib.solutions.face_detection.FaceDetection(
@@ -257,21 +258,16 @@ def deidentify_video(input_path: str, output_path: str,
         min_tracking_confidence=0.3,
     )
 
-    # ── Pass 1: Detect faces ──
+    # ── Pass 1: Detect faces (read until decode fails) ──
     if is_stereo:
         faces_L_raw, faces_R_raw = [], []
     else:
         faces_raw = []
 
-    for t in range(n_frames):
+    for t in range(reported_frames):
         ret, frame = cap.read()
         if not ret:
-            if is_stereo:
-                faces_L_raw.append([])
-                faces_R_raw.append([])
-            else:
-                faces_raw.append([])
-            continue
+            break  # actual end of decodable frames
 
         frame = np.ascontiguousarray(frame, dtype=np.uint8)
 
@@ -289,9 +285,15 @@ def deidentify_video(input_path: str, output_path: str,
             faces_raw.append(_detect_faces_in_half(rgb, face_det, full_w, h))
 
         if progress_callback and t % 10 == 0:
-            progress_callback(t / n_frames * 40)  # Pass 1 = 0-40%
+            progress_callback(t / reported_frames * 40)  # Pass 1 = 0-40%
 
     face_det.close()
+
+    # Use actual readable frame count (may be less than container metadata)
+    n_frames = len(faces_L_raw) if is_stereo else len(faces_raw)
+    if n_frames < reported_frames:
+        logger.info(f"  Note: {reported_frames - n_frames} trailing undecodable frames "
+                    f"(reported={reported_frames}, actual={n_frames})")
 
     # ── Temporal smoothing ──
     if is_stereo:
