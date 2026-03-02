@@ -108,6 +108,7 @@ const labeler = (() => {
     // Video element for smooth playback
     let videoEl = null;
     let videoPlaying = false;
+    let videoLoading = false; // true while waiting for canplay after src change
     let currentTrialIdx = -1; // which trial the video element is loaded with
 
     // Deleted frame/side keys — sent to server on save so DB stays in sync
@@ -1788,15 +1789,21 @@ const labeler = (() => {
 
         // Load video for this trial if not already loaded
         if (currentTrialIdx !== trialIdx) {
+            videoLoading = true;
+            renderTimeline();
             videoEl.src = `/api/labeling/sessions/${sessionId}/video?trial=${trialIdx}`;
             currentTrialIdx = trialIdx;
             // Wait for enough data before seeking/playing
             videoEl.oncanplay = () => {
                 videoEl.oncanplay = null;
+                videoLoading = false;
+                renderTimeline();
                 seekAndPlay();
             };
             videoEl.onerror = () => {
                 videoEl.onerror = null;
+                videoLoading = false;
+                renderTimeline();
                 console.error('Video load failed, falling back to frame-by-frame');
                 fallbackPlay();
             };
@@ -1877,6 +1884,7 @@ const labeler = (() => {
     function stopVideoPlayback() {
         const wasVideoPlaying = videoPlaying;
         videoPlaying = false;
+        videoLoading = false;
         if (videoEl) {
             videoEl.pause();
             // Only recalculate from video time if the video element was actually
@@ -2210,6 +2218,17 @@ const labeler = (() => {
         tlCtx.strokeStyle = '#ff4444';
         tlCtx.lineWidth = 2;
         tlCtx.stroke();
+
+        // Video loading overlay
+        if (videoLoading) {
+            tlCtx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            tlCtx.fillRect(0, 0, w, h);
+            tlCtx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+            tlCtx.font = '12px sans-serif';
+            tlCtx.textAlign = 'center';
+            tlCtx.fillText('Loading video\u2026', w / 2, h / 2 + 4);
+            tlCtx.textAlign = 'start';
+        }
     }
 
     // ── Trial Plots (final mode) ────────────────────────
