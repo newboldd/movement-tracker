@@ -1787,48 +1787,39 @@ const labeler = (() => {
         const localFrame = currentFrame - trial.start_frame;
         const startTime = localFrame / trial.fps;
 
-        function seekAndPlay() {
-            if (!playing) return; // user paused while we were loading
-            videoEl.playbackRate = playbackRate;
-            videoEl.currentTime = startTime;
-            videoPlaying = true;
-
-            videoEl.play().then(() => {
-                requestAnimationFrame(videoDrawLoop);
-            }).catch(e => {
-                console.error('Video play failed, falling back to frame-by-frame', e);
-                videoPlaying = false;
-                fallbackPlay();
-            });
-        }
-
         // Load video source if not already set for this trial
         if (currentTrialIdx !== trialIdx) {
             videoEl.src = `/api/labeling/sessions/${sessionId}/video?trial=${trialIdx}`;
             currentTrialIdx = trialIdx;
         }
 
-        // If video is ready (HAVE_FUTURE_DATA or better), play immediately;
-        // otherwise wait for canplay
-        if (videoEl.readyState >= 3) {
-            seekAndPlay();
-        } else {
+        videoEl.playbackRate = playbackRate;
+        videoEl.currentTime = startTime;
+        videoPlaying = true;
+
+        // Show loading indicator while video buffers
+        if (videoEl.readyState < 3) {
             videoLoading = true;
             renderTimeline();
-            videoEl.oncanplay = () => {
-                videoEl.oncanplay = null;
+            const onReady = () => {
+                videoEl.removeEventListener('canplay', onReady);
                 videoLoading = false;
                 renderTimeline();
-                seekAndPlay();
             };
-            videoEl.onerror = () => {
-                videoEl.onerror = null;
-                videoLoading = false;
-                renderTimeline();
-                console.error('Video load failed, falling back to frame-by-frame');
-                fallbackPlay();
-            };
+            videoEl.addEventListener('canplay', onReady);
         }
+
+        videoEl.play().then(() => {
+            videoLoading = false;
+            renderTimeline();
+            requestAnimationFrame(videoDrawLoop);
+        }).catch(e => {
+            console.error('Video play failed, falling back to frame-by-frame', e);
+            videoPlaying = false;
+            videoLoading = false;
+            renderTimeline();
+            fallbackPlay();
+        });
 
         // Handle trial end — stop or advance to next trial
         videoEl.onended = () => {
@@ -1837,11 +1828,8 @@ const labeler = (() => {
                 currentFrame = trials[nextTrialIdx].start_frame;
                 currentTrialIdx = nextTrialIdx;
                 videoEl.src = `/api/labeling/sessions/${sessionId}/video?trial=${nextTrialIdx}`;
-                videoEl.oncanplay = () => {
-                    videoEl.oncanplay = null;
-                    videoEl.currentTime = 0;
-                    videoEl.play();
-                };
+                videoEl.currentTime = 0;
+                videoEl.play();
             } else {
                 playing = false;
                 videoPlaying = false;
