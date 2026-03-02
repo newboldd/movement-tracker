@@ -1112,7 +1112,7 @@ const labeler = (() => {
         const mx = e.clientX - rect.left;
         const my = e.clientY - rect.top;
 
-        const zoomFactor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+        const zoomFactor = e.deltaY < 0 ? 1.05 : 1 / 1.05;
         const newScale = scale * zoomFactor;
 
         // Zoom toward cursor
@@ -1856,14 +1856,18 @@ const labeler = (() => {
     }
 
     function stopVideoPlayback() {
+        const wasVideoPlaying = videoPlaying;
         videoPlaying = false;
         if (videoEl) {
             videoEl.pause();
-            // Recalculate frame from actual paused video time
-            const trial = trials[currentTrialIdx];
-            if (trial) {
-                const localFrame = Math.round(videoEl.currentTime * trial.fps);
-                currentFrame = trial.start_frame + Math.min(Math.max(0, localFrame), trial.frame_count - 1);
+            // Only recalculate from video time if the video element was actually
+            // rendering frames (not in fallback frame-by-frame mode)
+            if (wasVideoPlaying) {
+                const trial = trials[currentTrialIdx];
+                if (trial) {
+                    const localFrame = Math.round(videoEl.currentTime * trial.fps);
+                    currentFrame = trial.start_frame + Math.min(Math.max(0, localFrame), trial.frame_count - 1);
+                }
             }
         }
         goToFrame(currentFrame);

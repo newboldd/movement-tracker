@@ -273,3 +273,18 @@ def get_total_frames(subject_name: str) -> int:
     if not trials:
         return 0
     return trials[-1]["end_frame"] + 1
+
+
+def cache_all_frame_counts(video_dir: str) -> None:
+    """Pre-populate the frame count cache for all .mp4 files in a directory."""
+    import glob, time
+    videos = sorted(glob.glob(str(Path(video_dir) / "*.mp4")))
+    print(f"Caching frame counts for {len(videos)} videos in {video_dir}")
+    for i, vpath in enumerate(videos):
+        name = Path(vpath).name
+        t0 = time.time()
+        count = _get_actual_frame_count(vpath)
+        dt = time.time() - t0
+        marker = f"({dt:.1f}s)" if dt > 0.5 else "(cached)"
+        print(f"  [{i+1}/{len(videos)}] {name}: {count} frames {marker}")
+    print("Done.")
