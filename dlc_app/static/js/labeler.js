@@ -352,10 +352,6 @@ const labeler = (() => {
         currentFrame = frame;
         distAutoScroll = true; // frame navigation re-enables auto-scroll
 
-        // Preload video for this trial so it's buffered when user presses play
-        const trialIdx = getTrialForFrame(frame);
-        preloadVideoForTrial(trialIdx);
-
         try {
             currentImage = await loadImage(frame, currentSide);
             imgW = currentImage.width;
