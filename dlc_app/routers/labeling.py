@@ -226,17 +226,10 @@ def get_video(
     if trial < 0 or trial >= len(trials):
         raise HTTPException(400, f"Trial index {trial} out of range (0-{len(trials)-1})")
 
+    # Always serve the original video for <video> element playback —
+    # deidentified videos use MPEG-4 Part 2 which browsers can't decode.
+    # Individual /frame requests still serve deidentified JPEG crops.
     video_path = trials[trial]["video_path"]
-
-    # Swap to deidentified version when enabled (mirrors extract_frame logic)
-    settings = get_settings()
-    if settings.prefer_deidentified:
-        stem = Path(video_path).stem
-        no_face = _get_no_face_videos(subj["name"])
-        if stem not in no_face:
-            deident = _deidentified_path(video_path)
-            if deident:
-                video_path = deident
 
     return FileResponse(video_path, media_type="video/mp4")
 

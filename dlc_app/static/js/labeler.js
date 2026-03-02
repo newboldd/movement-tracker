@@ -108,10 +108,7 @@ const labeler = (() => {
     // Video element for smooth playback
     let videoEl = null;
     let videoPlaying = false;
-    let videoLoading = false; // true while buffering video
-    let videoLoadingPct = 0;  // download progress 0-100
     let currentTrialIdx = -1; // which trial the video element is loaded with
-    const videoBlobs = {};    // trialIdx -> blob URL (fully downloaded)
 
     // Deleted frame/side keys — sent to server on save so DB stays in sync
     const deletedKeys = new Set();
@@ -304,8 +301,6 @@ const labeler = (() => {
             updateLabelCount();
             goToFrame(0);
 
-            // Start buffering the first trial's video immediately
-            preloadVideoForTrial(0);
         } catch (e) {
             alert('Error loading session: ' + e.message);
         }
@@ -679,25 +674,6 @@ const labeler = (() => {
             ctx.drawImage(currentImage, 0, 0);
             ctx.restore();
 
-            // Video buffering overlay on main canvas
-            if (videoLoading) {
-                ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
-                ctx.fillRect(0, 0, cw, ch);
-                ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
-                ctx.font = '16px sans-serif';
-                ctx.textAlign = 'center';
-                const pct = videoLoadingPct > 0 ? ` ${videoLoadingPct}%` : '';
-                ctx.fillText(`Buffering video${pct}`, cw / 2, ch / 2);
-                // Progress bar
-                if (videoLoadingPct > 0) {
-                    const bw = cw * 0.4, bh = 6, bx = (cw - bw) / 2, by = ch / 2 + 12;
-                    ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
-                    ctx.fillRect(bx, by, bw, bh);
-                    ctx.fillStyle = 'rgba(74, 158, 255, 0.9)';
-                    ctx.fillRect(bx, by, bw * videoLoadingPct / 100, bh);
-                }
-                ctx.textAlign = 'start';
-            }
         }
 
         drawLabelsOverlay();
@@ -1745,55 +1721,6 @@ const labeler = (() => {
         return 0;
     }
 
-    let _blobDownloads = {}; // trialIdx -> Promise (dedup in-flight downloads)
-
-    async function downloadVideoBlob(trialIdx) {
-        /** Download a trial's video fully into memory as a blob URL. */
-        if (videoBlobs[trialIdx]) return videoBlobs[trialIdx];
-        // Dedup: return existing in-flight download
-        if (_blobDownloads[trialIdx]) return _blobDownloads[trialIdx];
-
-        const url = `/api/labeling/sessions/${sessionId}/video?trial=${trialIdx}`;
-        console.log(`[video] Downloading trial ${trialIdx}...`);
-
-        _blobDownloads[trialIdx] = (async () => {
-            const resp = await fetch(url);
-            const total = parseInt(resp.headers.get('content-length') || '0', 10);
-            console.log(`[video] Trial ${trialIdx}: ${(total / 1e6).toFixed(1)} MB`);
-            const reader = resp.body.getReader();
-            const chunks = [];
-            let loaded = 0;
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                chunks.push(value);
-                loaded += value.length;
-                if (total > 0) {
-                    const pct = Math.round(loaded / total * 100);
-                    if (pct !== videoLoadingPct) {
-                        videoLoadingPct = pct;
-                        if (videoLoading) render();
-                    }
-                }
-            }
-            const blob = new Blob(chunks, { type: 'video/mp4' });
-            const blobUrl = URL.createObjectURL(blob);
-            videoBlobs[trialIdx] = blobUrl;
-            console.log(`[video] Trial ${trialIdx} ready (${(loaded / 1e6).toFixed(1)} MB)`);
-            delete _blobDownloads[trialIdx];
-            return blobUrl;
-        })();
-
-        return _blobDownloads[trialIdx];
-    }
-
-    function preloadVideoForTrial(trialIdx) {
-        /** Start downloading trial video in background (fire and forget). */
-        if (!videoEl || trialIdx < 0 || trialIdx >= trials.length) return;
-        if (videoBlobs[trialIdx]) return;
-        downloadVideoBlob(trialIdx).catch(e => console.error('[video] Preload failed:', e));
-    }
-
     function toggleSide() {
         const idx = cameraNames.indexOf(currentSide);
         const newIdx = (idx + 1) % cameraNames.length;
@@ -1846,57 +1773,62 @@ const labeler = (() => {
         const localFrame = currentFrame - trial.start_frame;
         const startTime = localFrame / trial.fps;
 
-        // Download video fully before playing (ensures no buffering stalls)
-        if (!videoBlobs[trialIdx]) {
-            videoLoading = true;
-            videoLoadingPct = 0;
-            renderTimeline();
-            try {
-                await downloadVideoBlob(trialIdx);
-            } catch (e) {
-                console.error('Video download failed, falling back to frame-by-frame', e);
-                videoLoading = false;
-                renderTimeline();
-                fallbackPlay();
+        // Use streaming URL (not blob) — browser handles buffering natively
+        const videoUrl = `/api/labeling/sessions/${sessionId}/video?trial=${trialIdx}&_=${Date.now()}`;
+        if (currentTrialIdx !== trialIdx) {
+            videoEl.src = videoUrl;
+            currentTrialIdx = trialIdx;
+            console.log(`[video] Loading trial ${trialIdx}, readyState=${videoEl.readyState}`);
+
+            // Wait for enough data to play, with error/timeout fallback
+            const ready = await new Promise(resolve => {
+                if (videoEl.readyState >= 3) { resolve(true); return; }
+                const timer = setTimeout(() => { resolve(false); }, 8000);
+                const onReady = () => {
+                    clearTimeout(timer);
+                    videoEl.removeEventListener('error', onError);
+                    resolve(true);
+                };
+                const onError = () => {
+                    clearTimeout(timer);
+                    videoEl.removeEventListener('canplay', onReady);
+                    console.error('[video] Error loading:', videoEl.error);
+                    resolve(false);
+                };
+                videoEl.addEventListener('canplay', onReady, { once: true });
+                videoEl.addEventListener('error', onError, { once: true });
+            });
+
+            console.log(`[video] Ready=${ready}, readyState=${videoEl.readyState}`);
+            if (!ready || !playing) {
+                if (!ready) {
+                    console.warn('[video] Timed out or error, falling back to frame-by-frame');
+                    fallbackPlay();
+                }
                 return;
             }
-            if (!playing) return; // user paused while downloading
-            videoLoading = false;
-            renderTimeline();
-        }
-
-        // Set blob URL as source
-        if (currentTrialIdx !== trialIdx) {
-            videoEl.src = videoBlobs[trialIdx];
-            currentTrialIdx = trialIdx;
         }
 
         videoEl.playbackRate = playbackRate;
         videoEl.currentTime = startTime;
         videoPlaying = true;
 
-        videoEl.play().then(() => {
+        try {
+            await videoEl.play();
+            console.log(`[video] Playing trial ${trialIdx} at ${startTime.toFixed(2)}s`);
             requestAnimationFrame(videoDrawLoop);
-        }).catch(e => {
-            console.error('Video play failed, falling back to frame-by-frame', e);
+        } catch (e) {
+            console.error('[video] play() rejected:', e);
             videoPlaying = false;
             fallbackPlay();
-        });
+        }
 
         // Handle trial end — stop or advance to next trial
         videoEl.onended = () => {
             const nextTrialIdx = trialIdx + 1;
             if (nextTrialIdx < trials.length && playing) {
                 currentFrame = trials[nextTrialIdx].start_frame;
-                if (videoBlobs[nextTrialIdx]) {
-                    currentTrialIdx = nextTrialIdx;
-                    videoEl.src = videoBlobs[nextTrialIdx];
-                    videoEl.currentTime = 0;
-                    videoEl.play();
-                } else {
-                    // Next trial not downloaded yet — restart playback to trigger download
-                    startVideoPlayback();
-                }
+                startVideoPlayback();
             } else {
                 playing = false;
                 videoPlaying = false;
@@ -1948,10 +1880,13 @@ const labeler = (() => {
         }
 
         drawLabelsOverlay();
-
         updateFrameDisplay();
-        renderTimeline();
-        renderDistanceTrace();
+
+        // Only update timeline/trace every ~10 frames to reduce work during playback
+        if (currentFrame % 10 === 0) {
+            renderTimeline();
+            renderDistanceTrace();
+        }
 
         requestAnimationFrame(videoDrawLoop);
     }
@@ -1959,7 +1894,6 @@ const labeler = (() => {
     function stopVideoPlayback() {
         const wasVideoPlaying = videoPlaying;
         videoPlaying = false;
-        videoLoading = false;
         if (videoEl) {
             videoEl.pause();
             // Only recalculate from video time if the video element was actually
@@ -2295,26 +2229,6 @@ const labeler = (() => {
         tlCtx.lineWidth = 2;
         tlCtx.stroke();
 
-        // Video loading overlay
-        if (videoLoading) {
-            tlCtx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-            tlCtx.fillRect(0, 0, w, h);
-            // Progress bar
-            if (videoLoadingPct > 0) {
-                const barH = 4;
-                const barY = h / 2 + 8;
-                tlCtx.fillStyle = 'rgba(255, 255, 255, 0.2)';
-                tlCtx.fillRect(w * 0.2, barY, w * 0.6, barH);
-                tlCtx.fillStyle = 'rgba(74, 158, 255, 0.8)';
-                tlCtx.fillRect(w * 0.2, barY, w * 0.6 * videoLoadingPct / 100, barH);
-            }
-            tlCtx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-            tlCtx.font = '12px sans-serif';
-            tlCtx.textAlign = 'center';
-            const pctText = videoLoadingPct > 0 ? ` ${videoLoadingPct}%` : '';
-            tlCtx.fillText(`Buffering video${pctText}`, w / 2, h / 2 + 4);
-            tlCtx.textAlign = 'start';
-        }
     }
 
     // ── Trial Plots (final mode) ────────────────────────
