@@ -33,10 +33,14 @@ def get_video_info(video_path: str) -> VideoInfo:
     return _video_info_cache[video_path]
 
 
-def get_subject_videos(subject_name: str) -> list[str]:
+def get_subject_videos(subject_name: str, *, prefer_deidentified: bool = False) -> list[str]:
     """Find all stereo video files for a subject.
 
-    Prefers deidentified videos from trials/deidentified/ when available.
+    Args:
+        subject_name: Subject identifier (e.g. 'Con07')
+        prefer_deidentified: If True, return deidentified versions when
+            available. Default False — always returns originals so frame
+            numbering stays consistent with labels in the database.
     """
     import glob
     settings = get_settings()
@@ -53,8 +57,8 @@ def get_subject_videos(subject_name: str) -> list[str]:
             if Path(v).name.lower().startswith(prefix_lower)
         )
 
-    # Prefer deidentified versions when they exist
-    if deident_dir.is_dir():
+    # Optionally swap in deidentified versions
+    if prefer_deidentified and deident_dir.is_dir():
         result = []
         for v in videos:
             deident_path = deident_dir / Path(v).name
