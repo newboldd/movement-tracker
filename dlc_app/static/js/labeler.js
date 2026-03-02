@@ -678,6 +678,26 @@ const labeler = (() => {
             ctx.scale(scale, scale);
             ctx.drawImage(currentImage, 0, 0);
             ctx.restore();
+
+            // Video buffering overlay on main canvas
+            if (videoLoading) {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+                ctx.fillRect(0, 0, cw, ch);
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+                ctx.font = '16px sans-serif';
+                ctx.textAlign = 'center';
+                const pct = videoLoadingPct > 0 ? ` ${videoLoadingPct}%` : '';
+                ctx.fillText(`Buffering video${pct}`, cw / 2, ch / 2);
+                // Progress bar
+                if (videoLoadingPct > 0) {
+                    const bw = cw * 0.4, bh = 6, bx = (cw - bw) / 2, by = ch / 2 + 12;
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
+                    ctx.fillRect(bx, by, bw, bh);
+                    ctx.fillStyle = 'rgba(74, 158, 255, 0.9)';
+                    ctx.fillRect(bx, by, bw * videoLoadingPct / 100, bh);
+                }
+                ctx.textAlign = 'start';
+            }
         }
 
         drawLabelsOverlay();
@@ -1725,36 +1745,53 @@ const labeler = (() => {
         return 0;
     }
 
+    let _blobDownloads = {}; // trialIdx -> Promise (dedup in-flight downloads)
+
     async function downloadVideoBlob(trialIdx) {
         /** Download a trial's video fully into memory as a blob URL. */
         if (videoBlobs[trialIdx]) return videoBlobs[trialIdx];
+        // Dedup: return existing in-flight download
+        if (_blobDownloads[trialIdx]) return _blobDownloads[trialIdx];
+
         const url = `/api/labeling/sessions/${sessionId}/video?trial=${trialIdx}`;
-        const resp = await fetch(url);
-        const total = parseInt(resp.headers.get('content-length') || '0', 10);
-        const reader = resp.body.getReader();
-        const chunks = [];
-        let loaded = 0;
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            chunks.push(value);
-            loaded += value.length;
-            if (total > 0) {
-                videoLoadingPct = Math.round(loaded / total * 100);
-                renderTimeline();
+        console.log(`[video] Downloading trial ${trialIdx}...`);
+
+        _blobDownloads[trialIdx] = (async () => {
+            const resp = await fetch(url);
+            const total = parseInt(resp.headers.get('content-length') || '0', 10);
+            console.log(`[video] Trial ${trialIdx}: ${(total / 1e6).toFixed(1)} MB`);
+            const reader = resp.body.getReader();
+            const chunks = [];
+            let loaded = 0;
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                chunks.push(value);
+                loaded += value.length;
+                if (total > 0) {
+                    const pct = Math.round(loaded / total * 100);
+                    if (pct !== videoLoadingPct) {
+                        videoLoadingPct = pct;
+                        if (videoLoading) render();
+                    }
+                }
             }
-        }
-        const blob = new Blob(chunks, { type: 'video/mp4' });
-        const blobUrl = URL.createObjectURL(blob);
-        videoBlobs[trialIdx] = blobUrl;
-        return blobUrl;
+            const blob = new Blob(chunks, { type: 'video/mp4' });
+            const blobUrl = URL.createObjectURL(blob);
+            videoBlobs[trialIdx] = blobUrl;
+            console.log(`[video] Trial ${trialIdx} ready (${(loaded / 1e6).toFixed(1)} MB)`);
+            delete _blobDownloads[trialIdx];
+            return blobUrl;
+        })();
+
+        return _blobDownloads[trialIdx];
     }
 
     function preloadVideoForTrial(trialIdx) {
         /** Start downloading trial video in background (fire and forget). */
         if (!videoEl || trialIdx < 0 || trialIdx >= trials.length) return;
         if (videoBlobs[trialIdx]) return;
-        downloadVideoBlob(trialIdx).catch(() => {});
+        downloadVideoBlob(trialIdx).catch(e => console.error('[video] Preload failed:', e));
     }
 
     function toggleSide() {
