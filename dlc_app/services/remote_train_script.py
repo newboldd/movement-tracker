@@ -280,8 +280,17 @@ def run_pipeline(config_path: str, shuffle: int, labels_dir: str,
             logger.info(f"Removing old analysis file: {os.path.basename(old_file)}")
             os.remove(old_file)
 
-    deeplabcut.analyze_videos(config_path, [labels_dir],
-                              shuffle=shuffle, engine=Engine.PYTORCH)
+    # Pass explicit video paths instead of directory — DLC's directory
+    # scanning can miss files or misidentify them as already analyzed
+    video_files = sorted(glob.glob(os.path.join(labels_dir, "*.mp4")))
+    logger.info(f"Found {len(video_files)} videos to analyze: "
+                f"{[os.path.basename(v) for v in video_files]}")
+
+    if video_files:
+        deeplabcut.analyze_videos(config_path, video_files,
+                                  shuffle=shuffle, engine=Engine.PYTORCH)
+    else:
+        logger.warning("No video files found in labels directory!")
     logger.info("Analysis complete")
 
     deeplabcut.analyze_videos_converth5_to_csv(labels_dir)
