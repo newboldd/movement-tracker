@@ -1771,23 +1771,39 @@ const labeler = (() => {
         const localFrame = currentFrame - trial.start_frame;
         const startTime = localFrame / trial.fps;
 
+        function seekAndPlay() {
+            if (!playing) return; // user paused while we were loading
+            videoEl.playbackRate = playbackRate;
+            videoEl.currentTime = startTime;
+            videoPlaying = true;
+
+            videoEl.play().then(() => {
+                requestAnimationFrame(videoDrawLoop);
+            }).catch(e => {
+                console.error('Video play failed, falling back to frame-by-frame', e);
+                videoPlaying = false;
+                fallbackPlay();
+            });
+        }
+
         // Load video for this trial if not already loaded
         if (currentTrialIdx !== trialIdx) {
             videoEl.src = `/api/labeling/sessions/${sessionId}/video?trial=${trialIdx}`;
             currentTrialIdx = trialIdx;
+            // Wait for enough data before seeking/playing
+            videoEl.oncanplay = () => {
+                videoEl.oncanplay = null;
+                seekAndPlay();
+            };
+            videoEl.onerror = () => {
+                videoEl.onerror = null;
+                console.error('Video load failed, falling back to frame-by-frame');
+                fallbackPlay();
+            };
+        } else {
+            // Video already loaded for this trial — seek and play immediately
+            seekAndPlay();
         }
-
-        videoEl.playbackRate = playbackRate;
-        videoEl.currentTime = startTime;
-        videoPlaying = true;
-
-        videoEl.play().then(() => {
-            requestAnimationFrame(videoDrawLoop);
-        }).catch(e => {
-            console.error('Video play failed, falling back to frame-by-frame', e);
-            videoPlaying = false;
-            fallbackPlay();
-        });
 
         // Handle trial end — stop or advance to next trial
         videoEl.onended = () => {
@@ -1796,8 +1812,11 @@ const labeler = (() => {
                 currentFrame = trials[nextTrialIdx].start_frame;
                 currentTrialIdx = nextTrialIdx;
                 videoEl.src = `/api/labeling/sessions/${sessionId}/video?trial=${nextTrialIdx}`;
-                videoEl.currentTime = 0;
-                videoEl.play();
+                videoEl.oncanplay = () => {
+                    videoEl.oncanplay = null;
+                    videoEl.currentTime = 0;
+                    videoEl.play();
+                };
             } else {
                 playing = false;
                 videoPlaying = false;
