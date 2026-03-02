@@ -1033,6 +1033,8 @@ def remote_preprocess_batch(
                 if remote_overrides_file:
                     launch_args_parts.append(
                         f"'--overrides-file', r'{remote_overrides_file}'")
+                if force:
+                    launch_args_parts.append("'--force'")
                 launch_args_str = ", ".join(launch_args_parts)
                 # Popen stdout/stderr handles C-level AND Python-level output.
                 # Do NOT also pass --log-file (two handles to the same file

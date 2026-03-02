@@ -158,14 +158,24 @@ def run_mp_subject(subject_name: str, videos: list[str], output_dir: str):
     import mediapipe as mp_lib
 
     # Build trial map (contiguous frame offsets)
+    # Use actual readable frame count, not CAP_PROP_FRAME_COUNT (often inflated)
     trials = []
     offset = 0
     for vpath in videos:
         cap = cv2.VideoCapture(vpath)
-        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        reported = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        # Count actual readable frames
+        actual = 0
+        for _ in range(reported):
+            if not cap.read()[0]:
+                break
+            actual += 1
         cap.release()
-        trials.append({"path": vpath, "start": offset, "n_frames": n_frames})
-        offset += n_frames
+        if actual < reported:
+            logger.info(f"  {Path(vpath).name}: {reported - actual} trailing "
+                         f"undecodable frames (container={reported}, actual={actual})")
+        trials.append({"path": vpath, "start": offset, "n_frames": actual})
+        offset += actual
     total_frames = offset
 
     if total_frames == 0:
@@ -613,7 +623,7 @@ def deidentify_video(input_path: str, output_path: str,
         return
 
     cap = cv2.VideoCapture(input_path)
-    n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    reported_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
     full_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -626,7 +636,7 @@ def deidentify_video(input_path: str, output_path: str,
 
     logger.info(
         f"Deidentifying {Path(input_path).name}: "
-        f"{n_frames} frames, {'stereo' if is_stereo else 'mono'}, {half_w}x{h}"
+        f"{reported_frames} frames, {'stereo' if is_stereo else 'mono'}, {half_w}x{h}"
     )
 
     face_det = mp_lib.solutions.face_detection.FaceDetection(
@@ -646,18 +656,10 @@ def deidentify_video(input_path: str, output_path: str,
         faces_raw = []
         hand_kps_all = []
 
-    for t in range(n_frames):
+    for t in range(reported_frames):
         ret, frame = cap.read()
         if not ret:
-            if is_stereo:
-                faces_L_raw.append([])
-                faces_R_raw.append([])
-                hand_kps_L.append(None)
-                hand_kps_R.append(None)
-            else:
-                faces_raw.append([])
-                hand_kps_all.append(None)
-            continue
+            break  # actual end of decodable frames
 
         frame = np.ascontiguousarray(frame, dtype=np.uint8)
 
@@ -684,11 +686,17 @@ def deidentify_video(input_path: str, output_path: str,
             hand_kps_all.append(kps[0] if kps else None)
 
         if subject_name and t % 10 == 0:
-            pct = video_pct_base + (t / n_frames * 40 / 100) * video_pct_span
+            pct = video_pct_base + (t / max(reported_frames, 1) * 40 / 100) * video_pct_span
             emit_progress(subject_name, pct)
 
     face_det.close()
     hands_det.close()
+
+    # Use actual readable frame count (may be less than container metadata)
+    n_frames = len(faces_L_raw) if is_stereo else len(faces_raw)
+    if n_frames < reported_frames:
+        logger.info(f"  Note: {reported_frames - n_frames} trailing undecodable frames "
+                     f"(container says {reported_frames}, read {n_frames})")
 
     # ── Apply overrides and filters ──
     if is_stereo:
@@ -847,6 +855,7 @@ def cmd_pipeline(args):
     """Pipeline subcommand: run MP + blur as a detached process with status.json."""
     status_file = args.status_file
     overrides_file = getattr(args, "overrides_file", None)
+    force = getattr(args, "force", False)
     do_mp = "mp" in args.steps
     do_blur = "blur" in args.steps
 
@@ -868,12 +877,13 @@ def cmd_pipeline(args):
         mp_filter = args.mp_subjects if args.mp_subjects is not None else args.subjects
         mp_subjects = discover_subjects(args.video_dir, mp_filter)
         if mp_subjects:
-            # Skip already-completed subjects
-            skipped = [n for n in mp_subjects if _mp_complete(n, args.output_dir)]
-            if skipped:
-                logger.info(f"MediaPipe: skipping {len(skipped)} already-completed: "
-                            f"{', '.join(sorted(skipped))}")
-                mp_subjects = {k: v for k, v in mp_subjects.items() if k not in skipped}
+            # Skip already-completed subjects (unless --force)
+            if not force:
+                skipped = [n for n in mp_subjects if _mp_complete(n, args.output_dir)]
+                if skipped:
+                    logger.info(f"MediaPipe: skipping {len(skipped)} already-completed: "
+                                f"{', '.join(sorted(skipped))}")
+                    mp_subjects = {k: v for k, v in mp_subjects.items() if k not in skipped}
 
             pct_start, pct_end = mp_range
             total_subjects = len(mp_subjects)
@@ -907,13 +917,14 @@ def cmd_pipeline(args):
         blur_filter = args.blur_subjects if args.blur_subjects is not None else args.subjects
         blur_subjects = discover_subjects(args.video_dir, blur_filter)
         if blur_subjects:
-            # Skip already-completed subjects
-            skipped = [n for n in blur_subjects
-                       if _blur_complete(n, blur_subjects[n], args.output_dir)]
-            if skipped:
-                logger.info(f"Blur: skipping {len(skipped)} already-completed: "
-                            f"{', '.join(sorted(skipped))}")
-                blur_subjects = {k: v for k, v in blur_subjects.items() if k not in skipped}
+            # Skip already-completed subjects (unless --force)
+            if not force:
+                skipped = [n for n in blur_subjects
+                           if _blur_complete(n, blur_subjects[n], args.output_dir)]
+                if skipped:
+                    logger.info(f"Blur: skipping {len(skipped)} already-completed: "
+                                f"{', '.join(sorted(skipped))}")
+                    blur_subjects = {k: v for k, v in blur_subjects.items() if k not in skipped}
 
             pct_start, pct_end = blur_range
             total_subjects = len(blur_subjects)
@@ -987,6 +998,8 @@ def main():
                         help="Path to face_blur_overrides.json")
     pipe_p.add_argument("--log-file", default=None,
                         help="Redirect stdout/stderr to this file")
+    pipe_p.add_argument("--force", action="store_true",
+                        help="Re-run even if outputs already exist on remote")
 
     args = parser.parse_args()
 
