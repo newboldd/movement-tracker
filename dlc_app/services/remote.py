@@ -744,6 +744,133 @@ def remote_train_monitor(
         registry.unregister_cancel_event(job_id)
 
 
+def remote_train_download(
+    job_id: int,
+    cfg: RemoteConfig,
+    local_dlc_dir: Path,
+    subject_name: str,
+    log_path: str,
+    registry,
+    labels_dir_name: str = "labels_v1",
+):
+    """Download-only: SCP model + analysis outputs from a completed remote training run.
+
+    No monitoring, no polling — just downloads results and marks the job done.
+    """
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    remote_project_dir = f"{cfg.work_dir}/{subject_name}"
+
+    cancel_event = registry.register_cancel_event(job_id)
+
+    def _update_progress(pct):
+        with get_db_ctx() as db:
+            db.execute("UPDATE jobs SET progress_pct = ? WHERE id = ?",
+                       (round(pct, 1), job_id))
+
+    def _fail(msg):
+        logger.error(f"Job {job_id} download failed: {msg}")
+        with get_db_ctx() as db:
+            db.execute(
+                """UPDATE jobs SET status = 'failed', error_msg = ?,
+                   finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                (msg, job_id),
+            )
+
+    def _run_scp(cmd, logfile, label):
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        registry._processes[job_id] = proc
+        for line in proc.stdout:
+            logfile.write(line)
+            logfile.flush()
+        proc.wait()
+        registry._processes.pop(job_id, None)
+        return proc
+
+    try:
+        with open(log_path, "w") as logfile:
+            logfile.write(f"=== Downloading results for {subject_name} from {cfg.host} ===\n")
+            logfile.flush()
+            _update_progress(10.0)
+
+            if cancel_event.is_set():
+                raise InterruptedError("Job cancelled")
+
+            # Download dlc-models-pytorch directory
+            remote_models = f"{cfg.host}:{remote_project_dir}/dlc-models-pytorch"
+            logfile.write(f"  Downloading dlc-models-pytorch/\n")
+            logfile.flush()
+            dl_cmd = _scp_base_args(cfg) + [remote_models, str(local_dlc_dir) + "/"]
+            proc = _run_scp(dl_cmd, logfile, "Download models")
+            if proc.returncode != 0:
+                logfile.write(f"  Warning: model download failed (exit {proc.returncode})\n")
+            _update_progress(40.0)
+
+            if cancel_event.is_set():
+                raise InterruptedError("Job cancelled")
+
+            # Download analysis results (CSV, H5, pickle) from labels dir
+            remote_labels_path = f"{remote_project_dir}/{labels_dir_name}"
+            local_labels_dir = local_dlc_dir / labels_dir_name
+            local_labels_dir.mkdir(exist_ok=True)
+
+            list_script = (
+                f"\"import os; d = r'{remote_labels_path}'; "
+                f"files = [f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)) "
+                f"and any(f.endswith(e) for e in ('.h5', '.csv', '.pickle'))] "
+                f"if os.path.isdir(d) else []; print('\\n'.join(files))\""
+            )
+            result = subprocess.run(
+                _py_cmd(cfg, list_script),
+                capture_output=True, text=True, timeout=15,
+            )
+            analysis_files = [f for f in result.stdout.strip().splitlines() if f]
+
+            if analysis_files:
+                logfile.write(f"  Downloading {len(analysis_files)} analysis files from {labels_dir_name}/\n")
+                for i, af in enumerate(analysis_files):
+                    dl_cmd = _scp_base_args(cfg) + [
+                        f"{cfg.host}:{remote_labels_path}/{af}",
+                        str(local_labels_dir / af),
+                    ]
+                    proc = _run_scp(dl_cmd, logfile, f"Download {af}")
+                    if proc.returncode == 0:
+                        logfile.write(f"  Downloaded {labels_dir_name}/{af}\n")
+                    else:
+                        logfile.write(f"  Warning: download failed for {af}\n")
+                    _update_progress(40.0 + (i + 1) / len(analysis_files) * 50.0)
+            else:
+                logfile.write(f"  Warning: no analysis files found in {labels_dir_name}/\n")
+
+            _update_progress(100.0)
+            logfile.write("=== Download complete ===\n")
+            logfile.flush()
+
+        with get_db_ctx() as db:
+            db.execute(
+                """UPDATE jobs SET status = 'completed', progress_pct = 100,
+                   finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                (job_id,),
+            )
+
+    except InterruptedError:
+        logger.info(f"Job {job_id} download cancelled")
+        with get_db_ctx() as db:
+            db.execute(
+                """UPDATE jobs SET status = 'cancelled',
+                   finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                (job_id,),
+            )
+    except Exception as e:
+        logger.exception(f"Job {job_id} download error")
+        _fail(str(e))
+    finally:
+        registry._processes.pop(job_id, None)
+        registry._threads.pop(job_id, None)
+        registry.unregister_cancel_event(job_id)
+
+
 def remote_preprocess_batch(
     job_id: int,
     cfg: RemoteConfig,

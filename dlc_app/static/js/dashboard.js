@@ -66,15 +66,13 @@ function renderTable() {
         <tr>
             <td class="name-col" onclick="showDetail(${s.id})">${s.name}</td>
             <td><button class="btn btn-sm" onclick="openFinal(${s.id})">View</button></td>
+            <td>${getActions(s)}</td>
             <td><span class="badge badge-${s.stage}">${s.stage.replace(/_/g, ' ')}</span></td>
             <td>${s.video_count}</td>
             <td>${s.has_mediapipe ? '&check;' : '&mdash;'}</td>
             <td>${s.has_blur ? '&check;' : '&mdash;'}</td>
             <td>${s.has_labels ? '&check;' : '&mdash;'}</td>
             <td>${s.has_snapshots ? '&check;' : '&mdash;'}</td>
-            <td>
-                ${getActions(s)}
-            </td>
         </tr>
     `).join('');
 }
@@ -84,8 +82,7 @@ function getActions(subject) {
     const s = subject.stage;
 
     // Label / Restart button (always visible)
-    const labelText = subject.has_labels ? 'Restart' : 'Label';
-    btns.push(`<button class="btn btn-sm" onclick="openLabeling(${subject.id})">${labelText}</button>`);
+    btns.push(`<button class="btn btn-sm" onclick="openLabeling(${subject.id})">Label</button>`);
 
     // Stage-specific actions
     if (s === 'committed' || s === 'labeled') {

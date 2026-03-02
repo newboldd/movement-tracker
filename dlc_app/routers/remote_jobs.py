@@ -76,7 +76,7 @@ def cancel_queue_item(queue_id: int) -> dict:
 def redownload_results(req: RedownloadRequest) -> dict:
     """Re-download results for completed jobs (download-only, no re-compute)."""
     from ..config import get_settings
-    from ..services.remote import remote_train_monitor, remote_preprocess_download
+    from ..services.remote import remote_train_monitor, remote_train_download, remote_preprocess_download
     from ..services.jobs import registry
     import threading
 
@@ -148,26 +148,21 @@ def redownload_results(req: RedownloadRequest) -> dict:
         return {"job_id": job["id"], "status": "running"}
 
     if req.job_type in ("train", "analyze_v1", "analyze_v2"):
-        # GPU: re-download by resuming monitor (download-only phase)
+        # GPU: just SCP the outputs — no monitoring or re-launching
         subject_name = subject_names[0]
         is_v1 = req.job_type == "analyze_v1"
         labels_dir_name = "labels_v1" if is_v1 else "labels_v2"
-        iteration = 0 if is_v1 else None
 
         thread = threading.Thread(
-            target=remote_train_monitor,
+            target=remote_train_download,
             kwargs=dict(
                 job_id=job["id"],
                 cfg=remote_cfg,
                 local_dlc_dir=settings.dlc_path / subject_name,
                 subject_name=subject_name,
                 log_path=log_path,
-                progress_parser=None,
-                on_complete=None,
                 registry=registry,
-                resume=True,
                 labels_dir_name=labels_dir_name,
-                iteration=iteration,
             ),
             daemon=True,
         )
