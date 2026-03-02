@@ -1,6 +1,7 @@
 """Subject CRUD and dashboard data endpoints."""
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 from typing import List, Optional
@@ -28,11 +29,22 @@ def _resolve_dlc_path(dlc_dir_value: Optional[str]) -> Optional[Path]:
     return settings.dlc_path / dlc_dir_value
 
 
+def _parse_no_face_videos(raw: str | None) -> list[str]:
+    """Parse no_face_videos JSON column (NULL → empty list)."""
+    if not raw:
+        return []
+    try:
+        val = json.loads(raw)
+        return val if isinstance(val, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
 def _subject_row_to_response(row: dict) -> dict:
     """Convert a DB row to SubjectResponse fields."""
     dlc_path = _resolve_dlc_path(row.get("dlc_dir"))
     videos = _find_videos(row["name"]) if row.get("name") else []
-    return {
+    resp = {
         **row,
         "stage_idx": STAGE_INDEX.get(row.get("stage", "created"), 0),
         "video_count": len(videos),
@@ -41,6 +53,8 @@ def _subject_row_to_response(row: dict) -> dict:
         "has_mediapipe": _has_mediapipe(dlc_path) if dlc_path and dlc_path.exists() else False,
         "has_blur": _has_deidentified(dlc_path) if dlc_path and dlc_path.exists() else False,
     }
+    resp["no_face_videos"] = _parse_no_face_videos(row.get("no_face_videos"))
+    return resp
 
 
 @router.get("")
@@ -84,12 +98,22 @@ def update_subject(subject_id: int, req: SubjectUpdate) -> dict:
         row = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Subject not found")
-        # camera_name: empty string → NULL
-        camera_val = req.camera_name if req.camera_name else None
-        db.execute(
-            "UPDATE subjects SET camera_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (camera_val, subject_id),
-        )
+        if req.camera_name is not None:
+            # camera_name: empty string → NULL
+            camera_val = req.camera_name if req.camera_name else None
+            db.execute(
+                "UPDATE subjects SET camera_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (camera_val, subject_id),
+            )
+        if req.no_face_videos is not None:
+            nfv_json = json.dumps(req.no_face_videos) if req.no_face_videos else None
+            db.execute(
+                "UPDATE subjects SET no_face_videos = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (nfv_json, subject_id),
+            )
+            # Clear video.py cache for this subject
+            from ..services.video import _no_face_cache
+            _no_face_cache.pop(row["name"], None)
         row = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
     return _subject_row_to_response(row)
 

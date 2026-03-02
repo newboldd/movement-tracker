@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS subjects (
     stage TEXT NOT NULL DEFAULT 'created',
     iteration INTEGER NOT NULL DEFAULT 1,
     camera_name TEXT,
+    no_face_videos TEXT,
     dlc_dir TEXT,
     video_pattern TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -178,6 +179,14 @@ def _migrate_add_tmux_session(conn):
         logger.info("Added tmux_session column to jobs table")
 
 
+def _migrate_add_no_face_videos(conn):
+    """Add no_face_videos column to subjects table if missing."""
+    columns = _get_table_columns(conn, "subjects")
+    if "no_face_videos" not in columns:
+        conn.execute("ALTER TABLE subjects ADD COLUMN no_face_videos TEXT")
+        logger.info("Added no_face_videos column to subjects table")
+
+
 def _migrate_relative_dlc_dir(conn):
     """Convert absolute dlc_dir paths to relative (subject name only)."""
     rows = conn.execute("SELECT id, dlc_dir FROM subjects WHERE dlc_dir IS NOT NULL").fetchall()
@@ -214,6 +223,7 @@ def init_db():
         conn.commit()
 
     if "subjects" in tables:
+        _migrate_add_no_face_videos(conn)
         _migrate_relative_dlc_dir(conn)
         conn.commit()
 

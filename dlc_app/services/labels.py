@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 from ..config import get_settings
 from .video import extract_frame_raw, build_trial_map, _resolve_frame
@@ -125,6 +126,41 @@ def backfill_label_metadata(subject_name: str):
                 json.dump(meta, f, indent=2)
 
 
+# Distinct colors per bodypart for QC overlay images
+_BP_COLORS = [
+    (0, 0, 255),    # red (BGR)
+    (0, 255, 0),    # green
+    (255, 0, 0),    # blue
+    (0, 255, 255),  # yellow
+    (255, 0, 255),  # magenta
+    (255, 255, 0),  # cyan
+]
+
+
+def _draw_label_overlay(frame: np.ndarray, keypoints: dict, bodyparts: list[str]) -> np.ndarray:
+    """Draw scatter crosses on a frame copy for each labeled keypoint.
+
+    Returns a new image with crosses and bodypart labels drawn on it.
+    """
+    img = frame.copy()
+    arm = 12  # cross arm length in pixels
+    thickness = 2
+
+    for i, bp in enumerate(bodyparts):
+        coords = keypoints.get(bp)
+        if not coords or len(coords) < 2 or coords[0] is None:
+            continue
+        x, y = int(round(coords[0])), int(round(coords[1]))
+        color = _BP_COLORS[i % len(_BP_COLORS)]
+        # Draw cross
+        cv2.line(img, (x - arm, y - arm), (x + arm, y + arm), color, thickness)
+        cv2.line(img, (x - arm, y + arm), (x + arm, y - arm), color, thickness)
+        # Label
+        cv2.putText(img, bp, (x + arm + 4, y - 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+    return img
+
+
 def commit_labels_to_dlc(
     subject_name: str,
     session_labels: list[dict],
@@ -146,13 +182,18 @@ def commit_labels_to_dlc(
     labeled_data_dir = dlc_path / "labeled-data" / training_name
 
     labeled_data_dir.mkdir(parents=True, exist_ok=True)
+    qc_dir = labeled_data_dir / "qc"
+    qc_dir.mkdir(exist_ok=True)
 
     # Clean up old PNGs from previous commits
     for old_png in labeled_data_dir.glob("img*.png"):
         old_png.unlink()
+    for old_png in qc_dir.glob("img*.png"):
+        old_png.unlink()
 
     # Build trial map for frame resolution
     trials = build_trial_map(subject_name)
+    bodyparts = settings.bodyparts
 
     # Group labels by (frame_num, trial_idx, side) to handle both camera views
     # For DLC, each labeled image is one camera half at one frame
@@ -182,6 +223,10 @@ def commit_labels_to_dlc(
         frame_array = extract_frame_raw(video_path, local_frame, label["side"])
         png_path = labeled_data_dir / img_filename
         cv2.imwrite(str(png_path), frame_array)
+
+        # Save QC overlay with label crosses
+        qc_img = _draw_label_overlay(frame_array, kp, bodyparts)
+        cv2.imwrite(str(qc_dir / img_filename), qc_img)
 
         extracted.append({
             "img_filename": img_filename,

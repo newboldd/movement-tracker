@@ -936,26 +936,60 @@ def remote_preprocess_batch(
                 return
 
             # Upload face_blur_overrides.json if it exists (near video dir)
+            # Merge in skip=true for videos marked as no-face in the DB
             remote_overrides_file = None
             overrides_candidates = [
                 settings.video_path.parent.parent / "face_blur_overrides.json",
                 settings.video_path.parent / "face_blur_overrides.json",
                 settings.video_path / "face_blur_overrides.json",
             ]
+            overrides_data = {}
             for cand in overrides_candidates:
                 if cand.is_file():
-                    upload_ov_cmd = _scp_base_args(cfg) + [
-                        str(cand),
-                        f"{cfg.host}:{cfg.work_dir}/",
-                    ]
-                    proc = _run_remote_proc(upload_ov_cmd, logfile, "Upload overrides")
-                    if proc.returncode == 0:
-                        remote_overrides_file = f"{cfg.work_dir}/face_blur_overrides.json"
-                        logfile.write(f"  Uploaded face_blur_overrides.json from {cand}\n")
-                    else:
-                        logfile.write(f"  Warning: failed to upload face_blur_overrides.json\n")
-                    logfile.flush()
+                    try:
+                        overrides_data = json.loads(cand.read_text())
+                    except (json.JSONDecodeError, OSError):
+                        pass
                     break
+
+            # Add skip=true for no-face videos from DB
+            no_face_stems = set()
+            with get_db_ctx() as nf_db:
+                for subj_name in sorted(needed_subjects):
+                    row = nf_db.execute(
+                        "SELECT no_face_videos FROM subjects WHERE name = ?",
+                        (subj_name,),
+                    ).fetchone()
+                    if row and row["no_face_videos"]:
+                        try:
+                            stems = json.loads(row["no_face_videos"])
+                            no_face_stems.update(stems)
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+            for stem in sorted(no_face_stems):
+                overrides_data.setdefault(stem, {})["skip"] = True
+                logfile.write(f"  Override: {stem} skip=true (no faces)\n")
+
+            if overrides_data:
+                import tempfile
+                tmp = tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".json", prefix="face_blur_overrides_",
+                    delete=False,
+                )
+                json.dump(overrides_data, tmp, indent=2)
+                tmp.close()
+                upload_ov_cmd = _scp_base_args(cfg) + [
+                    tmp.name,
+                    f"{cfg.host}:{cfg.work_dir}/face_blur_overrides.json",
+                ]
+                proc = _run_remote_proc(upload_ov_cmd, logfile, "Upload overrides")
+                os.unlink(tmp.name)
+                if proc.returncode == 0:
+                    remote_overrides_file = f"{cfg.work_dir}/face_blur_overrides.json"
+                    logfile.write(f"  Uploaded merged face_blur_overrides.json\n")
+                else:
+                    logfile.write(f"  Warning: failed to upload face_blur_overrides.json\n")
+                logfile.flush()
 
             _update_progress(5.0)
 

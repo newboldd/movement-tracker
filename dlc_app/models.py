@@ -31,6 +31,7 @@ class SubjectCreate(BaseModel):
 
 class SubjectUpdate(BaseModel):
     camera_name: Optional[str] = None
+    no_face_videos: Optional[List[str]] = None
 
 
 class SubjectResponse(BaseModel):
@@ -51,6 +52,7 @@ class SubjectResponse(BaseModel):
 class SubjectDetail(SubjectResponse):
     videos: List[str] = []
     trials: List[str] = []
+    no_face_videos: List[str] = []
     jobs: List[dict] = []
     label_sessions: List[dict] = []
 

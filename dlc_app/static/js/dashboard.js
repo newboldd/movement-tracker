@@ -117,6 +117,19 @@ async function updateSubjectCamera(subjectId, cameraName) {
     }
 }
 
+async function updateNoFaceVideos(subjectId) {
+    const checkboxes = document.querySelectorAll('.no-face-cb');
+    const noFaceVideos = [];
+    checkboxes.forEach(cb => {
+        if (!cb.checked) noFaceVideos.push(cb.dataset.stem);
+    });
+    try {
+        await API.patch(`/api/subjects/${subjectId}`, { no_face_videos: noFaceVideos });
+    } catch (e) {
+        alert('Error updating face status: ' + e.message);
+    }
+}
+
 // ── Detail panel ─────────────────────────────────────
 async function showDetail(subjectId) {
     try {
@@ -141,7 +154,16 @@ async function showDetail(subjectId) {
             <div class="detail-section">
                 <h3>Trials</h3>
                 ${detail.trials.length > 0
-                    ? detail.trials.map(t => `<div class="info-row"><span>${t}</span></div>`).join('')
+                    ? detail.trials.map(t => {
+                        const noFace = (detail.no_face_videos || []).includes(t);
+                        return `<div class="info-row" style="gap:8px;">
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;">
+                                <input type="checkbox" class="no-face-cb" data-stem="${t}" ${!noFace ? 'checked' : ''} onchange="updateNoFaceVideos(${detail.id})" />
+                                Has faces
+                            </label>
+                            <span>${t}</span>
+                        </div>`;
+                    }).join('')
                     : '<div class="info-row"><span class="label">No videos found</span></div>'
                 }
             </div>

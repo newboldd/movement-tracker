@@ -7,6 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from ..config import get_settings, JPEG_QUALITY, FRAME_CACHE_SIZE
+from ..db import get_db_ctx
 
 
 class VideoInfo:
@@ -31,6 +32,31 @@ def get_video_info(video_path: str) -> VideoInfo:
     if video_path not in _video_info_cache:
         _video_info_cache[video_path] = VideoInfo(video_path)
     return _video_info_cache[video_path]
+
+
+# Cache for no_face_videos per subject name — cleared on PATCH updates
+_no_face_cache: dict[str, list[str]] = {}
+
+
+def _get_no_face_videos(subject_name: str) -> list[str]:
+    """Return list of video stems marked as no-face for this subject."""
+    if subject_name in _no_face_cache:
+        return _no_face_cache[subject_name]
+    import json
+    with get_db_ctx() as db:
+        row = db.execute(
+            "SELECT no_face_videos FROM subjects WHERE name = ?",
+            (subject_name,),
+        ).fetchone()
+    if row and row["no_face_videos"]:
+        try:
+            result = json.loads(row["no_face_videos"])
+        except (json.JSONDecodeError, TypeError):
+            result = []
+    else:
+        result = []
+    _no_face_cache[subject_name] = result
+    return result
 
 
 def get_subject_videos(subject_name: str, *, prefer_deidentified: bool = False) -> list[str]:
@@ -153,11 +179,15 @@ def extract_frame(subject_name: str, global_frame: int, side: str,
     video_path, local_frame = _resolve_frame(trials, global_frame)
 
     # Optionally display deidentified version (frame numbering from originals)
+    # Skip deidentified swap for videos marked as no-face
     settings = get_settings()
     if settings.prefer_deidentified:
-        deident = _deidentified_path(video_path)
-        if deident:
-            video_path = deident
+        stem = Path(video_path).stem
+        no_face = _get_no_face_videos(subject_name)
+        if stem not in no_face:
+            deident = _deidentified_path(video_path)
+            if deident:
+                video_path = deident
 
     return _extract_frame_cached(video_path, local_frame, side)
 
