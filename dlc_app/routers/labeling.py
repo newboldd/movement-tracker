@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import List
 
 from fastapi import APIRouter, HTTPException, Query
@@ -12,6 +13,7 @@ from ..db import get_db_ctx
 from ..models import LabelBatchSave, SessionCreate, SessionResponse, STAGE_INDEX
 from ..services.video import (
     extract_frame, build_trial_map, get_total_frames, get_subject_videos,
+    _deidentified_path, _get_no_face_videos,
 )
 from ..services.labels import commit_labels_to_dlc, save_corrections_to_csv
 from ..services.mediapipe_prelabel import (
@@ -225,6 +227,17 @@ def get_video(
         raise HTTPException(400, f"Trial index {trial} out of range (0-{len(trials)-1})")
 
     video_path = trials[trial]["video_path"]
+
+    # Swap to deidentified version when enabled (mirrors extract_frame logic)
+    settings = get_settings()
+    if settings.prefer_deidentified:
+        stem = Path(video_path).stem
+        no_face = _get_no_face_videos(subj["name"])
+        if stem not in no_face:
+            deident = _deidentified_path(video_path)
+            if deident:
+                video_path = deident
+
     return FileResponse(video_path, media_type="video/mp4")
 
 
