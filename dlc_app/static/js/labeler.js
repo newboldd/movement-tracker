@@ -301,6 +301,9 @@ const labeler = (() => {
             recomputeCameraShift();
             updateLabelCount();
             goToFrame(0);
+
+            // Start buffering the first trial's video immediately
+            preloadVideoForTrial(0);
         } catch (e) {
             alert('Error loading session: ' + e.message);
         }
@@ -348,6 +351,10 @@ const labeler = (() => {
         if (frame < 0 || frame >= totalFrames) return;
         currentFrame = frame;
         distAutoScroll = true; // frame navigation re-enables auto-scroll
+
+        // Preload video for this trial so it's buffered when user presses play
+        const trialIdx = getTrialForFrame(frame);
+        preloadVideoForTrial(trialIdx);
 
         try {
             currentImage = await loadImage(frame, currentSide);
@@ -1720,6 +1727,14 @@ const labeler = (() => {
         return 0;
     }
 
+    function preloadVideoForTrial(trialIdx) {
+        /** Eagerly set the video src so the browser starts buffering. */
+        if (!videoEl || trialIdx < 0 || trialIdx >= trials.length) return;
+        if (currentTrialIdx === trialIdx) return; // already loaded
+        videoEl.src = `/api/labeling/sessions/${sessionId}/video?trial=${trialIdx}`;
+        currentTrialIdx = trialIdx;
+    }
+
     function toggleSide() {
         const idx = cameraNames.indexOf(currentSide);
         const newIdx = (idx + 1) % cameraNames.length;
@@ -1787,13 +1802,19 @@ const labeler = (() => {
             });
         }
 
-        // Load video for this trial if not already loaded
+        // Load video source if not already set for this trial
         if (currentTrialIdx !== trialIdx) {
-            videoLoading = true;
-            renderTimeline();
             videoEl.src = `/api/labeling/sessions/${sessionId}/video?trial=${trialIdx}`;
             currentTrialIdx = trialIdx;
-            // Wait for enough data before seeking/playing
+        }
+
+        // If video is ready (HAVE_FUTURE_DATA or better), play immediately;
+        // otherwise wait for canplay
+        if (videoEl.readyState >= 3) {
+            seekAndPlay();
+        } else {
+            videoLoading = true;
+            renderTimeline();
             videoEl.oncanplay = () => {
                 videoEl.oncanplay = null;
                 videoLoading = false;
@@ -1807,9 +1828,6 @@ const labeler = (() => {
                 console.error('Video load failed, falling back to frame-by-frame');
                 fallbackPlay();
             };
-        } else {
-            // Video already loaded for this trial — seek and play immediately
-            seekAndPlay();
         }
 
         // Handle trial end — stop or advance to next trial
