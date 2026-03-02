@@ -28,6 +28,7 @@ class SettingsUpdate(BaseModel):
     remote_ssh_key: Optional[str] = None
     remote_ssh_port: Optional[int] = None
     calibrations: Optional[Dict[str, str]] = None
+    prefer_deidentified: Optional[bool] = None
 
 
 @router.get("")

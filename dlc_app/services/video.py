@@ -128,6 +128,13 @@ def _extract_frame_cached(video_path: str, frame_num: int, side: str) -> bytes:
     return bytes(jpeg)
 
 
+def _deidentified_path(video_path: str) -> str | None:
+    """Return the deidentified version of a video if it exists."""
+    p = Path(video_path)
+    deident = p.parent / "deidentified" / p.name
+    return str(deident) if deident.exists() else None
+
+
 def extract_frame(subject_name: str, global_frame: int, side: str,
                   trials: list[dict] | None = None) -> bytes:
     """Extract a frame for a subject at a global frame index.
@@ -144,6 +151,14 @@ def extract_frame(subject_name: str, global_frame: int, side: str,
     if trials is None:
         trials = build_trial_map(subject_name)
     video_path, local_frame = _resolve_frame(trials, global_frame)
+
+    # Optionally display deidentified version (frame numbering from originals)
+    settings = get_settings()
+    if settings.prefer_deidentified:
+        deident = _deidentified_path(video_path)
+        if deident:
+            video_path = deident
+
     return _extract_frame_cached(video_path, local_frame, side)
 
 

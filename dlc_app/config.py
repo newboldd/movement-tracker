@@ -49,6 +49,9 @@ class Settings:
         self.host: str = "127.0.0.1"
         self.port: int = 8080
 
+        # Display preferences
+        self.prefer_deidentified: bool = False  # show deidentified videos in labeling UI
+
         # Remote training (optional)
         self.remote_host: str = ""       # e.g. user@192.168.1.50
         self.remote_python: str = ""     # e.g. /home/user/miniconda3/envs/dlc/bin/python
@@ -141,6 +144,8 @@ class Settings:
             self.port = int(data["port"])
         if "remote_ssh_port" in data and data["remote_ssh_port"] is not None:
             self.remote_ssh_port = int(data["remote_ssh_port"])
+        if "prefer_deidentified" in data and data["prefer_deidentified"] is not None:
+            self.prefer_deidentified = bool(data["prefer_deidentified"])
 
     def _apply_env_overrides(self):
         """Override settings from DLC_APP_* environment variables."""
@@ -200,6 +205,7 @@ class Settings:
             "remote_work_dir": self.remote_work_dir,
             "remote_ssh_key": self.remote_ssh_key,
             "remote_ssh_port": self.remote_ssh_port,
+            "prefer_deidentified": self.prefer_deidentified,
         }
 
     def save(self):
