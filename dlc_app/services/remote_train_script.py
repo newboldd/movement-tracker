@@ -44,6 +44,9 @@ def ensure_labeled_data_pngs(config_path: str, video_dir: str,
     For each labeled-data subdir that has label_metadata.json but is
     missing PNG files, extract frames from the stereo video (split at
     midline by side=OS/OD).
+
+    Metadata format (new): {img: {video_file, local_frame, side, ...}}
+    Fallback (old):        {img: {frame_num, side, ...}} — uses first video
     """
     import cv2
 
@@ -70,41 +73,58 @@ def ensure_labeled_data_pngs(config_path: str, video_dir: str,
         logger.info(f"Regenerating {len(missing)}/{len(meta)} PNGs "
                      f"in labeled-data/{subdir}")
 
-        # Find stereo video
-        pattern = os.path.join(video_dir, f"{subject_name}_*.mp4")
-        videos = sorted(glob.glob(pattern))
-        if not videos:
-            logger.warning(f"No stereo video found matching {pattern}, "
-                           f"cannot regenerate PNGs")
-            continue
-
-        video_path = videos[0]  # Use first matching video
-        cap = cv2.VideoCapture(video_path)
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        mid = w // 2
-
-        # Group missing frames by frame_num to minimize seeking
-        by_frame = {}
+        # Group missing frames by source video to minimize file opens
+        # New metadata has video_file + local_frame; old has only frame_num
+        by_video = {}  # video_path -> [(img_name, local_frame, side), ...]
         for img_name in missing:
             info = meta[img_name]
-            fn = info["frame_num"]
-            by_frame.setdefault(fn, []).append((img_name, info["side"]))
+            side = info["side"]
+
+            if "video_file" in info and "local_frame" in info:
+                # New metadata: exact video file and local frame
+                vpath = os.path.join(video_dir, info["video_file"])
+                local_frame = info["local_frame"]
+            else:
+                # Old metadata: frame_num is global, use first matching video
+                pattern = os.path.join(video_dir, f"{subject_name}_*.mp4")
+                videos = sorted(glob.glob(pattern))
+                if not videos:
+                    logger.warning(f"No stereo video found matching {pattern}")
+                    break
+                vpath = videos[0]
+                local_frame = info["frame_num"]
+
+            by_video.setdefault(vpath, []).append((img_name, local_frame, side))
 
         count = 0
-        for frame_num in sorted(by_frame.keys()):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-            ret, frame = cap.read()
-            if not ret:
-                logger.warning(f"Cannot read frame {frame_num}")
+        for vpath, frames in by_video.items():
+            if not os.path.isfile(vpath):
+                logger.warning(f"Video not found: {vpath}")
                 continue
-            left = frame[:, :mid]
-            right = frame[:, mid:]
-            for img_name, side in by_frame[frame_num]:
+
+            cap = cv2.VideoCapture(vpath)
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            if w == 0:
+                logger.warning(f"Cannot open video: {vpath}")
+                cap.release()
+                continue
+            mid = w // 2
+
+            # Sort by frame number for sequential reading
+            for img_name, local_frame, side in sorted(frames, key=lambda x: x[1]):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, local_frame)
+                ret, frame = cap.read()
+                if not ret:
+                    logger.warning(f"Cannot read frame {local_frame} from {os.path.basename(vpath)}")
+                    continue
+                left = frame[:, :mid]
+                right = frame[:, mid:]
                 half = left if side == "OS" else right
                 cv2.imwrite(os.path.join(ld_path, img_name), half)
                 count += 1
 
-        cap.release()
+            cap.release()
+
         logger.info(f"Extracted {count} PNGs for labeled-data/{subdir}")
 
 

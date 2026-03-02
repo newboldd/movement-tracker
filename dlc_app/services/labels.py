@@ -83,6 +83,48 @@ def convert_csv_to_h5(config_path: str):
     return result.stdout
 
 
+def backfill_label_metadata(subject_name: str):
+    """Backfill video_file and local_frame into existing label_metadata.json.
+
+    Old metadata only has global frame_num. This adds video_file (basename)
+    and local_frame so the remote training script can extract PNGs from the
+    correct source video.
+    """
+    settings = get_settings()
+    dlc_path = settings.dlc_path / subject_name
+    labeled_data_root = dlc_path / "labeled-data"
+    if not labeled_data_root.is_dir():
+        return
+
+    trials = build_trial_map(subject_name)
+    if not trials:
+        return
+
+    for subdir in labeled_data_root.iterdir():
+        meta_path = subdir / "label_metadata.json"
+        if not meta_path.is_file():
+            continue
+
+        with open(meta_path) as f:
+            meta = json.load(f)
+
+        changed = False
+        for img_name, info in meta.items():
+            if "video_file" in info and "local_frame" in info:
+                continue  # Already has new fields
+            try:
+                video_path, local_frame = _resolve_frame(trials, info["frame_num"])
+                info["video_file"] = Path(video_path).name
+                info["local_frame"] = local_frame
+                changed = True
+            except (ValueError, KeyError):
+                pass
+
+        if changed:
+            with open(meta_path, "w") as f:
+                json.dump(meta, f, indent=2)
+
+
 def commit_labels_to_dlc(
     subject_name: str,
     session_labels: list[dict],
@@ -147,6 +189,8 @@ def commit_labels_to_dlc(
         })
         metadata[img_filename] = {
             "frame_num": label["frame_num"],
+            "local_frame": local_frame,
+            "video_file": Path(video_path).name,
             "trial_idx": label["trial_idx"],
             "side": label["side"],
         }

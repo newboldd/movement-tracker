@@ -324,6 +324,14 @@ def remote_train_monitor(
         with open(log_path, "a" if resume else "w") as logfile:
 
             if not resume:
+                # ── Pre-upload: backfill label metadata ──────────────
+                try:
+                    from .labels import backfill_label_metadata
+                    backfill_label_metadata(subject_name)
+                except Exception as e:
+                    logfile.write(f"Warning: metadata backfill failed: {e}\n")
+                    logfile.flush()
+
                 # ── Phase 1: Upload DLC dir ──────────────────────────
                 logfile.write(f"=== Phase 1: Uploading {local_dlc_dir} to {cfg.host}:{remote_project_dir} ===\n")
                 logfile.flush()
