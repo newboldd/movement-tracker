@@ -300,6 +300,7 @@ body {
 
 .canvas-container canvas {
     cursor: crosshair;
+    outline: none;
 }
 
 

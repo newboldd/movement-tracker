@@ -1846,6 +1846,8 @@ const labeler = (() => {
                 playing = false;
                 videoPlaying = false;
                 document.getElementById('playBtn').innerHTML = '&#9654;';
+                goToFrame(currentFrame);
+                canvas.focus();
             }
         };
     }
@@ -1916,6 +1918,7 @@ const labeler = (() => {
             }
         }
         goToFrame(currentFrame);
+        canvas.focus();
     }
 
     function fallbackPlay() {
