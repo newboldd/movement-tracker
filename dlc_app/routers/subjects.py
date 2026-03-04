@@ -40,6 +40,25 @@ def _parse_no_face_videos(raw: str | None) -> list[str]:
         return []
 
 
+def _all_no_face(row: dict) -> bool:
+    """True if every video for this subject is marked as no-face."""
+    no_face = _parse_no_face_videos(row.get("no_face_videos"))
+    if not no_face:
+        return False
+    videos = _find_videos(row["name"]) if row.get("name") else []
+    if not videos:
+        return False
+    video_stems = {Path(v).stem for v in videos}
+    return video_stems.issubset(set(no_face))
+
+
+def _has_blur_complete(dlc_path: Path, row: dict) -> bool:
+    """True if blur is done: either has .deidentified marker or all videos are no-face."""
+    if _has_deidentified(dlc_path):
+        return True
+    return _all_no_face(row)
+
+
 def _subject_row_to_response(row: dict) -> dict:
     """Convert a DB row to SubjectResponse fields."""
     dlc_path = _resolve_dlc_path(row.get("dlc_dir"))
@@ -51,7 +70,7 @@ def _subject_row_to_response(row: dict) -> dict:
         "has_snapshots": _has_snapshots(dlc_path) if dlc_path and dlc_path.exists() else False,
         "has_labels": _has_labeled_data(dlc_path) if dlc_path and dlc_path.exists() else False,
         "has_mediapipe": _has_mediapipe(dlc_path) if dlc_path and dlc_path.exists() else False,
-        "has_blur": _has_deidentified(dlc_path) if dlc_path and dlc_path.exists() else False,
+        "has_blur": _has_blur_complete(dlc_path, row) if dlc_path and dlc_path.exists() else _all_no_face(row),
     }
     resp["no_face_videos"] = _parse_no_face_videos(row.get("no_face_videos"))
     return resp
