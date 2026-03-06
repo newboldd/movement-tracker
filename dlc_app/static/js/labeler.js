@@ -267,7 +267,7 @@ const labeler = (() => {
 
                 // Load all stage data and merge distances
                 await loadAllStages();
-                if (isRefine) computeCorrectionFrames();
+                if (isRefine) { computeCorrectionFrames(); updateLabelCount(); }
                 populateStageSelector();
 
                 // Final mode: hide timeline/distance trace, build trial plots at bottom
@@ -2232,6 +2232,13 @@ const labeler = (() => {
     }
 
     function updateLabelCount() {
+        if (isRefine) {
+            const total = correctionFrames.size;
+            const training = total - v2Excludes.size;
+            document.getElementById('labelCount').innerHTML =
+                `Corrections: <strong>${training}</strong> / ${total} training on`;
+            return;
+        }
         const count = labels.size;
         const committedStr = committedFrameCount > 0 ? ` (${committedFrameCount} committed)` : '';
         document.getElementById('labelCount').innerHTML =
@@ -2955,6 +2962,7 @@ const labeler = (() => {
             v2Excludes.add(key);
         }
         updateV2TrainingBtn();
+        updateLabelCount();
         renderDistanceTrace();
     }
 
