@@ -715,16 +715,32 @@ def commit_session(
                 (session["subject_id"],),
             )
 
-    # For refine sessions, auto-trigger training
-    retrain_job_id = None
-    if is_refine:
-        try:
-            from .pipeline import run_step as _run_step
-            from ..models import RunStepRequest
-            step_result = _run_step(session["subject_id"], RunStepRequest(step="train"))
-            retrain_job_id = step_result.get("job_id")
-        except Exception:
-            pass  # Training trigger is best-effort
-
-    result["retrain_job_id"] = retrain_job_id
     return result
+
+
+@router.post("/sessions/{session_id}/save_corrections")
+def save_corrections_only(session_id: int) -> dict:
+    """Persist session labels to corrections CSV without marking the session committed.
+
+    Used by the refine view's 'Save Corrections' button so the user can save
+    mid-session without committing to DLC training data.
+    """
+    with get_db_ctx() as db:
+        session = db.execute(
+            "SELECT * FROM label_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not session:
+            raise HTTPException(404, "Session not found")
+        subj = db.execute(
+            "SELECT * FROM subjects WHERE id = ?", (session["subject_id"],)
+        ).fetchone()
+        labels = db.execute(
+            """SELECT frame_num, trial_idx, side, keypoints
+               FROM frame_labels WHERE session_id = ?""",
+            (session_id,),
+        ).fetchall()
+
+    if not labels:
+        raise HTTPException(400, "No labels to save")
+
+    return save_corrections_to_csv(subject_name=subj["name"], session_labels=labels)

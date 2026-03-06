@@ -218,12 +218,18 @@ const labeler = (() => {
                 console.log('Could not load subjects list for navigation');
             }
 
-            // Update commit button text (hide in final mode)
-            const commitBtn = document.querySelector('[onclick="labeler.commitSession()"]');
-            if (commitBtn) {
-                if (isFinal) commitBtn.style.display = 'none';
-                else if (isCorrections) commitBtn.textContent = 'Save Corrections';
-                else if (isRefine) commitBtn.textContent = 'Commit & Retrain';
+            // Update commit buttons for mode
+            const mainCommitBtn = document.getElementById('mainCommitBtn');
+            const saveCorrectionsBtn = document.getElementById('saveCorrectionsBtn');
+            const commitDlcBtn = document.getElementById('commitDlcBtn');
+            if (isFinal) {
+                if (mainCommitBtn) mainCommitBtn.style.display = 'none';
+            } else if (isRefine) {
+                if (mainCommitBtn) mainCommitBtn.style.display = 'none';
+                if (saveCorrectionsBtn) saveCorrectionsBtn.style.display = '';
+                if (commitDlcBtn) commitDlcBtn.style.display = '';
+            } else if (isCorrections) {
+                if (mainCommitBtn) mainCommitBtn.textContent = 'Save Corrections';
             }
 
             // Update sidebar with dynamic shortcuts
@@ -785,8 +791,33 @@ const labeler = (() => {
             } else if (isCorrections || isRefine) {
                 const stageCoords = getStageLabel(currentFrame, currentSide, bp);
                 if (stageCoords) {
-                    drawPoint(stageCoords[0], stageCoords[1], bpColor(idx), bpLetter(bp));
-                    placedBps.push({ bp, x: stageCoords[0], y: stageCoords[1], stageSource: true });
+                    if (isRefine) {
+                        // Compare corrections label to DLC label for this bodypart
+                        const dlcBpArr = stageData['dlc'] && stageData['dlc'][currentSide]
+                            ? stageData['dlc'][currentSide][bp] : null;
+                        const dlcPt = dlcBpArr && currentFrame < dlcBpArr.length
+                            ? dlcBpArr[currentFrame] : null;
+                        if (dlcPt) {
+                            const diff = Math.hypot(stageCoords[0] - dlcPt[0], stageCoords[1] - dlcPt[1]);
+                            if (diff >= 3.0) {
+                                // Genuine correction: show DLC as ghost underneath, corrections as full label
+                                drawGhostPoint(dlcPt[0], dlcPt[1], bpColor(idx), 'D');
+                                drawPoint(stageCoords[0], stageCoords[1], bpColor(idx), bpLetter(bp));
+                                placedBps.push({ bp, x: stageCoords[0], y: stageCoords[1], stageSource: true });
+                            } else {
+                                // Matches DLC: show as ghost (no real correction here)
+                                drawGhostPoint(stageCoords[0], stageCoords[1], bpColor(idx), bpLetter(bp));
+                                placedBps.push({ bp, x: stageCoords[0], y: stageCoords[1], stageSource: true, ghost: true });
+                            }
+                        } else {
+                            // No DLC reference: show as full label
+                            drawPoint(stageCoords[0], stageCoords[1], bpColor(idx), bpLetter(bp));
+                            placedBps.push({ bp, x: stageCoords[0], y: stageCoords[1], stageSource: true });
+                        }
+                    } else {
+                        drawPoint(stageCoords[0], stageCoords[1], bpColor(idx), bpLetter(bp));
+                        placedBps.push({ bp, x: stageCoords[0], y: stageCoords[1], stageSource: true });
+                    }
                 } else {
                     // Gap frame: show auto-merge as ghost
                     const mergedCoords = getMergedLabel(currentFrame, currentSide, bp);
@@ -1509,7 +1540,7 @@ const labeler = (() => {
         // Then flush any remaining dirty keys
         await saveLabels();
 
-        if (labels.size === 0) {
+        if (!isRefine && labels.size === 0) {
             alert('No labels to commit.');
             return;
         }
@@ -1530,13 +1561,25 @@ const labeler = (() => {
                 }
             }
             const result = await API.post(`/api/labeling/sessions/${sessionId}/commit`, commitBody);
-            let msg = `Committed ${result.frame_count} frames for v2 training.`;
-            if (result.retrain_job_id) {
-                msg += ` Retrain job #${result.retrain_job_id} started.`;
-            }
-            updateLabelInfo(msg);
+            updateLabelInfo(`Committed ${result.frame_count} frames to DLC labeled-data.`);
         } catch (e) {
             alert('Commit error: ' + e.message);
+        }
+    }
+
+    async function saveCorrectionsOnly() {
+        if (!isRefine) return;
+        if (savePromise) await savePromise;
+        await saveLabels();
+        if (labels.size === 0) {
+            updateLabelInfo('No manual corrections to save yet.');
+            return;
+        }
+        try {
+            const result = await API.post(`/api/labeling/sessions/${sessionId}/save_corrections`);
+            updateLabelInfo(`Saved ${result.frame_count} corrected frames to corrections CSV.`);
+        } catch (e) {
+            alert('Save error: ' + e.message);
         }
     }
 
@@ -1545,6 +1588,12 @@ const labeler = (() => {
     function prevFrame() { goToFrame(currentFrame - 1); }
 
     async function nextLabel() {
+        if (isRefine) {
+            const sorted = getCorrectionFramesSorted();
+            const next = sorted.find(f => f > currentFrame);
+            if (next !== undefined) await goToFrame(next);
+            return;
+        }
         const sorted = getLabeledFrames();
         const next = sorted.find(f => f > currentFrame);
         if (next !== undefined) {
@@ -1554,12 +1603,27 @@ const labeler = (() => {
     }
 
     async function prevLabel() {
+        if (isRefine) {
+            const sorted = getCorrectionFramesSorted();
+            const prev = [...sorted].reverse().find(f => f < currentFrame);
+            if (prev !== undefined) await goToFrame(prev);
+            return;
+        }
         const sorted = getLabeledFrames();
         const prev = [...sorted].reverse().find(f => f < currentFrame);
         if (prev !== undefined) {
             zoomToLabels(prev, currentSide);
             await goToFrame(prev);
         }
+    }
+
+    function getCorrectionFramesSorted() {
+        const frames = new Set();
+        correctionFrames.forEach(key => {
+            const [f] = key.split('_');
+            frames.add(parseInt(f));
+        });
+        return [...frames].sort((a, b) => a - b);
     }
 
     async function nextGap() {
@@ -1705,6 +1769,10 @@ const labeler = (() => {
         const show = !isFinal || selectedStage === 'labels';
         prev.style.display = show ? '' : 'none';
         next.style.display = show ? '' : 'none';
+        if (isRefine) {
+            prev.textContent = '\u2190 Corr';
+            next.textContent = 'Corr \u2192';
+        }
     }
 
     function recomputeCameraShift() {
@@ -2762,7 +2830,7 @@ const labeler = (() => {
                 const x = fToX(frame);
                 let y;
                 if (distances && frame < distances.length && distances[frame] !== null) {
-                    y = dToY(distances[frame]);
+                    y = Math.max(padT + 4, Math.min(padT + plotH - 4, dToY(distances[frame])));
                 } else {
                     y = padT + plotH * 0.5;
                 }
@@ -2911,7 +2979,7 @@ const labeler = (() => {
         nextFrame, prevFrame, nextLabel, prevLabel,
         nextGap, prevGap, acceptMergedLabels,
         toggleSide, togglePlay, resetZoom, cycleReviewMode,
-        saveLabels, commitSession,
+        saveLabels, commitSession, saveCorrectionsOnly,
         toggleV2Training,
         prevSubject, nextSubject,
     };
