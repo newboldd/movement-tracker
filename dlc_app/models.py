@@ -98,3 +98,14 @@ class SessionResponse(BaseModel):
     status: str
     label_count: int = 0
     created_at: Optional[str] = None
+
+
+class V2Frame(BaseModel):
+    frame_num: int
+    side: str
+
+
+class CommitRequest(BaseModel):
+    # Refine mode: explicit list of correction frames to include in DLC training.
+    # Derived from corrections CSV vs DLC CSV diff on the frontend.
+    v2_train_frames: List[V2Frame] = []

@@ -64,7 +64,7 @@ def _parse_simple_corrections_csv(csv_path: Path) -> dict:
     return result
 
 
-def _parse_dlc_csv(csv_path: Path, likelihood_threshold: float = 0.6) -> dict:
+def _parse_dlc_csv(csv_path: Path, likelihood_threshold: float = 0.0) -> dict:
     """Parse a DLC multi-header CSV into per-bodypart coordinate arrays.
 
     DLC CSVs have 3 header rows:
@@ -114,11 +114,7 @@ def _parse_dlc_csv(csv_path: Path, likelihood_threshold: float = 0.6) -> dict:
             try:
                 x = float(row[cols["x"]])
                 y = float(row[cols["y"]])
-                likelihood = float(row[cols["likelihood"]]) if "likelihood" in cols else 1.0
-                if likelihood >= likelihood_threshold:
-                    coords.append([x, y])
-                else:
-                    coords.append(None)
+                coords.append([x, y])
             except (IndexError, ValueError):
                 coords.append(None)
         result[bp] = coords

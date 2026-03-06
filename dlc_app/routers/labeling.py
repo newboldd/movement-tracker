@@ -5,12 +5,12 @@ import json
 from pathlib import Path
 from typing import List
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 
 from ..config import get_settings
 from ..db import get_db_ctx
-from ..models import LabelBatchSave, SessionCreate, SessionResponse, STAGE_INDEX
+from ..models import CommitRequest, LabelBatchSave, SessionCreate, SessionResponse, STAGE_INDEX
 from ..services.video import (
     extract_frame, build_trial_map, get_total_frames, get_subject_videos,
     _deidentified_path, _get_no_face_videos,
@@ -578,10 +578,15 @@ def delete_label(session_id: int, frame_num: int, side: str = Query(...)) -> dic
 
 
 @router.post("/sessions/{session_id}/commit")
-def commit_session(session_id: int) -> dict:
+def commit_session(
+    session_id: int,
+    req: CommitRequest = Body(default=None),
+) -> dict:
     """Commit session: extract frames as PNGs, write CSV/H5, create DLC structure.
 
-    For refine sessions: also updates subject.iteration and auto-triggers remote training.
+    For refine sessions: saves all labeled frames to corrections CSV, then commits only
+    non-excluded frames (those not in req.v2_excludes) to DLC training data, and
+    auto-triggers remote training.
     """
     with get_db_ctx() as db:
         session = db.execute(
@@ -600,10 +605,10 @@ def commit_session(session_id: int) -> dict:
             (session_id,),
         ).fetchall()
 
-    if not labels:
-        raise HTTPException(400, "No labels to commit")
-
     is_refine = session["session_type"] == "refine"
+
+    if not labels and not is_refine:
+        raise HTTPException(400, "No labels to commit")
     is_corrections = session["session_type"] == "corrections"
 
     if is_corrections:
@@ -623,11 +628,75 @@ def commit_session(session_id: int) -> dict:
             )
         return result
 
-    result = commit_labels_to_dlc(
-        subject_name=subj["name"],
-        session_labels=labels,
-        iteration=session["iteration"],
-    )
+    if is_refine:
+        # Build training labels from corrections stage data for the requested frames.
+        # The frontend sends the frames (corrections CSV != DLC CSV) that are NOT excluded.
+        import json as _json
+        from ..services.dlc_predictions import get_dlc_predictions_for_stage
+
+        # First, persist any manual edits made in refine mode to the corrections CSV
+        if labels:
+            save_corrections_to_csv(
+                subject_name=subj["name"],
+                session_labels=labels,
+            )
+
+        train_frames = req.v2_train_frames if req is not None else []
+        if not train_frames:
+            raise HTTPException(400, "No training frames selected (v2_train_frames is empty)")
+
+        # Load corrections stage data to get keypoints for each training frame
+        corr_data = get_dlc_predictions_for_stage(subj["name"], "corrections")
+        if not corr_data:
+            raise HTTPException(400, "No corrections stage data found for this subject")
+
+        settings = get_settings()
+        bodyparts = settings.bodyparts
+        cam_names = settings.camera_names
+
+        # Build a synthetic session_labels list from corrections data
+        from ..services.video import build_trial_map as _build_trial_map
+        trials = _build_trial_map(subj["name"])
+        frame_to_trial = {}
+        for ti, t in enumerate(trials):
+            for f in range(t["start_frame"], t["end_frame"] + 1):
+                frame_to_trial[f] = ti
+
+        training_labels = []
+        for vf in train_frames:
+            frame_num = vf.frame_num
+            side = vf.side
+            if side not in cam_names:
+                continue
+            cam_data = corr_data.get(side, {})
+            kp = {}
+            for bp in bodyparts:
+                arr = cam_data.get(bp)
+                if arr and frame_num < len(arr) and arr[frame_num] is not None:
+                    kp[bp] = arr[frame_num]
+            if not kp:
+                continue
+            training_labels.append({
+                "frame_num": frame_num,
+                "trial_idx": frame_to_trial.get(frame_num, 0),
+                "side": side,
+                "keypoints": kp,
+            })
+
+        if not training_labels:
+            raise HTTPException(400, "No usable labels found in corrections data for selected frames")
+
+        result = commit_labels_to_dlc(
+            subject_name=subj["name"],
+            session_labels=training_labels,
+            iteration=session["iteration"],
+        )
+    else:
+        result = commit_labels_to_dlc(
+            subject_name=subj["name"],
+            session_labels=labels,
+            iteration=session["iteration"],
+        )
 
     # Update session and subject status
     with get_db_ctx() as db:

@@ -37,8 +37,8 @@
                     <button class="btn btn-sm" onclick="labeler.nextFrame()" title="Next frame (S/Right)">&rarr;</button>
                 </div>
                 <div style="display:flex;gap:4px;margin-bottom:8px;">
-                    <button class="btn btn-sm" onclick="labeler.prevLabel()" title="Previous labeled frame">&larr; Label</button>
-                    <button class="btn btn-sm" onclick="labeler.nextLabel()" title="Next labeled frame">Label &rarr;</button>
+                    <button class="btn btn-sm" id="prevLabelBtn" onclick="labeler.prevLabel()" title="Previous labeled frame">&larr; Label</button>
+                    <button class="btn btn-sm" id="nextLabelBtn" onclick="labeler.nextLabel()" title="Next labeled frame">Label &rarr;</button>
                 </div>
                 <div style="margin-bottom: 8px;">
                     <label style="font-size:12px;color:var(--text-muted);">Playback speed</label>
@@ -68,6 +68,7 @@
             <div style="margin-bottom: 16px;">
                 <h3 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">Actions</h3>
                 <button class="btn btn-sm btn-success" onclick="labeler.commitSession()" style="width:100%;">Save &amp; Commit</button>
+                <button class="btn btn-sm" id="v2ToggleBtn" onclick="labeler.toggleV2Training()" style="width:100%;margin-top:4px;display:none;">Training: On ✓</button>
             </div>
 
             <div>
@@ -121,10 +122,18 @@
 
             <!-- Trial plots (final mode only) -->
             <div id="trialPlotsContainer" style="display:none;"></div>
+
+            <!-- Y-max control (shown when distance data is visible) -->
+            <div id="ymaxContainer" style="display:none;position:absolute;bottom:4px;right:8px;display:none;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);">
+                <label for="ymaxInput">Y max:</label>
+                <input id="ymaxInput" type="number" min="0" step="10"
+                    style="width:60px;padding:2px 4px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:11px;"
+                    placeholder="auto">
+            </div>
         </div>
     </div>
 
     <script src="/static/js/api.js?v=10"></script>
-    <script src="/static/js/labeler.js?v=23"></script>
+    <script src="/static/js/labeler.js?v=24"></script>
 </body>
 </html>

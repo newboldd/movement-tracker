@@ -72,6 +72,8 @@ const labeler = (() => {
     let canvas, ctx;
     let timeline, tlCtx;
     let distCanvas, distCtx;
+    // User-defined Y max for distance plots (null = auto)
+    let userYMax = null;
     // Distance trace viewport (zoomed ~10s window)
     let distViewStart = 0;      // first visible frame
     let distViewFrames = 0;     // number of frames in visible window (set from fps)
@@ -118,6 +120,16 @@ const labeler = (() => {
     // so next-priority ghost can appear after user deletes a correction
     const rejectedStageLabels = new Set();
 
+    // V2 training exclusions (refine mode): Set of `${frame}_${side}` keys.
+    // All labeled frames are included by default; adding a key here excludes it
+    // from DLC training while still saving it to the corrections CSV on commit.
+    const v2Excludes = new Set();
+
+    // Frames that differ between corrections and DLC stage data (refine mode).
+    // These are pre-existing manual corrections and are shown as green dots.
+    // Populated by computeCorrectionFrames() after stage data loads.
+    let correctionFrames = new Set();
+
     // Prefetch cache
     const imageCache = new Map();
     const PREFETCH_AHEAD = 3;
@@ -147,6 +159,20 @@ const labeler = (() => {
         setupCanvasEvents();
         setupTimeline();
         if (distCanvas) setupDistanceTrace();
+
+        // Y-max input
+        const ymaxInput = document.getElementById('ymaxInput');
+        if (ymaxInput) {
+            ymaxInput.addEventListener('change', () => {
+                const val = parseFloat(ymaxInput.value);
+                userYMax = (isFinite(val) && val > 0) ? val : null;
+                renderDistanceTrace();
+                renderTrialPlots();
+            });
+            ymaxInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') ymaxInput.blur();
+            });
+        }
 
         loadSession();
     }
@@ -216,8 +242,8 @@ const labeler = (() => {
                 });
             }
 
-            if (isCorrections || isFinal) {
-                // Corrections / Final mode: load stage data, no ghosts
+            if (isCorrections || isFinal || isRefine) {
+                // Corrections / Final / Refine mode: load stage data
                 try {
                     const stagesResp = await API.get(`/api/labeling/sessions/${sessionId}/available_stages`);
                     availableStages = stagesResp.stages || [];
@@ -235,6 +261,7 @@ const labeler = (() => {
 
                 // Load all stage data and merge distances
                 await loadAllStages();
+                if (isRefine) computeCorrectionFrames();
                 populateStageSelector();
 
                 // Final mode: hide timeline/distance trace, build trial plots at bottom
@@ -244,7 +271,7 @@ const labeler = (() => {
                     buildTrialPlots();
                 }
             } else {
-                // Initial / Refine mode: load MP + DLC + committed labels as before
+                // Initial mode: load MP + DLC + committed labels as ghosts
                 try {
                     const mpData = await API.get(`/api/labeling/sessions/${sessionId}/mediapipe`);
                     if (mpData && Object.keys(mpData).length > 0) {
@@ -295,10 +322,13 @@ const labeler = (() => {
                 if (traceContainer) traceContainer.style.display = 'block';
                 const timelineContainer = document.querySelector('.timeline-container');
                 if (timelineContainer) timelineContainer.style.display = 'none';
+                const ymaxContainer = document.getElementById('ymaxContainer');
+                if (ymaxContainer) ymaxContainer.style.display = 'flex';
             }
 
             recomputeCameraShift();
             updateLabelCount();
+            updateLabelNavButtons();
             goToFrame(0);
 
         } catch (e) {
@@ -374,6 +404,7 @@ const labeler = (() => {
         updateFrameDisplay();
         renderTimeline();
         renderDistanceTrace();
+        if (isRefine) updateV2TrainingBtn();
     }
 
     function fitImage() {
@@ -486,7 +517,7 @@ const labeler = (() => {
         const select = document.getElementById('stageSelector');
         const csvList = document.getElementById('stageCsvList');
         if (!container || !select) return;
-        if (!isFinal || availableStages.length === 0) return;
+        if ((!isFinal && !isRefine) || availableStages.length === 0) return;
 
         container.style.display = 'block';
         select.innerHTML = '<option value="auto">Auto (priority merge)</option>';
@@ -519,6 +550,7 @@ const labeler = (() => {
             selectedStage = select.value;
             select.blur();
             updateCsvList();
+            updateLabelNavButtons();
             computeMergedDistances();
             if (isFinal) computeFinalCropBoxes();
             render();
@@ -532,6 +564,41 @@ const labeler = (() => {
         }
 
         updateCsvList();
+    }
+
+    function computeCorrectionFrames() {
+        /** In refine mode: find all frame+side combos where corrections stage
+         *  coords differ from DLC stage coords by >= CORR_THRESHOLD pixels.
+         *  These represent pre-existing manual corrections and are shown as
+         *  green dots on the distance trace.
+         */
+        correctionFrames = new Set();
+        if (!isRefine) return;
+
+        const corrData = stageData['corrections'];
+        const dlcData = stageData['dlc'];
+        if (!corrData || !dlcData) return;
+
+        const CORR_THRESHOLD = 3.0; // pixels — below this = rounding / noise
+
+        for (const cam of cameraNames) {
+            if (!corrData[cam] || !dlcData[cam]) continue;
+            for (const bp of bodyparts) {
+                const corrArr = corrData[cam][bp];
+                const dlcArr = dlcData[cam][bp];
+                if (!corrArr || !dlcArr) continue;
+                const n = Math.min(corrArr.length, dlcArr.length);
+                for (let f = 0; f < n; f++) {
+                    const c = corrArr[f];
+                    const d = dlcArr[f];
+                    if (!c || !d) continue;
+                    if (Math.hypot(c[0] - d[0], c[1] - d[1]) >= CORR_THRESHOLD) {
+                        correctionFrames.add(`${f}_${cam}`);
+                    }
+                }
+            }
+        }
+        console.log(`[refine] ${correctionFrames.size} correction frames found`);
     }
 
     function computeMergedDistances() {
@@ -568,6 +635,8 @@ const labeler = (() => {
 
         if (merged.some(d => d !== null)) {
             distances = merged;
+            const ymaxContainer = document.getElementById('ymaxContainer');
+            if (ymaxContainer) ymaxContainer.style.display = 'flex';
             if (!isFinal) {
                 const traceContainer = document.getElementById('distanceTraceContainer');
                 if (traceContainer) traceContainer.style.display = 'block';
@@ -617,7 +686,7 @@ const labeler = (() => {
     function getStageLabel(frame, side, bodypart) {
         /** Look up label from selected stage or all stages (highest priority first).
          *  Skips stages whose label was rejected by the user for this frame/side/bp. */
-        if (!isCorrections && !isFinal) return null;
+        if (!isCorrections && !isFinal && !isRefine) return null;
 
         const stagesToUse = (selectedStage !== 'auto')
             ? [selectedStage]
@@ -639,7 +708,7 @@ const labeler = (() => {
 
     function getStageLabelSource(frame, side, bodypart) {
         /** Like getStageLabel but returns {coords, stage} or null. */
-        if (!isCorrections && !isFinal) return null;
+        if (!isCorrections && !isFinal && !isRefine) return null;
 
         const stagesToUse = (selectedStage !== 'auto')
             ? [selectedStage]
@@ -713,7 +782,7 @@ const labeler = (() => {
                     drawPoint(stageCoords[0], stageCoords[1], bpColor(idx), bpLetter(bp));
                     placedBps.push({ bp, x: stageCoords[0], y: stageCoords[1] });
                 }
-            } else if (isCorrections) {
+            } else if (isCorrections || isRefine) {
                 const stageCoords = getStageLabel(currentFrame, currentSide, bp);
                 if (stageCoords) {
                     drawPoint(stageCoords[0], stageCoords[1], bpColor(idx), bpLetter(bp));
@@ -873,8 +942,8 @@ const labeler = (() => {
             }
         }
 
-        // Corrections mode: check stage-sourced labels and ghosts
-        if (isCorrections) {
+        // Corrections / Refine mode: check stage-sourced labels and ghosts
+        if (isCorrections || isRefine) {
             for (const bp of bodyparts) {
                 if (hasManualLabel(currentFrame, currentSide, bp)) continue;
                 const stageCoords = getStageLabel(currentFrame, currentSide, bp);
@@ -1163,6 +1232,7 @@ const labeler = (() => {
         updateLabelCount();
         scheduleSave();
         recomputeCameraShift();
+        if (isRefine) updateV2TrainingBtn();
     }
 
     // ── Zoom helpers ─────────────────────────────────
@@ -1178,7 +1248,7 @@ const labeler = (() => {
             const manual = lbl ? lbl[bp] : null;
             if (manual && manual[0] != null) {
                 pts.push(manual);
-            } else if (isCorrections) {
+            } else if (isCorrections || isRefine) {
                 const sc = getStageLabel(frame, side, bp);
                 if (sc) pts.push(sc);
             } else {
@@ -1296,6 +1366,7 @@ const labeler = (() => {
         updateLabelCount();
         scheduleSave();
         recomputeCameraShift();
+        if (isRefine) updateV2TrainingBtn();
     }
 
     function removeLabel(which) {
@@ -1319,11 +1390,12 @@ const labeler = (() => {
             render();
             updateLabelCount();
             scheduleSave();
+            if (isRefine) updateV2TrainingBtn();
             return;
         }
 
-        // Corrections mode: reject the stage-sourced label so next-priority appears
-        if (isCorrections) {
+        // Corrections/Refine mode: reject the stage-sourced label so next-priority appears
+        if (isCorrections || isRefine) {
             rejectStageLabel(which);
         }
     }
@@ -1443,8 +1515,22 @@ const labeler = (() => {
         }
 
         try {
-            const result = await API.post(`/api/labeling/sessions/${sessionId}/commit`);
-            let msg = `Committed ${result.frame_count} frames.`;
+            const commitBody = {};
+            if (isRefine) {
+                // v2_train_frames = correction frames the user has NOT excluded
+                commitBody.v2_train_frames = [...correctionFrames]
+                    .filter(key => !v2Excludes.has(key))
+                    .map(key => {
+                        const [frameStr, side] = key.split('_');
+                        return { frame_num: parseInt(frameStr), side };
+                    });
+                if (commitBody.v2_train_frames.length === 0) {
+                    updateLabelInfo('No training frames selected — toggle some on first.');
+                    return;
+                }
+            }
+            const result = await API.post(`/api/labeling/sessions/${sessionId}/commit`, commitBody);
+            let msg = `Committed ${result.frame_count} frames for v2 training.`;
             if (result.retrain_job_id) {
                 msg += ` Retrain job #${result.retrain_job_id} started.`;
             }
@@ -1477,7 +1563,7 @@ const labeler = (() => {
     }
 
     async function nextGap() {
-        if (!isCorrections) return;
+        if (!isCorrections && !isRefine) return;
         // Check both cameras at each frame, current camera first
         const sides = [currentSide, ...cameraNames.filter(c => c !== currentSide)];
         for (let f = currentFrame + 1; f < totalFrames; f++) {
@@ -1507,7 +1593,7 @@ const labeler = (() => {
     }
 
     async function prevGap() {
-        if (!isCorrections) return;
+        if (!isCorrections && !isRefine) return;
         const sides = [currentSide, ...cameraNames.filter(c => c !== currentSide)];
         for (let f = currentFrame - 1; f >= 0; f--) {
             for (const side of sides) {
@@ -1551,7 +1637,7 @@ const labeler = (() => {
     function acceptMergedLabels() {
         /** Accept auto-merge labels for current frame, promoting them to manual corrections.
          *  Only operates on gap bodyparts (where getStageLabel returns null). */
-        if (!isCorrections) return;
+        if (!isCorrections && !isRefine) return;
         const key = `${currentFrame}_${currentSide}`;
         let lbl = labels.get(key);
         if (!lbl) { lbl = {}; labels.set(key, lbl); }
@@ -1582,6 +1668,22 @@ const labeler = (() => {
     }
 
     function getLabeledFrames() {
+        // In final mode, navigate through frames that have data in the 'labels' stage
+        if (isFinal) {
+            const sd = stageData['labels'];
+            if (!sd || !sd[currentSide]) return [];
+            const camData = sd[currentSide];
+            const frames = new Set();
+            for (const bp of bodyparts) {
+                const arr = camData[bp];
+                if (!arr) continue;
+                for (let f = 0; f < arr.length; f++) {
+                    if (arr[f] != null) frames.add(f);
+                }
+            }
+            return [...frames].sort((a, b) => a - b);
+        }
+
         const frames = new Set();
         labels.forEach((lbl, key) => {
             const [frameStr, side] = key.split('_');
@@ -1594,6 +1696,15 @@ const labeler = (() => {
             frames.add(parseInt(frameStr));
         });
         return [...frames].sort((a, b) => a - b);
+    }
+
+    function updateLabelNavButtons() {
+        const prev = document.getElementById('prevLabelBtn');
+        const next = document.getElementById('nextLabelBtn');
+        if (!prev || !next) return;
+        const show = !isFinal || selectedStage === 'labels';
+        prev.style.display = show ? '' : 'none';
+        next.style.display = show ? '' : 'none';
     }
 
     function recomputeCameraShift() {
@@ -1627,8 +1738,8 @@ const labeler = (() => {
             }
         }
 
-        // 2a. Corrections/Final mode: use stage labels for camera shift estimation
-        if (dxValues.length < 4 && (isCorrections || isFinal) && availableStages.length > 0) {
+        // 2a. Corrections/Final/Refine mode: use stage labels for camera shift estimation
+        if (dxValues.length < 4 && (isCorrections || isFinal || isRefine) && availableStages.length > 0) {
             for (let f = 0; f < totalFrames; f += 10) {
                 for (const bp of bodyparts) {
                     const c0 = getStageLabel(f, cam0, bp);
@@ -1963,12 +2074,12 @@ const labeler = (() => {
                     break;
                 case 'q':
                     e.preventDefault();
-                    if (isCorrections) prevGap();
+                    if (isCorrections || isRefine) prevGap();
                     else prevLabel();
                     break;
                 case 'w':
                     e.preventDefault();
-                    if (isCorrections) nextGap();
+                    if (isCorrections || isRefine) nextGap();
                     else nextLabel();
                     break;
                 case 'r':
@@ -1983,8 +2094,12 @@ const labeler = (() => {
                     e.preventDefault();
                     resetZoom();
                     break;
+                case 't':
+                    e.preventDefault();
+                    if (isRefine) toggleV2Training();
+                    break;
                 case 'Enter':
-                    if (isCorrections) {
+                    if (isCorrections || isRefine) {
                         e.preventDefault();
                         acceptMergedLabels();
                     }
@@ -2019,17 +2134,20 @@ const labeler = (() => {
 
     // ── UI updates ────────────────────────────────────
     function updateFrameDisplay() {
-        document.getElementById('frameDisplay').textContent =
-            `Frame: ${currentFrame} / ${totalFrames - 1}`;
-
-        // Find current trial
+        // Find current trial and compute local frame
         let trialName = '--';
+        let localFrame = currentFrame;
+        let trialFrameCount = totalFrames;
         for (const t of trials) {
             if (currentFrame >= t.start_frame && currentFrame <= t.end_frame) {
                 trialName = t.trial_name;
+                localFrame = currentFrame - t.start_frame;
+                trialFrameCount = t.frame_count;
                 break;
             }
         }
+        document.getElementById('frameDisplay').textContent =
+            `Frame: ${localFrame} / ${trialFrameCount - 1}`;
         document.getElementById('trialDisplay').textContent = `Trial: ${trialName}`;
 
         // Show distance for current frame (unless in review mode)
@@ -2076,12 +2194,15 @@ const labeler = (() => {
             <div><kbd>A</kbd> / <kbd>&larr;</kbd> Prev frame</div>
             <div><kbd>S</kbd> / <kbd>&rarr;</kbd> Next frame</div>
         `;
-        if (isCorrections) {
+        if (isCorrections || isRefine) {
             html += `
                 <div><kbd>Q</kbd> Prev gap</div>
                 <div><kbd>W</kbd> Next gap</div>
                 <div><kbd>Enter</kbd> Accept merge</div>
             `;
+            if (isRefine) {
+                html += `<div><kbd>T</kbd> Toggle v2 training</div>`;
+            }
         } else {
             html += `
                 <div><kbd>Q</kbd> Prev label</div>
@@ -2319,7 +2440,7 @@ const labeler = (() => {
         if (globalMin === Infinity) return;
         const range = globalMax - globalMin || 10;
         globalMin = Math.max(0, globalMin - range * 0.05);
-        globalMax = globalMax + range * 0.05;
+        globalMax = userYMax !== null ? userYMax : globalMax + range * 0.05;
 
         // Fixed scale: 30 seconds = visible plot width
         const padL = 40, padR = 8, padT = 16, padB = 22;
@@ -2571,7 +2692,7 @@ const labeler = (() => {
 
         const range = maxD - minD || 10;
         minD = Math.max(0, minD - range * 0.05);
-        maxD = maxD + range * 0.05;
+        maxD = userYMax !== null ? userYMax : maxD + range * 0.05;
 
         const dToY = (d) => padT + ((maxD - d) / (maxD - minD)) * plotH;
 
@@ -2630,6 +2751,35 @@ const labeler = (() => {
         distCtx.strokeStyle = 'rgba(74, 158, 255, 0.7)';
         distCtx.lineWidth = 1.5;
         distCtx.stroke();
+
+        // Green dots/circles for correction frames (refine mode only)
+        if (isRefine) {
+            correctionFrames.forEach(key => {
+                const [frameStr, side] = key.split('_');
+                const frame = parseInt(frameStr);
+                if (frame < vStart || frame >= vEnd) return;
+
+                const x = fToX(frame);
+                let y;
+                if (distances && frame < distances.length && distances[frame] !== null) {
+                    y = dToY(distances[frame]);
+                } else {
+                    y = padT + plotH * 0.5;
+                }
+
+                distCtx.beginPath();
+                distCtx.arc(x, y, 4, 0, Math.PI * 2);
+                distCtx.strokeStyle = '#00cc44';
+                distCtx.lineWidth = 1.5;
+                if (v2Excludes.has(key)) {
+                    distCtx.stroke(); // empty circle = excluded from v2 training
+                } else {
+                    distCtx.fillStyle = '#00cc44';
+                    distCtx.fill(); // filled dot = included in v2 training
+                    distCtx.stroke();
+                }
+            });
+        }
 
         // Camera ticks for frames with manual corrections (visible only)
         labels.forEach((lbl, key) => {
@@ -2721,6 +2871,40 @@ const labeler = (() => {
         if (nextBtn) nextBtn.disabled = idx >= allSubjects.length - 1;
     }
 
+    // ── V2 training toggle (refine mode) ─────────────
+    function toggleV2Training() {
+        if (!isRefine) return;
+        const key = `${currentFrame}_${currentSide}`;
+        if (!correctionFrames.has(key)) return; // not a correction frame — nothing to toggle
+        if (v2Excludes.has(key)) {
+            v2Excludes.delete(key);
+        } else {
+            v2Excludes.add(key);
+        }
+        updateV2TrainingBtn();
+        renderDistanceTrace();
+    }
+
+    function updateV2TrainingBtn() {
+        const btn = document.getElementById('v2ToggleBtn');
+        if (!btn || !isRefine) return;
+        const key = `${currentFrame}_${currentSide}`;
+        if (!correctionFrames.has(key)) {
+            btn.style.display = 'none';
+            return;
+        }
+        btn.style.display = '';
+        if (v2Excludes.has(key)) {
+            btn.textContent = 'Training: Off';
+            btn.style.background = '';
+            btn.style.color = 'var(--text-muted)';
+        } else {
+            btn.textContent = 'Training: On \u2713';
+            btn.style.background = 'rgba(0,204,68,0.15)';
+            btn.style.color = '#00cc44';
+        }
+    }
+
     // ── Public API ────────────────────────────────────
     return {
         init,
@@ -2728,6 +2912,7 @@ const labeler = (() => {
         nextGap, prevGap, acceptMergedLabels,
         toggleSide, togglePlay, resetZoom, cycleReviewMode,
         saveLabels, commitSession,
+        toggleV2Training,
         prevSubject, nextSubject,
     };
 })();
