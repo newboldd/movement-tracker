@@ -2142,12 +2142,14 @@ const labeler = (() => {
                     break;
                 case 'q':
                     e.preventDefault();
-                    if (isCorrections || isRefine) prevGap();
+                    if (isRefine) prevLabel();
+                    else if (isCorrections) prevGap();
                     else prevLabel();
                     break;
                 case 'w':
                     e.preventDefault();
-                    if (isCorrections || isRefine) nextGap();
+                    if (isRefine) nextLabel();
+                    else if (isCorrections) nextGap();
                     else nextLabel();
                     break;
                 case 'r':
@@ -2262,15 +2264,18 @@ const labeler = (() => {
             <div><kbd>A</kbd> / <kbd>&larr;</kbd> Prev frame</div>
             <div><kbd>S</kbd> / <kbd>&rarr;</kbd> Next frame</div>
         `;
-        if (isCorrections || isRefine) {
+        if (isRefine) {
+            html += `
+                <div><kbd>Q</kbd> Prev corr</div>
+                <div><kbd>W</kbd> Next corr</div>
+                <div><kbd>T</kbd> Toggle training</div>
+            `;
+        } else if (isCorrections) {
             html += `
                 <div><kbd>Q</kbd> Prev gap</div>
                 <div><kbd>W</kbd> Next gap</div>
                 <div><kbd>Enter</kbd> Accept merge</div>
             `;
-            if (isRefine) {
-                html += `<div><kbd>T</kbd> Toggle v2 training</div>`;
-            }
         } else {
             html += `
                 <div><kbd>Q</kbd> Prev label</div>
