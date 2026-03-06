@@ -605,6 +605,19 @@ const labeler = (() => {
             }
         }
         console.log(`[refine] ${correctionFrames.size} correction frames found`);
+
+        // Restore persisted excludes, keeping only keys still in correctionFrames
+        const saved = localStorage.getItem(`v2excludes_${sessionId}`);
+        if (saved) {
+            try {
+                const parsed = JSON.parse(saved);
+                parsed.forEach(k => { if (correctionFrames.has(k)) v2Excludes.add(k); });
+            } catch (_) {}
+        }
+    }
+
+    function saveV2Excludes() {
+        localStorage.setItem(`v2excludes_${sessionId}`, JSON.stringify([...v2Excludes]));
     }
 
     function computeMergedDistances() {
@@ -2963,6 +2976,7 @@ const labeler = (() => {
         }
         updateV2TrainingBtn();
         updateLabelCount();
+        saveV2Excludes();
         renderDistanceTrace();
     }
 
