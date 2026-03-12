@@ -7,17 +7,54 @@
     <link rel="stylesheet" href="/static/css/main.css?v=6">
     <style>
         body { overflow: hidden; }
+
+        /* Mode switcher styling */
+        #modeSwitcher .btn {
+            padding: 4px 10px;
+            font-size: 12px;
+            border: 1px solid var(--border);
+            background: var(--bg-card);
+            color: var(--text);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        #modeSwitcher .btn:hover {
+            background: var(--bg);
+            border-color: var(--blue);
+        }
+
+        #modeSwitcher .btn.active {
+            background: var(--blue);
+            color: white;
+            border-color: var(--blue);
+        }
     </style>
 </head>
 <body>
     <div class="header">
-        <div style="display:flex;align-items:center;gap:8px;">
-            <span id="sessionTypeLabel" style="font-size:18px;font-weight:600;"></span>
-            <select id="subjectSelect" class="subject-select"></select>
+        <div style="display:flex;align-items:center;gap:16px;">
+            <div style="display:flex;align-items:center;gap:8px;">
+                <span id="sessionTypeLabel" style="font-size:18px;font-weight:600;"></span>
+                <select id="subjectSelect" class="subject-select"></select>
+                <!-- Subject prev/next navigation -->
+                <button class="btn btn-sm" id="prevSubjectBtn" onclick="labeler.prevSubject()" title="Previous subject">&larr;</button>
+                <button class="btn btn-sm" id="nextSubjectBtn" onclick="labeler.nextSubject()" title="Next subject">&rarr;</button>
+            </div>
+            <!-- Mode Switcher -->
+            <div id="modeSwitcher" style="display:flex;gap:4px;align-items:center;">
+                <span style="font-size:12px;color:var(--text-muted);margin-right:4px;">Mode:</span>
+                <button class="btn btn-sm" id="modeLabel" onclick="switchMode('initial')" title="Label mode">Label</button>
+                <button class="btn btn-sm" id="modeRefine" onclick="switchMode('refine')" title="Refine mode">Refine</button>
+                <button class="btn btn-sm" id="modeCorrect" onclick="switchMode('corrections')" title="Correct mode">Correct</button>
+                <button class="btn btn-sm" id="modeEvents" onclick="switchMode('events')" title="Events mode">Events</button>
+            </div>
         </div>
         <nav>
             <a href="/">Dashboard</a>
-            <a href="/remote">Remote</a>
+            <a href="/remote">Processing</a>
+            <a href="/labeling-select" class="active">Labeling</a>
+            <a href="/results">Results</a>
             <a href="/settings">Settings</a>
         </nav>
     </div>
@@ -74,6 +111,53 @@
                 <button class="btn btn-sm" id="v2ToggleBtn" onclick="labeler.toggleV2Training()" style="width:100%;margin-top:4px;display:none;">Training: On ✓</button>
             </div>
 
+            <!-- Events panel (visible in events mode only) -->
+            <div id="eventsPanel" style="display:none;margin-bottom:16px;">
+                <h3 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">Events</h3>
+
+                <!-- Auto-detect -->
+                <button class="btn btn-sm" id="detectEventsBtn" onclick="labeler.detectEvents()" style="width:100%;margin-bottom:8px;">Auto-detect</button>
+
+                <!-- Place event type buttons -->
+                <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;margin-bottom:8px;">
+                    <button class="btn btn-sm" onclick="labeler.placeEventType('open')" title="Place Open at current frame (1)" style="color:#00cc44;border-color:#00cc44;">1 Open</button>
+                    <button class="btn btn-sm" onclick="labeler.placeEventType('peak')" title="Place Peak at current frame (2)" style="color:#ffcc00;border-color:#ffcc00;">2 Peak</button>
+                    <button class="btn btn-sm" onclick="labeler.placeEventType('close')" title="Place Close at current frame (3)" style="color:#ff4444;border-color:#ff4444;">3 Close</button>
+                </div>
+
+                <!-- Delete / Shift -->
+                <div style="display:flex;gap:4px;margin-bottom:8px;">
+                    <button class="btn btn-sm" onclick="labeler.deleteEvent()" title="Delete event at current frame (X)" style="flex:1;">Delete</button>
+                </div>
+                <div style="display:flex;gap:4px;margin-bottom:10px;">
+                    <button class="btn btn-sm" onclick="labeler.shiftEvent(-1)" title="Shift event back 1 frame ([)" style="flex:1;">← Shift</button>
+                    <button class="btn btn-sm" onclick="labeler.shiftEvent(1)" title="Shift event forward 1 frame (])" style="flex:1;">Shift →</button>
+                </div>
+
+                <!-- Event type visibility toggles -->
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">Show events:</div>
+                <div style="display:flex;flex-direction:column;gap:3px;">
+                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
+                        <input type="checkbox" id="showOpen" checked onchange="labeler.setEventVisibility('open', this.checked)">
+                        <span style="color:#00cc44;">●</span> Open
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
+                        <input type="checkbox" id="showPeak" checked onchange="labeler.setEventVisibility('peak', this.checked)">
+                        <span style="color:#ffcc00;">●</span> Peak
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
+                        <input type="checkbox" id="showClose" checked onchange="labeler.setEventVisibility('close', this.checked)">
+                        <span style="color:#ff4444;">●</span> Close
+                    </label>
+                </div>
+
+                <!-- Save events -->
+                <button class="btn btn-sm btn-success" onclick="labeler.saveEvents()" style="width:100%;margin-top:8px;">Save Events</button>
+
+                <!-- Event counts -->
+                <div id="eventCounts" style="font-size:11px;color:var(--text-muted);margin-top:6px;line-height:1.6;"></div>
+            </div>
+
             <div>
                 <h3 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">Shortcuts</h3>
                 <div class="shortcut-list" id="shortcutList">
@@ -87,12 +171,6 @@
                     <div><kbd>Drag</kbd> Move label</div>
                     <div><kbd>Right-click</kbd> Remove label</div>
                 </div>
-            </div>
-
-            <!-- Subject prev/next navigation -->
-            <div class="subject-nav-btns">
-                <button class="btn btn-sm" id="prevSubjectBtn" onclick="labeler.prevSubject()">&larr; Prev</button>
-                <button class="btn btn-sm" id="nextSubjectBtn" onclick="labeler.nextSubject()">Next &rarr;</button>
             </div>
         </div>
 
@@ -137,6 +215,78 @@
     </div>
 
     <script src="/static/js/api.js?v=10"></script>
-    <script src="/static/js/labeler.js?v=29"></script>
+    <script src="/static/js/labeler.js?v=31"></script>
+    <script>
+        // ── Mode Switcher ────────────────────────────────────────────
+        async function switchMode(sessionType) {
+            try {
+                // Get current subject from URL or page state
+                const subjectSelect = document.getElementById('subjectSelect');
+                const subjectId = subjectSelect ? parseInt(subjectSelect.value) : null;
+
+                if (!subjectId) {
+                    alert('No subject selected');
+                    return;
+                }
+
+                // Save current frame + zoom before navigating away
+                if (typeof labeler !== 'undefined' && labeler.saveNavState) {
+                    labeler.saveNavState();
+                }
+
+                // Create a new session with the selected mode
+                const session = await API.post(`/api/labeling/${subjectId}/sessions`, {
+                    session_type: sessionType
+                });
+
+                // Navigate to the new session
+                window.location.href = `/labeling?session=${session.id}`;
+            } catch (e) {
+                alert('Error switching mode: ' + e.message);
+            }
+        }
+
+        // ── Update mode button styling ────────────────────────────────
+        function updateModeButtonStyles() {
+            // Detect current mode from labeler state or sessionTypeLabel
+            const typeLabel = document.getElementById('sessionTypeLabel')?.textContent || '';
+            // Don't highlight anything until session finishes loading
+            if (!typeLabel.trim()) return;
+
+            let currentMode = 'initial';
+            if (typeLabel.includes('Refine')) currentMode = 'refine';
+            else if (typeLabel.includes('Correct')) currentMode = 'corrections';
+            else if (typeLabel.includes('Events')) currentMode = 'events';
+            else if (typeLabel.includes('Final')) currentMode = 'final';
+            else currentMode = 'initial';
+
+            // Map mode names to button IDs
+            const modeMap = {
+                'initial': 'modeLabel',
+                'refine': 'modeRefine',
+                'corrections': 'modeCorrect',
+                'events': 'modeEvents'
+            };
+
+            // Update all mode buttons
+            Object.entries(modeMap).forEach(([mode, btnId]) => {
+                const btn = document.getElementById(btnId);
+                if (btn) {
+                    if (mode === currentMode) {
+                        btn.classList.add('active');
+                    } else {
+                        btn.classList.remove('active');
+                    }
+                }
+            });
+        }
+
+        // Update button styles when page loads and periodically
+        document.addEventListener('DOMContentLoaded', () => {
+            updateModeButtonStyles();
+            // Re-check every 1 second in case mode changes
+            setInterval(updateModeButtonStyles, 1000);
+        });
+    </script>
 </body>
 </html>

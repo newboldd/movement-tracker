@@ -11,7 +11,9 @@
         <h1>DLC Labeler</h1>
         <nav>
             <a href="/" class="active">Dashboard</a>
-            <a href="/remote">Remote</a>
+            <a href="/remote">Processing</a>
+            <a href="/labeling-select">Labeling</a>
+            <a href="/results">Results</a>
             <a href="/settings">Settings</a>
         </nav>
     </div>
@@ -43,32 +45,17 @@
                 <span id="subjectCount" class="label-count"></span>
             </div>
             <div style="display: flex; gap: 8px;">
-                <button class="btn btn-sm" id="batchPreprocessBtn" style="display:none;" onclick="showBatchPreprocess()">Preprocess All (Remote)</button>
                 <button class="btn btn-sm" onclick="syncSubjects()">Sync from disk</button>
                 <a href="/onboarding" class="btn btn-sm btn-primary" style="text-decoration:none;">+ Add Subject</a>
             </div>
         </div>
 
-        <!-- Subject table -->
-        <div class="card" style="padding: 0; overflow: hidden;">
-            <table class="subject-table">
-                <thead>
-                    <tr>
-                        <th>Name</th>
-                        <th style="width:1%">Labels</th>
-                        <th style="width:1%">Stage</th>
-                        <th>Actions</th>
-                        <th>Videos</th>
-                        <th>MP</th>
-                        <th>Blur</th>
-                        <th>CSV</th>
-                        <th>Model</th>
-                    </tr>
-                </thead>
-                <tbody id="subjectTableBody">
-                    <tr><td colspan="9" style="text-align:center; padding:40px; color:var(--text-muted)">Loading...</td></tr>
-                </tbody>
-            </table>
+        <!-- Subjects grouped by diagnosis -->
+        <div class="card" style="padding: 16px; overflow: visible;">
+            <h2 style="margin: 0 0 16px 0;">Subjects by Diagnosis</h2>
+            <div id="subjectTableBody" style="min-height: 400px;">
+                <div style="text-align:center; padding:40px; color:var(--text-muted)">Loading...</div>
+            </div>
         </div>
 
         <!-- Subject detail panel -->

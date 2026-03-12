@@ -6,33 +6,69 @@
     <title>DLC Results</title>
     <link rel="stylesheet" href="/static/css/main.css">
 </head>
-<body>
+<body class="results-page">
     <div class="header">
-        <h1>Analysis Results</h1>
+        <div style="display:flex;align-items:center;gap:16px;">
+            <!-- Subject selector -->
+            <div style="display:flex;align-items:center;gap:8px;">
+                <select id="subjectSelect" class="subject-select">
+                    <option value="">Select a subject...</option>
+                </select>
+                <button class="btn btn-sm" id="prevSubjectBtn" title="Previous subject">&larr;</button>
+                <button class="btn btn-sm" id="nextSubjectBtn" title="Next subject">&rarr;</button>
+            </div>
+            <!-- Tab Switcher -->
+            <div id="tabSwitcher" style="display:flex;gap:4px;align-items:center;">
+                <span style="font-size:12px;color:#999;margin-right:4px;">Tab:</span>
+                <button class="btn btn-sm active" data-tab="distances">Distances</button>
+                <button class="btn btn-sm" data-tab="movements">Movements</button>
+                <button class="btn btn-sm" data-tab="group">Group Comparison</button>
+            </div>
+        </div>
         <nav>
             <a href="/">Dashboard</a>
+            <a href="/remote">Processing</a>
+            <a href="/labeling-select">Labeling</a>
             <a href="/results" class="active">Results</a>
-            <a href="/remote">Remote</a>
             <a href="/settings">Settings</a>
         </nav>
     </div>
 
-    <div class="container">
-        <div style="margin-bottom: 16px;">
-            <select id="subjectSelect"
-                style="padding: 8px 12px; background: var(--bg-card); border: 1px solid var(--border);
-                       border-radius: var(--radius); color: var(--text); font-size: 14px; min-width: 200px;">
-                <option value="">Select a subject...</option>
-            </select>
+    <div class="results-container">
+        <!-- Distances Tab -->
+        <div id="tabDistances" class="results-tab active">
+            <div id="distancePlots">
+                <div class="results-no-data">Select a subject to view distance traces</div>
+            </div>
         </div>
 
-        <div id="resultsContent">
-            <div class="card" style="text-align:center;color:var(--text-muted);padding:40px;">
-                Select a subject to view results
+        <!-- Movements Tab -->
+        <div id="tabMovements" class="results-tab">
+            <div class="results-controls" id="movementControls">
+                <label><input type="checkbox" data-param="imi" checked> IMI</label>
+                <label><input type="checkbox" data-param="amplitude" checked> Amplitude</label>
+                <label><input type="checkbox" data-param="peak_open_vel" checked> Peak Opening Vel.</label>
+                <label><input type="checkbox" data-param="peak_close_vel" checked> Peak Closing Vel.</label>
+                <label><input type="checkbox" data-param="mean_open_vel" checked> Mean Opening Vel.</label>
+                <label><input type="checkbox" data-param="mean_close_vel" checked> Mean Closing Vel.</label>
+                <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
+                <label><input type="checkbox" id="sequenceToggle"> Sequence Effect</label>
+            </div>
+            <div id="movementPlots" class="results-plot-grid">
+                <div class="results-no-data" style="grid-column:1/-1;">Select a subject to view movement parameters</div>
+            </div>
+        </div>
+
+        <!-- Group Comparison Tab -->
+        <div id="tabGroup" class="results-tab">
+            <div id="highlightedSubject"></div>
+            <div id="groupPlots" class="results-plot-grid">
+                <div class="results-no-data" style="grid-column:1/-1;">Loading group data...</div>
             </div>
         </div>
     </div>
 
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/api.js"></script>
     <script src="/static/js/results.js"></script>
 </body>

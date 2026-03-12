@@ -1,9 +1,10 @@
-/* Dashboard: subject table, job indicators, detail panel */
+/* Dashboard: subject table, job indicators, detail panel, diagnosis grouping */
 
 let subjects = [];
 let activeJobs = [];
 let appStatus = { configured: true, has_calibration: false };
 let calibrationNames = [];
+let diagnosisGroups = ["Control", "MSA", "PD", "PSP"];
 
 // ── Check settings status ────────────────────────────────
 async function checkStatus() {
@@ -18,17 +19,90 @@ async function checkStatus() {
     } catch (e) { /* ignore */ }
 }
 
+// ── Load diagnosis groups from settings ───────────────
+async function loadDiagnosisGroups() {
+    try {
+        const settings = await API.get('/api/settings');
+        diagnosisGroups = settings.diagnosis_groups || ["Control", "MSA", "PD", "PSP"];
+    } catch (e) {
+        diagnosisGroups = ["Control", "MSA", "PD", "PSP"];
+    }
+}
+
 // ── Load subjects ─────────────────────────────────────
 async function loadSubjects() {
     try {
         subjects = await API.get('/api/subjects');
-        renderTable();
+        await loadDiagnosisGroups();
+        renderDiagnosisGroups();
         populateStageFilter();
         loadJobs();
     } catch (e) {
         document.getElementById('subjectTableBody').innerHTML =
             `<tr><td colspan="9" style="text-align:center;color:var(--red)">${e.message}</td></tr>`;
     }
+}
+
+// ── Render subjects grouped by diagnosis ──────────────
+function renderDiagnosisGroups() {
+    const container = document.getElementById('subjectTableBody');
+    const filtered = getFilteredSubjects();
+
+    document.getElementById('subjectCount').innerHTML =
+        `Showing <strong>${filtered.length}</strong> of ${subjects.length} subjects`;
+
+    if (filtered.length === 0) {
+        container.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:40px;">No subjects found</div>';
+        return;
+    }
+
+    // Group by diagnosis
+    const grouped = {};
+    diagnosisGroups.forEach(dg => {
+        grouped[dg] = [];
+    });
+
+    filtered.forEach(s => {
+        const diagnosis = s.diagnosis || "Control";
+        if (!grouped[diagnosis]) {
+            grouped[diagnosis] = [];
+        }
+        grouped[diagnosis].push(s);
+    });
+
+    let html = '<div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; width: 100%;">';
+
+    diagnosisGroups.forEach(diagnosis => {
+        const groupSubjects = grouped[diagnosis] || [];
+        html += `
+            <div style="background: var(--bg-card); border-radius: var(--radius); padding: 12px; border: 1px solid var(--border);">
+                <h3 style="margin: 0 0 12px 0; font-size: 14px; color: var(--text); text-align: center;">${diagnosis} (${groupSubjects.length})</h3>
+                <div style="display: flex; flex-direction: column; gap: 6px; max-height: 600px; overflow-y: auto;">
+        `;
+
+        if (groupSubjects.length === 0) {
+            html += '<span style="font-size: 12px; color: var(--text-muted); text-align: center;">No subjects</span>';
+        } else {
+            groupSubjects.forEach(s => {
+                const stageColor = `badge-${s.stage}`;
+                html += `
+                    <div style="padding: 8px; background: var(--bg); border-radius: 4px; border: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                        <div style="cursor: pointer; flex: 1;" onclick="showDetail(${s.id})">
+                            <div style="font-weight: 600; font-size: 13px; margin-bottom: 4px;">${s.name}</div>
+                            <span class="badge ${stageColor}" style="font-size: 11px;">${s.stage.replace(/_/g, ' ')}</span>
+                        </div>
+                        <button class="btn btn-sm" style="white-space: nowrap;" onclick="openLabeling(${s.id})">Labels</button>
+                        <button class="btn btn-sm" style="white-space: nowrap;" onclick="window.location.href='/results?subject=${s.id}&tab=distances'">Results</button>
+                    </div>
+                `;
+            });
+        }
+
+        html += '</div></div>';
+    });
+
+    html += '</div>';
+    container.innerHTML = html;
 }
 
 function populateStageFilter() {
@@ -114,6 +188,16 @@ async function updateSubjectCamera(subjectId, cameraName) {
     }
 }
 
+async function updateSubjectDiagnosis(subjectId, diagnosis) {
+    try {
+        await API.patch(`/api/subjects/${subjectId}`, { diagnosis: diagnosis });
+        // Refresh the subjects list to update the grouped view
+        await loadSubjects();
+    } catch (e) {
+        alert('Error updating diagnosis: ' + e.message);
+    }
+}
+
 async function updateNoFaceVideos(subjectId) {
     const checkboxes = document.querySelectorAll('.no-face-cb');
     const noFaceVideos = [];
@@ -139,7 +223,11 @@ async function showDetail(subjectId) {
                 <h3>Info</h3>
                 <div class="info-row"><span class="label">Stage</span><span class="badge badge-${detail.stage}">${detail.stage.replace(/_/g, ' ')}</span></div>
                 <div class="info-row"><span class="label">Iteration</span><span>${detail.iteration}</span></div>
-                <div class="info-row"><span class="label">Videos</span><span>${detail.video_count}</span></div>
+                <div class="info-row"><span class="label">Diagnosis</span><span>
+                    <select id="diagnosisSelect" onchange="updateSubjectDiagnosis(${detail.id}, this.value)" style="padding:2px 6px;font-size:13px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);">
+                        ${diagnosisGroups.map(dg => `<option value="${dg}"${dg === (detail.diagnosis || 'Control') ? ' selected' : ''}>${dg}</option>`).join('')}
+                    </select>
+                </span></div>
                 <div class="info-row"><span class="label">DLC Dir</span><span style="font-size:11px;word-break:break-all">${detail.dlc_dir || 'N/A'}</span></div>
                 <div class="info-row"><span class="label">Camera</span><span>
                     <select id="cameraSelect" onchange="updateSubjectCamera(${detail.id}, this.value)" style="padding:2px 6px;font-size:13px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);">
@@ -347,6 +435,19 @@ async function syncSubjects() {
     }
 }
 
+async function autoAssignDiagnosis() {
+    if (!confirm('Auto-assign diagnosis groups to all subjects based on their names?\n\nThis will use name patterns (e.g., "Con" → Control, "MSA" → MSA, etc.) to assign subjects to groups.')) {
+        return;
+    }
+    try {
+        const result = await API.post('/api/subjects/auto-assign-diagnosis');
+        alert(`Auto-assignment complete!\n\nUpdated: ${result.updated} subjects\nTotal subjects: ${result.total_subjects}`);
+        loadSubjects();
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
 async function removeSubject(subjectId, subjectName) {
     if (!confirm(`Remove subject "${subjectName}"?\n\nThis will delete the DLC directory (models, labels, config).\nTrial and deidentified videos are NOT deleted.`)) {
         return;
@@ -434,15 +535,11 @@ async function startBatchPreprocess() {
 }
 
 // ── Event listeners ──────────────────────────────────
-document.getElementById('filterInput').addEventListener('input', renderTable);
-document.getElementById('stageFilter').addEventListener('change', renderTable);
+document.getElementById('filterInput').addEventListener('input', renderDiagnosisGroups);
+document.getElementById('stageFilter').addEventListener('change', renderDiagnosisGroups);
 
 // ── Init ─────────────────────────────────────────────
 checkStatus().then(async () => {
     await loadCalibrationNames();
-    // Show batch button if remote is configured
-    if (appStatus.remote_enabled) {
-        document.getElementById('batchPreprocessBtn').style.display = '';
-    }
     loadSubjects();
 });

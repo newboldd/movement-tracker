@@ -1,58 +1,328 @@
-"""Analysis results and plot serving."""
+"""Analysis results: distance traces, movement parameters, group comparison."""
 
+from __future__ import annotations
+
+import csv as _csv
+import logging
+import math
 from pathlib import Path
+
+import numpy as np
 from fastapi import APIRouter, HTTPException
 
 from ..config import get_settings
 from ..db import get_db_ctx
+from ..services.dlc_predictions import get_dlc_predictions_for_session
+from ..services.video import build_trial_map
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/results", tags=["results"])
 
+EVENT_TYPES = ("open", "peak", "close")
 
-@router.get("/{subject_id}")
-def get_results(subject_id: int) -> dict:
-    """Get analysis results summary for a subject."""
-    settings = get_settings()
 
+# ── helpers ─────────────────────────────────────────────────────────────
+
+def _get_subject(subject_id: int) -> dict:
+    """Look up a subject by ID; raise 404 if missing."""
     with get_db_ctx() as db:
         subj = db.execute(
             "SELECT * FROM subjects WHERE id = ?", (subject_id,)
         ).fetchone()
     if not subj:
         raise HTTPException(404, "Subject not found")
+    return dict(subj)
 
+
+def _read_events_csv(subject_name: str) -> dict:
+    """Read events.csv → {event_type: [frame_nums]}."""
+    settings = get_settings()
+    path = settings.dlc_path / subject_name / "events.csv"
+    result = {t: [] for t in EVENT_TYPES}
+    if not path.exists():
+        return result
+    with open(path, newline="") as f:
+        reader = _csv.DictReader(f)
+        for row in reader:
+            et = row.get("event_type", "").strip()
+            fn = row.get("frame_num", "").strip()
+            if et in result and fn.isdigit():
+                result[et].append(int(fn))
+    return result
+
+
+def _load_distances_and_trials(subject_name: str) -> tuple[list, list[dict]]:
+    """Return (distances, trials) for a subject.
+
+    distances: list[float|None] across all frames.
+    trials: list of {name, fps, start_frame, end_frame, frame_count}.
+    """
+    trials = build_trial_map(subject_name)
+    if not trials:
+        return [], []
+
+    preds = get_dlc_predictions_for_session(subject_name)
+    distances = preds.get("distances") if preds else None
+    if not distances:
+        return [], trials
+
+    return distances, trials
+
+
+def _compute_velocity(dist: list, fps: float, half_win: int = 2) -> list:
+    """Compute velocity via symmetric finite difference.
+
+    vel[i] = (dist[i+hw] - dist[i-hw]) / (2*hw) * fps   (mm/s)
+    """
+    n = len(dist)
+    vel = [None] * n
+    for i in range(n):
+        i0 = max(0, i - half_win)
+        i1 = min(n - 1, i + half_win)
+        d0, d1 = dist[i0], dist[i1]
+        if d0 is not None and d1 is not None and (i1 - i0) > 0:
+            vel[i] = round((d1 - d0) / (i1 - i0) * fps, 2)
+    return vel
+
+
+def _build_movement_params(
+    distances: list,
+    events: dict,
+    trials: list[dict],
+) -> tuple[list[dict], list[str]]:
+    """Compute per-movement parameters from events + distance trace.
+
+    Returns (movements_list, trial_names).
+    """
+    opens = sorted(events.get("open", []))
+    peaks = sorted(events.get("peak", []))
+    closes = sorted(events.get("close", []))
+
+    if not peaks or not distances:
+        return [], [t["trial_name"] for t in trials]
+
+    # Match events into triplets: for each peak find nearest open before + close after
+    movements = []
+    trial_names = [t["trial_name"] for t in trials]
+
+    # Determine fps per frame (for multi-trial with potentially different fps)
+    frame_fps = [60.0] * len(distances)
+    for t in trials:
+        fps = t.get("fps", 60)
+        for f in range(t["start_frame"], min(t["end_frame"] + 1, len(distances))):
+            frame_fps[f] = fps
+
+    # Determine which trial each frame belongs to
+    frame_trial = [0] * len(distances)
+    for ti, t in enumerate(trials):
+        for f in range(t["start_frame"], min(t["end_frame"] + 1, len(distances))):
+            frame_trial[f] = ti
+
+    # Compute velocity for the entire trace (use median fps)
+    med_fps = trials[0].get("fps", 60) if trials else 60
+    vel = _compute_velocity(distances, med_fps)
+
+    # Global minimum distance (ignoring None)
+    valid_dists = [d for d in distances if d is not None]
+    global_min = min(valid_dists) if valid_dists else 0
+
+    first_peak = peaks[0]
+
+    for idx, pk in enumerate(peaks):
+        fps = frame_fps[pk] if pk < len(frame_fps) else 60
+
+        # Find matching open: largest open frame < pk
+        open_f = None
+        for o in reversed(opens):
+            if o < pk:
+                open_f = o
+                break
+
+        # Find matching close: smallest close frame > pk
+        close_f = None
+        for c in closes:
+            if c > pk:
+                close_f = c
+                break
+
+        # Peak time relative to first peak (seconds)
+        peak_time = round((pk - first_peak) / fps, 4)
+
+        # IMI
+        imi = None
+        if idx > 0:
+            prev_pk = peaks[idx - 1]
+            imi = round((pk - prev_pk) / fps, 4)
+
+        # Amplitude
+        pk_dist = distances[pk] if pk < len(distances) else None
+        amplitude = round(pk_dist - global_min, 2) if pk_dist is not None else None
+
+        # Velocities
+        peak_open_vel = None
+        mean_open_vel = None
+        if open_f is not None and pk_dist is not None:
+            # Peak opening velocity: max velocity between open and peak
+            v_slice = vel[open_f:pk + 1]
+            valid_v = [v for v in v_slice if v is not None]
+            if valid_v:
+                peak_open_vel = round(max(valid_v), 2)
+
+            # Mean opening velocity: amplitude / duration
+            dur_open = (pk - open_f) / fps
+            if dur_open > 0 and amplitude is not None:
+                mean_open_vel = round(amplitude / dur_open, 2)
+
+        peak_close_vel = None
+        mean_close_vel = None
+        if close_f is not None and pk_dist is not None:
+            # Peak closing velocity: min velocity between peak and close (negative)
+            v_slice = vel[pk:close_f + 1]
+            valid_v = [v for v in v_slice if v is not None]
+            if valid_v:
+                peak_close_vel = round(min(valid_v), 2)
+
+            # Mean closing velocity: amplitude / duration (negative)
+            dur_close = (close_f - pk) / fps
+            if dur_close > 0 and amplitude is not None:
+                mean_close_vel = round(-amplitude / dur_close, 2)
+
+        movements.append({
+            "peak_time": peak_time,
+            "imi": imi,
+            "amplitude": amplitude,
+            "peak_open_vel": peak_open_vel,
+            "peak_close_vel": peak_close_vel,
+            "mean_open_vel": mean_open_vel,
+            "mean_close_vel": mean_close_vel,
+            "trial_idx": frame_trial[pk] if pk < len(frame_trial) else 0,
+        })
+
+    return movements, trial_names
+
+
+def _linreg_slope(x: list[float], y: list[float]) -> float | None:
+    """Simple OLS slope. Returns None if < 2 points."""
+    pairs = [(xi, yi) for xi, yi in zip(x, y)
+             if xi is not None and yi is not None
+             and math.isfinite(xi) and math.isfinite(yi)]
+    if len(pairs) < 2:
+        return None
+    xa = np.array([p[0] for p in pairs])
+    ya = np.array([p[1] for p in pairs])
+    xa_mean = xa.mean()
+    denom = ((xa - xa_mean) ** 2).sum()
+    if denom == 0:
+        return None
+    slope = float(((xa - xa_mean) * (ya - ya.mean())).sum() / denom)
+    return round(slope, 6)
+
+
+# ── API endpoints ───────────────────────────────────────────────────────
+
+@router.get("/{subject_id}/traces")
+def get_traces(subject_id: int) -> dict:
+    """Distance and velocity traces split by trial for the Distances tab."""
+    subj = _get_subject(subject_id)
     subject_name = subj["name"]
-    dlc_path = settings.dlc_path / subject_name
 
-    # Find analysis outputs
-    results = {
+    distances, trials = _load_distances_and_trials(subject_name)
+    if not distances:
+        return {"trials": [], "subject": subject_name}
+
+    result_trials = []
+    for t in trials:
+        s, e = t["start_frame"], t["end_frame"] + 1
+        trial_dist = distances[s:e]
+        fps = t.get("fps", 60)
+        trial_vel = _compute_velocity(trial_dist, fps)
+
+        result_trials.append({
+            "name": t["trial_name"],
+            "fps": fps,
+            "distances": trial_dist,
+            "velocities": trial_vel,
+        })
+
+    return {"trials": result_trials, "subject": subject_name}
+
+
+@router.get("/{subject_id}/movements")
+def get_movements(subject_id: int) -> dict:
+    """Per-movement parameters for the Movements tab."""
+    subj = _get_subject(subject_id)
+    subject_name = subj["name"]
+
+    distances, trials = _load_distances_and_trials(subject_name)
+    events = _read_events_csv(subject_name)
+
+    movements, trial_names = _build_movement_params(distances, events, trials)
+
+    return {
+        "movements": movements,
+        "trial_names": trial_names,
         "subject": subject_name,
-        "stage": subj["stage"],
-        "has_labels_v1": (dlc_path / "labels_v1").exists(),
-        "has_labeled_videos": (dlc_path / "labeled_videos").exists(),
-        "csv_files": [],
-        "video_files": [],
     }
 
-    # Find CSV outputs in labels_v1
-    labels_dir = dlc_path / "labels_v1"
-    if labels_dir.exists():
-        results["csv_files"] = [
-            f.name for f in sorted(labels_dir.glob("*.csv"))
-        ]
 
-    # Find labeled videos
-    lv_dir = dlc_path / "labeled_videos"
-    if lv_dir.exists():
-        results["video_files"] = [
-            f.name for f in sorted(lv_dir.glob("*.mp4"))
-        ]
+@router.get("/group")
+def get_group_comparison() -> dict:
+    """Aggregated per-subject statistics grouped by diagnosis."""
+    with get_db_ctx() as db:
+        subjects = db.execute(
+            "SELECT * FROM subjects ORDER BY diagnosis, name"
+        ).fetchall()
 
-    # Check for DLC corrections
-    corrections_dir = settings.data_path / "dlc_outputs" / "corrections"
-    if corrections_dir.exists():
-        corr_files = list(corrections_dir.glob(f"{subject_name}*.csv"))
-        results["has_corrections"] = len(corr_files) > 0
-        results["correction_files"] = [f.name for f in corr_files]
+    PARAM_KEYS = [
+        "imi", "amplitude",
+        "peak_open_vel", "peak_close_vel",
+        "mean_open_vel", "mean_close_vel",
+    ]
 
-    return results
+    results = []
+    for subj in subjects:
+        subject_name = subj["name"]
+        diagnosis = subj["diagnosis"] or "Control"
+
+        try:
+            distances, trials = _load_distances_and_trials(subject_name)
+            events = _read_events_csv(subject_name)
+            movements, _ = _build_movement_params(distances, events, trials)
+        except Exception as exc:
+            logger.warning(f"Skipping {subject_name}: {exc}")
+            continue
+
+        if len(movements) < 2:
+            continue
+
+        # Aggregate each parameter
+        entry: dict = {"name": subject_name, "diagnosis": diagnosis}
+
+        for key in PARAM_KEYS:
+            vals = [m[key] for m in movements if m[key] is not None]
+            if vals:
+                mean_v = np.mean(vals)
+                std_v = np.std(vals)
+                entry[f"mean_{key}"] = round(float(mean_v), 4)
+                entry[f"cv_{key}"] = round(float(std_v / mean_v), 4) if mean_v != 0 else None
+
+                # Sequence effect: slope of parameter vs movement index
+                indices = [float(i) for i, m in enumerate(movements) if m[key] is not None]
+                slope = _linreg_slope(indices, vals)
+                entry[f"seq_{key}"] = slope
+            else:
+                entry[f"mean_{key}"] = None
+                entry[f"cv_{key}"] = None
+                entry[f"seq_{key}"] = None
+
+        # Frequency = 1 / mean IMI
+        mean_imi = entry.get("mean_imi")
+        entry["frequency"] = round(1.0 / mean_imi, 4) if mean_imi and mean_imi > 0 else None
+
+        results.append(entry)
+
+    # Collect unique groups
+    groups = sorted(set(r["diagnosis"] for r in results))
+
+    return {"subjects": results, "groups": groups}

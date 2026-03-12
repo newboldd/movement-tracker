@@ -128,7 +128,9 @@
         <h1>Settings</h1>
         <nav>
             <a href="/">Dashboard</a>
-            <a href="/remote">Remote</a>
+            <a href="/remote">Processing</a>
+            <a href="/labeling-select">Labeling</a>
+            <a href="/results">Results</a>
             <a href="/settings" class="active">Settings</a>
         </nav>
     </div>
@@ -238,6 +240,14 @@
                     <button class="btn" onclick="testRemoteConnection()" id="testRemoteBtn">Test Connection</button>
                     <span id="remoteTestResult" style="margin-left:12px;font-size:13px;"></span>
                 </div>
+            </div>
+
+            <!-- Diagnosis Groups -->
+            <div class="form-section">
+                <h3>Diagnosis Groups</h3>
+                <label style="font-size:13px;color:var(--text-muted);margin-bottom:8px;display:block;">Configure diagnosis groups for organizing subjects on the dashboard:</label>
+                <div id="diagnosisGroupsInput" class="tag-input"></div>
+                <div class="help" style="margin-top:6px;">Enter comma-separated diagnosis/group names. Subjects are organized into columns on the dashboard by their assigned diagnosis.</div>
             </div>
 
             <!-- Display -->

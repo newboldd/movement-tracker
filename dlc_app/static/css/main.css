@@ -459,3 +459,95 @@ body {
     .detail-grid { grid-template-columns: 1fr; }
     .labeling-sidebar { width: 180px; }
 }
+
+/* ── Results page white theme ──────────────────────── */
+body.results-page {
+    background: #ffffff;
+    color: #333;
+    overflow: auto;
+}
+body.results-page .header {
+    background: #f8f9fa;
+    border-color: #dee2e6;
+}
+body.results-page .header nav a { color: #666; }
+body.results-page .header nav a:hover,
+body.results-page .header nav a.active { color: #2196F3; }
+body.results-page .subject-select {
+    background: #fff;
+    color: #333;
+    border-color: #ccc;
+}
+body.results-page .btn {
+    background: #f0f0f0;
+    color: #333;
+    border-color: #ccc;
+}
+body.results-page .btn:hover {
+    background: #e0e0e0;
+}
+body.results-page .btn.active {
+    background: #2196F3;
+    color: #fff;
+    border-color: #2196F3;
+}
+body.results-page .btn:disabled,
+body.results-page .subject-select:disabled {
+    opacity: 0.4;
+    cursor: default;
+    pointer-events: none;
+}
+
+.results-container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 24px;
+}
+
+.results-tab { display: none; }
+.results-tab.active { display: block; }
+
+.results-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 16px;
+    padding: 12px 16px;
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 6px;
+}
+.results-controls label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 13px;
+    color: #555;
+    cursor: pointer;
+}
+.results-controls label input { cursor: pointer; }
+
+.results-plot-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+@media (max-width: 1000px) {
+    .results-plot-grid { grid-template-columns: 1fr; }
+}
+
+.results-no-data {
+    text-align: center;
+    color: #999;
+    padding: 60px 20px;
+    font-size: 15px;
+}
+
+#highlightedSubject {
+    font-size: 16px;
+    font-weight: 600;
+    color: #2196F3;
+    min-height: 24px;
+    margin-bottom: 12px;
+}

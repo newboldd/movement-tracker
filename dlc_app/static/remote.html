@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Remote Jobs</title>
+    <title>Processing Jobs</title>
     <link rel="stylesheet" href="/static/css/main.css">
     <style>
         .remote-grid {
@@ -12,6 +12,73 @@
             gap: 16px;
         }
         .full-width { grid-column: 1 / -1; }
+        .execution-target-group {
+            display: flex;
+            gap: 16px;
+            align-items: center;
+            padding: 12px;
+            background: var(--bg);
+            border-radius: var(--radius);
+            margin-bottom: 12px;
+        }
+        .target-radios {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+        }
+        .target-radio {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .target-radio input[type="radio"] {
+            cursor: pointer;
+        }
+        .target-radio label {
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .gpu-selector {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            padding: 8px;
+            background: var(--bg-card);
+            border-radius: 4px;
+        }
+        .gpu-selector select {
+            padding: 4px 8px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--text);
+            font-size: 13px;
+        }
+        .gpu-status {
+            font-size: 12px;
+            color: var(--text-muted);
+            padding: 8px 12px;
+            background: var(--bg-card);
+            border-radius: 4px;
+            border-left: 3px solid var(--text-muted);
+        }
+        .gpu-status.available {
+            border-left-color: var(--green);
+            color: var(--green);
+        }
+        .gpu-status.unavailable {
+            border-left-color: var(--red);
+            color: var(--red);
+        }
+        .job-restriction-toggle {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+        }
+        .job-restriction-toggle input[type="checkbox"] {
+            cursor: pointer;
+        }
         .subject-grid {
             display: flex;
             flex-wrap: wrap;
@@ -112,10 +179,12 @@
 </head>
 <body>
     <div class="header">
-        <h1>Remote Jobs</h1>
+        <h1>Processing Jobs</h1>
         <nav>
             <a href="/">Dashboard</a>
-            <a href="/remote" class="active">Remote</a>
+            <a href="/remote" class="active">Processing</a>
+            <a href="/labeling-select">Labeling</a>
+            <a href="/results">Results</a>
             <a href="/settings">Settings</a>
         </nav>
     </div>
@@ -124,16 +193,68 @@
         <!-- Launch Job -->
         <div class="card">
             <h2>Launch Job</h2>
+
+            <!-- Step Selection -->
             <div class="toolbar">
                 <label style="font-size:13px;color:var(--text-muted);">Step:</label>
                 <select id="stepSelect" class="step-select"></select>
                 <div style="flex:1;"></div>
                 <button class="btn btn-sm" onclick="selectAllSubjects()">Select All</button>
                 <button class="btn btn-sm" onclick="clearSubjects()">Clear</button>
-                <button class="btn btn-primary" onclick="submitJob()">Submit Job</button>
             </div>
-            <div id="subjectGrid" class="subject-grid">
-                <span class="empty-state">Loading subjects...</span>
+
+            <!-- Subject Selection -->
+            <div style="margin-bottom:12px;">
+                <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:6px;">Subjects:</label>
+                <div id="subjectGrid" class="subject-grid">
+                    <span class="empty-state">Loading subjects...</span>
+                </div>
+            </div>
+
+            <!-- Execution Target Selection -->
+            <div style="margin-bottom:12px;">
+                <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:8px;">Execution Target:</label>
+                <div class="execution-target-group" style="margin-bottom:0;">
+                    <div class="target-radios" style="flex:1;">
+                        <div class="target-radio">
+                            <input type="radio" id="targetLocalCpu" name="executionTarget" value="local-cpu" checked>
+                            <label for="targetLocalCpu">
+                                <span style="color:var(--blue);">⬤</span> Local CPU
+                            </label>
+                        </div>
+                        <div class="target-radio">
+                            <input type="radio" id="targetLocalGpu" name="executionTarget" value="local-gpu">
+                            <label for="targetLocalGpu">
+                                <span style="color:var(--green);">⬤</span> Local GPU
+                            </label>
+                        </div>
+                        <div class="target-radio">
+                            <input type="radio" id="targetRemote" name="executionTarget" value="remote">
+                            <label for="targetRemote">
+                                <span style="color:var(--gray);">⬤</span> Remote Server
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- GPU Selector (visible when Local GPU selected) -->
+                    <div id="gpuSelectorDiv" class="gpu-selector" style="display:none;">
+                        <label style="font-size:12px;color:var(--text-muted);">Device:</label>
+                        <select id="gpuSelector"></select>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Job Restriction Toggle -->
+            <div style="padding:8px 12px;background:var(--bg-card);border-radius:4px;margin-bottom:12px;">
+                <label class="job-restriction-toggle">
+                    <input type="checkbox" id="restrictJobsToggle" checked>
+                    <span>Restrict job types by target (training/analysis only on GPU/Remote)</span>
+                </label>
+            </div>
+
+            <!-- Submit Button -->
+            <div style="display:flex;justify-content:flex-end;">
+                <button class="btn btn-primary" onclick="submitJob()">Submit Processing Job</button>
             </div>
         </div>
 
