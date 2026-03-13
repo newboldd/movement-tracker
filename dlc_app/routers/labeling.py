@@ -29,6 +29,7 @@ from ..services.dlc_predictions import (
     get_stage_csv_files,
     has_stage_data,
 )
+from ..services.metrics import compute_trial_metrics, detect_strategy_g
 
 router = APIRouter(prefix="/api/labeling", tags=["labeling"])
 
@@ -771,6 +772,28 @@ def _write_events_csv(subject_name: str, events: dict) -> int:
     return count
 
 
+def _merge_with_saved(detected: list[int], saved: list[int], gap: int) -> list[int]:
+    """Merge detected events with saved events; saved events always survive.
+
+    Detected events within `gap` frames of any saved event are discarded.
+    Remaining detected events are filtered by the gap constraint relative
+    to their neighbors; saved events always pass through regardless of spacing.
+    """
+    saved_set = set(saved)
+    filtered_detected = [f for f in detected if not any(abs(f - s) < gap for s in saved_set)]
+    merged = sorted(saved_set | set(filtered_detected))
+    out: list[int] = []
+    last = -gap
+    for f in merged:
+        if f in saved_set:
+            out.append(f)
+            last = f
+        elif f - last >= gap:
+            out.append(f)
+            last = f
+    return out
+
+
 def _get_subject_name_for_session(session_id: int) -> str:
     with get_db_ctx() as db:
         session = db.execute(
@@ -1076,34 +1099,12 @@ def detect_events(session_id: int, body: dict = Body(default={})) -> dict:
         if cl_f is not None:
             closes.append(cl_f)
 
-    def _merge_with_saved(detected: list[int], saved: list[int], gap: int) -> list[int]:
-        """Merge detected events with saved events; saved events always survive.
-
-        Detected events within `gap` frames of any saved event are discarded.
-        Remaining detected events are filtered by the gap constraint relative
-        to their neighbors; saved events always pass through regardless of spacing.
-        """
-        saved_set = set(saved)
-        # Remove detected events that are within gap of any saved event
-        filtered_detected = [f for f in detected if not any(abs(f - s) < gap for s in saved_set)]
-        merged = sorted(saved_set | set(filtered_detected))
-        out: list[int] = []
-        last = -gap
-        for f in merged:
-            if f in saved_set:
-                # Saved events always survive
-                out.append(f)
-                last = f
-            elif f - last >= gap:
-                out.append(f)
-                last = f
-        return out
 
     peaks  = _merge_with_saved(peaks,  saved_events.get("peak",  []), min_event_gap)
     closes = _merge_with_saved(closes, saved_events.get("close", []), min_event_gap)
 
-    # Filter out events at video edges (first/last 30 frames per trial = ~0.5 sec @ 60fps)
-    edge_margin = 30
+    # Filter out events at video edges (first/last 2 frames per trial)
+    edge_margin = 2
     valid_frames = set()
     for t in trials:
         for f in range(t["start_frame"] + edge_margin, t["end_frame"] - edge_margin + 1):
@@ -1162,6 +1163,145 @@ def detect_events(session_id: int, body: dict = Body(default={})) -> dict:
         "open":  opens,
         "peak":  peaks,
         "close": closes,
+    }
+
+
+@router.post("/sessions/{session_id}/compute_metrics")
+def compute_metrics(session_id: int, body: dict = Body(...)) -> dict:
+    """Compute reversal and SSD motion metrics for a single trial.
+
+    Request body: { "trial_index": int }
+    Returns: { distance, reversal, motion_ssd, per_cam_ssd, n_frames, trial_name }
+    """
+    subject_name = _get_subject_name_for_session(session_id)
+    trial_index = int(body.get("trial_index", 0))
+    trials = build_trial_map(subject_name)
+    if trial_index < 0 or trial_index >= len(trials):
+        raise HTTPException(400, f"Trial index {trial_index} out of range (0-{len(trials)-1})")
+
+    settings = get_settings()
+    cam_names = settings.camera_names
+
+    result = compute_trial_metrics(subject_name, trials[trial_index], cam_names)
+    result["trial_name"] = trials[trial_index]["trial_name"]
+    return result
+
+
+@router.post("/sessions/{session_id}/detect_events_v2")
+def detect_events_v2(session_id: int, body: dict = Body(...)) -> dict:
+    """Auto-detect events for a single trial using Strategy G.
+
+    Request body: {
+        "trial_index": int,
+        "params": { min_peak_height, min_event_gap, open_start_thresh, valley_thresh,
+                     nback, reversal_search_radius, ssd_search_radius, open_bias,
+                     close_bias, dist_guard_factor, peak_guard_factor },
+        "steps": { use_reversal, use_ssd, use_dist_guard, use_peak_guard },
+        "metrics": { reversal: [...], motion_ssd: [...], per_cam_ssd: {...} } | null
+    }
+    Returns: { open: [...], peak: [...], close: [...] } as global frame numbers.
+    """
+    subject_name = _get_subject_name_for_session(session_id)
+    trial_index = int(body.get("trial_index", 0))
+    trials = build_trial_map(subject_name)
+    if trial_index < 0 or trial_index >= len(trials):
+        raise HTTPException(400, f"Trial index {trial_index} out of range (0-{len(trials)-1})")
+
+    trial = trials[trial_index]
+    sf = trial["start_frame"]
+    ef = trial["end_frame"]
+
+    params = body.get("params", {})
+    steps = body.get("steps", {})
+    metrics = body.get("metrics")
+
+    min_event_gap = int(params.get("min_event_gap", 10))
+
+    # Load distance data for this trial
+    dist_raw = None
+    for stage in ("corrections", "refine", "dlc"):
+        stage_data = get_dlc_predictions_for_stage(subject_name, stage)
+        if stage_data and stage_data.get("distances"):
+            candidate = stage_data["distances"]
+            valid_count = sum(1 for d in candidate if d is not None)
+            if valid_count > len(candidate) * 0.5:
+                dist_raw = candidate
+                break
+
+    if not dist_raw:
+        data = get_mediapipe_for_session(subject_name)
+        dist_raw = data.get("distances") if data else None
+
+    if not dist_raw:
+        raise HTTPException(400, "No distance data available for auto-detection")
+
+    # Slice to trial range (local indices for detection)
+    trial_dist = dist_raw[sf:ef + 1]
+
+    # Extract metrics (pre-computed or None)
+    reversal = metrics.get("reversal") if metrics else None
+    motion_ssd = metrics.get("motion_ssd") if metrics else None
+    per_cam_ssd = metrics.get("per_cam_ssd") if metrics else None
+    settings = get_settings()
+    cam_names = settings.camera_names
+
+    # Run Strategy G detection (returns global frame numbers)
+    detected = detect_strategy_g(
+        trial_dist, reversal, motion_ssd, per_cam_ssd, cam_names,
+        start_frame=sf, steps=steps, params=params,
+    )
+
+    # Merge with saved events (scoped to this trial)
+    saved_events = _read_events_csv(subject_name)
+
+    def _trial_events(frames):
+        return [f for f in frames if sf <= f <= ef]
+
+    for etype in EVENT_TYPES:
+        trial_saved = _trial_events(saved_events.get(etype, []))
+        detected[etype] = _merge_with_saved(detected[etype], trial_saved, min_event_gap)
+
+    # Edge margin: exclude literal first/last 2 frames of trial
+    edge_margin = 2
+    valid_start = sf + edge_margin
+    valid_end = ef - edge_margin
+    for etype in EVENT_TYPES:
+        detected[etype] = [f for f in detected[etype] if valid_start <= f <= valid_end]
+
+    # Validate event sequence: open → peak → close → repeat
+    all_events = []
+    for f in detected["open"]:
+        all_events.append((f, "open"))
+    for f in detected["peak"]:
+        all_events.append((f, "peak"))
+    for f in detected["close"]:
+        all_events.append((f, "close"))
+    all_events.sort()
+
+    valid_events = {"open": [], "peak": [], "close": []}
+    expected_next = "open"
+
+    for frame, etype in all_events:
+        if expected_next == "open":
+            if etype == "open":
+                valid_events["open"].append(frame)
+                expected_next = "peak"
+        elif expected_next == "peak":
+            if etype == "peak":
+                valid_events["peak"].append(frame)
+                expected_next = "close"
+            elif etype == "close":
+                valid_events["close"].append(frame)
+                expected_next = "open"
+        elif expected_next == "close":
+            if etype == "close":
+                valid_events["close"].append(frame)
+                expected_next = "open"
+
+    return {
+        "open": sorted(valid_events["open"]),
+        "peak": sorted(valid_events["peak"]),
+        "close": sorted(valid_events["close"]),
     }
 
 

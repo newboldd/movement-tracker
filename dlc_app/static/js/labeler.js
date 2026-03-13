@@ -155,6 +155,11 @@ const labeler = (() => {
     };
     const EVENT_TYPES = ['open', 'peak', 'close'];
 
+    // Per-trial event filtering
+    let currentEventTrialIdx = 0;
+    let cachedTrialMetrics = null;  // {distance, reversal, motion_ssd, per_cam_ssd}
+    let cachedMetricsTrialIdx = -1;
+
     // Prefetch cache
     const imageCache = new Map();
     const PREFETCH_AHEAD = 3;
@@ -2458,17 +2463,17 @@ const labeler = (() => {
                 return;
             }
 
-            // Ctrl+Z: undo (disabled in final mode)
+            // Ctrl+Z: undo (disabled in final mode, but allowed in events mode)
             if (e.key === 'z' && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
                 e.preventDefault();
-                if (!isFinal) undo();
+                if (!isFinal || isEvents) undo();
                 return;
             }
 
-            // Ctrl+Y or Ctrl+Shift+Z: redo (disabled in final mode)
+            // Ctrl+Y or Ctrl+Shift+Z: redo (disabled in final mode, but allowed in events mode)
             if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Z')) {
                 e.preventDefault();
-                if (!isFinal) redo();
+                if (!isFinal || isEvents) redo();
                 return;
             }
 
@@ -3275,6 +3280,7 @@ const labeler = (() => {
 
         // Event markers (events mode only)
         if (isEvents) {
+            const trialRange = getTrialFrameRange(currentEventTrialIdx);
             EVENT_TYPES.forEach(etype => {
                 if (!eventVisibility[etype]) return;
                 const color = EVENT_COLORS[etype];
@@ -3287,6 +3293,10 @@ const labeler = (() => {
                     } else {
                         y = padT + plotH * 0.5;
                     }
+                    // Dim events outside current trial
+                    const inCurrentTrial = f >= trialRange.start && f <= trialRange.end;
+                    distCtx.globalAlpha = inCurrentTrial ? 1.0 : 0.25;
+
                     // Draw diamond: filled=saved to CSV, outline=pending
                     const r = 5;
                     const isSaved = savedEventFrames[etype].has(f);
@@ -3320,6 +3330,7 @@ const labeler = (() => {
                         distCtx.lineWidth = 1.5;
                         distCtx.stroke();
                     }
+                    distCtx.globalAlpha = 1.0;
                 });
             });
         }
@@ -3529,11 +3540,14 @@ const labeler = (() => {
                 eventMarkers[t] = result[t] || [];
                 savedEventFrames[t] = new Set(eventMarkers[t]);
             });
+            // Initialize trial switcher
+            currentEventTrialIdx = getTrialForFrame(currentFrame);
+            const trialLabel = document.getElementById('trialSelectorLabel');
+            if (trialLabel && trials[currentEventTrialIdx]) {
+                trialLabel.textContent = trials[currentEventTrialIdx].trial_name;
+            }
             updateEventCounts();
             renderDistanceTrace();
-            // Auto-detect if no events saved yet
-            const total = EVENT_TYPES.reduce((s, t) => s + eventMarkers[t].length, 0);
-            if (total === 0) await detectEvents();
         } catch (e) {
             console.log('Could not load events:', e);
         }
@@ -3623,49 +3637,247 @@ const labeler = (() => {
         goToFrame(newFrame);
     }
 
-    async function detectEvents() {
+    // ── Trial switching ──────────────────────────────────
+
+    function setEventTrial(trialIdx) {
+        if (trialIdx < 0 || trialIdx >= trials.length) return;
+        currentEventTrialIdx = trialIdx;
+        const trial = trials[trialIdx];
+        goToFrame(trial.start_frame);
+        const label = document.getElementById('trialSelectorLabel');
+        if (label) label.textContent = trial.trial_name;
+        updateEventCounts();
+        renderDistanceTrace();
+        if (cachedMetricsTrialIdx !== trialIdx) cachedTrialMetrics = null;
+    }
+
+    function prevTrial() { setEventTrial(currentEventTrialIdx - 1); }
+    function nextTrial() { setEventTrial(currentEventTrialIdx + 1); }
+
+    function getTrialFrameRange(trialIdx) {
+        const t = trials[trialIdx];
+        return t ? { start: t.start_frame, end: t.end_frame } : { start: 0, end: totalFrames - 1 };
+    }
+
+    function eventsInTrial(trialIdx) {
+        const { start, end } = getTrialFrameRange(trialIdx);
+        const result = {};
+        EVENT_TYPES.forEach(t => {
+            result[t] = eventMarkers[t].filter(f => f >= start && f <= end);
+        });
+        return result;
+    }
+
+    // ── Auto-detect modal ─────────────────────────────────
+
+    function openDetectModal() {
+        const overlay = document.getElementById('detectModalOverlay');
+        if (overlay) overlay.classList.add('active');
+        const trialLabel = document.getElementById('detectModalTrial');
+        if (trialLabel && trials[currentEventTrialIdx]) {
+            trialLabel.textContent = `(${trials[currentEventTrialIdx].trial_name})`;
+        }
+        if (cachedTrialMetrics && cachedMetricsTrialIdx === currentEventTrialIdx) {
+            showMetricPlots();
+        }
+    }
+
+    function closeDetectModal() {
+        const overlay = document.getElementById('detectModalOverlay');
+        if (overlay) overlay.classList.remove('active');
+    }
+
+    function detectEvents() {
         if (!isEvents) return;
-        const btn = document.getElementById('detectEventsBtn');
-        if (btn) { btn.textContent = 'Detecting…'; btn.disabled = true; }
-        const snapshot = snapshotEventMarkers();  // snapshot before API call
+        openDetectModal();
+    }
+
+    async function computeMetrics() {
+        const btn = document.getElementById('computeMetricsBtn');
+        const loading = document.getElementById('metricPlotsLoading');
+        const container = document.getElementById('metricPlotsContainer');
+        if (btn) btn.disabled = true;
+        if (loading) loading.style.display = 'block';
+        if (container) container.style.display = 'none';
+
         try {
-            const result = await API.post(`/api/labeling/sessions/${sessionId}/detect_events`, {});
-            EVENT_TYPES.forEach(t => {
-                eventMarkers[t] = result[t] || [];
-                // savedEventFrames stays unchanged — only Save updates it
+            const result = await API.post(
+                `/api/labeling/sessions/${sessionId}/compute_metrics`,
+                { trial_index: currentEventTrialIdx }
+            );
+            cachedTrialMetrics = result;
+            cachedMetricsTrialIdx = currentEventTrialIdx;
+            showMetricPlots();
+        } catch (e) {
+            alert('Failed to compute metrics: ' + e.message);
+        } finally {
+            if (btn) btn.disabled = false;
+            if (loading) loading.style.display = 'none';
+        }
+    }
+
+    function showMetricPlots() {
+        const container = document.getElementById('metricPlotsContainer');
+        if (container) container.style.display = 'block';
+        renderMetricCanvas('distPlotCanvas', cachedTrialMetrics.distance, '#4a9eff', 'Distance');
+        renderMetricCanvas('reversalPlotCanvas', cachedTrialMetrics.reversal, '#ff9800', 'Reversal');
+        renderMetricCanvas('ssdPlotCanvas', cachedTrialMetrics.motion_ssd, '#4caf50', 'SSD Motion');
+    }
+
+    function renderMetricCanvas(canvasId, data, color, label) {
+        const canvas = document.getElementById(canvasId);
+        if (!canvas || !data) return;
+        const ctx = canvas.getContext('2d');
+        const w = canvas.parentElement.clientWidth;
+        const h = 80;
+        canvas.width = w;
+        canvas.height = h;
+
+        const padL = 50, padR = 8, padT = 12, padB = 10;
+        const plotW = w - padL - padR;
+        const plotH = h - padT - padB;
+
+        ctx.fillStyle = '#16213e';
+        ctx.fillRect(0, 0, w, h);
+
+        const sorted = [...data].filter(v => v != null && isFinite(v)).sort((a, b) => a - b);
+        if (sorted.length === 0) return;
+        const minD = sorted[Math.floor(sorted.length * 0.01)];
+        const maxD = sorted[Math.floor(sorted.length * 0.99)] || sorted[sorted.length - 1];
+        const range = maxD - minD || 1;
+
+        const fToX = (f) => padL + (f / data.length) * plotW;
+        const dToY = (d) => padT + ((maxD - d) / range) * plotH;
+
+        // Label
+        ctx.fillStyle = '#8892a0';
+        ctx.font = '10px sans-serif';
+        ctx.fillText(label, 4, padT + 4);
+
+        // Line
+        ctx.beginPath();
+        let started = false;
+        for (let f = 0; f < data.length; f++) {
+            const d = data[f];
+            if (d == null || !isFinite(d)) { started = false; continue; }
+            const x = fToX(f);
+            const y = Math.max(padT, Math.min(padT + plotH, dToY(d)));
+            if (!started) { ctx.moveTo(x, y); started = true; }
+            else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Overlay event markers from current trial
+        const trial = trials[currentEventTrialIdx];
+        if (trial) {
+            const sf = trial.start_frame;
+            EVENT_TYPES.forEach(etype => {
+                if (!eventVisibility[etype]) return;
+                eventMarkers[etype].forEach(gf => {
+                    if (gf < trial.start_frame || gf > trial.end_frame) return;
+                    const localF = gf - sf;
+                    const x = fToX(localF);
+                    ctx.beginPath();
+                    ctx.moveTo(x, padT);
+                    ctx.lineTo(x, padT + plotH);
+                    ctx.strokeStyle = EVENT_COLORS[etype] + '80';
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                });
             });
-            // Safety net: ensure all saved events are preserved
+        }
+    }
+
+    async function runDetection() {
+        const btn = document.getElementById('runDetectBtn');
+        if (btn) { btn.textContent = 'Running…'; btn.disabled = true; }
+
+        const snapshot = snapshotEventMarkers();
+
+        const params = {
+            min_peak_height: parseFloat(document.getElementById('paramMinPeakHeight').value),
+            min_event_gap: parseInt(document.getElementById('paramMinEventGap').value),
+            open_start_thresh: parseFloat(document.getElementById('paramOpenThresh').value),
+            valley_thresh: parseFloat(document.getElementById('paramValleyThresh').value),
+            nback: parseInt(document.getElementById('paramNback').value),
+            reversal_search_radius: parseInt(document.getElementById('paramReversalRadius').value),
+            ssd_search_radius: parseInt(document.getElementById('paramSsdRadius').value),
+            open_bias: parseInt(document.getElementById('paramOpenBias').value),
+            close_bias: parseInt(document.getElementById('paramCloseBias').value),
+            dist_guard_factor: parseFloat(document.getElementById('paramDistGuard').value),
+            peak_guard_factor: parseFloat(document.getElementById('paramPeakGuard').value),
+        };
+
+        const steps = {
+            use_reversal: document.getElementById('stepReversal').checked,
+            use_ssd: document.getElementById('stepSsd').checked,
+            use_dist_guard: document.getElementById('stepSsd').checked,
+            use_peak_guard: document.getElementById('stepReversal').checked,
+        };
+
+        const metrics = (cachedTrialMetrics && cachedMetricsTrialIdx === currentEventTrialIdx)
+            ? {
+                reversal: cachedTrialMetrics.reversal,
+                motion_ssd: cachedTrialMetrics.motion_ssd,
+                per_cam_ssd: cachedTrialMetrics.per_cam_ssd,
+              }
+            : null;
+
+        try {
+            const result = await API.post(`/api/labeling/sessions/${sessionId}/detect_events_v2`, {
+                trial_index: currentEventTrialIdx,
+                params,
+                steps,
+                metrics,
+            });
+
+            // Replace events for current trial only; keep other trials' events
+            const trial = trials[currentEventTrialIdx];
+            EVENT_TYPES.forEach(t => {
+                const otherTrialEvents = eventMarkers[t].filter(
+                    f => f < trial.start_frame || f > trial.end_frame
+                );
+                eventMarkers[t] = [...otherTrialEvents, ...(result[t] || [])].sort((a, b) => a - b);
+            });
+
+            // Safety net: ensure all saved events preserved
             for (const t of EVENT_TYPES) {
                 for (const f of savedEventFrames[t]) {
                     if (!eventMarkers[t].includes(f)) eventMarkers[t].push(f);
                 }
                 eventMarkers[t].sort((a, b) => a - b);
             }
+
             pushEventUndo(snapshot);
             updateEventCounts();
             renderDistanceTrace();
-            let newCount = 0;
-            EVENT_TYPES.forEach(t => {
-                eventMarkers[t].forEach(f => { if (!savedEventFrames[t].has(f)) newCount++; });
-            });
-            const total = EVENT_TYPES.reduce((s, t) => s + eventMarkers[t].length, 0);
-            updateLabelInfo(`Detected ${total} events (${newCount} new) — Save to keep`);
+            if (cachedTrialMetrics) showMetricPlots();
+
+            const trialEvents = eventsInTrial(currentEventTrialIdx);
+            const total = EVENT_TYPES.reduce((s, t) => s + trialEvents[t].length, 0);
+            updateLabelInfo(`Detected ${total} events in ${trial.trial_name} — Save to keep`);
         } catch (e) {
-            console.log('Auto-detection failed:', e);
+            alert('Detection failed: ' + e.message);
         } finally {
-            if (btn) { btn.textContent = 'Auto-detect'; btn.disabled = false; }
+            if (btn) { btn.textContent = 'Run Detection'; btn.disabled = false; }
         }
     }
 
     function prevEvent() {
+        const { start, end } = getTrialFrameRange(currentEventTrialIdx);
         const allFrames = [...new Set(EVENT_TYPES.filter(t => eventVisibility[t]).flatMap(t => eventMarkers[t]))]
+            .filter(f => f >= start && f <= end)
             .sort((a, b) => a - b);
         const prev = [...allFrames].reverse().find(f => f < currentFrame);
         if (prev !== undefined) goToFrame(prev);
     }
 
     function nextEvent() {
+        const { start, end } = getTrialFrameRange(currentEventTrialIdx);
         const allFrames = [...new Set(EVENT_TYPES.filter(t => eventVisibility[t]).flatMap(t => eventMarkers[t]))]
+            .filter(f => f >= start && f <= end)
             .sort((a, b) => a - b);
         const next = allFrames.find(f => f > currentFrame);
         if (next !== undefined) goToFrame(next);
@@ -3675,8 +3887,9 @@ const labeler = (() => {
         const el = document.getElementById('eventCounts');
         if (!el) return;
         const names = { open: 'Open', peak: 'Peak', close: 'Close' };
+        const trialEvents = eventsInTrial(currentEventTrialIdx);
         el.innerHTML = EVENT_TYPES.map(t =>
-            `<span style="color:${EVENT_COLORS[t]};">●</span> ${names[t]}: <strong>${eventMarkers[t].length}</strong>`
+            `<span style="color:${EVENT_COLORS[t]};">●</span> ${names[t]}: <strong>${trialEvents[t].length}</strong>`
         ).join('<br>');
     }
 
@@ -3694,6 +3907,11 @@ const labeler = (() => {
         setEventVisibility,
         placeEventType, deleteEvent, shiftEvent,
         prevEvent, nextEvent,
+        // Trial switching
+        prevTrial, nextTrial, setEventTrial,
+        // Detection modal
+        openDetectModal, closeDetectModal,
+        computeMetrics, runDetection,
         // Navigation persistence
         saveNavState,
     };

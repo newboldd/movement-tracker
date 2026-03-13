@@ -93,7 +93,9 @@ body {
 .badge-analyzing,
 .badge-analyzed    { background: #0d47a1; color: #64b5f6; }
 .badge-refined     { background: #006064; color: #4dd0e1; }
-.badge-corrected   { background: #2e7d32; color: #a5d6a7; }
+.badge-corrected       { background: #2e7d32; color: #a5d6a7; }
+.badge-events_partial  { background: #e65100; color: #ffcc80; }
+.badge-events_complete { background: #1b5e20; color: #a5d6a7; }
 .badge-triangulating,
 .badge-triangulated { background: #006064; color: #4dd0e1; }
 .badge-complete    { background: #2e7d32; color: #a5d6a7; }
@@ -235,6 +237,17 @@ body {
     justify-content: flex-end;
     margin-top: 16px;
 }
+
+/* ── Detection modal ──────────────────────────────────── */
+#detectModal { max-width: 900px; width: 90vw; max-height: 85vh; overflow-y: auto; }
+.detect-step-card { background: var(--bg); padding: 8px; border-radius: var(--radius); border: 1px solid var(--border); }
+.detect-param { display: flex; flex-direction: column; gap: 4px; }
+.detect-param label { display: flex; justify-content: space-between; align-items: center; gap: 6px; color: var(--text); font-size: 11px; }
+.detect-param input { width: 60px; padding: 2px 4px; font-size: 11px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); }
+.detect-core-params { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.detect-core-params label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--text); }
+.detect-core-params input { width: 100%; padding: 2px 4px; font-size: 11px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); }
+#metricPlotsContainer canvas { display: block; border: 1px solid var(--border); border-radius: 3px; margin-bottom: 4px; background: var(--bg-card); }
 
 /* ── Subject detail panel ───────────────────────────── */
 .detail-panel {
