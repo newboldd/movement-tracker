@@ -2254,13 +2254,21 @@ const labeler = (() => {
             }
         }
 
-        videoEl.playbackRate = playbackRate;
+        // Try to set playback rate. If unsupported (e.g., 0.02x, 0.05x), fall back to manual frame-by-frame.
+        try {
+            videoEl.playbackRate = playbackRate;
+        } catch (e) {
+            console.warn(`[video] Playback rate ${playbackRate}x unsupported, using frame-by-frame fallback:`, e.message);
+            videoPlaying = false;
+            fallbackPlay();
+            return;
+        }
         videoEl.currentTime = startTime;
         videoPlaying = true;
 
         try {
             await videoEl.play();
-            console.log(`[video] Playing trial ${trialIdx} at ${startTime.toFixed(2)}s`);
+            console.log(`[video] Playing trial ${trialIdx} at ${startTime.toFixed(2)}s (rate: ${playbackRate}x)`);
             requestAnimationFrame(videoDrawLoop);
         } catch (e) {
             console.error('[video] play() rejected:', e);
