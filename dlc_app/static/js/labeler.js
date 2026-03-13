@@ -258,7 +258,12 @@ const labeler = (() => {
                 playbackRate = SPEED_PRESETS[index];
                 speedDisplay.textContent = `${playbackRate}x`;
             });
-            // Initialize display with default value
+            // Initialize slider to match current playbackRate
+            const currentIndex = SPEED_PRESETS.indexOf(playbackRate);
+            if (currentIndex !== -1) {
+                speedSlider.value = currentIndex;
+            }
+            // Initialize display with current value
             speedDisplay.textContent = `${playbackRate}x`;
         }
 
@@ -2223,7 +2228,9 @@ const labeler = (() => {
         const btn = document.getElementById('playBtn');
         if (playing) {
             btn.innerHTML = '&#9646;&#9646;';
-            playbackRate = parseFloat(document.getElementById('playbackRate').value);
+            // Slider value is an index into SPEED_PRESETS, not a direct rate value
+            const sliderIndex = parseInt(document.getElementById('playbackRate').value);
+            playbackRate = SPEED_PRESETS[sliderIndex] || 1;
             startVideoPlayback();
         } else {
             btn.innerHTML = '&#9654;';
@@ -2274,7 +2281,7 @@ const labeler = (() => {
             if (!ready || !playing) {
                 if (!ready) {
                     console.warn('[video] Timed out or error, falling back to frame-by-frame');
-                    fallbackPlay();
+                    fallbackPlay(trial.fps);
                 }
                 return;
             }
@@ -2286,7 +2293,7 @@ const labeler = (() => {
         } catch (e) {
             console.warn(`[video] Playback rate ${playbackRate}x unsupported, using frame-by-frame fallback:`, e.message);
             videoPlaying = false;
-            fallbackPlay();
+            fallbackPlay(trial.fps);
             return;
         }
         videoEl.currentTime = startTime;
@@ -2299,7 +2306,7 @@ const labeler = (() => {
         } catch (e) {
             console.error('[video] play() rejected:', e);
             videoPlaying = false;
-            fallbackPlay();
+            fallbackPlay(trial.fps);
         }
 
         // Handle trial end — stop or advance to next trial
@@ -2389,10 +2396,17 @@ const labeler = (() => {
         canvas.focus();
     }
 
-    function fallbackPlay() {
+    function fallbackPlay(fpsOverride = null) {
         // Fallback: frame-by-frame if video streaming fails
-        playbackRate = parseFloat(document.getElementById('playbackRate').value);
-        const fps = trials.length > 0 ? trials[0].fps : 30;
+        // Slider value is an index into SPEED_PRESETS, not a direct rate value
+        const sliderIndex = parseInt(document.getElementById('playbackRate').value);
+        playbackRate = SPEED_PRESETS[sliderIndex] || 1;
+        let fps = fpsOverride;
+        // If no fps provided, determine from current trial
+        if (fps === null) {
+            const trialIdx = getTrialForFrame(currentFrame);
+            fps = trials.length > 0 && trialIdx >= 0 && trialIdx < trials.length ? trials[trialIdx].fps : 30;
+        }
         const interval = 1000 / (fps * playbackRate);
         (async function playLoop() {
             while (playing && currentFrame < totalFrames - 1) {
@@ -2421,8 +2435,16 @@ const labeler = (() => {
 
     function setupKeyboard() {
         document.addEventListener('keydown', (e) => {
-            // Ignore if typing in input
-            if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+            // Ignore if typing in a text input (but not slider or other input types)
+            if (e.target.tagName === 'INPUT' &&
+                (e.target.type === 'text' || e.target.type === 'number' || e.target.type === 'password')) {
+                return;
+            }
+            // Ignore if in a textarea or select (unless it's the speed slider)
+            if (e.target.id !== 'playbackRate' && (e.target.tagName === 'TEXTAREA' ||
+                (e.target.tagName === 'SELECT' && e.target.id !== 'playbackRate'))) {
+                return;
+            }
 
             // Ctrl+Z: undo (disabled in final mode)
             if (e.key === 'z' && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
