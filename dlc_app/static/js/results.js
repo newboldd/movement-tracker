@@ -8,19 +8,24 @@ let currentSubjectId = null;
 let cachedTraces = null;
 let cachedMovements = null;
 let cachedGroup = null;
+let cachedSequenceAssignments = null; // { byTrial: { trialIdx: {sequences, seq_r2} }, totalSeqs, totalR2 }
 
 const PARAM_LABELS = {
     imi: 'Inter-Movement Interval (s)',
     amplitude: 'Amplitude (mm)',
+    rel_amplitude: 'Relative Amplitude',
     peak_open_vel: 'Peak Opening Velocity (mm/s)',
     peak_close_vel: 'Peak Closing Velocity (mm/s)',
     mean_open_vel: 'Mean Opening Velocity (mm/s)',
     mean_close_vel: 'Mean Closing Velocity (mm/s)',
+    power: 'Power (mm\u00b2/s)',
 };
 
 const TRIAL_COLORS = [
     '#2196F3', '#FF5722', '#4CAF50', '#9C27B0', '#FF9800', '#00BCD4',
 ];
+
+const SEQ_COLORS = ['#1f77b4', '#2ca02c', '#9467bd', '#d62728', '#ff7f0e', '#17becf'];
 
 // ── Subject loading ────────────────────────────────────────────
 
@@ -49,10 +54,21 @@ function navigateSubject(delta) {
     }
 }
 
+function updateNavLinks() {
+    const labelingLink = document.getElementById('labelingLink');
+    if (labelingLink && currentSubjectId) {
+        labelingLink.href = `/labeling-select?subject=${currentSubjectId}`;
+    }
+}
+
 // ── Tab switching ──────────────────────────────────────────────
 
 function switchTab(tab) {
     currentTab = tab;
+    // Remember per-subject tab preference (skip 'group' — that's a page-level default)
+    if (currentSubjectId && tab !== 'group') {
+        sessionStorage.setItem(`dlc_resultsTab_${currentSubjectId}`, tab);
+    }
 
     // Update tab buttons
     document.querySelectorAll('#tabSwitcher .btn').forEach(btn => {
@@ -101,23 +117,79 @@ async function loadDistances(subjectId) {
             return;
         }
 
-        container.innerHTML = '';
-        data.trials.forEach((trial, idx) => {
-            const div = document.createElement('div');
-            div.id = `distPlot_${idx}`;
-            div.style.width = '100%';
-            div.style.height = '300px';
-            div.style.marginBottom = '8px';
-            container.appendChild(div);
-
-            renderDistancePlot(div.id, trial);
-        });
+        renderAllDistancePlots();
     } catch (e) {
         container.innerHTML = `<div class="results-no-data" style="color:#d32f2f;">${e.message}</div>`;
     }
 }
 
-function renderDistancePlot(divId, trial) {
+function getYAxisConfig() {
+    const locked = document.getElementById('lockYAxis').checked;
+    const minInput = document.getElementById('yAxisMin');
+    const maxInput = document.getElementById('yAxisMax');
+    const customMin = minInput.value !== '' ? parseFloat(minInput.value) : null;
+    const customMax = maxInput.value !== '' ? parseFloat(maxInput.value) : null;
+    return { locked, customMin, customMax };
+}
+
+function renderAllDistancePlots() {
+    const container = document.getElementById('distancePlots');
+    const data = cachedTraces;
+    if (!data || !data.trials) return;
+
+    container.innerHTML = '';
+    const yConfig = getYAxisConfig();
+    const yRange = data.y_range;
+
+    // Determine y-axis ranges
+    let distRange = null;
+    let velRange = null;
+    if (yConfig.locked && yRange) {
+        const dMin = yConfig.customMin !== null ? yConfig.customMin : yRange.dist_min;
+        const dMax = yConfig.customMax !== null ? yConfig.customMax : yRange.dist_max;
+        const pad = (dMax - dMin) * 0.05;
+        distRange = [dMin - pad, dMax + pad];
+
+        const vPad = (yRange.vel_max - yRange.vel_min) * 0.05;
+        velRange = [yRange.vel_min - vPad, yRange.vel_max + vPad];
+    }
+
+    data.trials.forEach((trial, idx) => {
+        // Wrapper for each trial (enables horizontal scrolling)
+        const wrapper = document.createElement('div');
+        wrapper.style.marginBottom = '16px';
+        wrapper.style.overflowX = 'auto';
+
+        // Distance plot
+        const distDiv = document.createElement('div');
+        distDiv.id = `distPlot_${idx}`;
+        distDiv.style.height = '220px';
+        wrapper.appendChild(distDiv);
+
+        // Velocity plot
+        const velDiv = document.createElement('div');
+        velDiv.id = `velPlot_${idx}`;
+        velDiv.style.height = '150px';
+        wrapper.appendChild(velDiv);
+
+        container.appendChild(wrapper);
+
+        // Compute plot width based on 20s per screen width
+        const fps = trial.fps || 60;
+        const durationSec = trial.distances.length / fps;
+        const containerWidth = container.clientWidth || 1200;
+        const plotWidth = Math.max(containerWidth, (durationSec / 20) * containerWidth);
+
+        // Set wrapper width to enable scrolling
+        distDiv.style.width = plotWidth + 'px';
+        velDiv.style.width = plotWidth + 'px';
+
+        renderDistancePlot(distDiv.id, trial, distRange, plotWidth);
+        renderVelocityPlot(velDiv.id, trial, velRange, plotWidth);
+    });
+}
+
+function renderDistancePlot(divId, trial, yRange, width) {
     const fps = trial.fps || 60;
     const n = trial.distances.length;
     const times = Array.from({ length: n }, (_, i) => +(i / fps).toFixed(3));
@@ -129,9 +201,38 @@ function renderDistancePlot(divId, trial) {
         mode: 'lines',
         name: 'Distance (mm)',
         line: { color: '#2196F3', width: 1.2 },
-        yaxis: 'y',
         hovertemplate: '%{x:.2f}s<br>%{y:.1f} mm<extra></extra>',
     };
+
+    const layout = {
+        title: { text: trial.name, font: { size: 13, color: '#666' } },
+        margin: { t: 30, b: 5, l: 55, r: 20 },
+        xaxis: { showticklabels: false, color: '#666', gridcolor: '#eee' },
+        yaxis: {
+            title: { text: 'Distance (mm)', font: { size: 11, color: '#2196F3' } },
+            color: '#2196F3',
+            gridcolor: '#f0f0f0',
+            zeroline: false,
+        },
+        plot_bgcolor: '#fff',
+        paper_bgcolor: '#fff',
+        showlegend: false,
+        hovermode: 'x unified',
+        width: width,
+    };
+
+    if (yRange) layout.yaxis.range = yRange;
+
+    Plotly.newPlot(divId, [distTrace], layout, {
+        responsive: false,
+        displayModeBar: false,
+    });
+}
+
+function renderVelocityPlot(divId, trial, yRange, width) {
+    const fps = trial.fps || 60;
+    const n = trial.velocities.length;
+    const times = Array.from({ length: n }, (_, i) => +(i / fps).toFixed(3));
 
     const velTrace = {
         x: times,
@@ -140,26 +241,16 @@ function renderDistancePlot(divId, trial) {
         mode: 'lines',
         name: 'Velocity (mm/s)',
         line: { color: '#4CAF50', width: 1 },
-        yaxis: 'y2',
         hovertemplate: '%{x:.2f}s<br>%{y:.1f} mm/s<extra></extra>',
     };
 
     const layout = {
-        title: { text: trial.name, font: { size: 13, color: '#666' } },
-        margin: { t: 30, b: 35, l: 55, r: 55 },
-        xaxis: { title: '', color: '#666', gridcolor: '#eee' },
+        margin: { t: 5, b: 35, l: 55, r: 20 },
+        xaxis: { title: { text: 'Time (s)', font: { size: 11 } }, color: '#666', gridcolor: '#eee' },
         yaxis: {
-            title: { text: 'Distance (mm)', font: { size: 11, color: '#2196F3' } },
-            color: '#2196F3',
-            gridcolor: '#f0f0f0',
-            zeroline: false,
-        },
-        yaxis2: {
             title: { text: 'Velocity (mm/s)', font: { size: 11, color: '#4CAF50' } },
-            overlaying: 'y',
-            side: 'right',
             color: '#4CAF50',
-            gridcolor: 'transparent',
+            gridcolor: '#f0f0f0',
             zeroline: true,
             zerolinecolor: '#ddd',
         },
@@ -167,10 +258,13 @@ function renderDistancePlot(divId, trial) {
         paper_bgcolor: '#fff',
         showlegend: false,
         hovermode: 'x unified',
+        width: width,
     };
 
-    Plotly.newPlot(divId, [distTrace, velTrace], layout, {
-        responsive: true,
+    if (yRange) layout.yaxis.range = yRange;
+
+    Plotly.newPlot(divId, [velTrace], layout, {
+        responsive: false,
         displayModeBar: false,
     });
 }
@@ -188,8 +282,18 @@ async function loadMovements(subjectId) {
     container.innerHTML = '<div class="results-no-data" style="grid-column:1/-1;">Loading...</div>';
 
     try {
+        cachedSequenceAssignments = null;
         const data = await API.get(`/api/results/${subjectId}/movements`);
         cachedMovements = data;
+
+        // Show auto-detect banner if applicable
+        const banner = document.getElementById('movementEventBanner');
+        if (data.event_source === 'auto') {
+            banner.innerHTML = '<div class="auto-detect-banner">Using auto-detected events (no saved events found for this subject)</div>';
+        } else {
+            banner.innerHTML = '';
+        }
+
         renderMovementPlots();
     } catch (e) {
         container.innerHTML = `<div class="results-no-data" style="grid-column:1/-1;color:#d32f2f;">${e.message}</div>`;
@@ -220,7 +324,18 @@ function renderMovementPlots() {
         return;
     }
 
-    const showSeq = document.getElementById('sequenceToggle').checked;
+    const seqMode = document.getElementById('sequenceMode').value;
+
+    // Pre-compute sequence assignments if multi-seq mode (based on amplitude)
+    if (seqMode.endsWith('_multi') && data.movements.length > 0) {
+        if (!cachedSequenceAssignments) {
+            cachedSequenceAssignments = computeSequenceAssignments(data);
+        }
+        updateSeqInfo(cachedSequenceAssignments);
+    } else {
+        hideSeqInfo();
+    }
+
     container.innerHTML = '';
 
     params.forEach(param => {
@@ -229,11 +344,69 @@ function renderMovementPlots() {
         div.style.height = '320px';
         container.appendChild(div);
 
-        renderMovementScatter(div.id, data, param, showSeq);
+        renderMovementScatter(div.id, data, param, seqMode);
     });
 }
 
-function renderMovementScatter(divId, data, param, showSequence) {
+function computeSequenceAssignments(data) {
+    const movements = data.movements;
+    // Group by trial
+    const byTrial = {};
+    movements.forEach((m, i) => {
+        const ti = m.trial_idx;
+        if (!byTrial[ti]) byTrial[ti] = [];
+        byTrial[ti].push({ ...m, _globalIdx: i });
+    });
+
+    const result = { byTrial: {}, totalSeqs: 0, totalR2: 0 };
+    let totalSS = 0, totalSSExplained = 0;
+
+    // Need global amplitude stats for overall R²
+    const allAmps = movements.map(m => m.amplitude).filter(a => a != null && isFinite(a));
+    let globalAmpMean = 0;
+    for (const a of allAmps) globalAmpMean += a;
+    globalAmpMean /= allAmps.length || 1;
+    for (const a of allAmps) totalSS += (a - globalAmpMean) ** 2;
+
+    Object.keys(byTrial).sort((a, b) => +a - +b).forEach(ti => {
+        const ms = byTrial[ti];
+        const amps = ms.map(m => m.amplitude).filter(a => a != null && isFinite(a));
+
+        if (amps.length < 5) {
+            result.byTrial[ti] = { sequences: [], seq_r2: 0 };
+            return;
+        }
+
+        const opt = optimizeSequences(amps, 5, 0.3);
+        result.byTrial[ti] = opt;
+        result.totalSeqs += opt.sequences.length;
+
+        // Accumulate explained variance for overall R²
+        for (const seq of opt.sequences) {
+            totalSSExplained += seq.ss_reg;
+        }
+    });
+
+    result.totalR2 = totalSS > 0 ? totalSSExplained / totalSS : 0;
+    return result;
+}
+
+function updateSeqInfo(assignments) {
+    const el = document.getElementById('seqInfo');
+    if (!el) return;
+    if (assignments.totalSeqs > 0) {
+        el.textContent = `${assignments.totalSeqs} sequence${assignments.totalSeqs !== 1 ? 's' : ''} detected | R\u00b2 = ${assignments.totalR2.toFixed(3)}`;
+    } else {
+        el.textContent = 'No sequences detected';
+    }
+}
+
+function hideSeqInfo() {
+    const el = document.getElementById('seqInfo');
+    if (el) el.textContent = '';
+}
+
+function renderMovementScatter(divId, data, param, seqMode) {
     const movements = data.movements;
     const trialNames = data.trial_names || [];
 
@@ -246,6 +419,12 @@ function renderMovementScatter(divId, data, param, showSequence) {
     });
 
     const traces = [];
+    const shapes = []; // for sequence spans
+    const annotations = [];
+    const isMulti = seqMode.endsWith('_multi');
+    const isExp = seqMode.startsWith('exp_');
+    const isFirst10 = seqMode.endsWith('_first10');
+
     Object.keys(byTrial).sort((a, b) => +a - +b).forEach(ti => {
         const ms = byTrial[ti];
         const x = ms.map(m => m.peak_time);
@@ -262,24 +441,162 @@ function renderMovementScatter(divId, data, param, showSequence) {
             hovertemplate: `t=%{x:.2f}s<br>${PARAM_LABELS[param]}: %{y:.2f}<extra></extra>`,
         });
 
-        // Sequence effect: linear regression line
-        if (showSequence) {
-            const pairs = x.map((xi, i) => [xi, y[i]]).filter(p => p[0] != null && p[1] != null);
-            if (pairs.length >= 2) {
-                const xs = pairs.map(p => p[0]);
-                const ys = pairs.map(p => p[1]);
-                const { slope, intercept } = linearRegression(xs, ys);
-                const xMin = Math.min(...xs);
-                const xMax = Math.max(...xs);
+        if (seqMode === 'none') return;
+
+        // Build valid pairs (non-null x and y)
+        const validPairs = [];
+        for (let i = 0; i < x.length; i++) {
+            if (x[i] != null && y[i] != null && isFinite(x[i]) && isFinite(y[i])) {
+                validPairs.push({ x: x[i], y: y[i], idx: i });
+            }
+        }
+
+        if (isMulti) {
+            // Multi-sequence mode: use cached sequence assignments from amplitude
+            const trialSeqs = cachedSequenceAssignments && cachedSequenceAssignments.byTrial[ti];
+            if (!trialSeqs || trialSeqs.sequences.length === 0) return;
+
+            // For each sequence window (start/end are indices into the trial's amplitude array,
+            // but we need to filter for valid param values within those windows)
+            trialSeqs.sequences.forEach((seq, si) => {
+                const seqColor = SEQ_COLORS[si % SEQ_COLORS.length];
+                // seq.start and seq.end are indices into the trial's valid amplitude array
+                // Map to the trial's movement indices (ms[])
+                // The amplitude array was built from ms.filter(valid amplitude) — need same mapping
+                const ampValid = [];
+                for (let i = 0; i < ms.length; i++) {
+                    if (ms[i].amplitude != null && isFinite(ms[i].amplitude)) {
+                        ampValid.push(i);
+                    }
+                }
+                const seqMsIndices = ampValid.slice(seq.start, seq.end);
+
+                // Get x, y for this param within the sequence window
+                const seqX = [], seqY = [];
+                for (const mi of seqMsIndices) {
+                    if (x[mi] != null && y[mi] != null && isFinite(x[mi]) && isFinite(y[mi])) {
+                        seqX.push(x[mi]);
+                        seqY.push(y[mi]);
+                    }
+                }
+                if (seqX.length < 2) return;
+
+                const xMin = Math.min(...seqX);
+                const xMax = Math.max(...seqX);
+
+                // Background span for this sequence
+                shapes.push({
+                    type: 'rect', xref: 'x', yref: 'paper',
+                    x0: xMin, x1: xMax, y0: 0, y1: 1,
+                    fillcolor: seqColor, opacity: 0.07,
+                    line: { width: 0 },
+                    layer: 'below',
+                });
+
+                if (isExp) {
+                    // Exponential fit within sequence
+                    const fit = exponentialFit(seqX, seqY);
+                    if (!fit) return;
+                    const nPts = 50;
+                    const step = (xMax - xMin) / (nPts - 1);
+                    const curveX = [], curveY = [];
+                    for (let k = 0; k < nPts; k++) {
+                        const xv = xMin + k * step;
+                        curveX.push(xv);
+                        curveY.push(fit.predict(xv));
+                    }
+                    traces.push({
+                        x: curveX, y: curveY,
+                        type: 'scatter', mode: 'lines',
+                        name: `Seq ${si + 1}`,
+                        line: { color: seqColor, width: 2.5 },
+                        showlegend: false, hoverinfo: 'skip',
+                    });
+                    // R² annotation
+                    const midX = seqX[Math.floor(seqX.length / 2)];
+                    const midY = fit.predict(midX);
+                    annotations.push({
+                        x: midX, y: midY,
+                        text: `R\u00b2=${fit.r2.toFixed(2)}`,
+                        showarrow: false,
+                        font: { size: 9, color: seqColor },
+                        yshift: 12,
+                    });
+                } else {
+                    // Linear fit within sequence
+                    const reg = linearRegressionFull(seqX, seqY);
+                    if (!reg) return;
+                    traces.push({
+                        x: [xMin, xMax],
+                        y: [reg.slope * xMin + reg.intercept, reg.slope * xMax + reg.intercept],
+                        type: 'scatter', mode: 'lines',
+                        name: `Seq ${si + 1}`,
+                        line: { color: seqColor, width: 2.5 },
+                        showlegend: false, hoverinfo: 'skip',
+                    });
+                    // R² annotation
+                    const midX = (xMin + xMax) / 2;
+                    const midY = reg.slope * midX + reg.intercept;
+                    annotations.push({
+                        x: midX, y: midY,
+                        text: `R\u00b2=${reg.r2.toFixed(2)}`,
+                        showarrow: false,
+                        font: { size: 9, color: seqColor },
+                        yshift: 12,
+                    });
+                }
+            });
+
+        } else {
+            // Full or first-10 modes
+            let fitPairs = validPairs;
+            if (isFirst10) {
+                fitPairs = validPairs.slice(0, 10);
+            }
+            if (fitPairs.length < 2) return;
+
+            const fitX = fitPairs.map(p => p.x);
+            const fitY = fitPairs.map(p => p.y);
+            const xMin = Math.min(...fitX);
+            const xMax = Math.max(...fitX);
+
+            if (isExp) {
+                // Exponential fit
+                const fit = exponentialFit(fitX, fitY);
+                if (!fit) return;
+                const nPts = 80;
+                const step = (xMax - xMin) / (nPts - 1);
+                const curveX = [], curveY = [];
+                for (let k = 0; k < nPts; k++) {
+                    const xv = xMin + k * step;
+                    curveX.push(xv);
+                    curveY.push(fit.predict(xv));
+                }
+                traces.push({
+                    x: curveX, y: curveY,
+                    type: 'scatter', mode: 'lines',
+                    name: `Exp. fit (Trial ${+ti + 1})`,
+                    line: { color, width: 2, dash: 'dash' },
+                    showlegend: false, hoverinfo: 'skip',
+                });
+                // R² annotation
+                annotations.push({
+                    x: (xMin + xMax) / 2, y: fit.predict((xMin + xMax) / 2),
+                    text: `R\u00b2=${fit.r2.toFixed(2)}`,
+                    showarrow: false,
+                    font: { size: 9, color },
+                    yshift: 12,
+                });
+            } else {
+                // Linear fit
+                const { slope, intercept } = linearRegression(fitX, fitY);
                 traces.push({
                     x: [xMin, xMax],
                     y: [slope * xMin + intercept, slope * xMax + intercept],
-                    type: 'scatter',
-                    mode: 'lines',
+                    type: 'scatter', mode: 'lines',
                     name: `Trend (Trial ${+ti + 1})`,
                     line: { color, width: 2, dash: 'dash' },
-                    showlegend: false,
-                    hoverinfo: 'skip',
+                    showlegend: false, hoverinfo: 'skip',
                 });
             }
         }
@@ -294,6 +611,8 @@ function renderMovementScatter(divId, data, param, showSequence) {
         paper_bgcolor: '#fff',
         showlegend: true,
         legend: { orientation: 'h', y: -0.2, font: { size: 11 } },
+        shapes,
+        annotations,
     };
 
     Plotly.newPlot(divId, traces, layout, { responsive: true, displayModeBar: false });
@@ -312,14 +631,165 @@ function linearRegression(x, y) {
     return { slope, intercept };
 }
 
+function linearRegressionFull(x, y) {
+    // Filter to valid (non-null, finite) pairs
+    const pairs = [];
+    for (let i = 0; i < x.length; i++) {
+        if (x[i] != null && y[i] != null && isFinite(x[i]) && isFinite(y[i])) {
+            pairs.push([x[i], y[i]]);
+        }
+    }
+    if (pairs.length < 2) return null;
+    const xs = pairs.map(p => p[0]);
+    const ys = pairs.map(p => p[1]);
+    const n = xs.length;
+    let sx = 0, sy = 0, sxy = 0, sx2 = 0, sy2 = 0;
+    for (let i = 0; i < n; i++) {
+        sx += xs[i]; sy += ys[i]; sxy += xs[i] * ys[i];
+        sx2 += xs[i] * xs[i]; sy2 += ys[i] * ys[i];
+    }
+    const xMean = sx / n;
+    const yMean = sy / n;
+    const denom = n * sx2 - sx * sx;
+    if (denom === 0) return null;
+    const slope = (n * sxy - sx * sy) / denom;
+    const intercept = (sy - slope * sx) / n;
+
+    // SS_total and SS_reg
+    let ssTot = 0, ssReg = 0;
+    for (let i = 0; i < n; i++) {
+        ssTot += (ys[i] - yMean) ** 2;
+        ssReg += (xs[i] - xMean) ** 2;
+    }
+    ssReg *= slope * slope;
+    const r2 = ssTot > 0 ? ssReg / ssTot : 0;
+
+    return { slope, intercept, r2, ss_reg: ssReg, n };
+}
+
+/**
+ * DP-optimal non-overlapping negative-slope sequence detection.
+ * Ported from bradykinesia_analysis.ipynb `optimize_sequences()`.
+ *
+ * @param {number[]} amplitudes - amplitude values for movements in one trial
+ * @param {number} minMoves - minimum movements per sequence window (default 5)
+ * @param {number} minR2 - minimum R² per window (default 0.3)
+ * @returns {{ sequences: Array<{start,end,slope,r2,ss_reg}>, seq_r2: number }}
+ */
+function optimizeSequences(amplitudes, minMoves = 5, minR2 = 0.3) {
+    const n = amplitudes.length;
+    const result = { sequences: [], seq_r2: 0 };
+    if (n < minMoves) return result;
+
+    // Total SS (for computing seq_r2)
+    let ampMean = 0;
+    for (let i = 0; i < n; i++) ampMean += amplitudes[i];
+    ampMean /= n;
+    let totalSS = 0;
+    for (let i = 0; i < n; i++) totalSS += (amplitudes[i] - ampMean) ** 2;
+    if (totalSS === 0) return result;
+
+    // Enumerate all negative-slope windows of length >= minMoves
+    // Each window: [start, end, ss_reg, slope, r2]  (end is exclusive)
+    const windows = [];
+    for (let i = 0; i <= n - minMoves; i++) {
+        for (let j = i + minMoves; j <= n; j++) {
+            // Linear regression on (index, amplitude) for window [i, j)
+            const reg = linearRegressionFull(
+                Array.from({ length: j - i }, (_, k) => k),
+                amplitudes.slice(i, j)
+            );
+            if (!reg || reg.slope >= 0) continue;
+            if (reg.r2 < minR2) continue;
+            windows.push({ start: i, end: j, ss_reg: reg.ss_reg, slope: reg.slope, r2: reg.r2 });
+        }
+    }
+
+    if (windows.length === 0) return result;
+
+    // Sort windows by end position
+    windows.sort((a, b) => a.end - b.end);
+
+    // DP: find max-SS non-overlapping set
+    const dp = new Float64Array(n + 1);    // dp[pos] = best total SS using windows ending at or before pos
+    const choice = new Array(n + 1);        // choice[pos] = list of chosen windows
+    for (let pos = 0; pos <= n; pos++) choice[pos] = [];
+
+    let wi = 0; // window index
+    for (let pos = 1; pos <= n; pos++) {
+        // Carry forward
+        dp[pos] = dp[pos - 1];
+        choice[pos] = choice[pos - 1];
+
+        // Try all windows ending at this position
+        while (wi < windows.length && windows[wi].end === pos) {
+            const w = windows[wi];
+            const val = dp[w.start] + w.ss_reg;
+            if (val > dp[pos]) {
+                dp[pos] = val;
+                choice[pos] = [...choice[w.start], w];
+            }
+            wi++;
+        }
+    }
+
+    result.sequences = choice[n];
+    result.seq_r2 = dp[n] / totalSS;
+    return result;
+}
+
+/**
+ * Exponential decay fit: y = a * exp(b * x)
+ * Computed by log-transforming y and fitting linear regression.
+ * R² is computed on original scale.
+ *
+ * @param {number[]} x
+ * @param {number[]} y
+ * @returns {{ a: number, b: number, r2: number, predict: function }|null}
+ */
+function exponentialFit(x, y) {
+    // Filter to valid pairs with positive y
+    const pairs = [];
+    for (let i = 0; i < x.length; i++) {
+        if (x[i] != null && y[i] != null && isFinite(x[i]) && isFinite(y[i]) && y[i] > 0) {
+            pairs.push([x[i], y[i]]);
+        }
+    }
+    if (pairs.length < 2) return null;
+
+    const xs = pairs.map(p => p[0]);
+    const logYs = pairs.map(p => Math.log(p[1]));
+    const ys = pairs.map(p => p[1]);
+
+    // Linear regression on (x, log(y))
+    const reg = linearRegression(xs, logYs);
+    const a = Math.exp(reg.intercept);
+    const b = reg.slope;
+
+    // R² on original scale
+    let yMean = 0;
+    for (let i = 0; i < ys.length; i++) yMean += ys[i];
+    yMean /= ys.length;
+    let ssTot = 0, ssRes = 0;
+    for (let i = 0; i < xs.length; i++) {
+        const pred = a * Math.exp(b * xs[i]);
+        ssTot += (ys[i] - yMean) ** 2;
+        ssRes += (ys[i] - pred) ** 2;
+    }
+    const r2 = ssTot > 0 ? 1 - ssRes / ssTot : 0;
+
+    return { a, b, r2, predict: (xVal) => a * Math.exp(b * xVal) };
+}
+
 // ── Group Comparison Tab ───────────────────────────────────────
 
 let highlightedSubject = null;
 
 async function loadGroup() {
     const container = document.getElementById('groupPlots');
+    const includeAuto = document.getElementById('includeAutoToggle').checked;
 
-    if (cachedGroup) {
+    if (cachedGroup && cachedGroup._includeAuto === includeAuto) {
         renderGroupPlots();
         return;
     }
@@ -327,7 +797,8 @@ async function loadGroup() {
     container.innerHTML = '<div class="results-no-data" style="grid-column:1/-1;">Loading group data...</div>';
 
     try {
-        cachedGroup = await API.get('/api/results/group');
+        cachedGroup = await API.get(`/api/results/group?include_auto=${includeAuto}`);
+        cachedGroup._includeAuto = includeAuto;
         renderGroupPlots();
     } catch (e) {
         container.innerHTML = `<div class="results-no-data" style="grid-column:1/-1;color:#d32f2f;">${e.message}</div>`;
@@ -342,6 +813,8 @@ const GROUP_PARAMS = [
     { key: 'mean_amplitude', label: 'Mean Amplitude (mm)' },
     { key: 'cv_amplitude', label: 'CV of Amplitude' },
     { key: 'seq_amplitude', label: 'Sequence Effect: Amplitude' },
+    { key: 'mean_rel_amplitude', label: 'Mean Relative Amplitude' },
+    { key: 'mean_power', label: 'Mean Power (mm\u00b2/s)' },
     { key: 'mean_peak_open_vel', label: 'Mean Peak Opening Vel. (mm/s)' },
     { key: 'cv_peak_open_vel', label: 'CV Peak Opening Vel.' },
     { key: 'mean_peak_close_vel', label: 'Mean Peak Closing Vel. (mm/s)' },
@@ -422,13 +895,15 @@ function renderGroupBar(divId, data, paramKey, paramLabel) {
         showlegend: false,
     };
 
-    // Individual dots with jitter
+    // Individual dots with jitter — differentiate saved vs auto
     const dotX = [];
     const dotY = [];
     const dotText = [];
     const dotColors = [];
     const dotSizes = [];
     const dotOpacities = [];
+    const dotLineWidths = [];
+    const dotLineColors = [];
 
     groups.forEach((g, gi) => {
         const subs = byGroup[g];
@@ -436,16 +911,22 @@ function renderGroupBar(divId, data, paramKey, paramLabel) {
             const val = s[paramKey];
             if (val == null || !isFinite(val)) return;
 
-            // Jitter: spread dots within ±0.25 of the bar center
             const jitter = subs.length > 1
                 ? -0.25 + (si / (subs.length - 1)) * 0.5
                 : 0;
             dotX.push(gi + jitter);
             dotY.push(val);
-            dotText.push(s.name);
-            dotColors.push(GROUP_COLORS[g] || '#999');
+            dotText.push(s.name + (s.event_source === 'auto' ? ' (auto)' : ''));
 
+            const groupColor = GROUP_COLORS[g] || '#999';
             const isHighlighted = highlightedSubject === s.name;
+            const isAuto = s.event_source === 'auto';
+
+            // Auto-detected: open circle (white fill, colored border)
+            // Saved: filled circle
+            dotColors.push(isAuto ? '#ffffff' : groupColor);
+            dotLineColors.push(isAuto ? groupColor : '#333');
+            dotLineWidths.push(isAuto ? 2 : (isHighlighted ? 2 : 0.5));
             dotSizes.push(isHighlighted ? 12 : 8);
             dotOpacities.push(isHighlighted ? 1.0 : 0.7);
         });
@@ -461,7 +942,7 @@ function renderGroupBar(divId, data, paramKey, paramLabel) {
             color: dotColors,
             size: dotSizes,
             opacity: dotOpacities,
-            line: { color: '#333', width: dotSizes.map(s => s > 8 ? 2 : 0.5) },
+            line: { color: dotLineColors, width: dotLineWidths },
         },
         hovertemplate: '%{text}<br>%{y:.3f}<extra></extra>',
         showlegend: false,
@@ -486,13 +967,13 @@ function renderGroupBar(divId, data, paramKey, paramLabel) {
         displayModeBar: false,
     });
 
-    // Click handler on dots (curveNumber 1 = dot trace, 0 = bar trace)
+    // Click handler on dots
     const plotDiv = document.getElementById(divId);
     plotDiv.on('plotly_click', (eventData) => {
         if (eventData.points && eventData.points.length > 0) {
             const pt = eventData.points[0];
             if (pt.curveNumber === 1 && pt.text) {
-                highlightSubject(pt.text);
+                highlightSubject(pt.text.replace(' (auto)', ''));
             }
         }
     });
@@ -511,8 +992,11 @@ function highlightSubject(name) {
 
 document.getElementById('subjectSelect').addEventListener('change', (e) => {
     currentSubjectId = e.target.value;
+    sessionStorage.setItem('dlc_lastSubjectId', String(currentSubjectId));
     cachedTraces = null;
     cachedMovements = null;
+    cachedSequenceAssignments = null;
+    updateNavLinks();
 
     if (currentTab === 'distances') {
         loadDistances(currentSubjectId);
@@ -528,27 +1012,69 @@ document.querySelectorAll('#tabSwitcher .btn').forEach(btn => {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab));
 });
 
-// Movement controls: re-render on checkbox change
-document.querySelectorAll('#movementControls input').forEach(cb => {
+// Movement controls: re-render on checkbox or sequence mode change
+document.querySelectorAll('#movementControls input[data-param]').forEach(cb => {
     cb.addEventListener('change', () => {
         if (cachedMovements) renderMovementPlots();
     });
+});
+document.getElementById('sequenceMode').addEventListener('change', () => {
+    if (cachedMovements) renderMovementPlots();
+});
+
+// Distance controls: re-render on y-axis changes
+document.getElementById('lockYAxis').addEventListener('change', () => {
+    const locked = document.getElementById('lockYAxis').checked;
+    document.getElementById('yAxisInputs').style.display = locked ? '' : 'none';
+    if (cachedTraces) renderAllDistancePlots();
+});
+document.getElementById('yAxisMin').addEventListener('change', () => {
+    if (cachedTraces) renderAllDistancePlots();
+});
+document.getElementById('yAxisMax').addEventListener('change', () => {
+    if (cachedTraces) renderAllDistancePlots();
+});
+
+// Group comparison: auto-detect toggle
+document.getElementById('includeAutoToggle').addEventListener('change', () => {
+    cachedGroup = null;
+    loadGroup();
 });
 
 // ── Init ───────────────────────────────────────────────────────
 
 const params = new URLSearchParams(window.location.search);
 const initSubject = params.get('subject');
+const initFrom = params.get('from');
 const initTab = params.get('tab');
 
 loadSubjects().then(() => {
-    if (initSubject) {
-        document.getElementById('subjectSelect').value = initSubject;
-        currentSubjectId = initSubject;
+    // 1. Determine which subject to show
+    let subjectId = initSubject;
+    if (!subjectId) {
+        // No subject in URL — check sessionStorage for last-opened subject
+        subjectId = sessionStorage.getItem('dlc_lastSubjectId') || null;
     }
+    if (subjectId) {
+        document.getElementById('subjectSelect').value = subjectId;
+        currentSubjectId = subjectId;
+        sessionStorage.setItem('dlc_lastSubjectId', String(subjectId));
+        updateNavLinks();
+    }
+
+    // 2. Determine which tab to show
     if (initTab && ['distances', 'movements', 'group'].includes(initTab)) {
+        // Explicit tab param takes highest priority
         switchTab(initTab);
+    } else if (!initSubject && !initFrom) {
+        // No subject param and no source context → group comparison
+        switchTab('group');
     } else if (currentSubjectId) {
-        loadDistances(currentSubjectId);
+        // Have a subject — check for a remembered tab
+        const lastTab = sessionStorage.getItem(`dlc_resultsTab_${currentSubjectId}`);
+        switchTab(lastTab || 'movements');
+    } else {
+        // No subject at all → group comparison
+        switchTab('group');
     }
 });

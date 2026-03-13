@@ -3,6 +3,7 @@
 import logging
 import threading
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -224,6 +225,112 @@ def index():
 def labeling_page():
     """Serve the labeling page."""
     return FileResponse(str(STATIC_DIR / "labeling.html"))
+
+
+@app.get("/labeling-select")
+def labeling_select_page(subject: Optional[int] = None, mode: Optional[str] = None):
+    """Smart redirect to labeling page.
+
+    If ``subject`` is given, create a session for that subject with the
+    requested ``mode`` (or auto-detect the best mode from the subject's
+    pipeline stage).  Otherwise fall back to the most recent session or
+    create one for the first subject.
+    """
+    from fastapi.responses import RedirectResponse
+    from .db import get_db_ctx
+
+    # Stages that indicate no DLC predictions yet → default to 'initial'
+    _PRE_DLC_STAGES = {
+        "created", "videos_linked", "prelabeled", "labeling", "labeled",
+        "committed", "training", "training_dataset_created", "trained",
+    }
+    # Stages that have DLC predictions but no corrections → default to 'corrections'
+    _PRE_CORRECTIONS_STAGES = {"analyzed", "refined"}
+    # Valid session types
+    _VALID_MODES = {"initial", "refine", "corrections", "events", "final"}
+
+    def _create_session(db, sid: int, stype: str) -> Optional[int]:
+        db.execute(
+            "INSERT INTO label_sessions (subject_id, session_type) "
+            "VALUES (?, ?)",
+            (sid, stype),
+        )
+        db.commit()
+        row = db.execute(
+            "SELECT id FROM label_sessions WHERE subject_id = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (sid,),
+        ).fetchone()
+        return row["id"] if row else None
+
+    def _smart_mode(stage: str) -> str:
+        """Pick the best labeling mode based on the subject's pipeline stage."""
+        if stage in _PRE_DLC_STAGES:
+            return "initial"
+        if stage in _PRE_CORRECTIONS_STAGES:
+            return "corrections"
+        # corrected, events_partial, events_complete, complete, etc.
+        return "events"
+
+    with get_db_ctx() as db:
+        # ── Subject explicitly requested ──────────────────────────
+        if subject is not None:
+            row = db.execute(
+                "SELECT * FROM subjects WHERE id = ?", (subject,)
+            ).fetchone()
+            if not row:
+                return RedirectResponse(url="/", status_code=302)
+
+            # Determine session type
+            if mode and mode in _VALID_MODES:
+                session_type = mode
+            else:
+                session_type = _smart_mode(row["stage"] or "created")
+
+            try:
+                sid = _create_session(db, subject, session_type)
+                if sid:
+                    return RedirectResponse(
+                        url=f"/labeling?session={sid}", status_code=302
+                    )
+                else:
+                    logger.warning("labeling-select: _create_session returned None for subject=%s type=%s", subject, session_type)
+            except Exception as exc:
+                logger.exception("labeling-select: session creation failed for subject=%s type=%s: %s", subject, session_type, exc)
+            return RedirectResponse(url="/", status_code=302)
+
+        # ── No subject param — fall back to most recent session ───
+        recent_session = db.execute(
+            "SELECT id FROM label_sessions "
+            "ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+
+        if recent_session:
+            return RedirectResponse(
+                url=f"/labeling?session={recent_session['id']}", status_code=302
+            )
+
+        # No session found — get first subject
+        first_subject = db.execute(
+            "SELECT * FROM subjects ORDER BY id LIMIT 1"
+        ).fetchone()
+
+        if not first_subject:
+            return RedirectResponse(url="/", status_code=302)
+
+        subject_id = first_subject["id"]
+        session_type = _smart_mode(first_subject["stage"] or "created")
+
+        try:
+            sid = _create_session(db, subject_id, session_type)
+            if sid:
+                return RedirectResponse(
+                    url=f"/labeling?session={sid}", status_code=302
+                )
+        except Exception:
+            pass
+
+        return RedirectResponse(url="/", status_code=302)
 
 
 @app.get("/results")

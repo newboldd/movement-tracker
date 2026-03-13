@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DLC Results</title>
-    <link rel="stylesheet" href="/static/css/main.css">
+    <link rel="stylesheet" href="/static/css/main.css?v=3">
 </head>
 <body class="results-page">
     <div class="header">
@@ -19,7 +19,7 @@
             </div>
             <!-- Tab Switcher -->
             <div id="tabSwitcher" style="display:flex;gap:4px;align-items:center;">
-                <span style="font-size:12px;color:#999;margin-right:4px;">Tab:</span>
+                <span style="font-size:12px;color:var(--text-muted);margin-right:4px;">Tab:</span>
                 <button class="btn btn-sm active" data-tab="distances">Distances</button>
                 <button class="btn btn-sm" data-tab="movements">Movements</button>
                 <button class="btn btn-sm" data-tab="group">Group Comparison</button>
@@ -28,7 +28,7 @@
         <nav>
             <a href="/">Dashboard</a>
             <a href="/remote">Processing</a>
-            <a href="/labeling-select">Labeling</a>
+            <a href="/labeling-select" id="labelingLink">Labeling</a>
             <a href="/results" class="active">Results</a>
             <a href="/settings">Settings</a>
         </nav>
@@ -37,6 +37,13 @@
     <div class="results-container">
         <!-- Distances Tab -->
         <div id="tabDistances" class="results-tab active">
+            <div class="distance-controls" id="distanceControls">
+                <label><input type="checkbox" id="lockYAxis" checked> Lock Y-axis across trials</label>
+                <span id="yAxisInputs">
+                    <label style="margin:0;">Min: <input type="number" id="yAxisMin" step="1" placeholder="auto"></label>
+                    <label style="margin:0;">Max: <input type="number" id="yAxisMax" step="1" placeholder="auto"></label>
+                </span>
+            </div>
             <div id="distancePlots">
                 <div class="results-no-data">Select a subject to view distance traces</div>
             </div>
@@ -47,13 +54,30 @@
             <div class="results-controls" id="movementControls">
                 <label><input type="checkbox" data-param="imi" checked> IMI</label>
                 <label><input type="checkbox" data-param="amplitude" checked> Amplitude</label>
+                <label><input type="checkbox" data-param="rel_amplitude"> Relative Amplitude</label>
                 <label><input type="checkbox" data-param="peak_open_vel" checked> Peak Opening Vel.</label>
                 <label><input type="checkbox" data-param="peak_close_vel" checked> Peak Closing Vel.</label>
                 <label><input type="checkbox" data-param="mean_open_vel" checked> Mean Opening Vel.</label>
                 <label><input type="checkbox" data-param="mean_close_vel" checked> Mean Closing Vel.</label>
+                <label><input type="checkbox" data-param="power"> Power (Vel x Amp)</label>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
-                <label><input type="checkbox" id="sequenceToggle"> Sequence Effect</label>
+                <label style="display:flex;align-items:center;gap:4px;">
+                    Sequence:
+                    <select id="sequenceMode"
+                        style="padding:3px 8px;background:var(--bg-card,#fff);border:1px solid #ccc;
+                               border-radius:4px;color:inherit;font-size:12px;">
+                        <option value="none">None</option>
+                        <option value="linear_full">Linear (full)</option>
+                        <option value="linear_first10">Linear (first 10)</option>
+                        <option value="linear_multi">Linear (multi-seq)</option>
+                        <option value="exp_full">Exponential (full)</option>
+                        <option value="exp_first10">Exponential (first 10)</option>
+                        <option value="exp_multi">Exponential (multi-seq)</option>
+                    </select>
+                </label>
+                <span id="seqInfo" style="font-size:11px;color:#666;"></span>
             </div>
+            <div id="movementEventBanner"></div>
             <div id="movementPlots" class="results-plot-grid">
                 <div class="results-no-data" style="grid-column:1/-1;">Select a subject to view movement parameters</div>
             </div>
@@ -61,7 +85,10 @@
 
         <!-- Group Comparison Tab -->
         <div id="tabGroup" class="results-tab">
-            <div id="highlightedSubject"></div>
+            <div class="results-controls" id="groupControls">
+                <label><input type="checkbox" id="includeAutoToggle"> Include auto-detected events</label>
+                <span id="highlightedSubject"></span>
+            </div>
             <div id="groupPlots" class="results-plot-grid">
                 <div class="results-no-data" style="grid-column:1/-1;">Loading group data...</div>
             </div>
@@ -70,6 +97,6 @@
 
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js"></script>
+    <script src="/static/js/results.js?v=4"></script>
 </body>
 </html>

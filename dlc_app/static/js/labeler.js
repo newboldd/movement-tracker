@@ -157,8 +157,11 @@ const labeler = (() => {
 
     // Per-trial event filtering
     let currentEventTrialIdx = 0;
-    let cachedTrialMetrics = null;  // {distance, reversal, motion_ssd, per_cam_ssd}
-    let cachedMetricsTrialIdx = -1;
+    // Per-trial metrics cache: { trialIdx: {distance, reversal, motion_ssd, per_cam_ssd} }
+    let metricsCache = {};
+    let metricsLoading = new Set();  // trial indices currently being computed
+    // Current detect focus mode: 'all', 'open', 'peak', 'close'
+    let detectFocus = 'all';
 
     // Prefetch cache
     const imageCache = new Map();
@@ -272,6 +275,17 @@ const labeler = (() => {
             speedDisplay.textContent = `${playbackRate}x`;
         }
 
+        // Threshold param inputs → re-render distance metric canvas on change
+        ['paramMinPeakHeight', 'paramValleyThresh'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) {
+                el.addEventListener('input', () => {
+                    const cached = metricsCache[currentEventTrialIdx];
+                    if (cached) renderMetricCanvas('distPlotCanvas', cached.distance, '#4a9eff', 'Distance');
+                });
+            }
+        });
+
         loadSession();
     }
 
@@ -294,6 +308,12 @@ const labeler = (() => {
 
             // Populate subject navigation dropdown
             currentSubjectId = sessionInfo.subject.id;
+            // Persist subject and mode in sessionStorage for cross-page navigation
+            sessionStorage.setItem('dlc_lastSubjectId', String(currentSubjectId));
+            sessionStorage.setItem(`dlc_labelTab_${currentSubjectId}`, currentSessionType());
+            // Update results nav link with current subject and source
+            const resultsLink = document.getElementById('resultsLink');
+            if (resultsLink) resultsLink.href = `/results?subject=${currentSubjectId}&from=labeling`;
             const typeLabel = document.getElementById('sessionTypeLabel');
             if (isEvents) typeLabel.textContent = 'Events:';
             else if (isFinal) typeLabel.textContent = 'Final:';
@@ -639,6 +659,28 @@ const labeler = (() => {
         renderTimeline();
         renderDistanceTrace();
         if (isRefine) updateV2TrainingBtn();
+
+        // Trial-follows-frame: auto-sync currentEventTrialIdx when frame crosses trial boundary
+        if (isEvents) {
+            const newTrial = getTrialForFrame(currentFrame);
+            if (newTrial !== currentEventTrialIdx) {
+                currentEventTrialIdx = newTrial;
+                const trialLabel = document.getElementById('trialSelectorLabel');
+                if (trialLabel && trials[currentEventTrialIdx]) {
+                    trialLabel.textContent = trials[currentEventTrialIdx].trial_name;
+                }
+                updateEventCounts();
+                // If detect modal is open, refresh metric plots for new trial
+                const overlay = document.getElementById('detectModalOverlay');
+                if (overlay && overlay.classList.contains('active')) {
+                    const modalTrial = document.getElementById('detectModalTrial');
+                    if (modalTrial && trials[currentEventTrialIdx]) {
+                        modalTrial.textContent = `(${trials[currentEventTrialIdx].trial_name})`;
+                    }
+                    showMetricPlotsForCurrentTrial();
+                }
+            }
+        }
     }
 
     function fitImage() {
@@ -3396,6 +3438,10 @@ const labeler = (() => {
             // Save current frame/zoom and preferences before switching
             saveNavState();
             savePreferences();
+            // Update results nav link
+            const resultsLink = document.getElementById('resultsLink');
+            if (resultsLink) resultsLink.href = `/results?subject=${subjectId}&from=labeling`;
+            sessionStorage.setItem('dlc_lastSubjectId', String(subjectId));
             const session = await API.post(`/api/labeling/${subjectId}/sessions`, {
                 session_type: currentSessionType(),
             });
@@ -3548,8 +3594,36 @@ const labeler = (() => {
             }
             updateEventCounts();
             renderDistanceTrace();
+
+            // Auto-compute metrics for all trials in background (fire-and-forget)
+            metricsCache = {};
+            metricsLoading.clear();
+            for (let i = 0; i < trials.length; i++) {
+                computeMetricsForTrial(i);
+            }
         } catch (e) {
             console.log('Could not load events:', e);
+        }
+    }
+
+    async function computeMetricsForTrial(trialIdx) {
+        if (metricsCache[trialIdx] || metricsLoading.has(trialIdx)) return;
+        metricsLoading.add(trialIdx);
+        try {
+            const result = await API.post(
+                `/api/labeling/sessions/${sessionId}/compute_metrics`,
+                { trial_index: trialIdx }
+            );
+            metricsCache[trialIdx] = result;
+            // If detect modal is open and showing this trial, refresh plots
+            const overlay = document.getElementById('detectModalOverlay');
+            if (overlay && overlay.classList.contains('active') && currentEventTrialIdx === trialIdx) {
+                showMetricPlotsForCurrentTrial();
+            }
+        } catch (e) {
+            console.log(`Metrics computation failed for trial ${trialIdx}:`, e);
+        } finally {
+            metricsLoading.delete(trialIdx);
         }
     }
 
@@ -3637,18 +3711,13 @@ const labeler = (() => {
         goToFrame(newFrame);
     }
 
-    // ── Trial switching ──────────────────────────────────
+    // ── Trial switching (auto-follows frame position now) ──
 
     function setEventTrial(trialIdx) {
         if (trialIdx < 0 || trialIdx >= trials.length) return;
         currentEventTrialIdx = trialIdx;
         const trial = trials[trialIdx];
         goToFrame(trial.start_frame);
-        const label = document.getElementById('trialSelectorLabel');
-        if (label) label.textContent = trial.trial_name;
-        updateEventCounts();
-        renderDistanceTrace();
-        if (cachedMetricsTrialIdx !== trialIdx) cachedTrialMetrics = null;
     }
 
     function prevTrial() { setEventTrial(currentEventTrialIdx - 1); }
@@ -3677,9 +3746,9 @@ const labeler = (() => {
         if (trialLabel && trials[currentEventTrialIdx]) {
             trialLabel.textContent = `(${trials[currentEventTrialIdx].trial_name})`;
         }
-        if (cachedTrialMetrics && cachedMetricsTrialIdx === currentEventTrialIdx) {
-            showMetricPlots();
-        }
+        showMetricPlotsForCurrentTrial();
+        // Apply current focus mode
+        applyDetectFocus();
     }
 
     function closeDetectModal() {
@@ -3692,53 +3761,62 @@ const labeler = (() => {
         openDetectModal();
     }
 
-    async function computeMetrics() {
-        const btn = document.getElementById('computeMetricsBtn');
+    // Show metric plots from cache, or show loading/unavailable state
+    function showMetricPlotsForCurrentTrial() {
         const loading = document.getElementById('metricPlotsLoading');
         const container = document.getElementById('metricPlotsContainer');
-        if (btn) btn.disabled = true;
-        if (loading) loading.style.display = 'block';
-        if (container) container.style.display = 'none';
+        const unavailable = document.getElementById('metricPlotsUnavailable');
 
-        try {
-            const result = await API.post(
-                `/api/labeling/sessions/${sessionId}/compute_metrics`,
-                { trial_index: currentEventTrialIdx }
-            );
-            cachedTrialMetrics = result;
-            cachedMetricsTrialIdx = currentEventTrialIdx;
-            showMetricPlots();
-        } catch (e) {
-            alert('Failed to compute metrics: ' + e.message);
-        } finally {
-            if (btn) btn.disabled = false;
+        const cached = metricsCache[currentEventTrialIdx];
+        if (cached) {
             if (loading) loading.style.display = 'none';
+            if (unavailable) unavailable.style.display = 'none';
+            if (container) container.style.display = 'block';
+            renderMetricCanvas('distPlotCanvas', cached.distance, '#4a9eff', 'Distance');
+            renderMetricCanvas('reversalPlotCanvas', cached.reversal, '#ff9800', 'Reversal');
+            renderMetricCanvas('ssdPlotCanvas', cached.motion_ssd, '#4caf50', 'SSD Motion');
+        } else if (metricsLoading.has(currentEventTrialIdx)) {
+            if (container) container.style.display = 'none';
+            if (unavailable) unavailable.style.display = 'none';
+            if (loading) loading.style.display = 'block';
+            // Poll until done
+            const trialToWatch = currentEventTrialIdx;
+            const poll = setInterval(() => {
+                if (metricsCache[trialToWatch]) {
+                    clearInterval(poll);
+                    if (currentEventTrialIdx === trialToWatch) showMetricPlotsForCurrentTrial();
+                } else if (!metricsLoading.has(trialToWatch)) {
+                    clearInterval(poll);
+                    // Failed
+                    if (currentEventTrialIdx === trialToWatch) {
+                        if (loading) loading.style.display = 'none';
+                        if (unavailable) unavailable.style.display = 'block';
+                    }
+                }
+            }, 300);
+        } else {
+            // Not cached and not loading — metrics unavailable
+            if (container) container.style.display = 'none';
+            if (loading) loading.style.display = 'none';
+            if (unavailable) unavailable.style.display = 'block';
         }
     }
 
-    function showMetricPlots() {
-        const container = document.getElementById('metricPlotsContainer');
-        if (container) container.style.display = 'block';
-        renderMetricCanvas('distPlotCanvas', cachedTrialMetrics.distance, '#4a9eff', 'Distance');
-        renderMetricCanvas('reversalPlotCanvas', cachedTrialMetrics.reversal, '#ff9800', 'Reversal');
-        renderMetricCanvas('ssdPlotCanvas', cachedTrialMetrics.motion_ssd, '#4caf50', 'SSD Motion');
-    }
-
     function renderMetricCanvas(canvasId, data, color, label) {
-        const canvas = document.getElementById(canvasId);
-        if (!canvas || !data) return;
-        const ctx = canvas.getContext('2d');
-        const w = canvas.parentElement.clientWidth;
-        const h = 80;
-        canvas.width = w;
-        canvas.height = h;
+        const cvs = document.getElementById(canvasId);
+        if (!cvs || !data) return;
+        const c = cvs.getContext('2d');
+        const w = cvs.parentElement.clientWidth;
+        const h = 90;
+        cvs.width = w;
+        cvs.height = h;
 
-        const padL = 50, padR = 8, padT = 12, padB = 10;
+        const padL = 50, padR = 8, padT = 14, padB = 12;
         const plotW = w - padL - padR;
         const plotH = h - padT - padB;
 
-        ctx.fillStyle = '#16213e';
-        ctx.fillRect(0, 0, w, h);
+        c.fillStyle = '#16213e';
+        c.fillRect(0, 0, w, h);
 
         const sorted = [...data].filter(v => v != null && isFinite(v)).sort((a, b) => a - b);
         if (sorted.length === 0) return;
@@ -3749,25 +3827,78 @@ const labeler = (() => {
         const fToX = (f) => padL + (f / data.length) * plotW;
         const dToY = (d) => padT + ((maxD - d) / range) * plotH;
 
-        // Label
-        ctx.fillStyle = '#8892a0';
-        ctx.font = '10px sans-serif';
-        ctx.fillText(label, 4, padT + 4);
+        // Y-axis ticks and labels
+        const nTicks = 4;
+        c.fillStyle = '#8892a0';
+        c.font = '9px sans-serif';
+        c.textAlign = 'right';
+        for (let i = 0; i <= nTicks; i++) {
+            const val = minD + (maxD - minD) * (1 - i / nTicks);
+            const y = padT + (i / nTicks) * plotH;
+            c.fillText(val.toFixed(1), padL - 4, y + 3);
+            // Grid line
+            c.beginPath();
+            c.moveTo(padL, y);
+            c.lineTo(w - padR, y);
+            c.strokeStyle = 'rgba(42, 58, 92, 0.4)';
+            c.lineWidth = 0.5;
+            c.stroke();
+        }
+        c.textAlign = 'left';
 
-        // Line
-        ctx.beginPath();
+        // Label
+        c.fillStyle = '#8892a0';
+        c.font = '10px sans-serif';
+        c.fillText(label, 4, padT + 4);
+
+        // Threshold lines for distance plot
+        if (canvasId === 'distPlotCanvas') {
+            const mph = parseFloat(document.getElementById('paramMinPeakHeight')?.value);
+            if (isFinite(mph) && mph >= minD && mph <= maxD) {
+                const ty = dToY(mph);
+                c.beginPath();
+                c.setLineDash([4, 3]);
+                c.moveTo(padL, ty);
+                c.lineTo(w - padR, ty);
+                c.strokeStyle = '#f44336';
+                c.lineWidth = 1;
+                c.stroke();
+                c.setLineDash([]);
+                c.fillStyle = '#f44336';
+                c.font = '8px sans-serif';
+                c.fillText('min_peak', w - padR - 44, ty - 3);
+            }
+            const vt = parseFloat(document.getElementById('paramValleyThresh')?.value);
+            if (isFinite(vt) && vt >= minD && vt <= maxD) {
+                const ty = dToY(vt);
+                c.beginPath();
+                c.setLineDash([4, 3]);
+                c.moveTo(padL, ty);
+                c.lineTo(w - padR, ty);
+                c.strokeStyle = '#ff9800';
+                c.lineWidth = 1;
+                c.stroke();
+                c.setLineDash([]);
+                c.fillStyle = '#ff9800';
+                c.font = '8px sans-serif';
+                c.fillText('valley', w - padR - 30, ty - 3);
+            }
+        }
+
+        // Data line
+        c.beginPath();
         let started = false;
         for (let f = 0; f < data.length; f++) {
             const d = data[f];
             if (d == null || !isFinite(d)) { started = false; continue; }
             const x = fToX(f);
             const y = Math.max(padT, Math.min(padT + plotH, dToY(d)));
-            if (!started) { ctx.moveTo(x, y); started = true; }
-            else ctx.lineTo(x, y);
+            if (!started) { c.moveTo(x, y); started = true; }
+            else c.lineTo(x, y);
         }
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1;
-        ctx.stroke();
+        c.strokeStyle = color;
+        c.lineWidth = 1;
+        c.stroke();
 
         // Overlay event markers from current trial
         const trial = trials[currentEventTrialIdx];
@@ -3779,15 +3910,94 @@ const labeler = (() => {
                     if (gf < trial.start_frame || gf > trial.end_frame) return;
                     const localF = gf - sf;
                     const x = fToX(localF);
-                    ctx.beginPath();
-                    ctx.moveTo(x, padT);
-                    ctx.lineTo(x, padT + plotH);
-                    ctx.strokeStyle = EVENT_COLORS[etype] + '80';
-                    ctx.lineWidth = 1;
-                    ctx.stroke();
+                    c.beginPath();
+                    c.moveTo(x, padT);
+                    c.lineTo(x, padT + plotH);
+                    c.strokeStyle = EVENT_COLORS[etype] + '80';
+                    c.lineWidth = 1;
+                    c.stroke();
                 });
             });
         }
+    }
+
+    // ── Event-type focus mode ─────────────────────────────
+
+    // Which params are relevant for each focus mode
+    const FOCUS_RELEVANCE = {
+        open: {
+            params: ['paramOpenThresh', 'paramNback', 'paramSsdRadius', 'paramOpenBias', 'paramDistGuard', 'paramGaussianSigma', 'paramMaxValidDist', 'paramMinEventGap'],
+            cards: ['cardSsd'],
+            canvases: ['distPlotCanvas', 'ssdPlotCanvas'],
+        },
+        peak: {
+            params: ['paramMinPeakHeight', 'paramValleyThresh', 'paramMinEventGap', 'paramReversalRadius', 'paramPeakGuard', 'paramEdgeMinPeak', 'paramMaxValidDist'],
+            cards: ['cardReversal'],
+            canvases: ['distPlotCanvas', 'reversalPlotCanvas'],
+        },
+        close: {
+            params: ['paramSsdRadius', 'paramCloseBias', 'paramDistGuard', 'paramGaussianSigma', 'paramMaxValidDist', 'paramMinEventGap'],
+            cards: ['cardSsd'],
+            canvases: ['distPlotCanvas', 'ssdPlotCanvas'],
+        },
+    };
+
+    function setDetectFocus(focus) {
+        detectFocus = focus;
+        // Update button active states
+        const btns = document.querySelectorAll('#detectFocusSelector button');
+        btns.forEach(b => {
+            b.classList.toggle('active', b.getAttribute('data-focus') === focus);
+        });
+        applyDetectFocus();
+    }
+
+    function applyDetectFocus() {
+        if (detectFocus === 'all') {
+            // Enable everything
+            document.querySelectorAll('.detect-core-params label, .detect-param label').forEach(el => {
+                el.classList.remove('detect-param-dimmed');
+            });
+            document.querySelectorAll('.detect-step-card').forEach(el => {
+                el.classList.remove('detect-dimmed');
+            });
+            document.querySelectorAll('#metricPlotsContainer canvas').forEach(el => {
+                el.classList.remove('detect-dimmed');
+            });
+            return;
+        }
+
+        const rel = FOCUS_RELEVANCE[detectFocus];
+        if (!rel) return;
+
+        // Dim/enable param labels based on their input ID
+        document.querySelectorAll('.detect-core-params label, .detect-param label').forEach(el => {
+            const input = el.querySelector('input[type="number"]');
+            if (!input) return;
+            if (rel.params.includes(input.id)) {
+                el.classList.remove('detect-param-dimmed');
+            } else {
+                el.classList.add('detect-param-dimmed');
+            }
+        });
+
+        // Dim/enable step cards
+        document.querySelectorAll('.detect-step-card').forEach(el => {
+            if (rel.cards.includes(el.id)) {
+                el.classList.remove('detect-dimmed');
+            } else {
+                el.classList.add('detect-dimmed');
+            }
+        });
+
+        // Dim/enable metric canvases
+        document.querySelectorAll('#metricPlotsContainer canvas').forEach(el => {
+            if (rel.canvases.includes(el.id)) {
+                el.classList.remove('detect-dimmed');
+            } else {
+                el.classList.add('detect-dimmed');
+            }
+        });
     }
 
     async function runDetection() {
@@ -3808,6 +4018,9 @@ const labeler = (() => {
             close_bias: parseInt(document.getElementById('paramCloseBias').value),
             dist_guard_factor: parseFloat(document.getElementById('paramDistGuard').value),
             peak_guard_factor: parseFloat(document.getElementById('paramPeakGuard').value),
+            gaussian_sigma: parseFloat(document.getElementById('paramGaussianSigma').value),
+            max_valid_dist: parseFloat(document.getElementById('paramMaxValidDist').value),
+            edge_min_peak: parseFloat(document.getElementById('paramEdgeMinPeak').value),
         };
 
         const steps = {
@@ -3817,11 +4030,12 @@ const labeler = (() => {
             use_peak_guard: document.getElementById('stepReversal').checked,
         };
 
-        const metrics = (cachedTrialMetrics && cachedMetricsTrialIdx === currentEventTrialIdx)
+        const cached = metricsCache[currentEventTrialIdx];
+        const metrics = cached
             ? {
-                reversal: cachedTrialMetrics.reversal,
-                motion_ssd: cachedTrialMetrics.motion_ssd,
-                per_cam_ssd: cachedTrialMetrics.per_cam_ssd,
+                reversal: cached.reversal,
+                motion_ssd: cached.motion_ssd,
+                per_cam_ssd: cached.per_cam_ssd,
               }
             : null;
 
@@ -3853,7 +4067,7 @@ const labeler = (() => {
             pushEventUndo(snapshot);
             updateEventCounts();
             renderDistanceTrace();
-            if (cachedTrialMetrics) showMetricPlots();
+            if (cached) showMetricPlotsForCurrentTrial();
 
             const trialEvents = eventsInTrial(currentEventTrialIdx);
             const total = EVENT_TYPES.reduce((s, t) => s + trialEvents[t].length, 0);
@@ -3911,7 +4125,7 @@ const labeler = (() => {
         prevTrial, nextTrial, setEventTrial,
         // Detection modal
         openDetectModal, closeDetectModal,
-        computeMetrics, runDetection,
+        runDetection, setDetectFocus,
         // Navigation persistence
         saveNavState,
     };

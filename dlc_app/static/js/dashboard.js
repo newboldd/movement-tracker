@@ -76,7 +76,7 @@ function renderDiagnosisGroups() {
         const groupSubjects = grouped[diagnosis] || [];
         html += `
             <div style="background: var(--bg-card); border-radius: var(--radius); padding: 12px; border: 1px solid var(--border);">
-                <h3 style="margin: 0 0 12px 0; font-size: 14px; color: var(--text); text-align: center;">${diagnosis} (${groupSubjects.length})</h3>
+                <h3 style="margin: 0 0 12px 0; font-size: 14px; color: var(--text); display: flex; justify-content: space-between; align-items: center;">${diagnosis} <span style="font-weight: 400; font-size: 12px; color: var(--text-muted);">n=${groupSubjects.length}</span></h3>
                 <div style="display: flex; flex-direction: column; gap: 6px; max-height: 600px; overflow-y: auto;">
         `;
 
@@ -92,7 +92,7 @@ function renderDiagnosisGroups() {
                             <span class="badge ${stageColor}" style="font-size: 11px;">${s.stage.replace(/_/g, ' ')}</span>
                         </div>
                         <button class="btn btn-sm" style="white-space: nowrap;" onclick="openLabeling(${s.id})">Labels</button>
-                        <button class="btn btn-sm" style="white-space: nowrap;" onclick="window.location.href='/results?subject=${s.id}&tab=distances'">Results</button>
+                        <button class="btn btn-sm" style="white-space: nowrap;" onclick="sessionStorage.setItem('dlc_lastSubjectId','${s.id}');window.location.href='/results?subject=${s.id}&from=dashboard'">Results</button>
                     </div>
                 `;
             });
@@ -105,13 +105,29 @@ function renderDiagnosisGroups() {
     container.innerHTML = html;
 }
 
+// Canonical stage order (matches pipeline progression)
+const STAGE_ORDER = [
+    "created", "videos_linked", "prelabeled", "labeling", "labeled",
+    "committed", "training", "training_dataset_created", "trained",
+    "cropping", "cropped", "analyzing", "analyzed",
+    "triangulating", "triangulated", "refined", "corrected",
+    "retraining", "retrained",
+    "events_partial", "events_complete", "complete",
+];
+
 function populateStageFilter() {
-    const stages = [...new Set(subjects.map(s => s.stage))].sort();
+    const present = new Set(subjects.map(s => s.stage));
     const sel = document.getElementById('stageFilter');
-    // Keep first option
     sel.innerHTML = '<option value="">All stages</option>';
-    stages.forEach(st => {
-        sel.innerHTML += `<option value="${st}">${st}</option>`;
+    // Add stages in pipeline order
+    STAGE_ORDER.forEach(st => {
+        if (present.has(st)) {
+            sel.innerHTML += `<option value="${st}">${st.replace(/_/g, ' ')}</option>`;
+        }
+    });
+    // Any stages not in the canonical list (e.g. error states) go at the end
+    [...present].filter(st => !STAGE_ORDER.includes(st)).sort().forEach(st => {
+        sel.innerHTML += `<option value="${st}">${st.replace(/_/g, ' ')}</option>`;
     });
 }
 
@@ -463,44 +479,30 @@ async function removeSubject(subjectId, subjectName) {
 }
 
 // ── Refine navigation ────────────────────────────────
-async function openRefine(subjectId) {
-    try {
-        const session = await API.post(`/api/labeling/${subjectId}/sessions`, { session_type: 'refine' });
-        window.location.href = `/labeling?session=${session.id}`;
-    } catch (e) {
-        alert('Error: ' + e.message);
-    }
+function openRefine(subjectId) {
+    sessionStorage.setItem('dlc_lastSubjectId', String(subjectId));
+    window.location.href = `/labeling-select?subject=${subjectId}&mode=refine`;
 }
 
 // ── Final (read-only) navigation ─────────────────────
-async function openFinal(subjectId) {
-    try {
-        const session = await API.post(`/api/labeling/${subjectId}/sessions`, { session_type: 'final' });
-        window.location.href = `/labeling?session=${session.id}`;
-    } catch (e) {
-        alert('Error: ' + e.message);
-    }
+function openFinal(subjectId) {
+    sessionStorage.setItem('dlc_lastSubjectId', String(subjectId));
+    window.location.href = `/labeling-select?subject=${subjectId}&mode=final`;
 }
 
 // ── Corrections navigation ───────────────────────────
-async function openCorrections(subjectId) {
-    try {
-        const session = await API.post(`/api/labeling/${subjectId}/sessions`, { session_type: 'corrections' });
-        window.location.href = `/labeling?session=${session.id}`;
-    } catch (e) {
-        alert('Error: ' + e.message);
-    }
+function openCorrections(subjectId) {
+    sessionStorage.setItem('dlc_lastSubjectId', String(subjectId));
+    window.location.href = `/labeling-select?subject=${subjectId}&mode=corrections`;
 }
 
 // ── Labeling navigation ──────────────────────────────
-async function openLabeling(subjectId) {
-    try {
-        // Create a new session
-        const session = await API.post(`/api/labeling/${subjectId}/sessions`, { session_type: 'initial' });
-        window.location.href = `/labeling?session=${session.id}`;
-    } catch (e) {
-        alert('Error: ' + e.message);
-    }
+function openLabeling(subjectId) {
+    sessionStorage.setItem('dlc_lastSubjectId', String(subjectId));
+    // Use remembered mode if available, otherwise let server pick smart default
+    const lastMode = sessionStorage.getItem(`dlc_labelTab_${subjectId}`);
+    const url = `/labeling-select?subject=${subjectId}` + (lastMode ? `&mode=${lastMode}` : '');
+    window.location.href = url;
 }
 
 // ── Batch preprocessing ─────────────────────────────
