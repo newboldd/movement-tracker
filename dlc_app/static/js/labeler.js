@@ -1550,6 +1550,8 @@ const labeler = (() => {
         scheduleSave();
         recomputeCameraShift();
         if (isRefine) updateV2TrainingBtn();
+        // Re-render distance trace since label coordinates changed
+        renderDistanceTrace();
         goToFrame(action.frame);
     }
 
