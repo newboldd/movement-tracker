@@ -78,21 +78,15 @@
                     <button class="btn btn-sm" id="nextLabelBtn" onclick="labeler.nextLabel()" title="Next labeled frame">Label &rarr;</button>
                 </div>
                 <div style="margin-bottom: 8px;">
-                    <label style="font-size:12px;color:var(--text-muted);">Playback speed</label>
-                    <select id="playbackRate" style="width:100%;padding:4px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:12px;">
-                        <option value="0.01">0.01x</option>
-                        <option value="0.02">0.02x</option>
-                        <option value="0.05">0.05x</option>
-                        <option value="0.1">0.1x</option>
-                        <option value="0.25">0.25x</option>
-                        <option value="0.5">0.5x</option>
-                        <option value="1" selected>1x</option>
-                        <option value="2">2x</option>
-                        <option value="4">4x</option>
-                        <option value="16">16x</option>
-                        <option value="18">18x</option>
-                        <option value="60">60x</option>
-                    </select>
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                        <label style="font-size:12px;color:var(--text-muted);">Playback speed</label>
+                        <span id="playbackRateDisplay" style="font-size:12px;color:var(--accent);font-weight:bold;">1x</span>
+                    </div>
+                    <input type="range" id="playbackRate" min="0" max="13" value="6" style="width:100%;cursor:pointer;height:6px;border-radius:3px;background:var(--border);outline:none;-webkit-appearance:none;appearance:none;" />
+                    <style>
+                        #playbackRate::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width:16px; height:16px; border-radius:50%; background:var(--accent); cursor:pointer; }
+                        #playbackRate::-moz-range-thumb { width:16px; height:16px; border-radius:50%; background:var(--accent); cursor:pointer; border:none; }
+                    </style>
                 </div>
             </div>
 

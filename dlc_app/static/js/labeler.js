@@ -18,6 +18,9 @@ const labeler = (() => {
     let playTimer = null;
     let playbackRate = 1;
 
+    // Playback speed presets for the slider
+    const SPEED_PRESETS = [0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1, 2, 4, 16, 18, 60, 120, 240];
+
     // Labels: Map<frameKey, {[bodypart]: [x, y]}>
     // frameKey = `${frame}_${side}`
     const labels = new Map();
@@ -163,7 +166,7 @@ const labeler = (() => {
     // ── Preferences persistence ───────────────────────
     function savePreferences() {
         const prefs = {
-            playbackRate: parseFloat(document.getElementById('playbackRate').value || playbackRate),
+            playbackRate: playbackRate,
             selectedStage: selectedStage,
             eventVisibility: eventVisibility,
         };
@@ -177,9 +180,18 @@ const labeler = (() => {
                 const prefs = JSON.parse(saved);
                 if (prefs.playbackRate) {
                     playbackRate = prefs.playbackRate;
-                    const playbackSelect = document.getElementById('playbackRate');
-                    if (playbackSelect) {
-                        playbackSelect.value = prefs.playbackRate;
+                    const playbackSlider = document.getElementById('playbackRate');
+                    if (playbackSlider) {
+                        // Find the index of this speed in the presets array
+                        const index = SPEED_PRESETS.indexOf(playbackRate);
+                        if (index !== -1) {
+                            playbackSlider.value = index;
+                        }
+                        // Update display label
+                        const speedDisplay = document.getElementById('playbackRateDisplay');
+                        if (speedDisplay) {
+                            speedDisplay.textContent = `${playbackRate}x`;
+                        }
                     }
                 }
                 if (prefs.selectedStage) {
@@ -234,6 +246,20 @@ const labeler = (() => {
             ymaxInput.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter') ymaxInput.blur();
             });
+        }
+
+        // Playback speed slider
+        const speedSlider = document.getElementById('playbackRate');
+        const speedDisplay = document.getElementById('playbackRateDisplay');
+        if (speedSlider && speedDisplay) {
+            // Update display and playbackRate when slider moves
+            speedSlider.addEventListener('input', () => {
+                const index = parseInt(speedSlider.value);
+                playbackRate = SPEED_PRESETS[index];
+                speedDisplay.textContent = `${playbackRate}x`;
+            });
+            // Initialize display with default value
+            speedDisplay.textContent = `${playbackRate}x`;
         }
 
         loadSession();
