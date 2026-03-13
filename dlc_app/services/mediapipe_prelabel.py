@@ -130,16 +130,34 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
         video_path = trial["video_path"]
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         start_frame = trial["start_frame"]
-        n_frames = trial["frame_count"]
+        expected_frame_count = trial["frame_count"]
 
         target_label = _target_hand_label(video_name)
+
+        # Get actual frame count from video (from cache if available)
+        # to handle frame count differences between machines
+        try:
+            video_info = get_video_info(video_path)
+            actual_frame_count = video_info.frame_count
+        except Exception as e:
+            logger.warning(f"Could not get video info for {video_path}: {e}")
+            actual_frame_count = expected_frame_count
+
+        # If video has fewer frames than expected, assume missing frames are at START
+        # (e.g., video was trimmed or cv2 counts frames differently on this machine)
+        frame_offset = max(0, expected_frame_count - actual_frame_count)
+        if frame_offset > 0:
+            logger.info(
+                f"{video_name}: expected {expected_frame_count} frames, actual {actual_frame_count} "
+                f"→ applying start offset {frame_offset}"
+            )
 
         cap = cv2.VideoCapture(video_path)
         ret, frame0 = cap.read()
         if not ret:
             cap.release()
             logger.warning(f"Cannot read video: {video_path}")
-            frames_processed += n_frames
+            frames_processed += expected_frame_count
             continue
         h, full_w = frame0.shape[:2]
         midline = full_w // 2
@@ -160,16 +178,18 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
         prev_wrist_L = None
         prev_wrist_R = None
 
-        for local_frame in range(n_frames):
+        for local_frame in range(actual_frame_count):
             ret, frame = cap.read()
             if not ret:
+                logger.warning(f"{video_name}: unexpected end of video at frame {local_frame}")
                 break
 
             frame = np.ascontiguousarray(frame, dtype=np.uint8)
             frame_L = frame[:, :midline, :]
             frame_R = frame[:, midline:, :]
 
-            global_frame = start_frame + local_frame
+            # Apply frame offset: if video has fewer frames than expected, shift results forward
+            global_frame = start_frame + frame_offset + local_frame
 
             # Process left camera (OS)
             rgb_L = cv2.cvtColor(frame_L, cv2.COLOR_BGR2RGB)
@@ -270,11 +290,49 @@ def _compute_distances(OS_landmarks, OD_landmarks, calib):
     return distances
 
 
+def _detect_frame_offset(subject_name: str, npz_data: dict) -> int:
+    """Detect frame offset for misaligned MediaPipe files.
+
+    When frame counts differ between machines, MediaPipe data may be misaligned.
+    This attempts to detect per-trial misalignments.
+
+    However, since the offset wasn't applied when the NPZ was saved, we can only
+    detect THAT there's a mismatch, not reliably fix it without knowing the
+    original processing details.
+
+    Returns 0 (no correction applied), and logs diagnostics instead.
+    """
+    try:
+        trials = build_trial_map(subject_name)
+        expected_total = trials[-1]["end_frame"] + 1 if trials else 0
+
+        # Array size from the npz
+        stored_total = int(npz_data.get("total_frames", 0))
+
+        if stored_total != expected_total:
+            logger.warning(
+                f"{subject_name}: Frame count mismatch detected! "
+                f"NPZ stored {stored_total} frames, but trial map expects {expected_total}. "
+                f"This suggests the video files were processed on a different machine "
+                f"with different codec/frame counting behavior. "
+                f"MediaPipe labels may be misaligned. "
+                f"Consider reprocessing MediaPipe on this machine."
+            )
+
+        return 0  # Conservative: don't attempt auto-correction
+    except Exception as e:
+        logger.debug(f"Could not detect frame offset for {subject_name}: {e}")
+        return 0
+
+
 def load_mediapipe_prelabels(subject_name: str) -> dict | None:
     """Load saved MediaPipe prelabels for a subject.
 
     Handles both new format (OS_landmarks/OD_landmarks with all 21 joints)
     and old format (OS_thumb/OS_index/OD_thumb/OD_index with just 2 joints).
+
+    Automatically detects and compensates for frame misalignments from older
+    processing where frame offset logic wasn't applied.
 
     Returns dict with keys: OS_landmarks, OD_landmarks (N, 21, 2),
     confidence_OS, confidence_OD, distances, total_frames.
@@ -287,14 +345,48 @@ def load_mediapipe_prelabels(subject_name: str) -> dict | None:
 
     data = np.load(str(npz_path))
 
+    # Detect if data needs offset correction
+    frame_offset = _detect_frame_offset(subject_name, data)
+
     if "OS_landmarks" in data:
         # New format: full 21-joint arrays
+        OS_lm = data["OS_landmarks"].copy()
+        OD_lm = data["OD_landmarks"].copy()
+        conf_OS = data["confidence_OS"].copy()
+        conf_OD = data["confidence_OD"].copy()
+        dist = data["distances"].copy() if "distances" in data else None
+
+        # Apply offset correction if needed (shift data forward, pad start with NaN)
+        if frame_offset > 0:
+            OS_lm_corrected = np.full_like(OS_lm, np.nan)
+            OD_lm_corrected = np.full_like(OD_lm, np.nan)
+            conf_OS_corrected = np.full_like(conf_OS, np.nan)
+            conf_OD_corrected = np.full_like(conf_OD, np.nan)
+
+            # Shift data forward by frame_offset
+            OS_lm_corrected[frame_offset:] = OS_lm[:-frame_offset]
+            OD_lm_corrected[frame_offset:] = OD_lm[:-frame_offset]
+            conf_OS_corrected[frame_offset:] = conf_OS[:-frame_offset]
+            conf_OD_corrected[frame_offset:] = conf_OD[:-frame_offset]
+
+            if dist is not None:
+                dist_corrected = np.full_like(dist, np.nan)
+                dist_corrected[frame_offset:] = dist[:-frame_offset]
+                dist = dist_corrected
+
+            OS_lm = OS_lm_corrected
+            OD_lm = OD_lm_corrected
+            conf_OS = conf_OS_corrected
+            conf_OD = conf_OD_corrected
+
+            logger.info(f"{subject_name}: Applied frame offset {frame_offset} to MediaPipe data")
+
         return {
-            "OS_landmarks": data["OS_landmarks"],
-            "OD_landmarks": data["OD_landmarks"],
-            "confidence_OS": data["confidence_OS"],
-            "confidence_OD": data["confidence_OD"],
-            "distances": data["distances"],
+            "OS_landmarks": OS_lm,
+            "OD_landmarks": OD_lm,
+            "confidence_OS": conf_OS,
+            "confidence_OD": conf_OD,
+            "distances": dist if dist is not None else data.get("distances"),
             "total_frames": int(data["total_frames"]),
         }
     else:
@@ -306,12 +398,23 @@ def load_mediapipe_prelabels(subject_name: str) -> dict | None:
         OS_lm[:, INDEX_TIP] = data["OS_index"]
         OD_lm[:, THUMB_TIP] = data["OD_thumb"]
         OD_lm[:, INDEX_TIP] = data["OD_index"]
+
+        # Apply offset correction if needed
+        if frame_offset > 0:
+            OS_lm_corrected = np.full_like(OS_lm, np.nan)
+            OD_lm_corrected = np.full_like(OD_lm, np.nan)
+            OS_lm_corrected[frame_offset:] = OS_lm[:-frame_offset]
+            OD_lm_corrected[frame_offset:] = OD_lm[:-frame_offset]
+            OS_lm = OS_lm_corrected
+            OD_lm = OD_lm_corrected
+            logger.info(f"{subject_name}: Applied frame offset {frame_offset} to MediaPipe data (old format)")
+
         return {
             "OS_landmarks": OS_lm,
             "OD_landmarks": OD_lm,
             "confidence_OS": data["confidence_OS"],
             "confidence_OD": data["confidence_OD"],
-            "distances": data["distances"],
+            "distances": data.get("distances"),
             "total_frames": n,
         }
 
@@ -392,13 +495,18 @@ def get_mediapipe_for_session(subject_name: str) -> dict | None:
 
 
 def recompute_distance_for_frame(subject_name: str, frame_num: int,
-                                 manual_labels: dict) -> float | None:
-    """Recompute 3D distance for a single frame using manual corrections + MP fallback.
+                                 manual_labels: dict,
+                                 stage_data: dict | None = None) -> float | None:
+    """Recompute 3D distance for a single frame using manual corrections + stage data + MP fallback.
 
     Args:
         subject_name: Subject identifier
         frame_num: Global frame number
         manual_labels: dict of {side: {bodypart: [x,y]}} for this frame
+        stage_data: Optional pre-loaded stage data (e.g. corrections CSV + DLC fallback).
+                    When provided, used as fallback BEFORE raw MP predictions so that
+                    un-labeled cameras use the same coordinates as the distance trace
+                    display, not raw MP values which may be completely different.
 
     Returns:
         Distance in mm, or None if cannot compute.
@@ -411,22 +519,34 @@ def recompute_distance_for_frame(subject_name: str, frame_num: int,
     settings = get_settings()
     cam_names = settings.camera_names
 
-    # Load DLC predictions as additional fallback
-    from .dlc_predictions import get_dlc_predictions_for_session
-    dlc_data = get_dlc_predictions_for_session(subject_name)
+    # Only load raw DLC fallback when no stage_data is provided.
+    # When stage_data is available it already incorporates the best available
+    # DLC labels (corrections > labels_v2 > labels_v1) per trial and camera.
+    dlc_data = None
+    if stage_data is None:
+        from .dlc_predictions import get_dlc_predictions_for_session
+        dlc_data = get_dlc_predictions_for_session(subject_name)
 
     # Map bodypart names to joint indices
     bp_to_joint = {"thumb": THUMB_TIP, "index": INDEX_TIP}
 
-    # Get coords for each camera: prefer manual, fall back to MP, then DLC
+    # Get coords for each camera: manual > stage_data > MP > raw DLC
     def _get_coords(side_idx, bodypart):
         side = cam_names[side_idx]
-        # Check manual labels first
+        # 1. Manual labels (highest priority — user's direct corrections)
         side_labels = manual_labels.get(side, {})
         coords = side_labels.get(bodypart)
         if coords and coords[0] is not None:
             return np.array(coords, dtype=np.float64)
-        # Fall back to MP
+        # 2. Stage data (corrections CSV + per-trial/per-camera DLC fallback).
+        #    This matches exactly what the distance trace displays so that saving
+        #    one camera's label doesn't change the other camera's contribution.
+        if stage_data is not None:
+            cam_data = stage_data.get(side, {})
+            bp_coords = cam_data.get(bodypart, [])
+            if frame_num < len(bp_coords) and bp_coords[frame_num] is not None:
+                return np.array(bp_coords[frame_num], dtype=np.float64)
+        # 3. Fall back to MP
         if mp_data is not None:
             lm_key = "OS_landmarks" if side_idx == 0 else "OD_landmarks"
             joint_idx = bp_to_joint.get(bodypart)
@@ -434,7 +554,7 @@ def recompute_distance_for_frame(subject_name: str, frame_num: int,
                 pt = mp_data[lm_key][frame_num, joint_idx]
                 if not np.isnan(pt[0]):
                     return pt
-        # Fall back to DLC predictions
+        # 4. Fall back to raw DLC predictions (only when stage_data not available)
         if dlc_data is not None:
             dlc_cam = dlc_data.get(side, {})
             dlc_coords = dlc_cam.get(bodypart, [])

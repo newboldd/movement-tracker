@@ -1,6 +1,7 @@
 """Labeling session endpoints: frame serving, label CRUD, commit, MediaPipe prelabels."""
 from __future__ import annotations
 
+import csv as _csv
 import json
 from pathlib import Path
 from typing import List
@@ -10,7 +11,7 @@ from fastapi.responses import FileResponse, Response
 
 from ..config import get_settings
 from ..db import get_db_ctx
-from ..models import CommitRequest, LabelBatchSave, SessionCreate, SessionResponse, STAGE_INDEX
+from ..models import CommitRequest, LabelBatchSave, SessionCreate, SessionResponse, STAGE_INDEX, STAGES
 from ..services.video import (
     extract_frame, build_trial_map, get_total_frames, get_subject_videos,
     _deidentified_path, _get_no_face_videos,
@@ -24,6 +25,7 @@ from ..services.discovery import _count_labeled_frames, _has_mediapipe
 from ..services.dlc_predictions import (
     get_dlc_predictions_for_session,
     get_dlc_predictions_for_stage,
+    get_corrections_with_dlc_fallback,
     get_stage_csv_files,
     has_stage_data,
 )
@@ -71,7 +73,7 @@ def create_session(subject_id: int, req: SessionCreate) -> dict:
 
         is_refine = req.session_type == "refine"
         is_corrections = req.session_type == "corrections"
-        is_final = req.session_type == "final"
+        is_final = req.session_type in ("final", "events")
         iteration = subj["iteration"] + 1 if is_refine else subj["iteration"]
 
         db.execute(
@@ -423,7 +425,12 @@ def get_stage_data(
         data = _committed_labels_to_array(subj)
         return data if data else {}
 
-    # dlc, refine, corrections — load from specific directory
+    # corrections: load corrections where available, DLC fallback for uncovered trials
+    if stage == "corrections":
+        data = get_corrections_with_dlc_fallback(subject_name)
+        return data if data else {}
+
+    # dlc, refine — load from specific directory
     data = get_dlc_predictions_for_stage(subject_name, stage)
     return data if data else {}
 
@@ -558,8 +565,17 @@ def save_labels(session_id: int, req: LabelBatchSave) -> dict:
                     sides[row["side"]] = kp
                 frame_labels[frame_num] = sides
 
+        # Load stage data so un-labeled cameras use the same coordinates as the
+        # distance trace display (corrections CSV + per-trial DLC fallback),
+        # rather than raw MP which may differ significantly.
+        stage_data = None
+        session_type = session["session_type"] if session else None
+        if session_type in ("corrections", "refine", "initial"):
+            stage_data = get_corrections_with_dlc_fallback(subj["name"])
+
         for frame_num, sides in frame_labels.items():
-            dist = recompute_distance_for_frame(subj["name"], frame_num, sides)
+            dist = recompute_distance_for_frame(subj["name"], frame_num, sides,
+                                                stage_data=stage_data)
             if dist is not None:
                 updated_distances[str(frame_num)] = dist
 
@@ -716,6 +732,381 @@ def commit_session(
             )
 
     return result
+
+
+EVENT_TYPES = ("open", "peak", "close")
+
+
+def _events_csv_path(subject_name: str) -> Path:
+    settings = get_settings()
+    return settings.dlc_path / subject_name / "events.csv"
+
+
+def _read_events_csv(subject_name: str) -> dict:
+    result = {t: [] for t in EVENT_TYPES}
+    path = _events_csv_path(subject_name)
+    if not path.exists():
+        return result
+    with open(path, newline="") as f:
+        reader = _csv.DictReader(f)
+        for row in reader:
+            et = row.get("event_type", "").strip()
+            fn = row.get("frame_num", "").strip()
+            if et in result and fn.isdigit():
+                result[et].append(int(fn))
+    return result
+
+
+def _write_events_csv(subject_name: str, events: dict) -> int:
+    path = _events_csv_path(subject_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with open(path, "w", newline="") as f:
+        writer = _csv.writer(f)
+        writer.writerow(["event_type", "frame_num"])
+        for et in EVENT_TYPES:
+            for fn in sorted(events.get(et, [])):
+                writer.writerow([et, fn])
+                count += 1
+    return count
+
+
+def _get_subject_name_for_session(session_id: int) -> str:
+    with get_db_ctx() as db:
+        session = db.execute(
+            "SELECT * FROM label_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not session:
+            raise HTTPException(404, "Session not found")
+        subj = db.execute(
+            "SELECT name FROM subjects WHERE id = ?", (session["subject_id"],)
+        ).fetchone()
+    return subj["name"]
+
+
+@router.get("/sessions/{session_id}/events")
+def get_events(session_id: int) -> dict:
+    """Get all tapping events for the session's subject from CSV."""
+    subject_name = _get_subject_name_for_session(session_id)
+    return _read_events_csv(subject_name)
+
+
+@router.put("/sessions/{session_id}/events")
+def save_events(session_id: int, body: dict = Body(...)) -> dict:
+    """Update events for provided types only; preserve other types from existing CSV."""
+    subject_name = _get_subject_name_for_session(session_id)
+    existing = _read_events_csv(subject_name)
+    for et in EVENT_TYPES:
+        if et in body:
+            existing[et] = [int(f) for f in body[et]]
+    count = _write_events_csv(subject_name, existing)
+
+    # Update subject stage based on event completeness
+    types_with_data = [et for et in EVENT_TYPES if len(existing.get(et, [])) > 0]
+    if types_with_data:
+        new_stage = "events_complete" if len(types_with_data) == len(EVENT_TYPES) else "events_partial"
+        with get_db_ctx() as db:
+            session = db.execute(
+                "SELECT subject_id FROM label_sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            if session:
+                current = db.execute(
+                    "SELECT stage FROM subjects WHERE id = ?", (session["subject_id"],)
+                ).fetchone()
+                cur_stage = current["stage"] if current else "created"
+                cur_idx = STAGE_INDEX.get(cur_stage, 0)
+                new_idx = STAGE_INDEX.get(new_stage, 0)
+                # Advance stage (or update partial→complete)
+                if new_idx >= cur_idx:
+                    db.execute(
+                        "UPDATE subjects SET stage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (new_stage, session["subject_id"]),
+                    )
+
+    return {"saved": count}
+
+
+@router.post("/sessions/{session_id}/detect_events")
+def detect_events(session_id: int, body: dict = Body(default={})) -> dict:
+    """Auto-detect tapping events from the distance trace.
+
+    Uses threshold crossing on 4-frame velocity derivative to find opening/closing
+    movements, then searches backward/forward for precise start/stop frames.
+    """
+    with get_db_ctx() as db:
+        session = db.execute(
+            "SELECT * FROM label_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not session:
+            raise HTTPException(404, "Session not found")
+        subj = db.execute(
+            "SELECT * FROM subjects WHERE id = ?", (session["subject_id"],)
+        ).fetchone()
+
+    subject_name = subj["name"]
+
+    # Load distance data — prefer corrections stage (triangulated from full manual corrections,
+    # clean data with no tracking artifacts). Fall back to mediapipe if corrections unavailable.
+    dist_raw = None
+    for stage in ("corrections", "refine", "dlc"):
+        stage_data = get_dlc_predictions_for_stage(subject_name, stage)
+        if stage_data and stage_data.get("distances"):
+            candidate = stage_data["distances"]
+            valid_count = sum(1 for d in candidate if d is not None)
+            if valid_count > len(candidate) * 0.5:  # need >50% coverage
+                dist_raw = candidate
+                break
+
+    if not dist_raw:
+        # Fallback: mediapipe (full coverage but may have tracking outliers)
+        data = get_mediapipe_for_session(subject_name)
+        dist_raw = data.get("distances") if data else None
+
+    if not dist_raw:
+        raise HTTPException(400, "No distance data available for auto-detection")
+
+    # Parameters (can be overridden via request body)
+    # Minimum distance (mm) for a local maximum to count as a real peak opening
+    min_peak_height = float(body.get("min_peak_height", 15.0))
+    # 1-frame velocity threshold for pinpointing the open onset (backtrack from peak)
+    open_start_thresh = float(body.get("open_start_thresh", 5))
+    nback = int(body.get("nback", 60))
+    # Minimum frames between consecutive open events (prevents double-counting).
+    # 10 frames @ 60 fps = 167 ms = 6 Hz max tapping rate.
+    min_event_gap = int(body.get("min_event_gap", 10))
+    # Distances above this are tracking artifacts; excluded from derivatives
+    max_valid_dist = float(body.get("max_valid_dist", 200.0))
+
+    # Clean raw distances: mark outliers as None, then linearly interpolate gaps.
+    # This prevents derivative spikes caused by NaN→0 substitution or tracking artifacts.
+    dist_clean: list[float | None] = []
+    for d in dist_raw:
+        if d is None or not (0 <= float(d) <= max_valid_dist):
+            dist_clean.append(None)
+        else:
+            dist_clean.append(float(d))
+
+    # Track which frames were originally missing (before interpolation)
+    # Used later to skip peak candidates flanked by genuine missing data.
+    nan_mask = [v is None for v in dist_clean]
+
+    # Linear interpolation over None runs
+    n = len(dist_clean)
+    for i in range(n):
+        if dist_clean[i] is not None:
+            continue
+        left_v = left_i = None
+        for j in range(i - 1, -1, -1):
+            if dist_clean[j] is not None:
+                left_v, left_i = dist_clean[j], j
+                break
+        right_v = right_i = None
+        for j in range(i + 1, n):
+            if dist_clean[j] is not None:
+                right_v, right_i = dist_clean[j], j
+                break
+        if left_v is not None and right_v is not None:
+            t = (i - left_i) / (right_i - left_i)
+            dist_clean[i] = left_v + t * (right_v - left_v)
+        elif left_v is not None:
+            dist_clean[i] = left_v
+        elif right_v is not None:
+            dist_clean[i] = right_v
+        else:
+            dist_clean[i] = 0.0
+
+    dist = [d if d is not None else 0.0 for d in dist_clean]
+
+    # 4-frame velocity (opening/closing speed)
+    ddist = [0.0] * n
+    for i in range(4, n):
+        ddist[i] = dist[i] - dist[i - 4]
+
+    # 1-frame velocity (fine-grained direction)
+    ddist1 = [0.0] * n
+    for i in range(1, n):
+        ddist1[i] = dist[i] - dist[i - 1]
+
+    # --- Detect peaks (local maxima), then derive opens and closes from them ---
+    # Peaks are the most geometrically stable feature: local maxima in the distance trace
+    # are unambiguous regardless of opening amplitude, so we find them first and derive
+    # open onsets by backtracking and closes by looking forward.
+    half_win = max(min_event_gap // 2, 10)
+
+    # Find local-maximum candidates above min_peak_height
+    peak_candidates: list[int] = []
+    for i in range(half_win, n - half_win):
+        if dist[i] < min_peak_height:
+            continue
+        # Skip candidates flanked by originally-missing data (interpolated values
+        # can produce spurious peaks at the boundary of tracked/untracked regions)
+        if any(nan_mask[i - half_win: i + half_win + 1]):
+            continue
+        if dist[i] >= max(dist[i - half_win: i + half_win + 1]):
+            peak_candidates.append(i)
+
+    # Merge nearby candidates: keep the highest frame within each cluster
+    merged_peaks: list[int] = []
+    if peak_candidates:
+        group = [peak_candidates[0]]
+        for k in range(1, len(peak_candidates)):
+            if peak_candidates[k] - peak_candidates[k - 1] < min_event_gap:
+                group.append(peak_candidates[k])
+            else:
+                merged_peaks.append(max(group, key=lambda f: dist[f]))
+                group = [peak_candidates[k]]
+        merged_peaks.append(max(group, key=lambda f: dist[f]))
+
+    # Valley filter: consecutive peaks with no clear close between them are part of the
+    # same opening — keep only the higher one.  Real distinct taps always have the finger
+    # return below valley_thresh between them.
+    valley_thresh = float(body.get("valley_thresh", 25.0))
+    filtered: list[int] = []
+    for pk in merged_peaks:
+        if not filtered:
+            filtered.append(pk)
+            continue
+        valley_min = min(dist[filtered[-1]: pk + 1])
+        if valley_min < valley_thresh:
+            filtered.append(pk)          # clear close separates these → distinct peaks
+        elif dist[pk] > dist[filtered[-1]]:
+            filtered[-1] = pk            # same opening, keep the higher peak
+    merged_peaks = filtered
+
+    # For each detected peak, find the open onset and close.
+    # open onset: find the valley (local minimum) in [search_start, pk], then advance
+    #             forward from the valley until velocity first exceeds open_start_thresh.
+    #             This reliably finds the true onset even when the peak is approached slowly.
+    # close: minimum distance between this peak and the next peak.
+    opens_raw: list[int] = []
+    closes_raw: list[int] = []
+    for idx, pk in enumerate(merged_peaks):
+        search_start = closes_raw[-1] if closes_raw else max(0, pk - nback)
+        valley = min(range(search_start, pk + 1), key=lambda f: dist[f])
+        open_frame = valley  # fallback: the valley bottom itself
+        for k in range(valley, pk):
+            if ddist1[k] > open_start_thresh:
+                open_frame = k - 1  # last frame before the rise began
+                break
+        opens_raw.append(max(search_start, open_frame))
+
+        next_pk = merged_peaks[idx + 1] if idx + 1 < len(merged_peaks) else n
+        closes_raw.append(min(range(pk, min(next_pk, n)), key=lambda f: dist[f]))
+
+    # Merge detected opens with saved events; apply minimum inter-event gap.
+    # Saved opens take priority: drop detected opens within min_event_gap of a saved one.
+    saved_events = _read_events_csv(subject_name)
+    saved_opens = sorted(saved_events.get("open", []))
+    detected_opens = [f for f in sorted(opens_raw)
+                      if not any(abs(f - s) < min_event_gap for s in saved_opens)]
+    all_open = sorted(set(detected_opens + saved_opens))
+    opens: list[int] = []
+    last_f = -min_event_gap
+    for f in all_open:
+        if f - last_f >= min_event_gap:
+            opens.append(f)
+            last_f = f
+
+    # --- Detect peak and close events (anchor-based, per video) ---
+    # Use saved opens as anchors; fall back to detected opens if none saved.
+    anchor_opens = sorted(saved_events.get("open", [])) or opens
+
+    # Minimum peak distance for edge-interval detection (before first / after last anchor).
+    edge_min_peak = float(body.get("edge_min_peak", 15.0))
+
+    def _detect_edge_interval(t0: int, t1: int):
+        """Detect up to one peak and close in an edge interval.
+
+        Returns (peak_frame, close_frame); either may be None if not clearly detected.
+        """
+        if t1 - t0 < 5:
+            return None, None
+        peak_frame = max(range(t0, t1), key=lambda f: dist[f])
+        if dist[peak_frame] < edge_min_peak:
+            return None, None
+        search_end = min(t1, n)
+        close_frame = min(range(peak_frame, search_end), key=lambda f: dist[f])
+        return peak_frame, close_frame
+
+    # Load trial map to process videos independently.
+    trials = build_trial_map(subject_name)
+    frame_to_trial: dict[int, int] = {}
+    for ti, t in enumerate(trials):
+        for f in range(t["start_frame"], t["end_frame"] + 1):
+            frame_to_trial[f] = ti
+
+    anchor_by_trial: dict[int, list[int]] = {}
+    for f in anchor_opens:
+        ti = frame_to_trial.get(f, 0)
+        anchor_by_trial.setdefault(ti, []).append(f)
+
+    peaks: list[int] = []
+    closes: list[int] = []
+
+    for ti, t in enumerate(trials):
+        vid_anchors = sorted(anchor_by_trial.get(ti, []))
+        if not vid_anchors:
+            continue
+
+        vid_start = t["start_frame"]
+        vid_end = t["end_frame"] + 1  # exclusive
+
+        # Before first anchor: optional detection
+        pk_f, cl_f = _detect_edge_interval(vid_start, vid_anchors[0])
+        if pk_f is not None:
+            peaks.append(pk_f)
+        if cl_f is not None:
+            closes.append(cl_f)
+
+        # Between consecutive anchors: exactly one peak and one close
+        for idx in range(len(vid_anchors) - 1):
+            t0 = vid_anchors[idx]
+            t1 = vid_anchors[idx + 1]
+            if t1 - t0 < 5:
+                continue
+            peak_frame = max(range(t0, t1), key=lambda f: dist[f])
+            peaks.append(peak_frame)
+            search_end = min(t1, n)
+            closes.append(min(range(peak_frame, search_end), key=lambda f: dist[f]))
+
+        # After last anchor: optional detection
+        pk_f, cl_f = _detect_edge_interval(vid_anchors[-1], vid_end)
+        if pk_f is not None:
+            peaks.append(pk_f)
+        if cl_f is not None:
+            closes.append(cl_f)
+
+    def _merge_with_saved(detected: list[int], saved: list[int], gap: int) -> list[int]:
+        """Merge detected events with saved events; saved events always survive.
+
+        Detected events within `gap` frames of any saved event are discarded.
+        Remaining detected events are filtered by the gap constraint relative
+        to their neighbors; saved events always pass through regardless of spacing.
+        """
+        saved_set = set(saved)
+        # Remove detected events that are within gap of any saved event
+        filtered_detected = [f for f in detected if not any(abs(f - s) < gap for s in saved_set)]
+        merged = sorted(saved_set | set(filtered_detected))
+        out: list[int] = []
+        last = -gap
+        for f in merged:
+            if f in saved_set:
+                # Saved events always survive
+                out.append(f)
+                last = f
+            elif f - last >= gap:
+                out.append(f)
+                last = f
+        return out
+
+    peaks  = _merge_with_saved(peaks,  saved_events.get("peak",  []), min_event_gap)
+    closes = _merge_with_saved(closes, saved_events.get("close", []), min_event_gap)
+
+    return {
+        "open":  sorted(opens),
+        "peak":  sorted(peaks),
+        "close": sorted(closes),
+    }
 
 
 @router.post("/sessions/{session_id}/save_corrections")
