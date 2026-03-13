@@ -1432,7 +1432,10 @@ const labeler = (() => {
             const dy = (sy - dragStartY) / scale;
             const key = `${currentFrame}_${currentSide}`;
             const lbl = labels.get(key);
-            lbl[dragging] = [dragOrigX + dx, dragOrigY + dy];
+            // Round to 1 decimal place to avoid floating point accumulation errors
+            const newX = Math.round((dragOrigX + dx) * 10) / 10;
+            const newY = Math.round((dragOrigY + dy) * 10) / 10;
+            lbl[dragging] = [newX, newY];
             render();
         }
     }
@@ -1547,11 +1550,14 @@ const labeler = (() => {
         }
 
         updateLabelCount();
+        // Clear distance for current frame so it gets recalculated by server
+        const frameNum = parseInt(action.frame || currentFrame);
+        if (distances && frameNum < distances.length) {
+            distances[frameNum] = null;
+        }
         scheduleSave();
         recomputeCameraShift();
         if (isRefine) updateV2TrainingBtn();
-        // Re-render distance trace since label coordinates changed
-        renderDistanceTrace();
         goToFrame(action.frame);
     }
 
@@ -1656,13 +1662,17 @@ const labeler = (() => {
             labels.set(key, lbl);
         }
 
+        // Round to 1 decimal place to avoid floating point precision issues
+        const roundedX = Math.round(imgX * 10) / 10;
+        const roundedY = Math.round(imgY * 10) / 10;
+
         // Find first unplaced bodypart
         let placed = false;
         for (const bp of bodyparts) {
             const coords = lbl[bp];
             if (!coords || coords[0] == null) {
                 pushUndo(key, bp, null);
-                lbl[bp] = [imgX, imgY];
+                lbl[bp] = [roundedX, roundedY];
                 placed = true;
                 const remaining = bodyparts.filter(b => !lbl[b] || lbl[b][0] == null);
                 if (remaining.length > 0) {
@@ -1687,7 +1697,7 @@ const labeler = (() => {
             }
             if (closest) {
                 pushUndo(key, closest, [...lbl[closest]]);
-                lbl[closest] = [imgX, imgY];
+                lbl[closest] = [roundedX, roundedY];
             }
         }
 
