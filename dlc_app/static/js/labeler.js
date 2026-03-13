@@ -3567,6 +3567,8 @@ const labeler = (() => {
 
     function placeEventType(type) {
         if (!isEvents || !EVENT_TYPES.includes(type)) return;
+        // Don't allow placing events of types that are not currently plotted/visible
+        if (!eventVisibility[type]) return;
         const frames = eventMarkers[type];
         if (!frames.includes(currentFrame)) {
             const snapshot = snapshotEventMarkers();
