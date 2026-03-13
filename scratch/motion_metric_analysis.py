@@ -39,7 +39,15 @@ SUBJECT = "MSA02"
 CROP_HALF = 24          # half-size of square patch in pixels (patch = 2*CROP_HALF × 2*CROP_HALF)
 SMOOTHING_FRAMES = 3    # median smoothing window for SSD signal
 ZOOM_FRAMES = 300       # number of frames in each zoomed panel
-OUTPUT_DIR = Path("scratch/motion_metric_output")
+
+# Allow override via environment variable
+if "CROP_HALF" in os.environ:
+    try:
+        CROP_HALF = int(os.environ["CROP_HALF"])
+    except ValueError:
+        pass
+
+OUTPUT_DIR = Path(f"scratch/motion_metric_output_crop{CROP_HALF*2}px")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # ── Project imports ──────────────────────────────────────────────────────────
