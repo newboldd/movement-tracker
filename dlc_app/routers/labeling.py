@@ -1102,10 +1102,66 @@ def detect_events(session_id: int, body: dict = Body(default={})) -> dict:
     peaks  = _merge_with_saved(peaks,  saved_events.get("peak",  []), min_event_gap)
     closes = _merge_with_saved(closes, saved_events.get("close", []), min_event_gap)
 
+    # Filter out events at video edges (first/last 30 frames per trial = ~0.5 sec @ 60fps)
+    edge_margin = 30
+    valid_frames = set()
+    for t in trials:
+        for f in range(t["start_frame"] + edge_margin, t["end_frame"] - edge_margin + 1):
+            valid_frames.add(f)
+
+    opens  = [f for f in opens if f in valid_frames]
+    peaks  = [f for f in peaks if f in valid_frames]
+    closes = [f for f in closes if f in valid_frames]
+
+    # Validate event sequence: must follow open > peak > close > (repeat) pattern.
+    # Combine all events with their types and sort by frame.
+    all_events = []
+    for f in opens:
+        all_events.append((f, 'open'))
+    for f in peaks:
+        all_events.append((f, 'peak'))
+    for f in closes:
+        all_events.append((f, 'close'))
+    all_events.sort()
+
+    # Filter to valid sequence: open, then peak, then close, repeat.
+    # Peaks can be missing (open > close is valid). Valid transitions:
+    # open -> peak, open -> close, peak -> close, close -> open
+    valid_events = {'open': [], 'peak': [], 'close': []}
+    expected_next = 'open'  # Start by expecting an open
+
+    for frame, etype in all_events:
+        if expected_next == 'open':
+            if etype == 'open':
+                valid_events['open'].append(frame)
+                expected_next = 'peak'  # After open, expect peak or close
+            # Skip peaks/closes that appear before any open
+        elif expected_next == 'peak':
+            if etype == 'peak':
+                valid_events['peak'].append(frame)
+                expected_next = 'close'
+            elif etype == 'close':
+                # Peak is missing, transition directly to close (valid)
+                valid_events['close'].append(frame)
+                expected_next = 'open'
+            # Skip other opens before close
+        elif expected_next == 'close':
+            if etype == 'close':
+                valid_events['close'].append(frame)
+                expected_next = 'open'
+            elif etype == 'open':
+                # Close is missing? Skip this open (we expect close before next open)
+                pass
+            # Skip peaks after peak
+
+    opens  = sorted(valid_events['open'])
+    peaks  = sorted(valid_events['peak'])
+    closes = sorted(valid_events['close'])
+
     return {
-        "open":  sorted(opens),
-        "peak":  sorted(peaks),
-        "close": sorted(closes),
+        "open":  opens,
+        "peak":  peaks,
+        "close": closes,
     }
 
 
