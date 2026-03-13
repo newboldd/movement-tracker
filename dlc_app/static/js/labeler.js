@@ -100,8 +100,11 @@ const labeler = (() => {
     let computedCameraShiftX = null; // horizontal, or null = use default
     let computedCameraShiftY = null; // vertical, or null = no shift
 
-    // Undo stack: each entry = { key, bp, prev (coords or null) }
+    // Undo / Redo stacks.
+    // Label entries:  { type: 'label',  key, bp, prev (coords or null), frame }
+    // Events entries: { type: 'events', prev: snapshot, frame }
     const undoStack = [];
+    const redoStack = [];
     const MAX_UNDO = 50;
 
     // Review mode: null = all bodyparts, or bodypart name for focused review
@@ -111,6 +114,7 @@ const labeler = (() => {
     let videoEl = null;
     let videoPlaying = false;
     let currentTrialIdx = -1; // which trial the video element is loaded with
+    let videoFrameMode = false; // true when video element is the frame source (vs JPEG)
 
     // Deleted frame/side keys — sent to server on save so DB stays in sync
     const deletedKeys = new Set();
@@ -130,6 +134,24 @@ const labeler = (() => {
     // Populated by computeCorrectionFrames() after stage data loads.
     let correctionFrames = new Set();
 
+    // Stable Y-axis range computed once from cleanest available data (corrections > others)
+    // Null means not yet computed; recomputed on subject change.
+    let stableDistRange = null; // { min, max }
+
+    // Events mode state
+    let isEvents = false;
+    // (activeEventType removed — 1/2/3/4 keys directly place each event type)
+    let eventMarkers = { open: [], peak: [], close: [] };
+    // Tracks which frames are persisted to CSV (filled circles); rest are pending (outline circles)
+    let savedEventFrames = { open: new Set(), peak: new Set(), close: new Set() };
+    let eventVisibility = { open: true, peak: true, close: true };
+    const EVENT_COLORS = {
+        open:  '#00cc44',
+        peak:  '#ffcc00',
+        close: '#ff4444',
+    };
+    const EVENT_TYPES = ['open', 'peak', 'close'];
+
     // Prefetch cache
     const imageCache = new Map();
     const PREFETCH_AHEAD = 3;
@@ -137,6 +159,46 @@ const labeler = (() => {
     // Point detection radius
     const HIT_RADIUS = 12;
     const POINT_RADIUS = 6;
+
+    // ── Preferences persistence ───────────────────────
+    function savePreferences() {
+        const prefs = {
+            playbackRate: parseFloat(document.getElementById('playbackRate').value || playbackRate),
+            selectedStage: selectedStage,
+            eventVisibility: eventVisibility,
+        };
+        localStorage.setItem('dlc_labeler_prefs', JSON.stringify(prefs));
+    }
+
+    function restorePreferences() {
+        try {
+            const saved = localStorage.getItem('dlc_labeler_prefs');
+            if (saved) {
+                const prefs = JSON.parse(saved);
+                if (prefs.playbackRate) {
+                    playbackRate = prefs.playbackRate;
+                    const playbackSelect = document.getElementById('playbackRate');
+                    if (playbackSelect) {
+                        playbackSelect.value = prefs.playbackRate;
+                    }
+                }
+                if (prefs.selectedStage) {
+                    selectedStage = prefs.selectedStage;
+                }
+                if (prefs.eventVisibility) {
+                    eventVisibility = Object.assign({}, eventVisibility, prefs.eventVisibility);
+                    // Sync checkboxes
+                    EVENT_TYPES.forEach(t => {
+                        const id = 'show' + t[0].toUpperCase() + t.slice(1);
+                        const cb = document.getElementById(id);
+                        if (cb) cb.checked = eventVisibility[t];
+                    });
+                }
+            }
+        } catch (e) {
+            console.log('Could not restore preferences:', e);
+        }
+    }
 
     // ── Init ──────────────────────────────────────────
     function init() {
@@ -191,12 +253,14 @@ const labeler = (() => {
 
             isRefine = sessionInfo.session && sessionInfo.session.session_type === 'refine';
             isCorrections = sessionInfo.session && sessionInfo.session.session_type === 'corrections';
-            isFinal = sessionInfo.session && sessionInfo.session.session_type === 'final';
+            isEvents = sessionInfo.session && sessionInfo.session.session_type === 'events';
+            isFinal = sessionInfo.session && (sessionInfo.session.session_type === 'final' || isEvents);
 
             // Populate subject navigation dropdown
             currentSubjectId = sessionInfo.subject.id;
             const typeLabel = document.getElementById('sessionTypeLabel');
-            if (isFinal) typeLabel.textContent = 'Final:';
+            if (isEvents) typeLabel.textContent = 'Events:';
+            else if (isFinal) typeLabel.textContent = 'Final:';
             else if (isCorrections) typeLabel.textContent = 'Corrections:';
             else if (isRefine) typeLabel.textContent = 'Refine:';
             else typeLabel.textContent = 'Labeling:';
@@ -222,7 +286,7 @@ const labeler = (() => {
             const mainCommitBtn = document.getElementById('mainCommitBtn');
             const saveCorrectionsBtn = document.getElementById('saveCorrectionsBtn');
             const commitDlcBtn = document.getElementById('commitDlcBtn');
-            if (isFinal) {
+            if (isEvents || isFinal) {
                 if (mainCommitBtn) mainCommitBtn.style.display = 'none';
             } else if (isRefine) {
                 if (mainCommitBtn) mainCommitBtn.style.display = 'none';
@@ -267,11 +331,20 @@ const labeler = (() => {
 
                 // Load all stage data and merge distances
                 await loadAllStages();
+                computeStableDistRange(); // compute once from cleanest source
                 if (isRefine) { computeCorrectionFrames(); updateLabelCount(); }
                 populateStageSelector();
 
+                // Events mode: show distance trace, load events, show events panel
+                if (isEvents) {
+                    const timelineContainer = document.querySelector('.timeline-container');
+                    if (timelineContainer) timelineContainer.style.display = 'none';
+                    const eventsPanel = document.getElementById('eventsPanel');
+                    if (eventsPanel) eventsPanel.style.display = 'block';
+                    // Load saved events
+                    loadEvents();
                 // Final mode: hide timeline/distance trace, build trial plots at bottom
-                if (isFinal) {
+                } else if (isFinal) {
                     const timelineContainer = document.querySelector('.timeline-container');
                     if (timelineContainer) timelineContainer.style.display = 'none';
                     buildTrialPlots();
@@ -321,9 +394,14 @@ const labeler = (() => {
             // Always initialize the distance trace window size from fps
             initDistanceTraceWindow();
 
+            // For initial/refine modes: compute stable range from available distances now
+            if (!stableDistRange && distances && distances.some(d => d !== null)) {
+                computeStableDistRange();
+            }
+
             // Show distance trace if we have data; hide timeline to save space
-            // (in final mode: trial plots handle this instead)
-            if (distances && distances.some(d => d !== null) && !isFinal) {
+            // (in final mode: trial plots handle this instead; events mode always shows trace)
+            if (distances && distances.some(d => d !== null) && (!isFinal || isEvents)) {
                 const traceContainer = document.getElementById('distanceTraceContainer');
                 if (traceContainer) traceContainer.style.display = 'block';
                 const timelineContainer = document.querySelector('.timeline-container');
@@ -332,10 +410,26 @@ const labeler = (() => {
                 if (ymaxContainer) ymaxContainer.style.display = 'flex';
             }
 
+            // Restore user preferences (playback speed, label source)
+            restorePreferences();
+
+            // Update stage selector with restored selectedStage
+            const stageSelect = document.getElementById('stageSelector');
+            if (stageSelect && availableStages.length > 0) {
+                if (selectedStage && availableStages.includes(selectedStage)) {
+                    stageSelect.value = selectedStage;
+                    updateLabelNavButtons();
+                    computeMergedDistances();
+                    if (isFinal && !isEvents) computeFinalCropBoxes();
+                }
+            }
+
             recomputeCameraShift();
             updateLabelCount();
             updateLabelNavButtons();
-            goToFrame(0);
+            // Restore saved frame/zoom for this subject, else start at 0
+            const navRestored = restoreNavState();
+            await goToFrame(navRestored ? currentFrame : 0);
 
         } catch (e) {
             alert('Error loading session: ' + e.message);
@@ -369,6 +463,93 @@ const labeler = (() => {
         });
     }
 
+    // ── Video-element frame rendering ─────────────────
+    // Uses the browser's native video decoder instead of OpenCV JPEG extraction,
+    // which avoids the 1-frame seek offset that OpenCV has for many H.264 videos.
+    async function tryRenderVideoFrame(frame) {
+        // Don't interfere with active playback (videoDrawLoop or fallbackPlay)
+        if (!videoEl || playing) return false;
+
+        const trialIdx = getTrialForFrame(frame);
+        const trial = trials[trialIdx];
+        if (!trial) return false;
+
+        // Load correct trial's video into the element if needed.
+        if (currentTrialIdx !== trialIdx) {
+            const videoUrl = `/api/labeling/sessions/${sessionId}/video?trial=${trialIdx}`;
+            videoEl.src = videoUrl;
+            currentTrialIdx = trialIdx;
+            // Wait for video metadata to load so we can seek accurately
+            const loaded = await new Promise(resolve => {
+                if (videoEl.readyState >= 1) { resolve(true); return; }
+                const timer = setTimeout(() => { resolve(false); }, 5000); // 5 second timeout
+                const onLoaded = () => { clearTimeout(timer); videoEl.removeEventListener('error', onError); resolve(true); };
+                const onError = () => { clearTimeout(timer); videoEl.removeEventListener('loadedmetadata', onLoaded); resolve(false); };
+                videoEl.addEventListener('loadedmetadata', onLoaded, { once: true });
+                videoEl.addEventListener('error', onError, { once: true });
+            });
+            if (!loaded) return false; // Failed to load, fall back to JPEG
+        }
+        if (videoEl.readyState < 1) return false; // still loading metadata
+
+        // Seek to the target frame's timestamp.
+        // Use the midpoint of the frame duration (frame + 0.5) / fps to ensure
+        // the video element reliably shows the correct frame despite keyframe seeking
+        // or floating-point precision issues.
+        const localFrame = frame - trial.start_frame;
+        const halfFrame = 0.5 / trial.fps;
+        const targetTime = (localFrame + 0.5) / trial.fps; // midpoint of frame duration
+
+        if (Math.abs(videoEl.currentTime - targetTime) > halfFrame) {
+            videoEl.currentTime = targetTime;
+            await new Promise(resolve => {
+                videoEl.addEventListener('seeked', resolve, { once: true });
+                setTimeout(resolve, 2000); // timeout fallback — don't block forever
+            });
+        }
+
+        // Draw the video element to canvas, same logic as videoDrawLoop
+        const cw = containerEl.clientWidth;
+        const ch = containerEl.clientHeight;
+        canvas.width = cw;
+        canvas.height = ch;
+        ctx.clearRect(0, 0, cw, ch);
+
+        const vw = videoEl.videoWidth;
+        const vh = videoEl.videoHeight;
+        if (vw > 0 && vh > 0) {
+            const midline = Math.floor(vw / 2);
+            let sx, sw;
+            if (cameraNames.length >= 2 && currentSide === cameraNames[1]) {
+                sx = midline; sw = vw - midline;
+            } else {
+                sx = 0; sw = midline;
+            }
+            imgW = sw;
+            imgH = vh;
+            if (!hasUserZoom) {
+                if (isFinal && !isEvents && finalCropBoxes) {
+                    zoomToCropBox();
+                    hasUserZoom = true;
+                } else if (isFinal && !isEvents) {
+                    fitImage();
+                    hasUserZoom = true;
+                } else {
+                    if (!autoZoomForFrame(frame, currentSide)) fitImage();
+                }
+            }
+            ctx.save();
+            ctx.translate(offsetX, offsetY);
+            ctx.scale(scale, scale);
+            ctx.drawImage(videoEl, sx, 0, sw, vh, 0, 0, sw, vh);
+            ctx.restore();
+        }
+
+        drawLabelsOverlay();
+        videoFrameMode = true;
+        return true;
+    }
+
     function prefetchFrames(frame) {
         for (let i = 1; i <= PREFETCH_AHEAD; i++) {
             const f = frame + i;
@@ -385,26 +566,37 @@ const labeler = (() => {
         currentFrame = frame;
         distAutoScroll = true; // frame navigation re-enables auto-scroll
 
-        try {
-            currentImage = await loadImage(frame, currentSide);
-            imgW = currentImage.width;
-            imgH = currentImage.height;
-            if (!hasUserZoom) {
-                if (isFinal && finalCropBoxes) {
-                    // Final mode: zoom to crop box, then lock
-                    zoomToCropBox();
-                    hasUserZoom = true;
-                } else if (isFinal) {
-                    fitImage();
-                    hasUserZoom = true;
-                } else {
-                    if (!autoZoomForFrame(frame, currentSide)) fitImage();
+        // Prefer video element for accurate frame display.
+        // OpenCV's cap.set(POS_FRAMES, N) is unreliable for many H.264 videos —
+        // it can overshoot by 1 frame or accumulate drift at dropped frames.
+        // The browser's native video decoder (used in play mode) is the ground truth.
+        const renderedFromVideo = await tryRenderVideoFrame(frame);
+
+        if (!renderedFromVideo) {
+            // Fallback: load JPEG from backend (used before the video element is
+            // ready, or when play mode is active)
+            videoFrameMode = false;
+            try {
+                currentImage = await loadImage(frame, currentSide);
+                imgW = currentImage.width;
+                imgH = currentImage.height;
+                if (!hasUserZoom) {
+                    if (isFinal && !isEvents && finalCropBoxes) {
+                        // Final mode: zoom to crop box, then lock
+                        zoomToCropBox();
+                        hasUserZoom = true;
+                    } else if (isFinal && !isEvents) {
+                        fitImage();
+                        hasUserZoom = true;
+                    } else {
+                        if (!autoZoomForFrame(frame, currentSide)) fitImage();
+                    }
                 }
+                render();
+                prefetchFrames(frame);
+            } catch (e) {
+                console.error('Failed to load frame', frame, e);
             }
-            render();
-            prefetchFrames(frame);
-        } catch (e) {
-            console.error('Failed to load frame', frame, e);
         }
 
         updateFrameDisplay();
@@ -474,7 +666,7 @@ const labeler = (() => {
         const loadPromises = availableStages.map(s => ensureStageLoaded(s));
         await Promise.all(loadPromises);
         computeMergedDistances();
-        if (isFinal) computeFinalCropBoxes();
+        if (isFinal && !isEvents) computeFinalCropBoxes();
     }
 
     function computeFinalCropBoxes() {
@@ -523,10 +715,22 @@ const labeler = (() => {
         const select = document.getElementById('stageSelector');
         const csvList = document.getElementById('stageCsvList');
         if (!container || !select) return;
-        if ((!isFinal && !isRefine) || availableStages.length === 0) return;
+        if ((!isFinal && !isRefine && !isEvents) || availableStages.length === 0) return;
 
         container.style.display = 'block';
-        select.innerHTML = '<option value="auto">Auto (priority merge)</option>';
+        select.innerHTML = '';
+
+        // Only show "Auto (priority merge)" option in refine mode, not final/events
+        if (!isFinal || isEvents) {
+            // Events mode: allow "auto" so user can see best available distance data
+            // Refine mode: auto = merged priority chain
+            // Other modes: auto available
+            select.innerHTML = isEvents
+                ? '<option value="auto">Auto (best distance)</option>'
+                : '<option value="auto">Auto (priority merge)</option>';
+        } else {
+            select.innerHTML = '';
+        }
 
         // Add available CSV-based stages
         for (const stage of STAGE_CHAIN) {
@@ -558,9 +762,9 @@ const labeler = (() => {
             updateCsvList();
             updateLabelNavButtons();
             computeMergedDistances();
-            if (isFinal) computeFinalCropBoxes();
+            if (isFinal && !isEvents) computeFinalCropBoxes();
             render();
-            if (isFinal) renderTrialPlots();
+            if (isFinal && !isEvents) renderTrialPlots();
             else renderDistanceTrace();
         });
 
@@ -755,13 +959,31 @@ const labeler = (() => {
 
         ctx.clearRect(0, 0, cw, ch);
 
-        if (currentImage) {
+        if (videoFrameMode && videoEl && videoEl.readyState >= 2 && !videoPlaying) {
+            // Video element is the frame source — redraw from the paused video.
+            // This keeps labels correctly aligned during zoom/pan after frame-by-frame nav.
+            const vw = videoEl.videoWidth;
+            const vh = videoEl.videoHeight;
+            if (vw > 0 && vh > 0) {
+                const midline = Math.floor(vw / 2);
+                let sx, sw;
+                if (cameraNames.length >= 2 && currentSide === cameraNames[1]) {
+                    sx = midline; sw = vw - midline;
+                } else {
+                    sx = 0; sw = midline;
+                }
+                ctx.save();
+                ctx.translate(offsetX, offsetY);
+                ctx.scale(scale, scale);
+                ctx.drawImage(videoEl, sx, 0, sw, vh, 0, 0, sw, vh);
+                ctx.restore();
+            }
+        } else if (currentImage) {
             ctx.save();
             ctx.translate(offsetX, offsetY);
             ctx.scale(scale, scale);
             ctx.drawImage(currentImage, 0, 0);
             ctx.restore();
-
         }
 
         drawLabelsOverlay();
@@ -1239,30 +1461,51 @@ const labeler = (() => {
         render();
     }
 
-    // ── Undo ──────────────────────────────────────────
-    function pushUndo(key, bp, prevCoords) {
-        undoStack.push({ key, bp, prev: prevCoords });
-        if (undoStack.length > MAX_UNDO) undoStack.shift();
+    // ── Undo / Redo ──────────────────────────────────
+    function snapshotEventMarkers() {
+        return { open: [...eventMarkers.open], peak: [...eventMarkers.peak], close: [...eventMarkers.close] };
     }
 
-    function undo() {
-        if (undoStack.length === 0) return;
-        const action = undoStack.pop();
-        const { key, bp, prev } = action;
+    function pushUndo(key, bp, prevCoords) {
+        undoStack.push({ type: 'label', key, bp, prev: prevCoords, frame: currentFrame });
+        if (undoStack.length > MAX_UNDO) undoStack.shift();
+        redoStack.length = 0;
+    }
 
-        let lbl = labels.get(key);
+    function pushEventUndo(prevSnapshot) {
+        undoStack.push({ type: 'events', prev: prevSnapshot, frame: currentFrame });
+        if (undoStack.length > MAX_UNDO) undoStack.shift();
+        redoStack.length = 0;
+    }
+
+    // Core undo/redo logic: pop from `fromStack`, apply, push reverse to `toStack`.
+    function _applyUndoEntry(action, toStack) {
+        if (action.type === 'events') {
+            const currentSnapshot = snapshotEventMarkers();
+            toStack.push({ type: 'events', prev: currentSnapshot, frame: action.frame });
+            for (const t of EVENT_TYPES) eventMarkers[t] = [...action.prev[t]];
+            updateEventCounts();
+            renderDistanceTrace();
+            goToFrame(action.frame);
+            return;
+        }
+
+        // Label action
+        const { key, bp, prev } = action;
+        const lbl = labels.get(key);
+        const currentCoords = (lbl && lbl[bp]) ? lbl[bp] : null;
+        toStack.push({ type: 'label', key, bp, prev: currentCoords, frame: action.frame });
+
+        let lbl2 = labels.get(key);
         if (prev) {
-            // Restore previous coordinates
-            if (!lbl) { lbl = {}; labels.set(key, lbl); }
-            lbl[bp] = prev;
-            // If restoring a label, it's no longer deleted
+            if (!lbl2) { lbl2 = {}; labels.set(key, lbl2); }
+            lbl2[bp] = prev;
             deletedKeys.delete(key);
             dirtyKeys.add(key);
         } else {
-            // Was a new placement — remove it
-            if (lbl) {
-                delete lbl[bp];
-                const hasAny = bodyparts.some(b => lbl[b] && lbl[b][0] != null);
+            if (lbl2) {
+                delete lbl2[bp];
+                const hasAny = bodyparts.some(b => lbl2[b] && lbl2[b][0] != null);
                 if (!hasAny) {
                     labels.delete(key);
                     deletedKeys.add(key);
@@ -1272,11 +1515,21 @@ const labeler = (() => {
             }
         }
 
-        render();
         updateLabelCount();
         scheduleSave();
         recomputeCameraShift();
         if (isRefine) updateV2TrainingBtn();
+        goToFrame(action.frame);
+    }
+
+    function undo() {
+        if (undoStack.length === 0) return;
+        _applyUndoEntry(undoStack.pop(), redoStack);
+    }
+
+    function redo() {
+        if (redoStack.length === 0) return;
+        _applyUndoEntry(redoStack.pop(), undoStack);
     }
 
     // ── Zoom helpers ─────────────────────────────────
@@ -1533,7 +1786,7 @@ const labeler = (() => {
                     }
                 }
                 renderDistanceTrace();
-                if (isFinal) renderTrialPlots();
+                if (isFinal && !isEvents) renderTrialPlots();
             }
         } catch (e) {
             console.error('Save failed:', e);
@@ -2138,9 +2391,16 @@ const labeler = (() => {
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
 
             // Ctrl+Z: undo (disabled in final mode)
-            if (e.key === 'z' && (e.ctrlKey || e.metaKey)) {
+            if (e.key === 'z' && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
                 e.preventDefault();
                 if (!isFinal) undo();
+                return;
+            }
+
+            // Ctrl+Y or Ctrl+Shift+Z: redo (disabled in final mode)
+            if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Z')) {
+                e.preventDefault();
+                if (!isFinal) redo();
                 return;
             }
 
@@ -2155,13 +2415,15 @@ const labeler = (() => {
                     break;
                 case 'q':
                     e.preventDefault();
-                    if (isRefine) prevLabel();
+                    if (isEvents) prevEvent();
+                    else if (isRefine) prevLabel();
                     else if (isCorrections) prevGap();
                     else prevLabel();
                     break;
                 case 'w':
                     e.preventDefault();
-                    if (isRefine) nextLabel();
+                    if (isEvents) nextEvent();
+                    else if (isRefine) nextLabel();
                     else if (isCorrections) nextGap();
                     else nextLabel();
                     break;
@@ -2191,8 +2453,27 @@ const labeler = (() => {
                     e.preventDefault();
                     togglePlay();
                     break;
+                // Events mode shortcuts
+                case 'x':
+                    if (isEvents) { e.preventDefault(); deleteEvent(); }
+                    break;
+                case '[':
+                    if (isEvents) { e.preventDefault(); shiftEvent(-1); }
+                    break;
+                case ']':
+                    if (isEvents) { e.preventDefault(); shiftEvent(1); }
+                    break;
+                case '1':
+                    if (isEvents) { e.preventDefault(); placeEventType('open'); }
+                    break;
+                case '2':
+                    if (isEvents) { e.preventDefault(); placeEventType('peak'); }
+                    break;
+                case '3':
+                    if (isEvents) { e.preventDefault(); placeEventType('close'); }
+                    break;
                 default:
-                    if (isFinal) break; // Read-only: no delete shortcuts
+                    if (isFinal && !isEvents) break; // Read-only: no delete shortcuts
                     // D/F: delete bodypart by letter
                     if (e.key in DELETE_KEYS) {
                         const idx = DELETE_KEYS[e.key];
@@ -2245,6 +2526,12 @@ const labeler = (() => {
     }
 
     function updateLabelCount() {
+        if (isEvents) {
+            const total = EVENT_TYPES.reduce((s, t) => s + eventMarkers[t].length, 0);
+            document.getElementById('labelCount').innerHTML =
+                `Events: <strong>${total}</strong>`;
+            return;
+        }
         if (isRefine) {
             const total = correctionFrames.size;
             const training = total - v2Excludes.size;
@@ -2265,6 +2552,25 @@ const labeler = (() => {
     function updateShortcutsSidebar() {
         const el = document.getElementById('shortcutList');
         if (!el) return;
+
+        if (isEvents) {
+            el.innerHTML = `
+                <div><kbd>A</kbd> / <kbd>&larr;</kbd> Prev frame</div>
+                <div><kbd>S</kbd> / <kbd>&rarr;</kbd> Next frame</div>
+                <div><kbd>Q</kbd> Prev event</div>
+                <div><kbd>W</kbd> Next event</div>
+                <div><kbd>E</kbd> Toggle ${cameraNames.join('/')}</div>
+                <div><kbd>Z</kbd> Reset zoom</div>
+                <div><kbd>Space</kbd> Play/pause</div>
+                <div><kbd>1</kbd> Place open</div>
+                <div><kbd>2</kbd> Place peak</div>
+                <div><kbd>3</kbd> Place close</div>
+                <div><kbd>X</kbd> Delete event</div>
+                <div><kbd>[</kbd> Shift event ←1</div>
+                <div><kbd>]</kbd> Shift event →1</div>
+            `;
+            return;
+        }
 
         if (isFinal) {
             el.innerHTML = `
@@ -2339,8 +2645,12 @@ const labeler = (() => {
     }
 
     function renderTimeline() {
-        if (isFinal) {
+        if (isFinal && !isEvents) {
             renderTrialPlots();
+            return;
+        }
+        if (isEvents) {
+            renderDistanceTrace();
             return;
         }
 
@@ -2724,10 +3034,37 @@ const labeler = (() => {
             window.removeEventListener('mousemove', onMove);
             window.removeEventListener('mouseup', onUp);
             if (!moved) {
-                // Click — navigate to frame
-                const frame = distXToFrame(ev.clientX);
-                autoZoomForFrame(frame, currentSide);
-                goToFrame(frame);
+                // Click — check for nearby event markers first (leniency)
+                const rawFrame = distXToFrame(ev.clientX);
+                let targetFrame = rawFrame;
+
+                if (isEvents) {
+                    // Find closest visible event marker within leniency radius (8 px)
+                    const rect = distCanvas.getBoundingClientRect();
+                    const clickX = ev.clientX - rect.left;
+                    const padL = 40, padR = 8;
+                    const plotW = rect.width - padL - padR;
+                    const effectiveViewFrames = distViewFrames > 0 ? distViewFrames : totalFrames;
+                    const fToX = (f) => padL + ((f - distViewStart) / effectiveViewFrames) * plotW;
+                    const LENIENCY_PX = 10;
+                    let bestDist = LENIENCY_PX + 1;
+
+                    EVENT_TYPES.forEach(etype => {
+                        if (!eventVisibility[etype]) return;
+                        eventMarkers[etype].forEach(f => {
+                            if (f < distViewStart || f >= distViewStart + effectiveViewFrames) return;
+                            const markerX = fToX(f);
+                            const dx = Math.abs(clickX - markerX);
+                            if (dx < bestDist) {
+                                bestDist = dx;
+                                targetFrame = f;
+                            }
+                        });
+                    });
+                }
+
+                autoZoomForFrame(targetFrame, currentSide);
+                goToFrame(targetFrame);
             }
         };
 
@@ -2773,19 +3110,13 @@ const labeler = (() => {
 
         const fToX = (f) => padL + ((f - vStart) / effectiveViewFrames) * plotW;
 
-        // Use global data range so Y-axis stays constant while scrolling
-        let minD = Infinity, maxD = -Infinity;
-        for (const d of distances) {
-            if (d !== null && d !== undefined) {
-                minD = Math.min(minD, d);
-                maxD = Math.max(maxD, d);
-            }
-        }
-        if (minD === Infinity) return;
-
-        const range = maxD - minD || 10;
-        minD = Math.max(0, minD - range * 0.05);
-        maxD = userYMax !== null ? userYMax : maxD + range * 0.05;
+        // Use stable range (computed from cleanest source, outlier-filtered) for consistent Y-axis.
+        // Fall back to percentile range of current distances if stable range not yet set.
+        let minD, maxD;
+        const rangeSource = stableDistRange || percentileRange(distances);
+        if (!rangeSource) return;
+        minD = rangeSource.min;
+        maxD = userYMax !== null ? userYMax : rangeSource.max;
 
         const dToY = (d) => padT + ((maxD - d) / (maxD - minD)) * plotH;
 
@@ -2874,6 +3205,57 @@ const labeler = (() => {
             });
         }
 
+        // Event markers (events mode only)
+        if (isEvents) {
+            EVENT_TYPES.forEach(etype => {
+                if (!eventVisibility[etype]) return;
+                const color = EVENT_COLORS[etype];
+                eventMarkers[etype].forEach(f => {
+                    if (f < vStart || f >= vEnd) return;
+                    const x = fToX(f);
+                    let y;
+                    if (distances && f < distances.length && distances[f] !== null) {
+                        y = Math.max(padT + 5, Math.min(padT + plotH - 5, dToY(distances[f])));
+                    } else {
+                        y = padT + plotH * 0.5;
+                    }
+                    // Draw diamond: filled=saved to CSV, outline=pending
+                    const r = 5;
+                    const isSaved = savedEventFrames[etype].has(f);
+                    distCtx.beginPath();
+                    distCtx.moveTo(x, y - r);
+                    distCtx.lineTo(x + r, y);
+                    distCtx.lineTo(x, y + r);
+                    distCtx.lineTo(x - r, y);
+                    distCtx.closePath();
+                    if (isSaved) {
+                        distCtx.fillStyle = color;
+                        distCtx.fill();
+                        distCtx.strokeStyle = 'rgba(255,255,255,0.6)';
+                        distCtx.lineWidth = 1;
+                    } else {
+                        distCtx.fillStyle = 'transparent';
+                        distCtx.strokeStyle = color;
+                        distCtx.lineWidth = 2;
+                    }
+                    distCtx.stroke();
+
+                    // Highlight if this is the active frame
+                    if (f === currentFrame) {
+                        distCtx.beginPath();
+                        distCtx.moveTo(x, y - r - 3);
+                        distCtx.lineTo(x + r + 3, y);
+                        distCtx.lineTo(x, y + r + 3);
+                        distCtx.lineTo(x - r - 3, y);
+                        distCtx.closePath();
+                        distCtx.strokeStyle = 'white';
+                        distCtx.lineWidth = 1.5;
+                        distCtx.stroke();
+                    }
+                });
+            });
+        }
+
         // Camera ticks for frames with manual corrections (visible only)
         labels.forEach((lbl, key) => {
             const [frameStr, side] = key.split('_');
@@ -2922,6 +3304,7 @@ const labeler = (() => {
 
     // ── Subject navigation ─────────────────────────────
     function currentSessionType() {
+        if (isEvents) return 'events';
         if (isFinal) return 'final';
         if (isCorrections) return 'corrections';
         if (isRefine) return 'refine';
@@ -2931,6 +3314,9 @@ const labeler = (() => {
     async function switchSubject(subjectId) {
         if (subjectId === currentSubjectId) return;
         try {
+            // Save current frame/zoom and preferences before switching
+            saveNavState();
+            savePreferences();
             const session = await API.post(`/api/labeling/${subjectId}/sessions`, {
                 session_type: currentSessionType(),
             });
@@ -3000,6 +3386,230 @@ const labeler = (() => {
         }
     }
 
+    // ── Stable Y-range computation ─────────────────────
+    /** Compute a percentile-based Y range, ignoring outliers.
+     *  Uses P2 – P98 of valid values, then adds 5% padding. */
+    function percentileRange(arr, pLow = 2, pHigh = 98) {
+        const valid = arr.filter(d => d !== null && d !== undefined && isFinite(d)).sort((a, b) => a - b);
+        if (valid.length === 0) return null;
+        const lo = valid[Math.max(0, Math.floor(valid.length * pLow / 100))];
+        const hi = valid[Math.min(valid.length - 1, Math.floor(valid.length * pHigh / 100))];
+        if (lo === hi) return { min: Math.max(0, lo - 5), max: hi + 5 };
+        const pad = (hi - lo) * 0.05;
+        return { min: Math.max(0, lo - pad), max: hi + pad };
+    }
+
+    function computeStableDistRange() {
+        /** Compute once from the cleanest available data source.
+         *  Priority: corrections > refine > dlc > mp > current distances.
+         *  Uses percentile filtering to exclude outliers. */
+        const priority = ['corrections', 'refine', 'dlc', 'mp'];
+        for (const stage of priority) {
+            const sd = stageData[stage];
+            if (sd && sd.distances && sd.distances.some(d => d !== null)) {
+                const r = percentileRange(sd.distances);
+                if (r) { stableDistRange = r; return; }
+            }
+        }
+        // Fallback: current distances
+        if (distances && distances.some(d => d !== null)) {
+            const r = percentileRange(distances);
+            if (r) stableDistRange = r;
+        }
+    }
+
+    // ── Frame / zoom navigation persistence ───────────
+    function saveNavState() {
+        if (!currentSubjectId) return;
+        try {
+            localStorage.setItem(`dlc_nav_${currentSubjectId}`, JSON.stringify({
+                frame: currentFrame,
+                scale,
+                offsetX,
+                offsetY,
+                hasUserZoom,
+            }));
+        } catch (_) {}
+    }
+
+    function restoreNavState() {
+        if (!currentSubjectId) return false;
+        try {
+            const saved = localStorage.getItem(`dlc_nav_${currentSubjectId}`);
+            if (!saved) return false;
+            const nav = JSON.parse(saved);
+            if (typeof nav.frame === 'number' && nav.frame > 0 && nav.frame < totalFrames) {
+                currentFrame = nav.frame;
+                if (nav.hasUserZoom && nav.scale) {
+                    scale = nav.scale;
+                    offsetX = nav.offsetX || 0;
+                    offsetY = nav.offsetY || 0;
+                    hasUserZoom = true;
+                }
+                return true;
+            }
+        } catch (_) {}
+        return false;
+    }
+
+    // ── Events mode functions ──────────────────────────
+
+    async function loadEvents() {
+        try {
+            const result = await API.get(`/api/labeling/sessions/${sessionId}/events`);
+            EVENT_TYPES.forEach(t => {
+                eventMarkers[t] = result[t] || [];
+                savedEventFrames[t] = new Set(eventMarkers[t]);
+            });
+            updateEventCounts();
+            renderDistanceTrace();
+            // Auto-detect if no events saved yet
+            const total = EVENT_TYPES.reduce((s, t) => s + eventMarkers[t].length, 0);
+            if (total === 0) await detectEvents();
+        } catch (e) {
+            console.log('Could not load events:', e);
+        }
+    }
+
+    async function saveEvents() {
+        try {
+            // Only send visible types — backend merges with existing CSV for hidden types
+            const body = {};
+            EVENT_TYPES.forEach(t => { if (eventVisibility[t]) body[t] = eventMarkers[t]; });
+            await API.put(`/api/labeling/sessions/${sessionId}/events`, body);
+            // Mark saved types as persisted
+            EVENT_TYPES.forEach(t => {
+                if (eventVisibility[t]) savedEventFrames[t] = new Set(eventMarkers[t]);
+            });
+            savePreferences();
+            renderDistanceTrace();
+            const counts = EVENT_TYPES.filter(t => eventVisibility[t])
+                .map(t => `${t}: ${eventMarkers[t].length}`).join(', ');
+            updateLabelInfo(`Saved — ${counts}`);
+        } catch (e) {
+            alert('Error saving events: ' + e.message);
+        }
+    }
+
+    function setEventVisibility(type, visible) {
+        eventVisibility[type] = visible;
+        savePreferences();
+        renderDistanceTrace();
+    }
+
+    function placeEventType(type) {
+        if (!isEvents || !EVENT_TYPES.includes(type)) return;
+        const frames = eventMarkers[type];
+        if (!frames.includes(currentFrame)) {
+            const snapshot = snapshotEventMarkers();
+            frames.push(currentFrame);
+            frames.sort((a, b) => a - b);
+            pushEventUndo(snapshot);
+        }
+        updateEventCounts();
+        renderDistanceTrace();
+    }
+
+    // Returns the first visible event type that has a marker at currentFrame, or null.
+    function _plottedTypeAtFrame() {
+        for (const t of EVENT_TYPES)
+            if (eventVisibility[t] && eventMarkers[t].includes(currentFrame)) return t;
+        return null;
+    }
+
+    function deleteEvent() {
+        if (!isEvents) return;
+        const type = _plottedTypeAtFrame();
+        if (!type) return;
+        const frames = eventMarkers[type];
+        const idx = frames.indexOf(currentFrame);
+        if (idx !== -1) {
+            const snapshot = snapshotEventMarkers();
+            frames.splice(idx, 1);
+            pushEventUndo(snapshot);
+        }
+        updateEventCounts();
+        renderDistanceTrace();
+    }
+
+    function shiftEvent(delta) {
+        if (!isEvents) return;
+        const type = _plottedTypeAtFrame();
+        if (!type) return;
+        const frames = eventMarkers[type];
+        const idx = frames.indexOf(currentFrame);
+        if (idx === -1) return;
+
+        const snapshot = snapshotEventMarkers();
+        const newFrame = Math.max(0, Math.min(totalFrames - 1, currentFrame + delta));
+        frames.splice(idx, 1);
+        if (!frames.includes(newFrame)) {
+            frames.push(newFrame);
+            frames.sort((a, b) => a - b);
+        }
+        pushEventUndo(snapshot);
+        updateEventCounts();
+        // Navigate to the shifted frame
+        goToFrame(newFrame);
+    }
+
+    async function detectEvents() {
+        if (!isEvents) return;
+        const btn = document.getElementById('detectEventsBtn');
+        if (btn) { btn.textContent = 'Detecting…'; btn.disabled = true; }
+        const snapshot = snapshotEventMarkers();  // snapshot before API call
+        try {
+            const result = await API.post(`/api/labeling/sessions/${sessionId}/detect_events`, {});
+            EVENT_TYPES.forEach(t => {
+                eventMarkers[t] = result[t] || [];
+                // savedEventFrames stays unchanged — only Save updates it
+            });
+            // Safety net: ensure all saved events are preserved
+            for (const t of EVENT_TYPES) {
+                for (const f of savedEventFrames[t]) {
+                    if (!eventMarkers[t].includes(f)) eventMarkers[t].push(f);
+                }
+                eventMarkers[t].sort((a, b) => a - b);
+            }
+            pushEventUndo(snapshot);
+            updateEventCounts();
+            renderDistanceTrace();
+            let newCount = 0;
+            EVENT_TYPES.forEach(t => {
+                eventMarkers[t].forEach(f => { if (!savedEventFrames[t].has(f)) newCount++; });
+            });
+            const total = EVENT_TYPES.reduce((s, t) => s + eventMarkers[t].length, 0);
+            updateLabelInfo(`Detected ${total} events (${newCount} new) — Save to keep`);
+        } catch (e) {
+            console.log('Auto-detection failed:', e);
+        } finally {
+            if (btn) { btn.textContent = 'Auto-detect'; btn.disabled = false; }
+        }
+    }
+
+    function prevEvent() {
+        const allFrames = [...new Set(EVENT_TYPES.filter(t => eventVisibility[t]).flatMap(t => eventMarkers[t]))]
+            .sort((a, b) => a - b);
+        const prev = [...allFrames].reverse().find(f => f < currentFrame);
+        if (prev !== undefined) goToFrame(prev);
+    }
+
+    function nextEvent() {
+        const allFrames = [...new Set(EVENT_TYPES.filter(t => eventVisibility[t]).flatMap(t => eventMarkers[t]))]
+            .sort((a, b) => a - b);
+        const next = allFrames.find(f => f > currentFrame);
+        if (next !== undefined) goToFrame(next);
+    }
+
+    function updateEventCounts() {
+        const el = document.getElementById('eventCounts');
+        if (!el) return;
+        const names = { open: 'Open', peak: 'Peak', close: 'Close' };
+        el.innerHTML = EVENT_TYPES.map(t =>
+            `<span style="color:${EVENT_COLORS[t]};">●</span> ${names[t]}: <strong>${eventMarkers[t].length}</strong>`
+        ).join('<br>');
+    }
+
     // ── Public API ────────────────────────────────────
     return {
         init,
@@ -3009,6 +3619,13 @@ const labeler = (() => {
         saveLabels, commitSession, saveCorrectionsOnly,
         toggleV2Training,
         prevSubject, nextSubject,
+        // Events mode
+        loadEvents, saveEvents, detectEvents,
+        setEventVisibility,
+        placeEventType, deleteEvent, shiftEvent,
+        prevEvent, nextEvent,
+        // Navigation persistence
+        saveNavState,
     };
 })();
 
