@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DLC Labeling</title>
-    <link rel="stylesheet" href="/static/css/main.css?v=6">
+    <link rel="stylesheet" href="/static/css/main.css?v=7">
     <style>
         body { overflow: hidden; }
 
@@ -54,7 +54,7 @@
             <a href="/">Dashboard</a>
             <a href="/remote">Processing</a>
             <a href="/labeling-select" class="active">Labeling</a>
-            <a href="/results">Results</a>
+            <a href="/results" id="resultsLink">Results</a>
             <a href="/settings">Settings</a>
         </nav>
     </div>
@@ -115,14 +115,10 @@
             <div id="eventsPanel" style="display:none;margin-bottom:16px;">
                 <h3 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">Events</h3>
 
-                <!-- Trial selector -->
-                <div id="trialSelector" style="margin-bottom:8px;">
-                    <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">Trial:</label>
-                    <div style="display:flex;gap:4px;align-items:center;">
-                        <button class="btn btn-sm" onclick="labeler.prevTrial()" title="Previous trial">&larr;</button>
-                        <span id="trialSelectorLabel" style="font-size:13px;font-weight:600;flex:1;text-align:center;">--</span>
-                        <button class="btn btn-sm" onclick="labeler.nextTrial()" title="Next trial">&rarr;</button>
-                    </div>
+                <!-- Current trial indicator (auto-follows frame position) -->
+                <div id="trialIndicator" style="margin-bottom:8px;">
+                    <span style="font-size:12px;color:var(--text-muted);">Trial:</span>
+                    <span id="trialSelectorLabel" style="font-size:13px;font-weight:600;margin-left:4px;">--</span>
                 </div>
 
                 <!-- Auto-detect -->
@@ -225,7 +221,7 @@
     </div>
 
     <script src="/static/js/api.js?v=10"></script>
-    <script src="/static/js/labeler.js?v=32"></script>
+    <script src="/static/js/labeler.js?v=33"></script>
     <script>
         // ── Mode Switcher ────────────────────────────────────────────
         async function switchMode(sessionType) {
@@ -301,66 +297,91 @@
 <!-- Auto-detect Configuration Modal -->
 <div class="modal-overlay" id="detectModalOverlay">
     <div class="modal" id="detectModal">
-        <h3 style="margin-bottom:12px;">Auto-detect Configuration
+        <h3 style="margin-bottom:8px;">Auto-detect Configuration
             <span id="detectModalTrial" style="font-size:13px;color:var(--text-muted);margin-left:8px;"></span>
         </h3>
 
-        <!-- Metric plots area -->
+        <!-- Event-type focus selector -->
+        <div id="detectFocusSelector" style="display:flex;gap:4px;margin-bottom:12px;">
+            <button class="btn btn-sm active" data-focus="all" onclick="labeler.setDetectFocus('all')">All Events</button>
+            <button class="btn btn-sm" data-focus="open" onclick="labeler.setDetectFocus('open')" style="color:#00cc44;">Opens</button>
+            <button class="btn btn-sm" data-focus="peak" onclick="labeler.setDetectFocus('peak')" style="color:#ffcc00;">Peaks</button>
+            <button class="btn btn-sm" data-focus="close" onclick="labeler.setDetectFocus('close')" style="color:#ff4444;">Closes</button>
+        </div>
+
+        <!-- Metric plots area (auto-loaded, no button) -->
         <div id="metricPlotsArea" style="margin-bottom:12px;">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-                <span style="font-size:12px;color:var(--text-muted);">Metric plots (trial-local frames)</span>
-                <button class="btn btn-sm" id="computeMetricsBtn" onclick="labeler.computeMetrics()">Compute Metrics</button>
-            </div>
-            <div id="metricPlotsLoading" style="display:none;text-align:center;padding:16px;color:var(--text-muted);font-size:12px;">
-                Computing metrics (extracting video crops)…
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">Metric plots (trial-local frames)</div>
+            <div id="metricPlotsLoading" style="display:none;text-align:center;padding:12px;color:var(--text-muted);font-size:12px;">
+                Computing metrics…
             </div>
             <div id="metricPlotsContainer" style="display:none;">
-                <canvas id="distPlotCanvas" style="width:100%;height:80px;"></canvas>
-                <canvas id="reversalPlotCanvas" style="width:100%;height:80px;"></canvas>
-                <canvas id="ssdPlotCanvas" style="width:100%;height:80px;"></canvas>
+                <canvas id="distPlotCanvas" style="width:100%;height:90px;"></canvas>
+                <canvas id="reversalPlotCanvas" style="width:100%;height:90px;" class="detect-metric-canvas"></canvas>
+                <canvas id="ssdPlotCanvas" style="width:100%;height:90px;" class="detect-metric-canvas"></canvas>
+            </div>
+            <div id="metricPlotsUnavailable" style="display:none;text-align:center;padding:8px;color:var(--text-muted);font-size:11px;">
+                Metrics unavailable — detection will use distance only
             </div>
         </div>
 
-        <!-- Step toggles -->
-        <div style="margin-bottom:12px;">
-            <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">Detection Steps</div>
+        <!-- Peak Detection parameters -->
+        <div style="margin-bottom:10px;">
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">Peak Detection</div>
+            <div class="detect-core-params">
+                <label title="Minimum distance (mm) for a peak to count as a real finger opening. Increase to ignore small movements.">Min peak height <input type="number" id="paramMinPeakHeight" value="15" min="1" step="1" data-affects="peak"></label>
+                <label title="Distance (mm) that must be reached between peaks. Two peaks without a valley below this are merged.">Valley thresh <input type="number" id="paramValleyThresh" value="25" min="1" step="1" data-affects="peak"></label>
+                <label title="Minimum frames between events. Prevents double-counting. 10 frames = ~167ms at 60fps.">Min event gap <input type="number" id="paramMinEventGap" value="10" min="1" step="1" data-affects="all"></label>
+            </div>
+        </div>
+
+        <!-- Open Detection parameters -->
+        <div style="margin-bottom:10px;">
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">Open Detection</div>
+            <div class="detect-core-params">
+                <label title="Velocity threshold (mm/frame) for pinpointing the exact open onset. Lower = earlier detection.">Open thresh <input type="number" id="paramOpenThresh" value="5" min="0.1" step="0.5" data-affects="open"></label>
+                <label title="How many frames to search backward from a peak for the open onset.">Nback <input type="number" id="paramNback" value="60" min="10" step="5" data-affects="open"></label>
+            </div>
+        </div>
+
+        <!-- Refinement Step toggles -->
+        <div style="margin-bottom:10px;">
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">Refinement Steps</div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-                <div class="detect-step-card">
-                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:6px;">
+                <div class="detect-step-card" id="cardReversal">
+                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:6px;" title="Use motion reversal metric to refine peak positions. Finds the exact frame where finger motion reverses direction.">
                         <input type="checkbox" id="stepReversal" checked>
                         Reversal peak refinement
                     </label>
                     <div class="detect-param">
-                        <label>Search radius <input type="number" id="paramReversalRadius" value="3" min="1" max="10" step="1"></label>
-                        <label>Peak guard <input type="number" id="paramPeakGuard" value="0.1" min="0" max="1" step="0.05"></label>
+                        <label title="Frames to search around each peak for the motion reversal point.">Search radius <input type="number" id="paramReversalRadius" value="3" min="1" max="10" step="1" data-affects="peak"></label>
+                        <label title="Rejects reversal refinement if peak distance drops by more than this fraction.">Peak guard <input type="number" id="paramPeakGuard" value="0.1" min="0" max="1" step="0.05" data-affects="peak"></label>
                     </div>
                 </div>
-                <div class="detect-step-card">
-                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:6px;">
+                <div class="detect-step-card" id="cardSsd">
+                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:6px;" title="Use SSD motion energy metric to refine open/close positions. Finds the exact frames where finger motion starts and stops.">
                         <input type="checkbox" id="stepSsd" checked>
                         SSD open/close refinement
                     </label>
                     <div class="detect-param">
-                        <label>SSD radius <input type="number" id="paramSsdRadius" value="5" min="1" max="15" step="1"></label>
-                        <label>Open bias <input type="number" id="paramOpenBias" value="-1" min="-5" max="5" step="1"></label>
-                        <label>Close bias <input type="number" id="paramCloseBias" value="1" min="-5" max="5" step="1"></label>
-                        <label>Dist guard <input type="number" id="paramDistGuard" value="0.25" min="0" max="1" step="0.05"></label>
+                        <label title="Frames to search around open/close for the motion energy onset/offset.">SSD radius <input type="number" id="paramSsdRadius" value="5" min="1" max="15" step="1" data-affects="open,close"></label>
+                        <label title="Frame offset applied after SSD refinement of opens. Negative = earlier.">Open bias <input type="number" id="paramOpenBias" value="-1" min="-5" max="5" step="1" data-affects="open"></label>
+                        <label title="Frame offset applied after SSD refinement of closes. Positive = later.">Close bias <input type="number" id="paramCloseBias" value="1" min="-5" max="5" step="1" data-affects="close"></label>
+                        <label title="Rejects SSD refinement if refined distance exceeds this fraction of peak distance.">Dist guard <input type="number" id="paramDistGuard" value="0.25" min="0" max="1" step="0.05" data-affects="open,close"></label>
+                        <label title="Smoothing sigma for SSD signal before refinement. Higher = smoother.">SSD sigma <input type="number" id="paramGaussianSigma" value="2.0" min="0.5" max="5" step="0.5" data-affects="open,close"></label>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- Core parameters -->
-        <div style="margin-bottom:12px;">
-            <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">Core Parameters</div>
-            <div class="detect-core-params">
-                <label>Min peak height <input type="number" id="paramMinPeakHeight" value="15" min="1" step="1"></label>
-                <label>Min event gap <input type="number" id="paramMinEventGap" value="10" min="1" step="1"></label>
-                <label>Valley thresh <input type="number" id="paramValleyThresh" value="25" min="1" step="1"></label>
-                <label>Open thresh <input type="number" id="paramOpenThresh" value="5" min="0.1" step="0.5"></label>
-                <label>Nback <input type="number" id="paramNback" value="60" min="10" step="5"></label>
+        <!-- Advanced parameters (collapsed by default) -->
+        <details style="margin-bottom:12px;">
+            <summary style="font-size:12px;color:var(--text-muted);cursor:pointer;margin-bottom:4px;">Advanced</summary>
+            <div class="detect-core-params" style="margin-top:4px;">
+                <label title="Distances above this (mm) are treated as tracking artifacts and excluded.">Max valid dist <input type="number" id="paramMaxValidDist" value="200" min="50" max="500" step="10" data-affects="all"></label>
+                <label title="Minimum peak height for edge intervals (before first / after last open).">Edge min peak <input type="number" id="paramEdgeMinPeak" value="15" min="0" max="100" step="1" data-affects="peak"></label>
             </div>
-        </div>
+        </details>
 
         <!-- Actions -->
         <div class="actions">

@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS subjects (
     no_face_videos TEXT,
     dlc_dir TEXT,
     video_pattern TEXT,
+    diagnosis TEXT DEFAULT 'Control',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -63,23 +64,35 @@ CREATE TABLE IF NOT EXISTS frame_labels (
 );
 
 CREATE TABLE IF NOT EXISTS job_queue (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_type    TEXT NOT NULL,
-    subject_ids TEXT NOT NULL,
-    resource    TEXT NOT NULL,
-    status      TEXT NOT NULL DEFAULT 'queued',
-    job_id      INTEGER,
-    position    INTEGER NOT NULL,
-    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    started_at  TIMESTAMP,
-    finished_at TIMESTAMP,
-    error_msg   TEXT
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_type            TEXT NOT NULL,
+    subject_ids         TEXT NOT NULL,
+    resource            TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'queued',
+    job_id              INTEGER,
+    position            INTEGER NOT NULL,
+    execution_target    TEXT NOT NULL DEFAULT 'remote',
+    created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    started_at          TIMESTAMP,
+    finished_at         TIMESTAMP,
+    error_msg           TEXT
+);
+
+CREATE TABLE IF NOT EXISTS subject_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_id INTEGER NOT NULL REFERENCES subjects(id),
+    event_type TEXT NOT NULL,
+    frame_num INTEGER NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(subject_id, event_type, frame_num)
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_subject ON jobs(subject_id);
 CREATE INDEX IF NOT EXISTS idx_labels_session ON frame_labels(session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_subject ON label_sessions(subject_id);
 CREATE INDEX IF NOT EXISTS idx_job_queue_status ON job_queue(status, resource);
+CREATE INDEX IF NOT EXISTS idx_job_queue_status_target ON job_queue(status, execution_target);
+CREATE INDEX IF NOT EXISTS idx_subject_events ON subject_events(subject_id, event_type);
 """
 
 
@@ -205,6 +218,43 @@ def _migrate_relative_dlc_dir(conn):
             logger.info(f"Migrated dlc_dir: {dlc_dir} -> {name}")
 
 
+def _migrate_add_execution_target(conn):
+    """Add execution_target column to job_queue table if missing."""
+    columns = _get_table_columns(conn, "job_queue")
+    if "execution_target" not in columns:
+        conn.execute("ALTER TABLE job_queue ADD COLUMN execution_target TEXT NOT NULL DEFAULT 'remote'")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_job_queue_status_target ON job_queue(status, execution_target)")
+        logger.info("Added execution_target column to job_queue table")
+
+
+def _migrate_add_diagnosis(conn):
+    """Add diagnosis column to subjects table if missing."""
+    columns = _get_table_columns(conn, "subjects")
+    if "diagnosis" not in columns:
+        conn.execute("ALTER TABLE subjects ADD COLUMN diagnosis TEXT DEFAULT 'Control'")
+        logger.info("Added diagnosis column to subjects table")
+
+
+def _migrate_add_subject_events(conn):
+    """Create subject_events table if missing."""
+    tables = [r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()]
+    if "subject_events" not in tables:
+        conn.execute("""
+            CREATE TABLE subject_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject_id INTEGER NOT NULL REFERENCES subjects(id),
+                event_type TEXT NOT NULL,
+                frame_num INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(subject_id, event_type, frame_num)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_subject_events ON subject_events(subject_id, event_type)")
+        logger.info("Created subject_events table")
+
+
 def init_db():
     """Create tables if they don't exist, run migrations."""
     conn = get_db()
@@ -225,7 +275,15 @@ def init_db():
     if "subjects" in tables:
         _migrate_add_no_face_videos(conn)
         _migrate_relative_dlc_dir(conn)
+        _migrate_add_diagnosis(conn)
         conn.commit()
+
+    if "job_queue" in tables:
+        _migrate_add_execution_target(conn)
+        conn.commit()
+
+    _migrate_add_subject_events(conn)
+    conn.commit()
 
     conn.executescript(SCHEMA)
     conn.commit()

@@ -19,6 +19,8 @@ class LaunchRequest(BaseModel):
     job_type: str
     subject_ids: List[int] = []
     subjects: List[str] = []
+    execution_target: str = "remote"  # "local-cpu", "local-gpu", or "remote"
+    gpu_index: int = 0  # Which GPU to use if execution_target is "local-gpu"
 
 
 class RedownloadRequest(BaseModel):
@@ -35,9 +37,25 @@ def list_steps() -> list[dict]:
 
 @router.post("/launch")
 def launch_job(req: LaunchRequest) -> dict:
-    """Enqueue a new remote job."""
+    """Enqueue a new job (local or remote)."""
+    from ..config import get_settings
+
     if req.job_type not in RESOURCE_MAP:
         raise HTTPException(400, f"Unknown job type: {req.job_type}")
+
+    # Validate execution_target
+    if req.execution_target not in ["local-cpu", "local-gpu", "remote"]:
+        raise HTTPException(400, f"Invalid execution_target: {req.execution_target}")
+
+    settings = get_settings()
+
+    # Validate local-gpu target
+    if req.execution_target == "local-gpu":
+        if not settings.local_gpu_available:
+            raise HTTPException(400, "GPU not available on this machine")
+        gpus = settings.get_available_gpus()
+        if req.gpu_index >= len(gpus):
+            raise HTTPException(400, f"GPU index {req.gpu_index} out of range (only {len(gpus)} GPU(s) available)")
 
     # Resolve subject names from IDs if needed
     subject_names = list(req.subjects)
@@ -53,7 +71,13 @@ def launch_job(req: LaunchRequest) -> dict:
     if not subject_names:
         raise HTTPException(400, "No subjects specified")
 
-    result = queue_manager.enqueue(req.job_type, req.subject_ids, subject_names)
+    result = queue_manager.enqueue(
+        req.job_type,
+        req.subject_ids,
+        subject_names,
+        execution_target=req.execution_target,
+        gpu_index=req.gpu_index
+    )
     return result
 
 

@@ -308,12 +308,17 @@ const labeler = (() => {
 
             // Populate subject navigation dropdown
             currentSubjectId = sessionInfo.subject.id;
-            // Persist subject and mode in sessionStorage for cross-page navigation
+            // Persist subject, mode, and session ID for cross-page navigation
             sessionStorage.setItem('dlc_lastSubjectId', String(currentSubjectId));
             sessionStorage.setItem(`dlc_labelTab_${currentSubjectId}`, currentSessionType());
-            // Update results nav link with current subject and source
+            sessionStorage.setItem('dlc_lastSessionId', String(sessionId));
+            // Update nav links with current subject/session context
             const resultsLink = document.getElementById('resultsLink');
             if (resultsLink) resultsLink.href = `/results?subject=${currentSubjectId}&from=labeling`;
+            // Keep "Labeling" nav link pointing at current session so navigating
+            // away and back doesn't switch subjects
+            const labelingLink = document.querySelector('nav a[href*="labeling"]');
+            if (labelingLink) labelingLink.href = `/labeling?session=${sessionId}`;
             const typeLabel = document.getElementById('sessionTypeLabel');
             if (isEvents) typeLabel.textContent = 'Events:';
             else if (isFinal) typeLabel.textContent = 'Final:';

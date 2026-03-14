@@ -23,7 +23,7 @@ class JobRegistry:
         self._cancel_events: dict[int, threading.Event] = {}
 
     def launch(self, job_id: int, cmd: list[str], log_path: str,
-               progress_parser=None, on_complete=None) -> int:
+               progress_parser=None, on_complete=None, env=None) -> int:
         """Launch a subprocess and track it.
 
         Args:
@@ -32,8 +32,12 @@ class JobRegistry:
             log_path: Path to write stdout/stderr
             progress_parser: callable(line) -> float|None for progress extraction
             on_complete: callable(job_id, returncode) for post-completion actions
+            env: Optional environment variables dict (merged with os.environ)
         """
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+        # Merge provided env with current environment
+        popen_env = os.environ.copy() if env is None else env
 
         proc = subprocess.Popen(
             cmd,
@@ -41,6 +45,7 @@ class JobRegistry:
             stderr=subprocess.STDOUT,
             text=True,
             cwd=str(PROJECT_DIR),
+            env=popen_env,
         )
 
         self._processes[job_id] = proc

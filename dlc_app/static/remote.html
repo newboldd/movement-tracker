@@ -194,14 +194,35 @@
         <div class="card">
             <h2>Launch Job</h2>
 
-            <!-- Step Selection -->
-            <div class="toolbar">
+            <!-- Step + Target Selection -->
+            <div class="toolbar" style="flex-wrap:wrap;">
                 <label style="font-size:13px;color:var(--text-muted);">Step:</label>
                 <select id="stepSelect" class="step-select"></select>
+                <label style="font-size:13px;color:var(--text-muted);margin-left:12px;">Target:</label>
+                <div class="target-radios">
+                    <div class="target-radio">
+                        <input type="radio" id="targetLocalCpu" name="executionTarget" value="local-cpu" checked>
+                        <label for="targetLocalCpu"><span style="color:var(--blue);">⬤</span> Local CPU</label>
+                    </div>
+                    <div class="target-radio">
+                        <input type="radio" id="targetLocalGpu" name="executionTarget" value="local-gpu">
+                        <label for="targetLocalGpu"><span style="color:var(--green);">⬤</span> Local GPU</label>
+                    </div>
+                    <div class="target-radio">
+                        <input type="radio" id="targetRemote" name="executionTarget" value="remote">
+                        <label for="targetRemote"><span style="color:var(--gray);">⬤</span> Remote</label>
+                    </div>
+                    <div id="gpuSelectorDiv" class="gpu-selector" style="display:none;">
+                        <select id="gpuSelector"></select>
+                    </div>
+                </div>
                 <div style="flex:1;"></div>
                 <button class="btn btn-sm" onclick="selectAllSubjects()">Select All</button>
                 <button class="btn btn-sm" onclick="clearSubjects()">Clear</button>
             </div>
+
+            <!-- Inline warning area -->
+            <div id="jobWarning" style="display:none;padding:8px 12px;border-radius:4px;margin-bottom:12px;font-size:13px;"></div>
 
             <!-- Subject Selection -->
             <div style="margin-bottom:12px;">
@@ -209,47 +230,6 @@
                 <div id="subjectGrid" class="subject-grid">
                     <span class="empty-state">Loading subjects...</span>
                 </div>
-            </div>
-
-            <!-- Execution Target Selection -->
-            <div style="margin-bottom:12px;">
-                <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:8px;">Execution Target:</label>
-                <div class="execution-target-group" style="margin-bottom:0;">
-                    <div class="target-radios" style="flex:1;">
-                        <div class="target-radio">
-                            <input type="radio" id="targetLocalCpu" name="executionTarget" value="local-cpu" checked>
-                            <label for="targetLocalCpu">
-                                <span style="color:var(--blue);">⬤</span> Local CPU
-                            </label>
-                        </div>
-                        <div class="target-radio">
-                            <input type="radio" id="targetLocalGpu" name="executionTarget" value="local-gpu">
-                            <label for="targetLocalGpu">
-                                <span style="color:var(--green);">⬤</span> Local GPU
-                            </label>
-                        </div>
-                        <div class="target-radio">
-                            <input type="radio" id="targetRemote" name="executionTarget" value="remote">
-                            <label for="targetRemote">
-                                <span style="color:var(--gray);">⬤</span> Remote Server
-                            </label>
-                        </div>
-                    </div>
-
-                    <!-- GPU Selector (visible when Local GPU selected) -->
-                    <div id="gpuSelectorDiv" class="gpu-selector" style="display:none;">
-                        <label style="font-size:12px;color:var(--text-muted);">Device:</label>
-                        <select id="gpuSelector"></select>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Job Restriction Toggle -->
-            <div style="padding:8px 12px;background:var(--bg-card);border-radius:4px;margin-bottom:12px;">
-                <label class="job-restriction-toggle">
-                    <input type="checkbox" id="restrictJobsToggle" checked>
-                    <span>Restrict job types by target (training/analysis only on GPU/Remote)</span>
-                </label>
             </div>
 
             <!-- Submit Button -->
@@ -315,6 +295,7 @@
         </div>
     </div>
 
+    <script src="/static/js/nav.js"></script>
     <script src="/static/js/api.js?v=13"></script>
     <script src="/static/js/remote.js?v=1"></script>
 </body>

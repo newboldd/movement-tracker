@@ -195,13 +195,13 @@ def _clean_and_prep_distance(
     min_event_gap: int = 10,
     min_peak_height: float = 15.0,
     valley_thresh: float = 25.0,
+    max_valid_dist: float = 200.0,
 ) -> tuple[list[float], list[float], list[bool], list[int]]:
     """Shared distance preprocessing: clean, interpolate, find peaks.
 
     Returns (d, ddist1, nan_mask, merged_peaks).
     """
     n = len(dist)
-    max_valid_dist = 200.0
     dist_clean: list[float | None] = []
     for d_val in dist:
         if d_val is None or not (0 <= float(d_val) <= max_valid_dist):
@@ -344,7 +344,7 @@ def detect_strategy_g(
     steps: {use_reversal, use_ssd, use_dist_guard, use_peak_guard}
     params: {min_peak_height, min_event_gap, open_start_thresh, valley_thresh, nback,
              reversal_search_radius, ssd_search_radius, open_bias, close_bias,
-             dist_guard_factor, peak_guard_factor}
+             dist_guard_factor, peak_guard_factor, gaussian_sigma}
 
     Returns {open, peak, close} as GLOBAL frame numbers.
     """
@@ -359,6 +359,9 @@ def detect_strategy_g(
     close_bias = int(params.get("close_bias", 1))
     dist_guard_factor = float(params.get("dist_guard_factor", 0.25))
     peak_guard_factor = float(params.get("peak_guard_factor", 0.1))
+    gaussian_sigma = float(params.get("gaussian_sigma", 2.0))
+    max_valid_dist = float(params.get("max_valid_dist", 200.0))
+    edge_min_peak = float(params.get("edge_min_peak", 15.0))
 
     use_reversal = steps.get("use_reversal", True) and reversal is not None
     use_ssd = steps.get("use_ssd", True) and motion_ssd is not None
@@ -367,7 +370,7 @@ def detect_strategy_g(
 
     n = len(dist)
     d, ddist1, nan_mask, merged_peaks = _clean_and_prep_distance(
-        dist, min_event_gap, min_peak_height, valley_thresh
+        dist, min_event_gap, min_peak_height, valley_thresh, max_valid_dist
     )
 
     # Refine peaks with reversal metric
@@ -394,11 +397,11 @@ def detect_strategy_g(
     sm_ssd = None
     sm_ssd_per_cam: dict[str, np.ndarray] = {}
     if use_ssd:
-        sm_ssd = gaussian_smooth(np.array(motion_ssd, dtype=np.float64), 2.0)
+        sm_ssd = gaussian_smooth(np.array(motion_ssd, dtype=np.float64), gaussian_sigma)
         if per_cam_ssd and cam_names:
             for cam in cam_names:
                 if cam in per_cam_ssd:
-                    sm_ssd_per_cam[cam] = gaussian_smooth(np.array(per_cam_ssd[cam], dtype=np.float64), 2.0)
+                    sm_ssd_per_cam[cam] = gaussian_smooth(np.array(per_cam_ssd[cam], dtype=np.float64), gaussian_sigma)
 
     opens = []
     closes = []
@@ -486,4 +489,219 @@ def detect_strategy_g(
         "open": [start_frame + f for f in opens],
         "peak": [start_frame + f for f in refined_peaks],
         "close": [start_frame + f for f in closes],
+    }
+
+
+# ── Distance-based event detection (no video/session needed) ─────────────────
+
+
+def auto_detect_from_distance(
+    dist_raw: list,
+    trials: list[dict],
+    *,
+    min_peak_height: float = 15.0,
+    open_start_thresh: float = 5.0,
+    nback: int = 60,
+    min_event_gap: int = 10,
+    max_valid_dist: float = 200.0,
+    valley_thresh: float = 25.0,
+    edge_margin: int = 2,
+    edge_min_peak: float = 15.0,
+) -> dict:
+    """Distance-based event detection without session dependency.
+
+    Extracts the core detection algorithm from the labeling endpoint so it can
+    be reused by the results page (auto-detect fallback) and other callers.
+
+    Returns ``{open: [frames], peak: [frames], close: [frames]}``.
+    """
+    # Clean raw distances: mark outliers as None, then linearly interpolate.
+    dist_clean: list[float | None] = []
+    for d in dist_raw:
+        if d is None or not (0 <= float(d) <= max_valid_dist):
+            dist_clean.append(None)
+        else:
+            dist_clean.append(float(d))
+
+    nan_mask = [v is None for v in dist_clean]
+
+    # Linear interpolation over None runs
+    n = len(dist_clean)
+    for i in range(n):
+        if dist_clean[i] is not None:
+            continue
+        left_v = left_i = None
+        for j in range(i - 1, -1, -1):
+            if dist_clean[j] is not None:
+                left_v, left_i = dist_clean[j], j
+                break
+        right_v = right_i = None
+        for j in range(i + 1, n):
+            if dist_clean[j] is not None:
+                right_v, right_i = dist_clean[j], j
+                break
+        if left_v is not None and right_v is not None:
+            t = (i - left_i) / (right_i - left_i)
+            dist_clean[i] = left_v + t * (right_v - left_v)
+        elif left_v is not None:
+            dist_clean[i] = left_v
+        elif right_v is not None:
+            dist_clean[i] = right_v
+        else:
+            dist_clean[i] = 0.0
+
+    dist = [d if d is not None else 0.0 for d in dist_clean]
+
+    # 4-frame and 1-frame velocity
+    ddist1 = [0.0] * n
+    for i in range(1, n):
+        ddist1[i] = dist[i] - dist[i - 1]
+
+    # Find peaks (local maxima above min_peak_height)
+    half_win = max(min_event_gap // 2, 10)
+    peak_candidates: list[int] = []
+    for i in range(half_win, n - half_win):
+        if dist[i] < min_peak_height:
+            continue
+        if any(nan_mask[i - half_win: i + half_win + 1]):
+            continue
+        if dist[i] >= max(dist[i - half_win: i + half_win + 1]):
+            peak_candidates.append(i)
+
+    # Merge nearby candidates
+    merged_peaks: list[int] = []
+    if peak_candidates:
+        group = [peak_candidates[0]]
+        for k in range(1, len(peak_candidates)):
+            if peak_candidates[k] - peak_candidates[k - 1] < min_event_gap:
+                group.append(peak_candidates[k])
+            else:
+                merged_peaks.append(max(group, key=lambda f: dist[f]))
+                group = [peak_candidates[k]]
+        merged_peaks.append(max(group, key=lambda f: dist[f]))
+
+    # Valley filter
+    filtered: list[int] = []
+    for pk in merged_peaks:
+        if not filtered:
+            filtered.append(pk)
+            continue
+        valley_min = min(dist[filtered[-1]: pk + 1])
+        if valley_min < valley_thresh:
+            filtered.append(pk)
+        elif dist[pk] > dist[filtered[-1]]:
+            filtered[-1] = pk
+    merged_peaks = filtered
+
+    # For each peak, find open onset and close
+    opens_raw: list[int] = []
+    closes_raw: list[int] = []
+    for idx, pk in enumerate(merged_peaks):
+        search_start = closes_raw[-1] if closes_raw else max(0, pk - nback)
+        valley = min(range(search_start, pk + 1), key=lambda f: dist[f])
+        open_frame = valley
+        for k in range(valley, pk):
+            if ddist1[k] > open_start_thresh:
+                open_frame = k - 1
+                break
+        opens_raw.append(max(search_start, open_frame))
+
+        next_pk = merged_peaks[idx + 1] if idx + 1 < len(merged_peaks) else n
+        closes_raw.append(min(range(pk, min(next_pk, n)), key=lambda f: dist[f]))
+
+    # De-duplicate opens with min gap
+    all_open = sorted(opens_raw)
+    opens: list[int] = []
+    last_f = -min_event_gap
+    for f in all_open:
+        if f - last_f >= min_event_gap:
+            opens.append(f)
+            last_f = f
+
+    # Per-trial peak/close detection using opens as anchors
+    frame_to_trial: dict[int, int] = {}
+    for ti, t in enumerate(trials):
+        for f in range(t["start_frame"], t["end_frame"] + 1):
+            frame_to_trial[f] = ti
+
+    anchor_by_trial: dict[int, list[int]] = {}
+    for f in opens:
+        ti = frame_to_trial.get(f, 0)
+        anchor_by_trial.setdefault(ti, []).append(f)
+
+    peaks: list[int] = []
+    closes: list[int] = []
+
+    for ti, t in enumerate(trials):
+        vid_anchors = sorted(anchor_by_trial.get(ti, []))
+        if not vid_anchors:
+            continue
+        vid_start = t["start_frame"]
+        vid_end = t["end_frame"] + 1
+
+        # Before first anchor
+        if vid_anchors[0] - vid_start >= 5:
+            pk_f = max(range(vid_start, vid_anchors[0]), key=lambda f: dist[f])
+            if dist[pk_f] >= edge_min_peak:
+                peaks.append(pk_f)
+                closes.append(min(range(pk_f, vid_anchors[0]), key=lambda f: dist[f]))
+
+        # Between consecutive anchors
+        for ai in range(len(vid_anchors) - 1):
+            t0, t1 = vid_anchors[ai], vid_anchors[ai + 1]
+            if t1 - t0 < 5:
+                continue
+            peak_frame = max(range(t0, t1), key=lambda f: dist[f])
+            peaks.append(peak_frame)
+            closes.append(min(range(peak_frame, min(t1, n)), key=lambda f: dist[f]))
+
+        # After last anchor
+        if vid_end - vid_anchors[-1] >= 5:
+            pk_f = max(range(vid_anchors[-1], vid_end), key=lambda f: dist[f])
+            if dist[pk_f] >= edge_min_peak:
+                peaks.append(pk_f)
+                closes.append(min(range(pk_f, vid_end), key=lambda f: dist[f]))
+
+    # Filter events at video edges
+    valid_frames = set()
+    for t in trials:
+        for f in range(t["start_frame"] + edge_margin, t["end_frame"] - edge_margin + 1):
+            valid_frames.add(f)
+
+    opens = [f for f in opens if f in valid_frames]
+    peaks = [f for f in peaks if f in valid_frames]
+    closes = [f for f in closes if f in valid_frames]
+
+    # Validate sequence: open → peak → close → repeat
+    all_events = (
+        [(f, "open") for f in opens]
+        + [(f, "peak") for f in peaks]
+        + [(f, "close") for f in closes]
+    )
+    all_events.sort()
+
+    valid_events: dict[str, list[int]] = {"open": [], "peak": [], "close": []}
+    expected_next = "open"
+
+    for frame, etype in all_events:
+        if expected_next == "open":
+            if etype == "open":
+                valid_events["open"].append(frame)
+                expected_next = "peak"
+        elif expected_next == "peak":
+            if etype == "peak":
+                valid_events["peak"].append(frame)
+                expected_next = "close"
+            elif etype == "close":
+                valid_events["close"].append(frame)
+                expected_next = "open"
+        elif expected_next == "close":
+            if etype == "close":
+                valid_events["close"].append(frame)
+                expected_next = "open"
+
+    return {
+        "open": sorted(valid_events["open"]),
+        "peak": sorted(valid_events["peak"]),
+        "close": sorted(valid_events["close"]),
     }

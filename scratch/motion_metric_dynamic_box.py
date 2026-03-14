@@ -87,10 +87,10 @@ def extract_dynamic_box_gray(frame_bgr: np.ndarray, thumb: tuple[float, float],
     return cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY).astype(np.float32)
 
 
-def ssd(a: np.ndarray, b: np.ndarray) -> float:
-    """Sum of squared differences."""
+def msd(a: np.ndarray, b: np.ndarray) -> float:
+    """Mean squared difference per pixel (normalized by box size)."""
     diff = a - b
-    return float(np.sum(diff * diff))
+    return float(np.sum(diff * diff) / diff.size)
 
 
 def gaussian_smooth(arr: np.ndarray, sigma: float) -> np.ndarray:
@@ -173,7 +173,7 @@ def compute_motion_metric_fixed(subject_name: str, crop_half: int = 72) -> np.nd
                     key = (cam, bp)
                     prev = prev_crops.get(key)
                     if prev is not None and crop.shape == prev.shape:
-                        frame_ssd += ssd(crop, prev)
+                        frame_ssd += msd(crop, prev)
                         n_valid += 1
 
                     prev_crops[key] = crop
@@ -264,7 +264,7 @@ def compute_motion_metric_dynamic(subject_name: str) -> tuple[np.ndarray, list[d
 
                 # Compute SSD against previous
                 if prev_crop is not None and crop.shape == prev_crop.shape:
-                    frame_ssd += ssd(crop, prev_crop)
+                    frame_ssd += msd(crop, prev_crop)
                     n_valid += 1
                     if cam_idx == 0:  # Track box size for first camera
                         box_sizes[global_idx] = (crop.shape[1], crop.shape[0])
@@ -284,57 +284,135 @@ def compute_motion_metric_dynamic(subject_name: str) -> tuple[np.ndarray, list[d
 
 EVENT_COLORS = {"open": "#2196F3", "peak": "#FF9800", "close": "#E91E63"}
 
+
+def _draw_events_on_ax(ax, events: dict, sf: int, ef: int, ymax: float) -> list:
+    """Draw event rug plot and return legend patches."""
+    patches = []
+    for etype, color in EVENT_COLORS.items():
+        rug_frames = [f for f in events.get(etype, []) if sf <= f <= ef]
+        if rug_frames:
+            ax.vlines(rug_frames, 0, ymax, color=color, linewidth=0.5, alpha=0.5)
+            patches.append(mpatches.Patch(color=color, label=etype))
+    return patches
+
+
+def plot_trial_comparison(trial: dict, ssd_fixed: np.ndarray, ssd_dynamic: np.ndarray,
+                         sm_fixed: np.ndarray, sm_dynamic: np.ndarray,
+                         events: dict[str, list[int]], out_dir: Path) -> None:
+    """Create a per-trial comparison plot with separate y-axes for fixed vs dynamic."""
+    sf = trial["start_frame"]
+    ef = trial["end_frame"]
+    trial_name = trial["trial_name"]
+
+    frames = np.arange(sf, ef + 1)
+    fixed_vals = ssd_fixed[sf:ef + 1]
+    dynamic_vals = ssd_dynamic[sf:ef + 1]
+    sm_fixed_vals = sm_fixed[sf:ef + 1]
+    sm_dynamic_vals = sm_dynamic[sf:ef + 1]
+
+    # Separate y-axis scales for full trial
+    ymax_fixed = float(np.percentile(fixed_vals[fixed_vals > 0], 98)) if fixed_vals.max() > 0 else 1.0
+    ymax_dynamic = float(np.percentile(dynamic_vals[dynamic_vals > 0], 98)) if dynamic_vals.max() > 0 else 1.0
+
+    # Choose zoom window (300 frames centered on trial middle)
+    mid = (sf + ef) // 2
+    z_sf = max(sf, mid - ZOOM_FRAMES // 2)
+    z_ef = min(ef, z_sf + ZOOM_FRAMES - 1)
+
+    z_frames = np.arange(z_sf, z_ef + 1)
+    z_fixed = ssd_fixed[z_sf:z_ef + 1]
+    z_dynamic = ssd_dynamic[z_sf:z_ef + 1]
+    z_sm_fixed = sm_fixed[z_sf:z_ef + 1]
+    z_sm_dynamic = sm_dynamic[z_sf:z_ef + 1]
+
+    # Zoom y-axis scales
+    z_ymax_fixed = float(np.percentile(z_fixed[z_fixed > 0], 98)) if z_fixed.max() > 0 else 1.0
+    z_ymax_dynamic = float(np.percentile(z_dynamic[z_dynamic > 0], 98)) if z_dynamic.max() > 0 else 1.0
+
+    # Create 3-row, 2-column layout
+    fig = plt.figure(figsize=(18, 11))
+    gs = fig.add_gridspec(3, 2, height_ratios=[2, 0.5, 2], hspace=0.4, wspace=0.25)
+
+    ax_fixed_full = fig.add_subplot(gs[0, 0])
+    ax_rug_fixed = fig.add_subplot(gs[1, 0], sharex=ax_fixed_full)
+    ax_fixed_zoom = fig.add_subplot(gs[2, 0])
+
+    ax_dynamic_full = fig.add_subplot(gs[0, 1])
+    ax_rug_dynamic = fig.add_subplot(gs[1, 1], sharex=ax_dynamic_full)
+    ax_dynamic_zoom = fig.add_subplot(gs[2, 1])
+
+    # ── Fixed box: full trial ──
+    ax_fixed_full.plot(frames, fixed_vals, color="silver", alpha=0.5, linewidth=0.6, label="MSD (raw)")
+    ax_fixed_full.plot(frames, sm_fixed_vals, color="#1565C0", linewidth=1.0, label="MSD (smooth)")
+    ax_fixed_full.set_ylim(0, ymax_fixed * 1.05)
+    ax_fixed_full.set_ylabel("Mean MSD (px²)", fontsize=9)
+    ax_fixed_full.set_title(f"Fixed 144×144 px box (full trial)", fontsize=10)
+    ax_fixed_full.legend(fontsize=8, loc="upper right")
+    lp_fixed = _draw_events_on_ax(ax_fixed_full, events, sf, ef, ymax_fixed)
+    # Shade zoom region
+    ax_fixed_full.axvspan(z_sf, z_ef, color="gold", alpha=0.12, zorder=0)
+
+    # ── Dynamic box: full trial ──
+    ax_dynamic_full.plot(frames, dynamic_vals, color="silver", alpha=0.5, linewidth=0.6, label="MSD (raw)")
+    ax_dynamic_full.plot(frames, sm_dynamic_vals, color="#4CAF50", linewidth=1.0, label="MSD (smooth)")
+    ax_dynamic_full.set_ylim(0, ymax_dynamic * 1.05)
+    ax_dynamic_full.set_ylabel("Mean MSD (px²)", fontsize=9)
+    ax_dynamic_full.set_title(f"Dynamic box (full trial)", fontsize=10)
+    ax_dynamic_full.legend(fontsize=8, loc="upper right")
+    lp_dynamic = _draw_events_on_ax(ax_dynamic_full, events, sf, ef, ymax_dynamic)
+    # Shade zoom region
+    ax_dynamic_full.axvspan(z_sf, z_ef, color="gold", alpha=0.12, zorder=0)
+
+    # ── Event rugs (full trial) ──
+    ax_rug_fixed.set_ylim(0, 1)
+    ax_rug_fixed.set_yticks([])
+    if lp_fixed:
+        ax_rug_fixed.legend(handles=lp_fixed, loc="upper right", fontsize=7, ncol=3)
+
+    ax_rug_dynamic.set_ylim(0, 1)
+    ax_rug_dynamic.set_yticks([])
+    if lp_dynamic:
+        ax_rug_dynamic.legend(handles=lp_dynamic, loc="upper right", fontsize=7, ncol=3)
+
+    # ── Fixed box: zoom ──
+    ax_fixed_zoom.plot(z_frames, z_fixed, color="silver", alpha=0.5, linewidth=0.8)
+    ax_fixed_zoom.plot(z_frames, z_sm_fixed, color="#1565C0", linewidth=1.4)
+    ax_fixed_zoom.set_ylim(0, z_ymax_fixed * 1.1)
+    ax_fixed_zoom.set_ylabel("Mean MSD (px²)", fontsize=9)
+    ax_fixed_zoom.set_xlabel("Global frame index", fontsize=9)
+    ax_fixed_zoom.set_title(f"Zoom ({z_sf}–{z_ef})", fontsize=9)
+    _draw_events_on_ax(ax_fixed_zoom, events, z_sf, z_ef, z_ymax_fixed)
+
+    # ── Dynamic box: zoom ──
+    ax_dynamic_zoom.plot(z_frames, z_dynamic, color="silver", alpha=0.5, linewidth=0.8)
+    ax_dynamic_zoom.plot(z_frames, z_sm_dynamic, color="#4CAF50", linewidth=1.4)
+    ax_dynamic_zoom.set_ylim(0, z_ymax_dynamic * 1.1)
+    ax_dynamic_zoom.set_ylabel("Mean MSD (px²)", fontsize=9)
+    ax_dynamic_zoom.set_xlabel("Global frame index", fontsize=9)
+    ax_dynamic_zoom.set_title(f"Zoom ({z_sf}–{z_ef})", fontsize=9)
+    _draw_events_on_ax(ax_dynamic_zoom, events, z_sf, z_ef, z_ymax_dynamic)
+
+    fig.suptitle(f"{SUBJECT}  –  {trial_name}  –  Fixed vs Dynamic Bounding Box Comparison",
+                 fontsize=11, fontweight="bold")
+
+    plt.tight_layout()
+    out_path = out_dir / f"{SUBJECT}_{trial_name}_fixed_vs_dynamic.png"
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+
+
 def plot_comparison(ssd_fixed: np.ndarray, ssd_dynamic: np.ndarray,
                    trials: list[dict], events: dict[str, list[int]],
                    out_dir: Path) -> None:
     """Compare fixed-box vs dynamic-box SSD signals."""
-    total = len(ssd_fixed)
-    frames = np.arange(total)
-
     sm_fixed = gaussian_smooth(ssd_fixed, SMOOTHING_SIGMA)
     sm_dynamic = gaussian_smooth(ssd_dynamic, SMOOTHING_SIGMA)
 
-    nz_fixed = ssd_fixed[ssd_fixed > 0]
-    nz_dynamic = ssd_dynamic[ssd_dynamic > 0]
-    ymax = max(
-        float(np.percentile(nz_fixed, 98)) if len(nz_fixed) else 1,
-        float(np.percentile(nz_dynamic, 98)) if len(nz_dynamic) else 1
-    )
+    # Create per-trial comparison plots
+    for trial in trials:
+        plot_trial_comparison(trial, ssd_fixed, ssd_dynamic, sm_fixed, sm_dynamic, events, out_dir)
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(20, 10), sharex=True)
-
-    # Fixed box
-    ax1.plot(frames, ssd_fixed, color="silver", alpha=0.4, linewidth=0.5)
-    ax1.plot(frames, sm_fixed, color="#1565C0", linewidth=1.0, label="Fixed 144×144 px box")
-    ax1.set_ylim(0, ymax * 1.1)
-    ax1.set_ylabel("Mean SSD (px²)")
-    ax1.set_title(f"{SUBJECT} – Fixed vs Dynamic Bounding Box Comparison")
-    ax1.legend(fontsize=9)
-
-    # Dynamic box
-    ax2.plot(frames, ssd_dynamic, color="silver", alpha=0.4, linewidth=0.5)
-    ax2.plot(frames, sm_dynamic, color="#4CAF50", linewidth=1.0, label="Dynamic box (thumb+index)")
-    ax2.set_ylim(0, ymax * 1.1)
-    ax2.set_ylabel("Mean SSD (px²)")
-    ax2.set_xlabel("Global frame index")
-    ax2.legend(fontsize=9)
-
-    # Event markers on both
-    for ax in [ax1, ax2]:
-        for etype, color in EVENT_COLORS.items():
-            rug_frames = events.get(etype, [])
-            if rug_frames:
-                ax.vlines(rug_frames, 0, ymax, color=color, linewidth=0.4, alpha=0.3)
-
-    # Trial boundaries
-    for t in trials[1:]:
-        ax2.axvline(t["start_frame"], color="black", linewidth=0.8, linestyle="--", alpha=0.3)
-
-    plt.tight_layout()
-    out_path = out_dir / f"{SUBJECT}_fixed_vs_dynamic_comparison.png"
-    plt.savefig(out_path, dpi=150)
-    plt.close()
-    print(f"  → saved {out_path}")
+    print(f"  → saved per-trial comparison plots")
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────

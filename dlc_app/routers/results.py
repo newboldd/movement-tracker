@@ -8,11 +8,12 @@ import math
 from pathlib import Path
 
 import numpy as np
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from ..config import get_settings
 from ..db import get_db_ctx
 from ..services.dlc_predictions import get_dlc_predictions_for_session
+from ..services.metrics import auto_detect_from_distance
 from ..services.video import build_trial_map
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,23 @@ def _read_events_csv(subject_name: str) -> dict:
             if et in result and fn.isdigit():
                 result[et].append(int(fn))
     return result
+
+
+def _load_events(
+    subject_name: str, distances: list, trials: list[dict],
+) -> tuple[dict, str]:
+    """Load events, falling back to auto-detection if none saved.
+
+    Returns ``(events_dict, source)`` where *source* is ``"saved"`` or ``"auto"``.
+    """
+    events = _read_events_csv(subject_name)
+    has_events = any(len(v) > 0 for v in events.values())
+    if has_events:
+        return events, "saved"
+    if not distances or not trials:
+        return events, "saved"
+    auto = auto_detect_from_distance(distances, trials)
+    return auto, "auto"
 
 
 def _load_distances_and_trials(subject_name: str) -> tuple[list, list[dict]]:
@@ -129,8 +147,12 @@ def _build_movement_params(
 
     first_peak = peaks[0]
 
+    # Track first amplitude per trial for relative amplitude
+    first_amp_by_trial: dict[int, float | None] = {}
+
     for idx, pk in enumerate(peaks):
         fps = frame_fps[pk] if pk < len(frame_fps) else 60
+        ti = frame_trial[pk] if pk < len(frame_trial) else 0
 
         # Find matching open: largest open frame < pk
         open_f = None
@@ -149,15 +171,26 @@ def _build_movement_params(
         # Peak time relative to first peak (seconds)
         peak_time = round((pk - first_peak) / fps, 4)
 
-        # IMI
+        # IMI — only within the same trial (cross-video IMI is meaningless)
         imi = None
         if idx > 0:
             prev_pk = peaks[idx - 1]
-            imi = round((pk - prev_pk) / fps, 4)
+            prev_ti = frame_trial[prev_pk] if prev_pk < len(frame_trial) else 0
+            if prev_ti == ti:
+                imi = round((pk - prev_pk) / fps, 4)
 
         # Amplitude
         pk_dist = distances[pk] if pk < len(distances) else None
         amplitude = round(pk_dist - global_min, 2) if pk_dist is not None else None
+
+        # Relative amplitude (ratio to first movement in this trial)
+        rel_amplitude = None
+        if amplitude is not None:
+            if ti not in first_amp_by_trial:
+                first_amp_by_trial[ti] = amplitude
+            first_amp = first_amp_by_trial[ti]
+            if first_amp and first_amp > 0:
+                rel_amplitude = round(amplitude / first_amp, 4)
 
         # Velocities
         peak_open_vel = None
@@ -188,15 +221,22 @@ def _build_movement_params(
             if dur_close > 0 and amplitude is not None:
                 mean_close_vel = round(-amplitude / dur_close, 2)
 
+        # Power: velocity × amplitude (fast-small ≈ slow-large)
+        power = None
+        if peak_open_vel is not None and amplitude is not None:
+            power = round(peak_open_vel * amplitude, 2)
+
         movements.append({
             "peak_time": peak_time,
             "imi": imi,
             "amplitude": amplitude,
+            "rel_amplitude": rel_amplitude,
             "peak_open_vel": peak_open_vel,
             "peak_close_vel": peak_close_vel,
             "mean_open_vel": mean_open_vel,
             "mean_close_vel": mean_close_vel,
-            "trial_idx": frame_trial[pk] if pk < len(frame_trial) else 0,
+            "power": power,
+            "trial_idx": ti,
         })
 
     return movements, trial_names
@@ -232,6 +272,9 @@ def get_traces(subject_id: int) -> dict:
         return {"trials": [], "subject": subject_name}
 
     result_trials = []
+    all_dists: list[float] = []
+    all_vels: list[float] = []
+
     for t in trials:
         s, e = t["start_frame"], t["end_frame"] + 1
         trial_dist = distances[s:e]
@@ -245,7 +288,20 @@ def get_traces(subject_id: int) -> dict:
             "velocities": trial_vel,
         })
 
-    return {"trials": result_trials, "subject": subject_name}
+        all_dists.extend(d for d in trial_dist if d is not None)
+        all_vels.extend(v for v in trial_vel if v is not None)
+
+    # Global y-ranges for matched scaling across trials
+    y_range = None
+    if all_dists:
+        y_range = {
+            "dist_min": round(min(all_dists), 2),
+            "dist_max": round(max(all_dists), 2),
+            "vel_min": round(min(all_vels), 2) if all_vels else 0,
+            "vel_max": round(max(all_vels), 2) if all_vels else 0,
+        }
+
+    return {"trials": result_trials, "subject": subject_name, "y_range": y_range}
 
 
 @router.get("/{subject_id}/movements")
@@ -255,7 +311,7 @@ def get_movements(subject_id: int) -> dict:
     subject_name = subj["name"]
 
     distances, trials = _load_distances_and_trials(subject_name)
-    events = _read_events_csv(subject_name)
+    events, event_source = _load_events(subject_name, distances, trials)
 
     movements, trial_names = _build_movement_params(distances, events, trials)
 
@@ -263,11 +319,12 @@ def get_movements(subject_id: int) -> dict:
         "movements": movements,
         "trial_names": trial_names,
         "subject": subject_name,
+        "event_source": event_source,
     }
 
 
 @router.get("/group")
-def get_group_comparison() -> dict:
+def get_group_comparison(include_auto: bool = Query(False)) -> dict:
     """Aggregated per-subject statistics grouped by diagnosis."""
     with get_db_ctx() as db:
         subjects = db.execute(
@@ -275,7 +332,7 @@ def get_group_comparison() -> dict:
         ).fetchall()
 
     PARAM_KEYS = [
-        "imi", "amplitude",
+        "imi", "amplitude", "rel_amplitude", "power",
         "peak_open_vel", "peak_close_vel",
         "mean_open_vel", "mean_close_vel",
     ]
@@ -287,7 +344,12 @@ def get_group_comparison() -> dict:
 
         try:
             distances, trials = _load_distances_and_trials(subject_name)
-            events = _read_events_csv(subject_name)
+            if include_auto:
+                events, event_source = _load_events(subject_name, distances, trials)
+            else:
+                events = _read_events_csv(subject_name)
+                has = any(len(v) > 0 for v in events.values())
+                event_source = "saved" if has else "none"
             movements, _ = _build_movement_params(distances, events, trials)
         except Exception as exc:
             logger.warning(f"Skipping {subject_name}: {exc}")
@@ -297,7 +359,11 @@ def get_group_comparison() -> dict:
             continue
 
         # Aggregate each parameter
-        entry: dict = {"name": subject_name, "diagnosis": diagnosis}
+        entry: dict = {
+            "name": subject_name,
+            "diagnosis": diagnosis,
+            "event_source": event_source,
+        }
 
         for key in PARAM_KEYS:
             vals = [m[key] for m in movements if m[key] is not None]

@@ -24,8 +24,11 @@ import glob
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
+import threading
+import time
 import traceback
 
 logging.basicConfig(
@@ -157,6 +160,34 @@ def _write_status(status_file: str, phase: str, status: str,
         raise
 
 
+def _monitor_train_progress(log_file: str, status_file: str,
+                            stop_event: threading.Event,
+                            base_pct: float = 5.0, max_pct: float = 74.0):
+    """Background thread: parse training log for epoch progress and update status.json.
+
+    Reads the log file periodically, finds the latest 'Epoch X/Y' line, and
+    writes scaled progress to status.json. Runs until stop_event is set.
+    """
+    epoch_re = re.compile(r"Epoch\s+(\d+)/(\d+)")
+    last_epoch = -1
+
+    while not stop_event.wait(15):
+        try:
+            with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            matches = epoch_re.findall(content)
+            if matches:
+                current, total = int(matches[-1][0]), int(matches[-1][1])
+                if current != last_epoch and total > 0:
+                    last_epoch = current
+                    pct = base_pct + (current / total) * (max_pct - base_pct)
+                    _write_status(status_file, "train", "running", pct)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+
 # ── Crop logic ──────────────────────────────────────────────────────────
 
 def crop_stereo_videos(video_dir: str, subject_name: str,
@@ -251,8 +282,22 @@ def run_pipeline(config_path: str, shuffle: int, labels_dir: str,
         logger.info("=== Phase: Training ===")
         _write_status(status_file, "train", "running", 5.0)
 
-        deeplabcut.train_network(config_path, shuffle=shuffle,
-                                 engine=Engine.PYTORCH)
+        # Start background thread to track epoch progress via the log file
+        log_file = os.path.join(os.path.dirname(os.path.abspath(status_file)), "train.log")
+        progress_stop = threading.Event()
+        progress_thread = threading.Thread(
+            target=_monitor_train_progress,
+            args=(log_file, status_file, progress_stop),
+            daemon=True,
+        )
+        progress_thread.start()
+
+        try:
+            deeplabcut.train_network(config_path, shuffle=shuffle,
+                                     engine=Engine.PYTORCH)
+        finally:
+            progress_stop.set()
+            progress_thread.join(timeout=5)
 
         logger.info("=== Training complete ===")
         _write_status(status_file, "train", "running", 75.0)

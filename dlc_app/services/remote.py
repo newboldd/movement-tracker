@@ -147,14 +147,14 @@ def test_connection(cfg: RemoteConfig) -> dict:
 def _check_remote_pid_alive(cfg: RemoteConfig, pid: int) -> bool:
     """Check if a process with the given PID is running on the remote host."""
     try:
+        # Simple approach: ctypes on Windows, /proc on Linux, os.kill fallback
         script = (
-            f"\"import psutil; print(psutil.pid_exists({pid}))\""
-            if False else  # psutil may not be installed; use os-level check
-            f"\"import os; "
+            f"\"import os, ctypes; "
             f"alive = False; "
-            f"exec('try:\\n import ctypes\\n k = ctypes.windll.kernel32\\n h = k.OpenProcess(0x100000, False, {pid})\\n alive = h != 0\\n if h: k.CloseHandle(h)\\nexcept: pass') "
-            f"if os.name == 'nt' else "
-            f"exec('try:\\n os.kill({pid}, 0); alive = True\\nexcept (ProcessLookupError, PermissionError): pass'); "
+            f"k = getattr(getattr(ctypes, 'windll', None), 'kernel32', None) if os.name == 'nt' else None; "
+            f"h = k.OpenProcess(0x100000, False, {pid}) if k else 0; "
+            f"alive = bool(h) if k else os.path.exists('/proc/{pid}'); "
+            f"k.CloseHandle(h) if k and h else None; "
             f"print(alive)\""
         )
         result = subprocess.run(
@@ -599,6 +599,7 @@ def remote_train_monitor(
             ssh_fail_count = 0
             max_ssh_failures = 30  # 30 × 10s = 5min tolerance
             poll_interval = 10  # seconds
+            _epoch_re = re.compile(r"Epoch\s+(\d+)/(\d+)")
 
             while True:
                 _check_cancel()
@@ -626,6 +627,18 @@ def remote_train_monitor(
                 if status:
                     ssh_fail_count = 0
                     pct = status.get("progress_pct", 0)
+
+                    # Supplement with epoch-level progress from log (more granular
+                    # than status.json which only updates at phase boundaries)
+                    if new_log and status.get("phase") == "train":
+                        epoch_matches = _epoch_re.findall(new_log)
+                        if epoch_matches:
+                            cur_epoch, max_epoch = int(epoch_matches[-1][0]), int(epoch_matches[-1][1])
+                            if max_epoch > 0:
+                                # Training is 5-75% of remote progress
+                                epoch_pct = 5.0 + (cur_epoch / max_epoch) * 70.0
+                                pct = max(pct, epoch_pct)
+
                     # Scale remote 0-100% to local 8-90%
                     scaled = 8.0 + (pct / 100.0) * 82.0
                     _update_progress(scaled)
@@ -1598,6 +1611,223 @@ def remote_preprocess_download(
             )
     except Exception as e:
         logger.exception(f"Job {job_id} redownload error")
+        _fail(str(e))
+    finally:
+        registry._processes.pop(job_id, None)
+        registry._threads.pop(job_id, None)
+        registry.unregister_cancel_event(job_id)
+
+
+def resume_preprocess_monitor(
+    job_id: int,
+    cfg: RemoteConfig,
+    log_path: str,
+    registry,
+):
+    """Resume monitoring a detached remote preprocessing job after server restart.
+
+    Similar to remote_train_monitor(resume=True) but for preprocessing jobs.
+    Monitors the preprocess-specific status.json and log files, then handles
+    result downloads on completion.
+    """
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+    from ..config import get_settings
+    settings = get_settings()
+
+    remote_output_dir = f"{cfg.work_dir}/preprocess_output"
+    remote_log_file = f"{cfg.work_dir}/preprocess_{job_id}.log"
+    remote_status_file = f"{cfg.work_dir}/preprocess_{job_id}_status.json"
+
+    cancel_event = registry.register_cancel_event(job_id)
+
+    # Read PID from jobs table
+    with get_db_ctx() as db:
+        row = db.execute("SELECT tmux_session FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    remote_pid = None
+    if row and row[0] and row[0].startswith("pid:"):
+        try:
+            remote_pid = int(row[0].split(":")[1])
+        except (ValueError, IndexError):
+            pass
+
+    def _update_progress(pct):
+        with get_db_ctx() as db:
+            db.execute("UPDATE jobs SET progress_pct = ? WHERE id = ?",
+                        (round(pct, 1), job_id))
+
+    def _fail(msg):
+        logger.error(f"Job {job_id} resume preprocess monitor failed: {msg}")
+        with get_db_ctx() as db:
+            db.execute(
+                """UPDATE jobs SET status = 'failed', error_msg = ?,
+                   finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                (msg, job_id),
+            )
+
+    def _check_cancel():
+        if cancel_event.is_set():
+            raise InterruptedError("Job cancelled")
+
+    def _run_remote_proc(cmd, logfile, phase_name):
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        registry._processes[job_id] = proc
+        for line in proc.stdout:
+            logfile.write(line)
+            logfile.flush()
+        proc.wait()
+        registry._processes.pop(job_id, None)
+        return proc
+
+    try:
+        with open(log_path, "a") as logfile:
+            logfile.write(f"\n=== Resuming preprocessing monitor (PID {remote_pid}) ===\n")
+            logfile.flush()
+
+            # ── Monitor loop ─────────────────────────────────────
+            log_offset = 0
+            ssh_fail_count = 0
+            max_ssh_failures = 30
+            poll_interval = 10
+
+            while True:
+                _check_cancel()
+                time.sleep(poll_interval)
+                _check_cancel()
+
+                status = _read_remote_status(cfg, remote_status_file)
+
+                if status and status.get("pid"):
+                    remote_pid = status["pid"]
+
+                proc_alive = _check_remote_pid_alive(cfg, remote_pid) if remote_pid else False
+
+                new_log, log_offset = _tail_remote_log(cfg, remote_log_file, log_offset)
+                if new_log:
+                    logfile.write(new_log)
+                    logfile.flush()
+                    ssh_fail_count = 0
+
+                if status:
+                    ssh_fail_count = 0
+                    pct = status.get("progress_pct", 0)
+                    scaled = 7.0 + (pct / 100.0) * 78.0
+                    _update_progress(scaled)
+
+                    remote_status_val = status.get("status", "")
+                    if remote_status_val == "completed":
+                        error_info = status.get("error")
+                        if error_info:
+                            logfile.write(f"=== Remote preprocessing completed with errors: {error_info} ===\n")
+                        else:
+                            logfile.write("=== Remote preprocessing completed ===\n")
+                        logfile.flush()
+                        break
+                    elif remote_status_val == "failed":
+                        error = status.get("error", "Unknown error")
+                        _fail(f"Remote preprocessing failed: {error}")
+                        return
+                    elif not proc_alive:
+                        error = status.get("error", "Remote process exited unexpectedly")
+                        phase = status.get("phase", "unknown")
+                        _fail(f"Process exited during phase '{phase}': {error}")
+                        return
+
+                elif not proc_alive:
+                    ssh_fail_count += 1
+                    logfile.write(f"Warning: process not found and no status.json, attempt {ssh_fail_count}/{max_ssh_failures}\n")
+                    logfile.flush()
+                    if ssh_fail_count >= max_ssh_failures:
+                        _fail("Remote process died and no status.json found")
+                        return
+
+            # ── Download results ──────────────────────────────────
+            logfile.write(f"=== Downloading results from {cfg.host} ===\n")
+            logfile.flush()
+            _update_progress(85.0)
+
+            # Determine what steps were run from the status
+            do_mp = True  # conservative: try to download both
+            do_blur = True
+
+            result = subprocess.run(
+                _py_cmd(cfg, f"\"import os; dirs = [d for d in os.listdir(r'{remote_output_dir}') if os.path.isdir(os.path.join(r'{remote_output_dir}', d))]; print('\\n'.join(dirs))\""),
+                capture_output=True, text=True, timeout=15,
+            )
+            remote_subjects = result.stdout.strip().splitlines() if result.returncode == 0 else []
+            remote_subjects = [s for s in remote_subjects if s]
+
+            logfile.write(f"  Found {len(remote_subjects)} subject outputs\n")
+            logfile.flush()
+
+            for i, subj_name in enumerate(remote_subjects):
+                _check_cancel()
+
+                # Download mediapipe_prelabels.npz
+                remote_npz = f"{cfg.host}:{remote_output_dir}/{subj_name}/mediapipe_prelabels.npz"
+                local_dlc_dir = settings.dlc_path / subj_name
+                local_dlc_dir.mkdir(parents=True, exist_ok=True)
+                local_npz = str(local_dlc_dir / "mediapipe_prelabels.npz")
+
+                dl_cmd = _scp_base_args(cfg) + [remote_npz, local_npz]
+                proc = _run_remote_proc(dl_cmd, logfile, f"Download npz {subj_name}")
+                if proc.returncode == 0:
+                    logfile.write(f"  Downloaded {subj_name}/mediapipe_prelabels.npz\n")
+                # (scp failure is OK — subject might not have MP results)
+
+                # Download deidentified videos
+                remote_deident = f"{cfg.host}:{remote_output_dir}/{subj_name}/deidentified"
+                local_deident_dir = settings.video_path / "deidentified"
+                local_deident_dir.mkdir(parents=True, exist_ok=True)
+
+                result2 = subprocess.run(
+                    _py_cmd(cfg, f"\"import os; d = r'{remote_output_dir}/{subj_name}/deidentified'; print('\\n'.join(os.listdir(d))) if os.path.isdir(d) else print('')\""),
+                    capture_output=True, text=True, timeout=15,
+                )
+                deident_files = [f for f in result2.stdout.strip().splitlines() if f.endswith(".mp4")]
+
+                for df in deident_files:
+                    dl_cmd = _scp_base_args(cfg) + [
+                        f"{cfg.host}:{remote_output_dir}/{subj_name}/deidentified/{df}",
+                        str(local_deident_dir / df),
+                    ]
+                    proc = _run_remote_proc(dl_cmd, logfile, f"Download blur {df}")
+                    if proc.returncode == 0:
+                        logfile.write(f"  Downloaded deidentified/{df}\n")
+
+                if deident_files:
+                    local_dlc_dir = settings.dlc_path / subj_name
+                    local_dlc_dir.mkdir(parents=True, exist_ok=True)
+                    (local_dlc_dir / ".deidentified").write_text("")
+
+                logfile.flush()
+                pct = 85.0 + (i + 1) / max(len(remote_subjects), 1) * 15.0
+                _update_progress(pct)
+
+            _update_progress(100.0)
+            logfile.write("=== Download complete ===\n")
+            logfile.flush()
+
+        # ── Success ──────────────────────────────────────────────
+        with get_db_ctx() as db:
+            db.execute(
+                """UPDATE jobs SET status = 'completed', progress_pct = 100,
+                   finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                (job_id,),
+            )
+
+    except InterruptedError:
+        logger.info(f"Job {job_id} resume preprocess monitor cancelled")
+        with get_db_ctx() as db:
+            db.execute(
+                """UPDATE jobs SET status = 'cancelled',
+                   finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                (job_id,),
+            )
+    except Exception as e:
+        logger.exception(f"Job {job_id} resume preprocess monitor error")
         _fail(str(e))
     finally:
         registry._processes.pop(job_id, None)

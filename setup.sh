@@ -59,6 +59,14 @@ if [ ! -f "$VENV_DIR/.installed" ] || [ "$REQUIREMENTS" -nt "$VENV_DIR/.installe
     echo "Dependencies installed."
 fi
 
+# ── Kill any existing server on the port ─────────────────────────────────
+existing=$(lsof -ti :$PORT 2>/dev/null || true)
+if [ -n "$existing" ]; then
+    echo "Stopping existing server on port $PORT..."
+    echo "$existing" | xargs kill -9 2>/dev/null || true
+    sleep 1
+fi
+
 # ── Launch ───────────────────────────────────────────────────────────────
 echo ""
 echo "Starting DLC Labeler at http://localhost:$PORT"

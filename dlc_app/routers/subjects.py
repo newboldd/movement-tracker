@@ -100,9 +100,9 @@ def create_subject(req: SubjectCreate) -> dict:
             raise HTTPException(400, f"Subject '{req.name}' already exists")
 
         db.execute(
-            """INSERT INTO subjects (name, stage, dlc_dir, video_pattern)
-               VALUES (?, 'created', ?, ?)""",
-            (req.name, dlc_dir, req.video_pattern),
+            """INSERT INTO subjects (name, stage, dlc_dir, video_pattern, diagnosis)
+               VALUES (?, 'created', ?, ?, ?)""",
+            (req.name, dlc_dir, req.video_pattern, req.diagnosis),
         )
         row = db.execute(
             "SELECT * FROM subjects WHERE name = ?", (req.name,)
@@ -112,7 +112,7 @@ def create_subject(req: SubjectCreate) -> dict:
 
 @router.patch("/{subject_id}")
 def update_subject(subject_id: int, req: SubjectUpdate) -> dict:
-    """Update subject fields (e.g. camera_name)."""
+    """Update subject fields (e.g. camera_name, diagnosis)."""
     with get_db_ctx() as db:
         row = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
         if not row:
@@ -133,6 +133,11 @@ def update_subject(subject_id: int, req: SubjectUpdate) -> dict:
             # Clear video.py cache for this subject
             from ..services.video import _no_face_cache
             _no_face_cache.pop(row["name"], None)
+        if req.diagnosis is not None:
+            db.execute(
+                "UPDATE subjects SET diagnosis = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (req.diagnosis, subject_id),
+            )
         row = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
     return _subject_row_to_response(row)
 
@@ -226,6 +231,58 @@ def get_subject(subject_id: int) -> dict:
     resp["jobs"] = jobs
     resp["label_sessions"] = sessions
     return resp
+
+
+@router.post("/auto-assign-diagnosis")
+def auto_assign_diagnosis() -> dict:
+    """Auto-assign diagnosis to all subjects based on name patterns."""
+    from ..config import get_settings
+
+    settings = get_settings()
+    diagnosis_groups = settings.diagnosis_groups or ["Control", "MSA", "PD", "PSP"]
+
+    def infer_diagnosis(subject_name: str) -> str:
+        """Infer diagnosis from subject name using first 3 characters or keyword matching."""
+        name_upper = subject_name.upper()
+        name_lower = subject_name.lower()
+
+        # Try exact keyword matching first
+        for diagnosis in diagnosis_groups:
+            diag_upper = diagnosis.upper()
+            if diag_upper in name_upper:
+                return diagnosis
+
+        # Try first 3 characters matching
+        if len(subject_name) >= 3:
+            prefix = subject_name[:3].upper()
+            for diagnosis in diagnosis_groups:
+                if diagnosis.upper().startswith(prefix):
+                    return diagnosis
+
+        # Default to first diagnosis group
+        return diagnosis_groups[0] if diagnosis_groups else "Control"
+
+    with get_db_ctx() as db:
+        subjects = db.execute("SELECT id, name, diagnosis FROM subjects").fetchall()
+        updated = 0
+        assignments = {}
+
+        for subject in subjects:
+            new_diagnosis = infer_diagnosis(subject["name"])
+            assignments[subject["name"]] = new_diagnosis
+
+            if subject["diagnosis"] != new_diagnosis:
+                db.execute(
+                    "UPDATE subjects SET diagnosis = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (new_diagnosis, subject["id"]),
+                )
+                updated += 1
+
+    return {
+        "updated": updated,
+        "assignments": assignments,
+        "total_subjects": len(assignments),
+    }
 
 
 @router.post("/sync")

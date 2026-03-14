@@ -81,32 +81,33 @@ body {
     text-transform: capitalize;
 }
 
-.badge-created     { background: #333; color: #999; }
-.badge-labeling    { background: #1a237e; color: #7986cb; }
-.badge-labeled,
-.badge-committed   { background: #1b5e20; color: #81c784; }
+/* Stage badge colors: blue → red → yellow → green pipeline gradient */
+.badge-created     { background: #37474f; color: #90a4ae; }        /* gray — not started */
+.badge-videos_linked { background: #1a237e; color: #7986cb; }      /* deep blue */
+.badge-prelabeled  { background: #1a237e; color: #9fa8da; }        /* blue */
+.badge-labeling    { background: #283593; color: #7986cb; }        /* blue */
+.badge-labeled     { background: #4527a0; color: #b39ddb; }        /* indigo */
+.badge-committed   { background: #6a1b9a; color: #ce93d8; }        /* purple */
 .badge-training,
-.badge-training_dataset_created { background: #e65100; color: #ffb74d; }
-.badge-trained     { background: #004d40; color: #4db6ac; }
+.badge-training_dataset_created,
+.badge-retraining  { background: #880e4f; color: #f48fb1; }        /* pink-red */
+.badge-trained,
+.badge-retrained   { background: #b71c1c; color: #ef9a9a; }        /* red */
 .badge-cropping,
-.badge-cropped     { background: #4a148c; color: #ce93d8; }
+.badge-cropped,
 .badge-analyzing,
-.badge-analyzed    { background: #0d47a1; color: #64b5f6; }
-.badge-refined     { background: #006064; color: #4dd0e1; }
-.badge-corrected       { background: #2e7d32; color: #a5d6a7; }
-.badge-events_partial  { background: #e65100; color: #ffcc80; }
-.badge-events_complete { background: #1b5e20; color: #a5d6a7; }
+.badge-analyzed    { background: #d84315; color: #ff8a65; }        /* red-orange */
 .badge-triangulating,
-.badge-triangulated { background: #006064; color: #4dd0e1; }
-.badge-complete    { background: #2e7d32; color: #a5d6a7; }
+.badge-triangulated,
+.badge-refined     { background: #e65100; color: #ffb74d; }        /* orange */
+.badge-corrected   { background: #f57f17; color: #fff176; }        /* amber */
+.badge-events_partial  { background: #827717; color: #dce775; }    /* yellow-green */
+.badge-events_complete,
+.badge-complete    { background: #2e7d32; color: #a5d6a7; }        /* green */
 .badge-error_detection,
 .badge-errors_detected,
 .badge-error_labeling,
-.badge-error_labeled { background: #b71c1c; color: #ef9a9a; }
-.badge-prelabeled  { background: #1a237e; color: #9fa8da; }
-.badge-retraining,
-.badge-retrained   { background: #ff6f00; color: #ffe082; }
-.badge-videos_linked { background: #263238; color: #90a4ae; }
+.badge-error_labeled { background: #b71c1c; color: #ef9a9a; }      /* red — errors */
 
 /* ── Subject table ──────────────────────────────────── */
 .subject-table {
@@ -247,7 +248,12 @@ body {
 .detect-core-params { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
 .detect-core-params label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--text); }
 .detect-core-params input { width: 100%; padding: 2px 4px; font-size: 11px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); }
-#metricPlotsContainer canvas { display: block; border: 1px solid var(--border); border-radius: 3px; margin-bottom: 4px; background: var(--bg-card); }
+#metricPlotsContainer canvas { display: block; border: 1px solid var(--border); border-radius: 3px; margin-bottom: 4px; background: var(--bg-card); transition: opacity 0.2s; }
+#metricPlotsContainer canvas.detect-dimmed { opacity: 0.25; pointer-events: none; }
+.detect-param-dimmed { opacity: 0.3; pointer-events: none; }
+.detect-core-params label.detect-param-dimmed,
+.detect-param label.detect-param-dimmed { opacity: 0.3; pointer-events: none; }
+.detect-step-card.detect-dimmed { opacity: 0.3; pointer-events: none; }
 
 /* ── Subject detail panel ───────────────────────────── */
 .detail-panel {
@@ -473,39 +479,15 @@ body {
     .labeling-sidebar { width: 180px; }
 }
 
-/* ── Results page white theme ──────────────────────── */
+/* ── Results page: dark header, white body ─────────── */
 body.results-page {
     background: #ffffff;
     color: #333;
     overflow: auto;
 }
-body.results-page .header {
-    background: #f8f9fa;
-    border-color: #dee2e6;
-}
-body.results-page .header nav a { color: #666; }
-body.results-page .header nav a:hover,
-body.results-page .header nav a.active { color: #2196F3; }
-body.results-page .subject-select {
-    background: #fff;
-    color: #333;
-    border-color: #ccc;
-}
-body.results-page .btn {
-    background: #f0f0f0;
-    color: #333;
-    border-color: #ccc;
-}
-body.results-page .btn:hover {
-    background: #e0e0e0;
-}
-body.results-page .btn.active {
-    background: #2196F3;
-    color: #fff;
-    border-color: #2196F3;
-}
-body.results-page .btn:disabled,
-body.results-page .subject-select:disabled {
+/* Header keeps default dark theme — no overrides needed */
+body.results-page .header .btn:disabled,
+body.results-page .header .subject-select:disabled {
     opacity: 0.4;
     cursor: default;
     pointer-events: none;
@@ -515,6 +497,18 @@ body.results-page .subject-select:disabled {
     max-width: 1400px;
     margin: 0 auto;
     padding: 24px;
+}
+/* Light-theme overrides for controls inside results content area */
+.results-container .btn {
+    background: #f0f0f0;
+    color: #333;
+    border-color: #ccc;
+}
+.results-container .btn:hover { background: #e0e0e0; }
+.results-container .btn.active {
+    background: #2196F3;
+    color: #fff;
+    border-color: #2196F3;
 }
 
 .results-tab { display: none; }
@@ -556,6 +550,43 @@ body.results-page .subject-select:disabled {
     padding: 60px 20px;
     font-size: 15px;
 }
+
+.auto-detect-banner {
+    background: #fff3e0;
+    border: 1px solid #ffcc02;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-size: 13px;
+    color: #e65100;
+    margin-bottom: 12px;
+}
+
+.distance-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+    padding: 8px 16px;
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 6px;
+    font-size: 13px;
+    color: #555;
+}
+.distance-controls label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+}
+.distance-controls input[type="number"] {
+    width: 70px;
+    padding: 2px 6px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 12px;
+}
+.distance-controls input[type="checkbox"] { cursor: pointer; }
 
 #highlightedSubject {
     font-size: 16px;

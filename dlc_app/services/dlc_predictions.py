@@ -245,6 +245,18 @@ def _load_from_label_dir(
             continue
 
         start_frame = matching_trial["start_frame"]
+        trial_frame_count = matching_trial["frame_count"]
+
+        # If CSV has fewer rows than the video, assume the extra video frames are
+        # at the START (the DLC was run on a trimmed clip). Shift CSV rows forward
+        # so CSV row 0 lands at video frame `frame_offset` rather than frame 0.
+        csv_frame_count = max(len(v) for v in parsed.values())
+        frame_offset = max(0, trial_frame_count - csv_frame_count)
+        if frame_offset > 0:
+            logger.info(
+                f"{csv_path.name}: video={trial_frame_count} csv={csv_frame_count} "
+                f"→ applying start offset {frame_offset}"
+            )
 
         for bp in settings.bodyparts:
             dlc_coords = parsed.get(bp)
@@ -252,7 +264,7 @@ def _load_from_label_dir(
                 continue
 
             for local_frame, coord in enumerate(dlc_coords):
-                global_frame = start_frame + local_frame
+                global_frame = start_frame + frame_offset + local_frame
                 if global_frame < total_frames and coord is not None:
                     result[cam][bp][global_frame] = coord
 
@@ -330,6 +342,82 @@ def get_dlc_predictions_for_stage(subject_name: str, stage: str) -> dict | None:
 
     logger.info(f"Loading stage '{stage}' from '{labels_dir.name}' for {subject_name}")
     return _load_from_label_dir(subject_name, labels_dir, csv_files)
+
+
+def get_corrections_with_dlc_fallback(subject_name: str) -> dict | None:
+    """Load corrections where available, fall back to most recent DLC for uncovered trials.
+
+    For each (trial, camera) pair, corrections take priority.  Trials that have
+    no corrections CSV use the best available DLC predictions (labels_v2 > labels_v1).
+
+    Returns dict in labeler format: {camera: {bodypart: [[x,y]|null, ...]}, distances: [...]}
+    """
+    settings = get_settings()
+    cam_names = settings.camera_names
+    dlc_dir = settings.dlc_path / subject_name
+
+    # Find corrections and best fallback directories
+    corr_dir, corr_csvs = _find_label_dir(dlc_dir, ["corrections"])
+    fallback_dir, fallback_csvs = _find_label_dir(
+        dlc_dir, ["labels_v2", "labels_v1", "labels_v1.0", "labels_v0.1"]
+    )
+
+    if not corr_csvs:
+        # No corrections at all — load fallback only
+        if fallback_dir:
+            return _load_from_label_dir(subject_name, fallback_dir, fallback_csvs)
+        return None
+
+    if not fallback_csvs:
+        # No fallback — load corrections only
+        return _load_from_label_dir(subject_name, corr_dir, corr_csvs)
+
+    # Both exist: determine which (cam, trial_name) pairs corrections cover
+    covered_pairs: set[tuple[str, str]] = set()
+    for csv_path in corr_csvs:
+        cam, trial_name = _match_csv_to_trial(csv_path.name, subject_name, cam_names)
+        if cam and trial_name:
+            covered_pairs.add((cam, trial_name))
+
+    # Filter fallback CSVs to only uncovered trials
+    uncovered_csvs = []
+    for csv_path in fallback_csvs:
+        cam, trial_name = _match_csv_to_trial(csv_path.name, subject_name, cam_names)
+        if cam and trial_name and (cam, trial_name) not in covered_pairs:
+            uncovered_csvs.append(csv_path)
+
+    # Load corrections base
+    result = _load_from_label_dir(subject_name, corr_dir, corr_csvs)
+    if result is None:
+        # Corrections directory exists but failed to parse — fall back entirely
+        return _load_from_label_dir(subject_name, fallback_dir, fallback_csvs)
+
+    if not uncovered_csvs:
+        # All trials covered by corrections — nothing to merge
+        return result
+
+    # Load uncovered fallback data and merge into result (corrections take priority)
+    fallback_result = _load_from_label_dir(subject_name, fallback_dir, uncovered_csvs)
+    if fallback_result:
+        for cam in cam_names:
+            for bp in settings.bodyparts:
+                src = fallback_result.get(cam, {}).get(bp, [])
+                dst = result.get(cam, {}).get(bp, [])
+                if not src or not dst:
+                    continue
+                for f in range(min(len(src), len(dst))):
+                    if dst[f] is None and src[f] is not None:
+                        dst[f] = src[f]
+
+        # Recompute distances with the merged coordinate data
+        trials = build_trial_map(subject_name)
+        total_frames = trials[-1]["end_frame"] + 1 if trials else 0
+        if total_frames:
+            dlc_distances = _compute_dlc_distances(result, cam_names, subject_name, total_frames)
+            if dlc_distances is not None:
+                result["distances"] = dlc_distances
+
+    return result
 
 
 def has_stage_data(subject_name: str, stage: str) -> bool:

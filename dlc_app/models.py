@@ -18,6 +18,8 @@ STAGES = [
     "analyzed",
     "refined",
     "corrected",
+    "events_partial",
+    "events_complete",
 ]
 
 STAGE_INDEX = {s: i for i, s in enumerate(STAGES)}
@@ -27,11 +29,13 @@ STAGE_INDEX = {s: i for i, s in enumerate(STAGES)}
 class SubjectCreate(BaseModel):
     name: str
     video_pattern: Optional[str] = None
+    diagnosis: str = "Control"
 
 
 class SubjectUpdate(BaseModel):
     camera_name: Optional[str] = None
     no_face_videos: Optional[List[str]] = None
+    diagnosis: Optional[str] = None
 
 
 class SubjectResponse(BaseModel):
@@ -42,6 +46,7 @@ class SubjectResponse(BaseModel):
     iteration: int
     camera_name: Optional[str]
     dlc_dir: Optional[str]
+    diagnosis: str = "Control"
     video_count: int = 0
     has_snapshots: bool = False
     has_labels: bool = False

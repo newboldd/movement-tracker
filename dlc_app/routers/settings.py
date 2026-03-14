@@ -29,6 +29,7 @@ class SettingsUpdate(BaseModel):
     remote_ssh_port: Optional[int] = None
     calibrations: Optional[Dict[str, str]] = None
     prefer_deidentified: Optional[bool] = None
+    diagnosis_groups: Optional[list[str]] = None
 
 
 @router.get("")
@@ -51,7 +52,7 @@ def update_settings(req: SettingsUpdate) -> dict:
 
 @router.get("/status")
 def settings_status() -> dict:
-    """Check if the app is configured."""
+    """Check if the app is configured and return system capabilities."""
     settings = get_settings()
     issues = []
 
@@ -68,11 +69,27 @@ def settings_status() -> dict:
     if not settings.python_executable:
         issues.append("python_executable not set")
 
+    # Get GPU information
+    local_gpu_available = settings.local_gpu_available
+    gpus = settings.get_available_gpus() if local_gpu_available else []
+
+    # Try to get CUDA version if available
+    cuda_version = None
+    try:
+        import torch
+        if torch.version.cuda:
+            cuda_version = torch.version.cuda
+    except (ImportError, AttributeError):
+        pass
+
     return {
         "configured": settings.is_configured,
         "has_calibration": bool(settings.calibrations) or bool(settings.calibration_3d_config),
         "remote_enabled": settings.remote_enabled,
         "issues": issues,
+        "local_gpu_available": local_gpu_available,
+        "gpus": gpus,
+        "cuda_version": cuda_version,
     }
 
 

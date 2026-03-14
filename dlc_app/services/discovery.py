@@ -134,10 +134,40 @@ def _count_labeled_frames(dlc_path: Path) -> int:
     return count
 
 
+def _infer_events_stage(dlc_path: Path) -> str | None:
+    """Check events.csv to determine events stage.
+
+    Returns 'events_complete' if all 3 types have data,
+    'events_partial' if some types have data, or None if no events.
+    """
+    import csv as _csv
+
+    events_path = dlc_path / "events.csv"
+    if not events_path.exists():
+        return None
+
+    EVENT_TYPES = {"open", "peak", "close"}
+    types_found: set[str] = set()
+    try:
+        with open(events_path, newline="") as f:
+            for row in _csv.DictReader(f):
+                et = row.get("event_type", "").strip()
+                if et in EVENT_TYPES:
+                    types_found.add(et)
+    except Exception:
+        return None
+
+    if not types_found:
+        return None
+    return "events_complete" if types_found == EVENT_TYPES else "events_partial"
+
+
 def infer_stage(dlc_path: Path) -> str:
     """Infer pipeline stage from filesystem artifacts.
 
     Priority order (highest to lowest):
+    - Has events.csv with all types -> events_complete
+    - Has events.csv with some types -> events_partial
     - Has corrections/ -> corrected
     - Has labels_v2/ -> refined
     - Has labels_v1/ -> analyzed
@@ -145,6 +175,9 @@ def infer_stage(dlc_path: Path) -> str:
     - Has labeled-data/ with CSV -> committed
     - Has config.yaml -> created
     """
+    events_stage = _infer_events_stage(dlc_path)
+    if events_stage:
+        return events_stage
     if _has_corrections(dlc_path):
         return "corrected"
     if _has_labels_v2(dlc_path):

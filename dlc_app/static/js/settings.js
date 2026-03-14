@@ -105,6 +105,17 @@ async function validateCalibRow(btn) {
 setupTagInput('camera_names_tags', 'camera_names_input');
 setupTagInput('bodyparts_tags', 'bodyparts_input');
 
+// Setup diagnosis groups tag input with initial input field
+const diagnosisGroupsContainer = document.getElementById('diagnosisGroupsInput');
+if (diagnosisGroupsContainer) {
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'e.g. Control, MSA, PD, PSP';
+    diagnosisGroupsContainer.appendChild(input);
+    setupTagInput('diagnosisGroupsInput', input.id || 'diagnosisGroupsInput');
+    input.id = 'diagnosisGroupsInput_input';
+}
+
 // ── Load settings ─────────────────────────────────────────────
 async function loadSettings() {
     try {
@@ -138,6 +149,7 @@ async function loadSettings() {
         // Tag inputs
         setTagValues('camera_names_tags', settings.camera_names || []);
         setTagValues('bodyparts_tags', settings.bodyparts || []);
+        setTagValues('diagnosisGroupsInput', settings.diagnosis_groups || ["Control", "MSA", "PD", "PSP"]);
 
         // Calibrations
         setCalibrations(settings.calibrations || {});
@@ -176,6 +188,7 @@ function _gatherSettings() {
         python_executable: document.getElementById('python_executable').value.trim(),
         camera_names: getTagValues('camera_names_tags'),
         bodyparts: getTagValues('bodyparts_tags'),
+        diagnosis_groups: getTagValues('diagnosisGroupsInput') || ["Control", "MSA", "PD", "PSP"],
         dlc_scorer: document.getElementById('dlc_scorer').value.trim(),
         dlc_date: document.getElementById('dlc_date').value.trim(),
         dlc_net_type: document.getElementById('dlc_net_type').value,

@@ -53,8 +53,17 @@ class QueueManager:
         self._thread.start()
         logger.info("QueueManager drain loop started")
 
-    def enqueue(self, job_type: str, subject_ids: list[int], subject_names: list[str]) -> dict:
-        """Add a job to the queue. Returns {queue_id, position}."""
+    def enqueue(self, job_type: str, subject_ids: list[int], subject_names: list[str],
+                execution_target: str = "remote", gpu_index: int = 0) -> dict:
+        """Add a job to the queue. Returns {queue_id, position}.
+
+        Args:
+            job_type: Type of job (mediapipe, blur, train, analyze_v1, analyze_v2, etc.)
+            subject_ids: List of subject IDs from database
+            subject_names: List of subject names
+            execution_target: Where to execute - "local-cpu", "local-gpu", or "remote"
+            gpu_index: Which GPU to use if execution_target is "local-gpu"
+        """
         resource = RESOURCE_MAP.get(job_type)
         if not resource:
             raise ValueError(f"Unknown job type: {job_type}")
@@ -69,11 +78,18 @@ class QueueManager:
             position = row["next_pos"]
 
             db.execute(
-                """INSERT INTO job_queue (job_type, subject_ids, resource, status, position)
-                   VALUES (?, ?, ?, 'queued', ?)""",
-                (job_type, json.dumps(subject_names), resource, position),
+                """INSERT INTO job_queue (job_type, subject_ids, resource, status, position, execution_target)
+                   VALUES (?, ?, ?, 'queued', ?, ?)""",
+                (job_type, json.dumps(subject_names), resource, position, execution_target),
             )
             queue_id = db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+            # Store gpu_index in the job_queue record if using local GPU
+            if execution_target == "local-gpu":
+                db.execute(
+                    "UPDATE job_queue SET resource = ? WHERE id = ?",
+                    (f"gpu_{gpu_index}", queue_id),
+                )
 
         # Signal the drain thread
         self._drain_event.set()
@@ -181,6 +197,16 @@ class QueueManager:
                         )
                     logger.info(f"Queue item {item['id']}: underlying job {job_id} was {new_status}")
                     continue
+                if job and job["status"] in ("running", "pending"):
+                    # Underlying job still alive (app.py recovery resumed it) — keep queue running
+                    resource = item.get("resource", "gpu")
+                    with self._lock:
+                        if resource == "gpu":
+                            self._running_gpu = item["id"]
+                        else:
+                            self._running_cpu = item["id"]
+                    logger.info(f"Queue item {item['id']}: underlying job {job_id} still running, re-tracking")
+                    continue
 
             # If we can't determine state, mark failed
             with get_db_ctx() as db:
@@ -211,10 +237,31 @@ class QueueManager:
                 # Check if still actually running
                 with get_db_ctx() as db:
                     item = db.execute(
-                        "SELECT status FROM job_queue WHERE id = ?", (running_id,)
+                        "SELECT status, job_id FROM job_queue WHERE id = ?", (running_id,)
                     ).fetchone()
                 if item and item["status"] == "running":
-                    return  # Lane busy
+                    # Queue item thinks it's running — verify the underlying job
+                    job_id = item.get("job_id")
+                    if job_id:
+                        with get_db_ctx() as db:
+                            job = db.execute(
+                                "SELECT status, error_msg FROM jobs WHERE id = ?", (job_id,)
+                            ).fetchone()
+                        if job and job["status"] in ("completed", "failed", "cancelled"):
+                            # Underlying job finished (e.g. app.py resume thread) — sync queue
+                            with get_db_ctx() as db:
+                                db.execute(
+                                    "UPDATE job_queue SET status = ?, finished_at = CURRENT_TIMESTAMP, "
+                                    "error_msg = ? WHERE id = ?",
+                                    (job["status"], job.get("error_msg"), running_id),
+                                )
+                            logger.info(
+                                f"Queue item {running_id}: synced status to '{job['status']}' from job {job_id}"
+                            )
+                        else:
+                            return  # Lane busy — job still running
+                    else:
+                        return  # Lane busy — no job to check
                 # Lane freed — clear it
                 if resource == "gpu":
                     self._running_gpu = None
@@ -236,26 +283,36 @@ class QueueManager:
         self._launch_item(next_item)
 
     def _launch_item(self, queue_item: dict):
-        """Create a jobs row and launch the appropriate remote function."""
+        """Create a jobs row and launch the appropriate local or remote function."""
         queue_id = queue_item["id"]
         job_type = queue_item["job_type"]
         subject_names = json.loads(queue_item["subject_ids"])
         resource = queue_item["resource"]
+        execution_target = queue_item.get("execution_target", "remote")
 
         from ..config import get_settings
         from .jobs import registry
 
         settings = get_settings()
-        remote_cfg = settings.get_remote_config()
-        if not remote_cfg:
-            with get_db_ctx() as db:
-                db.execute(
-                    "UPDATE job_queue SET status = 'failed', error_msg = 'Remote not configured', "
-                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (queue_id,),
-                )
-            self._drain_event.set()
-            return
+
+        # Parse GPU index from resource if using local GPU
+        gpu_index = 0
+        if resource.startswith("gpu_"):
+            gpu_index = int(resource.split("_", 1)[1])
+
+        # For remote execution, require remote config
+        remote_cfg = None
+        if execution_target == "remote":
+            remote_cfg = settings.get_remote_config()
+            if not remote_cfg:
+                with get_db_ctx() as db:
+                    db.execute(
+                        "UPDATE job_queue SET status = 'failed', error_msg = 'Remote not configured', "
+                        "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (queue_id,),
+                    )
+                self._drain_event.set()
+                return
 
         # Resolve subject IDs from names
         with get_db_ctx() as db:
@@ -288,11 +345,18 @@ class QueueManager:
             subj_label += f"_+{len(subjects) - 3}"
         log_path = str(log_dir / f"job_queue_{job_type}_{subj_label}_{queue_id}.log")
 
+        # Set remote_host based on execution target
+        remote_host = None
+        if execution_target == "remote":
+            remote_host = remote_cfg.host if remote_cfg else None
+        elif execution_target in ("local-cpu", "local-gpu"):
+            remote_host = "localhost"
+
         with get_db_ctx() as db:
             db.execute(
                 """INSERT INTO jobs (subject_id, job_type, status, remote_host, log_path)
                    VALUES (?, ?, 'pending', ?, ?)""",
-                (first_subject_id, job_type, remote_cfg.host, log_path),
+                (first_subject_id, job_type, remote_host, log_path),
             )
             job = db.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 1").fetchone()
 
@@ -311,7 +375,7 @@ class QueueManager:
             )
 
         with self._lock:
-            if resource == "gpu":
+            if resource.startswith("gpu"):
                 self._running_gpu = queue_id
             else:
                 self._running_cpu = queue_id
@@ -319,105 +383,141 @@ class QueueManager:
         # Launch in a thread
         thread = threading.Thread(
             target=self._run_job,
-            args=(queue_id, job_id, job_type, subjects, remote_cfg, settings, log_path),
+            args=(queue_id, job_id, job_type, subjects, remote_cfg, settings, log_path,
+                  execution_target, gpu_index),
             daemon=True,
         )
         thread.start()
         self._job_threads[queue_id] = thread
 
-    def _run_job(self, queue_id, job_id, job_type, subjects, remote_cfg, settings, log_path):
-        """Run a job and update queue status on completion."""
+    def _run_job(self, queue_id, job_id, job_type, subjects, remote_cfg, settings, log_path,
+                  execution_target="remote", gpu_index=0):
+        """Run a job and update queue status on completion.
+
+        Args:
+            execution_target: "local-cpu", "local-gpu", or "remote"
+            gpu_index: GPU device index if execution_target is "local-gpu"
+        """
         from .jobs import registry
         from .remote import remote_preprocess_batch, remote_train_monitor
         from ..services.dlc_wrapper import fix_project_path
+        from .local_executor import local_executor
 
         try:
-            if job_type in ("mediapipe", "blur", "mediapipe+blur"):
-                # CPU lane: preprocessing
-                steps = []
-                if job_type in ("mediapipe", "mediapipe+blur"):
-                    steps.append("mediapipe")
-                if job_type in ("blur", "mediapipe+blur"):
-                    steps.append("blur")
+            subject_names = [s["name"] for s in subjects]
 
-                subject_names = [s["name"] for s in subjects]
-                remote_preprocess_batch(
-                    job_id=job_id,
-                    cfg=remote_cfg,
-                    steps=steps,
-                    subjects=subject_names,
-                    log_path=log_path,
-                    registry=registry,
-                    force=True,
-                )
+            # Route based on execution target
+            if execution_target in ("local-cpu", "local-gpu"):
+                # Local execution
+                if job_type in ("mediapipe", "blur", "mediapipe+blur"):
+                    # CPU lane: preprocessing
+                    if job_type == "mediapipe":
+                        local_executor.execute_mediapipe(subject_names[0], job_id, log_path)
+                    elif job_type == "blur":
+                        local_executor.execute_blur(subject_names, job_id, log_path)
+                    elif job_type == "mediapipe+blur":
+                        # Run both sequentially
+                        local_executor.execute_mediapipe(subject_names[0], job_id, log_path)
+                        # Wait a bit for first to complete
+                        import time
+                        time.sleep(1)
+                        local_executor.execute_blur(subject_names, job_id, log_path)
 
-            elif job_type == "train":
-                # GPU lane: training (one subject at a time through the queue)
-                subject = subjects[0]
-                subject_name = subject["name"]
-                cam_names = settings.camera_names
+                elif job_type == "train":
+                    # GPU lane: training on local GPU
+                    local_executor.execute_train(subject_names[0], gpu_index, job_id, log_path)
 
-                def on_complete(jid, returncode):
-                    if returncode == 0:
-                        try:
-                            fix_project_path(subject_name)
-                        except Exception:
-                            pass
-                        with get_db_ctx() as db:
-                            db.execute(
-                                "UPDATE subjects SET stage = 'trained', "
-                                "updated_at = CURRENT_TIMESTAMP WHERE name = ?",
-                                (subject_name,),
-                            )
+                elif job_type in ("analyze_v1", "analyze_v2"):
+                    # GPU lane: analyze on local GPU
+                    local_executor.execute_analyze(subject_names[0], gpu_index, job_id, log_path)
 
-                remote_train_monitor(
-                    job_id=job_id,
-                    cfg=remote_cfg,
-                    local_dlc_dir=settings.dlc_path / subject_name,
-                    subject_name=subject_name,
-                    log_path=log_path,
-                    progress_parser=None,
-                    on_complete=on_complete,
-                    registry=registry,
-                    cam_names=cam_names,
-                )
+            else:
+                # Remote execution (existing logic)
+                if job_type in ("mediapipe", "blur", "mediapipe+blur"):
+                    # CPU lane: preprocessing
+                    steps = []
+                    if job_type in ("mediapipe", "mediapipe+blur"):
+                        steps.append("mediapipe")
+                    if job_type in ("blur", "mediapipe+blur"):
+                        steps.append("blur")
 
-            elif job_type in ("analyze_v1", "analyze_v2"):
-                # GPU lane: analyze
-                subject = subjects[0]
-                subject_name = subject["name"]
-                cam_names = settings.camera_names
-                is_v1 = job_type == "analyze_v1"
-                labels_dir_name = "labels_v1" if is_v1 else "labels_v2"
-                analyze_iteration = 0 if is_v1 else None
+                    remote_preprocess_batch(
+                        job_id=job_id,
+                        cfg=remote_cfg,
+                        steps=steps,
+                        subjects=subject_names,
+                        log_path=log_path,
+                        registry=registry,
+                        force=True,
+                    )
 
-                def on_complete(jid, returncode):
-                    if returncode == 0:
-                        try:
-                            fix_project_path(subject_name)
-                        except Exception:
-                            pass
-                        with get_db_ctx() as db:
-                            db.execute(
-                                "UPDATE subjects SET stage = 'analyzed', "
-                                "updated_at = CURRENT_TIMESTAMP WHERE name = ?",
-                                (subject_name,),
-                            )
+                elif job_type == "train":
+                    # GPU lane: training (one subject at a time through the queue)
+                    subject = subjects[0]
+                    subject_name = subject["name"]
+                    cam_names = settings.camera_names
 
-                remote_train_monitor(
-                    job_id=job_id,
-                    cfg=remote_cfg,
-                    local_dlc_dir=settings.dlc_path / subject_name,
-                    subject_name=subject_name,
-                    log_path=log_path,
-                    progress_parser=None,
-                    on_complete=on_complete,
-                    registry=registry,
-                    cam_names=cam_names,
-                    skip_train=True,
-                    labels_dir_name=labels_dir_name,
-                    iteration=analyze_iteration,
-                )
+                    def on_complete(jid, returncode):
+                        if returncode == 0:
+                            try:
+                                fix_project_path(subject_name)
+                            except Exception:
+                                pass
+                            with get_db_ctx() as db:
+                                db.execute(
+                                    "UPDATE subjects SET stage = 'trained', "
+                                    "updated_at = CURRENT_TIMESTAMP WHERE name = ?",
+                                    (subject_name,),
+                                )
+
+                    remote_train_monitor(
+                        job_id=job_id,
+                        cfg=remote_cfg,
+                        local_dlc_dir=settings.dlc_path / subject_name,
+                        subject_name=subject_name,
+                        log_path=log_path,
+                        progress_parser=None,
+                        on_complete=on_complete,
+                        registry=registry,
+                        cam_names=cam_names,
+                    )
+
+                elif job_type in ("analyze_v1", "analyze_v2"):
+                    # GPU lane: analyze
+                    subject = subjects[0]
+                    subject_name = subject["name"]
+                    cam_names = settings.camera_names
+                    is_v1 = job_type == "analyze_v1"
+                    labels_dir_name = "labels_v1" if is_v1 else "labels_v2"
+                    analyze_iteration = 0 if is_v1 else None
+
+                    def on_complete(jid, returncode):
+                        if returncode == 0:
+                            try:
+                                fix_project_path(subject_name)
+                            except Exception:
+                                pass
+                            with get_db_ctx() as db:
+                                db.execute(
+                                    "UPDATE subjects SET stage = 'analyzed', "
+                                    "updated_at = CURRENT_TIMESTAMP WHERE name = ?",
+                                    (subject_name,),
+                                )
+
+                    remote_train_monitor(
+                        job_id=job_id,
+                        cfg=remote_cfg,
+                        local_dlc_dir=settings.dlc_path / subject_name,
+                        subject_name=subject_name,
+                        log_path=log_path,
+                        progress_parser=None,
+                        on_complete=on_complete,
+                        registry=registry,
+                        cam_names=cam_names,
+                        skip_train=True,
+                        labels_dir_name=labels_dir_name,
+                        iteration=analyze_iteration,
+                    )
 
             # Check final job status
             with get_db_ctx() as db:

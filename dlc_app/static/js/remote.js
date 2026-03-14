@@ -1,9 +1,74 @@
-/* Remote Jobs: queue management, job launching, monitoring */
+/* Processing Jobs: queue management, job launching, monitoring with local/remote/GPU support */
 
 let subjects = [];
 let steps = [];
 let queueStream = null;
 let _logStream = null;
+let gpuAvailable = false;
+let availableGpus = [];
+
+// ── Time helpers ────────────────────────────────────────
+function formatDuration(ms) {
+    const secs = Math.floor(ms / 1000);
+    if (secs < 60) return `${secs}s`;
+    const mins = Math.floor(secs / 60);
+    const remSecs = secs % 60;
+    if (mins < 60) return `${mins}m ${remSecs}s`;
+    const hrs = Math.floor(mins / 60);
+    const remMins = mins % 60;
+    return `${hrs}h ${remMins}m`;
+}
+
+function formatJobTime(startedAt, pct) {
+    if (!startedAt) return { display: '', tooltip: '' };
+    // Parse UTC timestamp from server
+    const started = new Date(startedAt.endsWith('Z') ? startedAt : startedAt + 'Z');
+    const now = new Date();
+    const elapsedMs = now - started;
+    const elapsed = formatDuration(elapsedMs);
+
+    if (pct > 2 && pct < 100) {
+        const totalEstMs = (elapsedMs / pct) * 100;
+        const remainMs = totalEstMs - elapsedMs;
+        const eta = formatDuration(Math.max(0, remainMs));
+        return {
+            display: `${elapsed} · ~${eta} left`,
+            tooltip: `Started: ${started.toLocaleString()}\nElapsed: ${elapsed}\nEstimated remaining: ${eta}`,
+        };
+    }
+    return {
+        display: elapsed,
+        tooltip: `Started: ${started.toLocaleString()}\nElapsed: ${elapsed}`,
+    };
+}
+
+// ── Detect GPU availability ─────────────────────────────
+async function loadGpuStatus() {
+    try {
+        const status = await API.get('/api/settings/status');
+        gpuAvailable = status.local_gpu_available || false;
+        availableGpus = status.gpus || [];
+
+        // Populate GPU selector
+        const gpuSel = document.getElementById('gpuSelector');
+        gpuSel.innerHTML = availableGpus.map(g =>
+            `<option value="${g.index}">${g.name} (${Math.round(g.memory_mb / 1024)}GB)</option>`
+        ).join('');
+
+        // Disable Local GPU option if no GPU available
+        const gpuRadio = document.getElementById('targetLocalGpu');
+        gpuRadio.disabled = !gpuAvailable;
+        if (!gpuAvailable) {
+            gpuRadio.parentElement.style.opacity = '0.5';
+            gpuRadio.parentElement.style.cursor = 'not-allowed';
+        }
+
+        // Update step availability based on execution target
+        updateStepAvailability();
+    } catch (e) {
+        console.error('Failed to load GPU status:', e);
+    }
+}
 
 // ── Load steps ──────────────────────────────────────────
 async function loadSteps() {
@@ -13,9 +78,38 @@ async function loadSteps() {
         sel.innerHTML = steps.map(s =>
             `<option value="${s.name}">${s.label} (${s.resource.toUpperCase()})</option>`
         ).join('');
+        updateStepAvailability();
     } catch (e) {
         console.error('Failed to load steps:', e);
     }
+}
+
+// ── Update warning based on step + target combination ───
+function updateJobWarning() {
+    const executionTarget = getExecutionTarget();
+    const jobType = document.getElementById('stepSelect').value;
+    const warning = document.getElementById('jobWarning');
+
+    const trainJobs = ['train', 'analyze_v1', 'analyze_v2'];
+
+    if (executionTarget === 'local-cpu' && trainJobs.includes(jobType)) {
+        warning.style.display = 'block';
+        warning.style.background = '#fff3cd';
+        warning.style.color = '#856404';
+        warning.innerHTML = `<strong>Warning:</strong> Training/analysis on a local CPU will be extremely slow (hours to days per subject). Consider using a GPU or the remote server instead.`;
+    } else {
+        warning.style.display = 'none';
+    }
+}
+
+// ── Get execution target ─────────────────────────────────
+function getExecutionTarget() {
+    return document.querySelector('input[name="executionTarget"]:checked')?.value || 'remote';
+}
+
+// ── Get selected GPU index ───────────────────────────────
+function getSelectedGpu() {
+    return parseInt(document.getElementById('gpuSelector')?.value || '0');
 }
 
 // ── Load subjects ───────────────────────────────────────
@@ -89,12 +183,34 @@ async function submitJob() {
         return;
     }
 
+    const executionTarget = getExecutionTarget();
+    const gpuIndex = executionTarget === 'local-gpu' ? getSelectedGpu() : 0;
+
     try {
         const result = await API.post('/api/remote/launch', {
             job_type: jobType,
             subject_ids: subjectIds,
             subjects: subjectNames,
+            execution_target: executionTarget,
+            gpu_index: gpuIndex,
         });
+
+        // Show inline warning if training on local CPU
+        const trainJobs = ['train', 'analyze_v1', 'analyze_v2'];
+        const warning = document.getElementById('jobWarning');
+        if (executionTarget === 'local-cpu' && trainJobs.includes(jobType)) {
+            const queueId = result?.queue_id || result?.id;
+            const cancelLink = queueId
+                ? ` <a href="#" onclick="cancelQueueItem(${queueId});document.getElementById('jobWarning').style.display='none';return false;" style="color:#856404;font-weight:600;">Cancel this job</a>`
+                : '';
+            warning.style.display = 'block';
+            warning.style.background = '#fff3cd';
+            warning.style.color = '#856404';
+            warning.innerHTML = `<strong>Warning:</strong> ${jobType} job submitted to local CPU — this will be very slow without a GPU.${cancelLink}`;
+        } else {
+            warning.style.display = 'none';
+        }
+
         clearSubjects();
         refreshQueue();
     } catch (e) {
@@ -134,9 +250,26 @@ function renderQueue(state) {
     renderHistory(state.history);
 }
 
+function getExecutionTargetBadge(item) {
+    const target = item.execution_target || 'remote';
+    const colors = {
+        'local-cpu': '#4A90E2',
+        'local-gpu': '#7ED321',
+        'remote': '#9B9B9B',
+    };
+    const labels = {
+        'local-cpu': 'Local CPU',
+        'local-gpu': 'Local GPU',
+        'remote': 'Remote',
+    };
+    const color = colors[target] || colors['remote'];
+    const label = labels[target] || target;
+    return `<span style="background:${color};color:white;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:600;">${label}</span>`;
+}
+
 function renderLane(elementId, resource, state) {
     const el = document.getElementById(elementId);
-    const running = state.running.filter(r => r.resource === resource);
+    const running = state.running.filter(r => r.resource.startsWith(resource));
     const queued = resource === 'gpu' ? state.gpu_queue : state.cpu_queue;
 
     if (running.length === 0 && queued.length === 0) {
@@ -150,15 +283,19 @@ function renderLane(elementId, resource, state) {
     for (const item of running) {
         const subjects = parseSubjects(item.subject_ids);
         const pct = item.progress_pct || 0;
+        const targetBadge = getExecutionTargetBadge(item);
+        const timeInfo = formatJobTime(item.started_at, pct);
         html += `
             <div class="queue-item" style="border-left: 3px solid var(--orange);">
                 <span class="job-indicator job-running"></span>
                 <span class="type">${item.job_type}</span>
+                ${targetBadge}
                 <span class="subjects" title="${subjects}">${subjects}</span>
                 <div class="progress-bar" style="width:80px;">
                     <div class="fill" style="width:${pct}%"></div>
                 </div>
                 <span style="font-size:11px;">${pct.toFixed(0)}%</span>
+                <span class="time-info" style="font-size:11px;color:var(--text-muted);margin-left:4px;" title="${timeInfo.tooltip}">${timeInfo.display}</span>
                 ${item.job_id ? `<button class="btn btn-sm" onclick="viewJobLogLive(${item.job_id})">Log</button>` : ''}
                 <button class="btn btn-sm btn-danger" onclick="cancelQueueItem(${item.id})">Cancel</button>
             </div>
@@ -169,10 +306,12 @@ function renderLane(elementId, resource, state) {
     for (let i = 0; i < queued.length; i++) {
         const item = queued[i];
         const subjects = parseSubjects(item.subject_ids);
+        const targetBadge = getExecutionTargetBadge(item);
         html += `
             <div class="queue-item">
                 <span class="pos">${i + 1}.</span>
                 <span class="type">${item.job_type}</span>
+                ${targetBadge}
                 <span class="subjects" title="${subjects}">${subjects}</span>
                 <button class="btn btn-sm btn-danger" onclick="cancelQueueItem(${item.id})">Cancel</button>
             </div>
@@ -210,6 +349,7 @@ function renderHistory(history) {
                     <th>Subjects</th>
                     <th>Resource</th>
                     <th>Status</th>
+                    <th>Duration</th>
                     <th>Finished</th>
                     <th>Actions</th>
                 </tr>
@@ -219,11 +359,14 @@ function renderHistory(history) {
 
     for (const item of history) {
         const subjects = parseSubjects(item.subject_ids);
-        const statusClass = item.status === 'completed' ? 'badge-trained'
+        const statusClass = item.status === 'completed' ? 'badge-complete'
             : item.status === 'failed' ? 'badge-error_detection'
             : 'badge-created';
         const errorTip = item.error_msg ? ` title="${item.error_msg}"` : '';
         const finishedAt = item.finished_at ? new Date(item.finished_at + 'Z').toLocaleString() : '-';
+        const duration = (item.started_at && item.finished_at)
+            ? formatDuration(new Date(item.finished_at + 'Z') - new Date(item.started_at + 'Z'))
+            : '-';
         const logBtn = item.job_id
             ? `<button class="btn btn-sm" onclick="viewJobLog(${item.job_id})">Log</button>`
             : '';
@@ -234,6 +377,7 @@ function renderHistory(history) {
                 <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${subjects}">${subjects}</td>
                 <td>${item.resource.toUpperCase()}</td>
                 <td><span class="badge ${statusClass}"${errorTip}>${item.status}</span></td>
+                <td style="font-size:12px;color:var(--text-muted);">${duration}</td>
                 <td style="font-size:12px;color:var(--text-muted);">${finishedAt}</td>
                 <td>${logBtn}</td>
             </tr>
@@ -331,6 +475,23 @@ async function redownload() {
 
 // ── Init ────────────────────────────────────────────────
 (async function init() {
+    // Add event listeners for execution target radio buttons
+    document.querySelectorAll('input[name="executionTarget"]').forEach(radio => {
+        radio.addEventListener('change', (e) => {
+            const gpuSelector = document.getElementById('gpuSelectorDiv');
+            const targetLocalGpu = e.target.value === 'local-gpu';
+            gpuSelector.style.display = targetLocalGpu ? 'flex' : 'none';
+            updateJobWarning();
+        });
+    });
+
+    // Update warning when step changes
+    document.getElementById('stepSelect')?.addEventListener('change', () => {
+        updateJobWarning();
+    });
+
+    // Load data
+    await loadGpuStatus();
     await loadSteps();
     await loadSubjects();
     await refreshQueue();

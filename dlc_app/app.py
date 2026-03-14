@@ -68,7 +68,7 @@ def startup():
     from .db import get_db_ctx
     with get_db_ctx() as db:
         stale_jobs = db.execute(
-            "SELECT id, tmux_session, remote_host, subject_id, log_path FROM jobs "
+            "SELECT id, job_type, tmux_session, remote_host, subject_id, log_path FROM jobs "
             "WHERE status IN ('running', 'pending')"
         ).fetchall()
 
@@ -77,9 +77,15 @@ def startup():
         resumed = 0
         failed = 0
 
+        # Job types that use remote_train_monitor
+        TRAIN_JOB_TYPES = {"train", "analyze_v1", "analyze_v2"}
+        # Job types that use remote_preprocess_batch
+        PREPROCESS_JOB_TYPES = {"mediapipe", "blur", "mediapipe+blur"}
+
         for job in stale_jobs:
             session_info = job.get("tmux_session") or ""
             remote_host = job.get("remote_host")
+            job_type = job.get("job_type", "")
 
             # Parse PID from session_info (format: "pid:12345" or legacy "dlc_job_N")
             remote_pid = None
@@ -90,51 +96,26 @@ def startup():
                     pass
 
             if session_info and remote_host and remote_cfg:
-                # Check if remote process is still alive
-                from .services.remote import _check_remote_pid_alive, _read_remote_status, remote_train_monitor
+                from .services.remote import (
+                    _check_remote_pid_alive, _read_remote_status,
+                    remote_train_monitor, resume_preprocess_monitor,
+                )
                 from .services.jobs import registry
 
                 if remote_pid and _check_remote_pid_alive(remote_cfg, remote_pid):
-                    # Process alive — resume monitoring
-                    logger.info(f"Job {job['id']}: remote PID {remote_pid} alive, resuming monitor")
+                    # Process alive — resume monitoring based on job type
+                    log_path = job["log_path"] or str(s.dlc_path / ".logs" / f"job_{job['id']}.log")
 
-                    # Look up subject name for this job
-                    with get_db_ctx() as db:
-                        subj = db.execute(
-                            "SELECT name FROM subjects WHERE id = ?",
-                            (job["subject_id"],),
-                        ).fetchone()
-
-                    if subj:
-                        subject_name = subj["name"]
-                        local_dlc_dir = s.dlc_path / subject_name
-                        log_path = job["log_path"] or str(s.dlc_path / ".logs" / f"job_train_{job['subject_id']}.log")
-
-                        def _on_resume_complete(jid, returncode, _subj=subject_name):
-                            if returncode == 0:
-                                from .services.dlc_wrapper import fix_project_path
-                                try:
-                                    fix_project_path(_subj)
-                                except Exception:
-                                    pass
-                                with get_db_ctx() as db2:
-                                    db2.execute(
-                                        "UPDATE subjects SET stage = 'trained', updated_at = CURRENT_TIMESTAMP "
-                                        "WHERE name = ?", (_subj,),
-                                    )
-
+                    if job_type in PREPROCESS_JOB_TYPES:
+                        # Preprocessing job — use preprocess monitor
+                        logger.info(f"Job {job['id']} ({job_type}): remote PID {remote_pid} alive, resuming preprocess monitor")
                         thread = threading.Thread(
-                            target=remote_train_monitor,
+                            target=resume_preprocess_monitor,
                             kwargs=dict(
                                 job_id=job["id"],
                                 cfg=remote_cfg,
-                                local_dlc_dir=local_dlc_dir,
-                                subject_name=subject_name,
                                 log_path=log_path,
-                                progress_parser=None,
-                                on_complete=_on_resume_complete,
                                 registry=registry,
-                                resume=True,
                             ),
                             daemon=True,
                         )
@@ -142,24 +123,21 @@ def startup():
                         registry._threads[job["id"]] = thread
                         resumed += 1
                         continue
-                else:
-                    # Process dead or PID unknown — check final status.json
-                    with get_db_ctx() as db:
-                        subj = db.execute(
-                            "SELECT name FROM subjects WHERE id = ?",
-                            (job["subject_id"],),
-                        ).fetchone()
-                    if subj:
-                        status_file = f"{remote_cfg.work_dir}/{subj['name']}/status.json"
-                        remote_status = _read_remote_status(remote_cfg, status_file)
-                        if remote_status and remote_status.get("status") == "completed":
-                            # Completed while we were down — spawn download-only thread
-                            logger.info(f"Job {job['id']}: process exited but status=completed, spawning download")
+
+                    elif job_type in TRAIN_JOB_TYPES:
+                        # Training/analyze job — use train monitor
+                        logger.info(f"Job {job['id']} ({job_type}): remote PID {remote_pid} alive, resuming train monitor")
+                        with get_db_ctx() as db:
+                            subj = db.execute(
+                                "SELECT name FROM subjects WHERE id = ?",
+                                (job["subject_id"],),
+                            ).fetchone()
+
+                        if subj:
                             subject_name = subj["name"]
                             local_dlc_dir = s.dlc_path / subject_name
-                            log_path = job["log_path"] or str(s.dlc_path / ".logs" / f"job_train_{job['subject_id']}.log")
 
-                            def _on_dl_complete(jid, returncode, _subj=subject_name):
+                            def _on_resume_complete(jid, returncode, _subj=subject_name):
                                 if returncode == 0:
                                     from .services.dlc_wrapper import fix_project_path
                                     try:
@@ -181,9 +159,86 @@ def startup():
                                     subject_name=subject_name,
                                     log_path=log_path,
                                     progress_parser=None,
-                                    on_complete=_on_dl_complete,
+                                    on_complete=_on_resume_complete,
                                     registry=registry,
                                     resume=True,
+                                ),
+                                daemon=True,
+                            )
+                            thread.start()
+                            registry._threads[job["id"]] = thread
+                            resumed += 1
+                            continue
+
+                    else:
+                        logger.warning(f"Job {job['id']}: unknown job_type '{job_type}' — keeping as running")
+                        resumed += 1
+                        continue
+
+                else:
+                    # Process dead or PID unknown — check final status
+                    if job_type in TRAIN_JOB_TYPES:
+                        with get_db_ctx() as db:
+                            subj = db.execute(
+                                "SELECT name FROM subjects WHERE id = ?",
+                                (job["subject_id"],),
+                            ).fetchone()
+                        if subj:
+                            status_file = f"{remote_cfg.work_dir}/{subj['name']}/status.json"
+                            remote_status = _read_remote_status(remote_cfg, status_file)
+                            if remote_status and remote_status.get("status") == "completed":
+                                logger.info(f"Job {job['id']}: process exited but status=completed, spawning download")
+                                subject_name = subj["name"]
+                                local_dlc_dir = s.dlc_path / subject_name
+                                log_path = job["log_path"] or str(s.dlc_path / ".logs" / f"job_{job['id']}.log")
+
+                                def _on_dl_complete(jid, returncode, _subj=subject_name):
+                                    if returncode == 0:
+                                        from .services.dlc_wrapper import fix_project_path
+                                        try:
+                                            fix_project_path(_subj)
+                                        except Exception:
+                                            pass
+                                        with get_db_ctx() as db2:
+                                            db2.execute(
+                                                "UPDATE subjects SET stage = 'trained', updated_at = CURRENT_TIMESTAMP "
+                                                "WHERE name = ?", (_subj,),
+                                            )
+
+                                thread = threading.Thread(
+                                    target=remote_train_monitor,
+                                    kwargs=dict(
+                                        job_id=job["id"],
+                                        cfg=remote_cfg,
+                                        local_dlc_dir=local_dlc_dir,
+                                        subject_name=subject_name,
+                                        log_path=log_path,
+                                        progress_parser=None,
+                                        on_complete=_on_dl_complete,
+                                        registry=registry,
+                                        resume=True,
+                                    ),
+                                    daemon=True,
+                                )
+                                thread.start()
+                                registry._threads[job["id"]] = thread
+                                resumed += 1
+                                continue
+
+                    elif job_type in PREPROCESS_JOB_TYPES:
+                        # Check preprocessing status file
+                        status_file = f"{remote_cfg.work_dir}/preprocess_{job['id']}_status.json"
+                        remote_status = _read_remote_status(remote_cfg, status_file)
+                        if remote_status and remote_status.get("status") == "completed":
+                            logger.info(f"Job {job['id']}: preprocess completed, spawning download")
+                            log_path = job["log_path"] or str(s.dlc_path / ".logs" / f"job_{job['id']}.log")
+                            thread = threading.Thread(
+                                target=resume_preprocess_monitor,
+                                kwargs=dict(
+                                    job_id=job["id"],
+                                    cfg=remote_cfg,
+                                    log_path=log_path,
+                                    registry=registry,
                                 ),
                                 daemon=True,
                             )
@@ -249,7 +304,21 @@ def labeling_select_page(subject: Optional[int] = None, mode: Optional[str] = No
     # Valid session types
     _VALID_MODES = {"initial", "refine", "corrections", "events", "final"}
 
-    def _create_session(db, sid: int, stype: str) -> Optional[int]:
+    def _get_or_get_or_create_session(db, sid: int, stype: str) -> Optional[int]:
+        """Return an existing active session of the same type, or create one."""
+        # Reuse existing active session (prefer one with labels)
+        existing = db.execute(
+            """SELECT ls.id, COUNT(fl.id) AS label_count
+               FROM label_sessions ls
+               LEFT JOIN frame_labels fl ON fl.session_id = ls.id
+               WHERE ls.subject_id = ? AND ls.session_type = ? AND ls.status = 'active'
+               GROUP BY ls.id
+               ORDER BY label_count DESC, ls.id DESC
+               LIMIT 1""",
+            (sid, stype),
+        ).fetchone()
+        if existing:
+            return existing["id"]
         db.execute(
             "INSERT INTO label_sessions (subject_id, session_type) "
             "VALUES (?, ?)",
@@ -288,7 +357,7 @@ def labeling_select_page(subject: Optional[int] = None, mode: Optional[str] = No
                 session_type = _smart_mode(row["stage"] or "created")
 
             try:
-                sid = _create_session(db, subject, session_type)
+                sid = _get_or_create_session(db, subject, session_type)
                 if sid:
                     return RedirectResponse(
                         url=f"/labeling?session={sid}", status_code=302
@@ -299,10 +368,16 @@ def labeling_select_page(subject: Optional[int] = None, mode: Optional[str] = No
                 logger.exception("labeling-select: session creation failed for subject=%s type=%s: %s", subject, session_type, exc)
             return RedirectResponse(url="/", status_code=302)
 
-        # ── No subject param — fall back to most recent session ───
+        # ── No subject param — fall back to most recent active session ──
+        # Prefer sessions with labels (actual work), then most recent
         recent_session = db.execute(
-            "SELECT id FROM label_sessions "
-            "ORDER BY created_at DESC LIMIT 1"
+            """SELECT ls.id, COUNT(fl.id) AS label_count
+               FROM label_sessions ls
+               LEFT JOIN frame_labels fl ON fl.session_id = ls.id
+               WHERE ls.status = 'active'
+               GROUP BY ls.id
+               ORDER BY label_count DESC, ls.created_at DESC
+               LIMIT 1"""
         ).fetchone()
 
         if recent_session:
@@ -322,7 +397,7 @@ def labeling_select_page(subject: Optional[int] = None, mode: Optional[str] = No
         session_type = _smart_mode(first_subject["stage"] or "created")
 
         try:
-            sid = _create_session(db, subject_id, session_type)
+            sid = _get_or_create_session(db, subject_id, session_type)
             if sid:
                 return RedirectResponse(
                     url=f"/labeling?session={sid}", status_code=302

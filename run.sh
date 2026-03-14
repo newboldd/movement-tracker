@@ -6,6 +6,15 @@ set -e
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$PROJECT_DIR/.venv"
+PORT=8080
+
+# Kill any existing process using the port
+existing=$(lsof -ti :$PORT 2>/dev/null || true)
+if [ -n "$existing" ]; then
+    echo "Stopping existing server on port $PORT..."
+    echo "$existing" | xargs kill -9 2>/dev/null || true
+    sleep 1
+fi
 
 # Activate venv if it exists (created by setup.sh)
 if [ -d "$VENV_DIR" ]; then
@@ -14,8 +23,8 @@ fi
 
 echo "Starting DLC Labeler..."
 echo ""
-echo "Dashboard will open at http://localhost:8080"
+echo "Dashboard will open at http://localhost:$PORT"
 echo ""
 
 cd "$PROJECT_DIR"
-python -m uvicorn dlc_app.app:app --host 127.0.0.1 --port 8080 --reload
+python -m uvicorn dlc_app.app:app --host 127.0.0.1 --port $PORT --reload

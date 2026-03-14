@@ -52,6 +52,9 @@ class Settings:
         # Display preferences
         self.prefer_deidentified: bool = False  # show deidentified videos in labeling UI
 
+        # Diagnosis/Group settings (for dashboard organization)
+        self.diagnosis_groups: list[str] = ["Control", "MSA", "PD", "PSP"]
+
         # Remote training (optional)
         self.remote_host: str = ""       # e.g. user@192.168.1.50
         self.remote_python: str = ""     # e.g. /home/user/miniconda3/envs/dlc/bin/python
@@ -90,6 +93,51 @@ class Settings:
             ssh_key_path=self.remote_ssh_key,
             port=self.remote_ssh_port,
         )
+
+    @property
+    def local_gpu_available(self) -> bool:
+        """Check if GPU is available locally."""
+        try:
+            import torch
+            return torch.cuda.is_available()
+        except (ImportError, Exception):
+            return False
+
+    def get_available_gpus(self) -> list[dict]:
+        """Get list of available GPUs with details.
+
+        Returns list of dicts with keys: index, name, memory_mb
+        Empty list if GPU not available or detection fails.
+        """
+        gpus = []
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                return gpus
+
+            count = torch.cuda.device_count()
+            for i in range(count):
+                try:
+                    name = torch.cuda.get_device_name(i)
+                    # Get memory in MB
+                    memory_bytes = torch.cuda.get_device_properties(i).total_memory
+                    memory_mb = int(memory_bytes / (1024 * 1024))
+                    gpus.append({
+                        "index": i,
+                        "name": name,
+                        "memory_mb": memory_mb
+                    })
+                except Exception as e:
+                    logger.warning(f"Could not get details for GPU {i}: {e}")
+                    gpus.append({
+                        "index": i,
+                        "name": f"GPU {i}",
+                        "memory_mb": 0
+                    })
+        except (ImportError, Exception) as e:
+            logger.debug(f"Could not detect GPUs: {e}")
+
+        return gpus
 
     @property
     def data_path(self) -> Path:
@@ -140,6 +188,8 @@ class Settings:
             self.bodyparts = data["bodyparts"]
         if "calibrations" in data and isinstance(data["calibrations"], dict):
             self.calibrations = data["calibrations"]
+        if "diagnosis_groups" in data and isinstance(data["diagnosis_groups"], list):
+            self.diagnosis_groups = data["diagnosis_groups"]
         if "port" in data and data["port"] is not None:
             self.port = int(data["port"])
         if "remote_ssh_port" in data and data["remote_ssh_port"] is not None:
@@ -198,6 +248,7 @@ class Settings:
             "dlc_net_type": self.dlc_net_type,
             "calibration_dir": self.calibration_dir,
             "calibrations": self.calibrations,
+            "diagnosis_groups": self.diagnosis_groups,
             "host": self.host,
             "port": self.port,
             "remote_host": self.remote_host,

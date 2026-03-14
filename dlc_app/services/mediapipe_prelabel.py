@@ -9,7 +9,6 @@ triangulated thumb-index distances using stereo calibration.
 
 import logging
 import os
-import re
 
 import cv2
 import numpy as np
@@ -50,54 +49,119 @@ def _extract_hands(results, width, height):
     return hands, scores, labels
 
 
-def _select_hand(hands, labels, target_label, prev_wrist):
-    """Select the detected hand matching target_label.
+def _assign_hands_to_tracks(hands, scores, prev_wrists, tracks, conf, frame_idx):
+    """Assign detected hands to two persistent tracks using wrist proximity.
 
-    MediaPipe handedness is mirrored (selfie-camera convention):
-      actual left hand  -> MP reports 'Right'
-      actual right hand -> MP reports 'Left'
+    Maintains up to two hand tracks per camera half.  When multiple hands
+    are detected, each is assigned to the nearest existing track by wrist
+    distance.  New track slots are filled when a hand cannot be matched.
 
-    Returns index into hands list, or None if no match.
+    Args:
+        hands: list of (21,2) arrays from ``_extract_hands``.
+        scores: list of confidence scores (parallel to *hands*).
+        prev_wrists: list[2] of previous wrist positions (mutated in-place).
+        tracks: (n_frames, 2, 21, 2) array to write into.
+        conf: (n_frames, 2) array to write into.
+        frame_idx: current local frame index.
     """
-    if target_label:
-        matching = [i for i, lbl in enumerate(labels) if lbl == target_label]
-        if not matching:
-            return None  # wrong hand only — skip frame
-        if len(matching) == 1:
-            return matching[0]
-        # Multiple matches: pick closest to previous wrist
-        if prev_wrist is not None:
-            return matching[int(np.argmin([
-                np.linalg.norm(hands[i][WRIST] - prev_wrist) for i in matching
-            ]))]
-        return matching[0]
+    if not hands:
+        return
 
-    # No target label (shouldn't happen for named trials): first hand
-    if prev_wrist is not None and len(hands) > 1:
-        return int(np.argmin([
-            np.linalg.norm(hh[WRIST] - prev_wrist) for hh in hands
-        ]))
-    return 0
+    n_hands = min(len(hands), 2)
+    active = [i for i in range(2) if prev_wrists[i] is not None]
+
+    if not active:
+        # No tracks yet — seed in detection order
+        for i in range(n_hands):
+            tracks[frame_idx, i] = hands[i]
+            conf[frame_idx, i] = scores[i]
+            prev_wrists[i] = hands[i][WRIST].copy()
+        return
+
+    # Build (hand, track) pairs sorted by wrist distance
+    pairs = []
+    for hi in range(n_hands):
+        for ti in active:
+            d = float(np.linalg.norm(hands[hi][WRIST] - prev_wrists[ti]))
+            pairs.append((d, hi, ti))
+    pairs.sort()
+
+    assigned_hands = set()
+    assigned_tracks = set()
+    for _, hi, ti in pairs:
+        if hi in assigned_hands or ti in assigned_tracks:
+            continue
+        tracks[frame_idx, ti] = hands[hi]
+        conf[frame_idx, ti] = scores[hi]
+        prev_wrists[ti] = hands[hi][WRIST].copy()
+        assigned_hands.add(hi)
+        assigned_tracks.add(ti)
+
+    # Any remaining hands go to unused track slots
+    empty = [i for i in range(2) if i not in active and i not in assigned_tracks]
+    remaining = [i for i in range(n_hands) if i not in assigned_hands]
+    for ti, hi in zip(empty, remaining):
+        tracks[frame_idx, ti] = hands[hi]
+        conf[frame_idx, ti] = scores[hi]
+        prev_wrists[ti] = hands[hi][WRIST].copy()
 
 
-def _target_hand_label(video_name: str) -> str | None:
-    """Parse target hand from video name (e.g. 'MSA01_L1' -> 'Right').
+def _pick_tapping_track(tracks, video_name=""):
+    """Choose the track whose thumb–index distance oscillates more.
 
-    MediaPipe assumes selfie camera (mirrored):
-      video _L -> MediaPipe reports 'Right'
-      video _R -> MediaPipe reports 'Left'
+    Computes the standard deviation of the Euclidean distance between
+    thumb tip and index tip over the middle 50 % of frames for each
+    track.  The track with the higher std-dev is selected as the
+    tapping hand.
+
+    Args:
+        tracks: (n_frames, 2, 21, 2) array.
+        video_name: for logging.
+
+    Returns:
+        Track index (0 or 1).
     """
-    m = re.search(r'_([LR])\d', video_name)
-    if m:
-        return 'Right' if m.group(1) == 'L' else 'Left'
-    return None
+    n = tracks.shape[0]
+    start = n // 4
+    end = 3 * n // 4
+    if end <= start:
+        start, end = 0, n
+
+    oscs = []
+    counts = []
+    for t_idx in range(2):
+        thumb = tracks[start:end, t_idx, THUMB_TIP]
+        index = tracks[start:end, t_idx, INDEX_TIP]
+        valid = ~np.isnan(thumb[:, 0]) & ~np.isnan(index[:, 0])
+        n_valid = int(np.sum(valid))
+        counts.append(n_valid)
+        if n_valid < 10:
+            oscs.append(0.0)
+            continue
+        dist = np.linalg.norm(thumb[valid] - index[valid], axis=1)
+        oscs.append(float(np.std(dist)))
+
+    chosen = int(np.argmax(oscs))
+
+    # If only one track has data, use it regardless of oscillation
+    if counts[0] >= 10 and counts[1] < 10:
+        chosen = 0
+    elif counts[1] >= 10 and counts[0] < 10:
+        chosen = 1
+
+    logger.info(
+        f"{video_name}: track0 osc={oscs[0]:.1f} ({counts[0]} pts), "
+        f"track1 osc={oscs[1]:.1f} ({counts[1]} pts) → selected track {chosen}"
+    )
+    return chosen
 
 
 def run_mediapipe(subject_name: str, progress_callback=None) -> str:
     """Run MediaPipe on all stereo videos for a subject.
 
     Extracts all 21 hand joint positions from both camera halves.
-    Tracks hand identity via wrist proximity across frames.
+    Tracks up to two hands per camera using wrist proximity, then
+    selects the tapping hand based on thumb-index oscillation.
     Computes 3D triangulated thumb-index distances when calibration available.
 
     Args:
@@ -132,8 +196,6 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
         start_frame = trial["start_frame"]
         expected_frame_count = trial["frame_count"]
 
-        target_label = _target_hand_label(video_name)
-
         # Get actual frame count from video (from cache if available)
         # to handle frame count differences between machines
         try:
@@ -144,7 +206,6 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
             actual_frame_count = expected_frame_count
 
         # If video has fewer frames than expected, assume missing frames are at START
-        # (e.g., video was trimmed or cv2 counts frames differently on this machine)
         frame_offset = max(0, expected_frame_count - actual_frame_count)
         if frame_offset > 0:
             logger.info(
@@ -164,7 +225,6 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
         # Create separate MediaPipe instances per camera half
-        # Always detect 2 hands so we can filter by handedness label
         mp_hands = mp_lib.solutions.hands
         det_L = mp_hands.Hands(
             static_image_mode=False, max_num_hands=2,
@@ -175,8 +235,13 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
             min_detection_confidence=0.5, min_tracking_confidence=0.5,
         )
 
-        prev_wrist_L = None
-        prev_wrist_R = None
+        # Track up to 2 hands per camera, then pick the tapping hand
+        os_tracks = np.full((actual_frame_count, 2, N_JOINTS, 2), np.nan)
+        od_tracks = np.full((actual_frame_count, 2, N_JOINTS, 2), np.nan)
+        os_conf = np.full((actual_frame_count, 2), np.nan)
+        od_conf = np.full((actual_frame_count, 2), np.nan)
+        prev_os = [None, None]
+        prev_od = [None, None]
 
         for local_frame in range(actual_frame_count):
             ret, frame = cap.read()
@@ -188,33 +253,17 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
             frame_L = frame[:, :midline, :]
             frame_R = frame[:, midline:, :]
 
-            # Apply frame offset: if video has fewer frames than expected, shift results forward
-            global_frame = start_frame + frame_offset + local_frame
-
             # Process left camera (OS)
             rgb_L = cv2.cvtColor(frame_L, cv2.COLOR_BGR2RGB)
             res_L = det_L.process(rgb_L)
-            hands_L, scores_L, labels_L = _extract_hands(res_L, midline, h)
+            hands_L, scores_L, _ = _extract_hands(res_L, midline, h)
+            _assign_hands_to_tracks(hands_L, scores_L, prev_os, os_tracks, os_conf, local_frame)
 
             # Process right camera (OD)
             rgb_R = cv2.cvtColor(frame_R, cv2.COLOR_BGR2RGB)
             res_R = det_R.process(rgb_R)
-            hands_R, scores_R, labels_R = _extract_hands(res_R, full_w - midline, h)
-
-            # Select target hand by handedness label, skip if wrong hand
-            if hands_L:
-                idx = _select_hand(hands_L, labels_L, target_label, prev_wrist_L)
-                if idx is not None:
-                    OS_landmarks[global_frame] = hands_L[idx]
-                    confidence_OS[global_frame] = scores_L[idx]
-                    prev_wrist_L = hands_L[idx][WRIST].copy()
-
-            if hands_R:
-                idx = _select_hand(hands_R, labels_R, target_label, prev_wrist_R)
-                if idx is not None:
-                    OD_landmarks[global_frame] = hands_R[idx]
-                    confidence_OD[global_frame] = scores_R[idx]
-                    prev_wrist_R = hands_R[idx][WRIST].copy()
+            hands_R, scores_R, _ = _extract_hands(res_R, full_w - midline, h)
+            _assign_hands_to_tracks(hands_R, scores_R, prev_od, od_tracks, od_conf, local_frame)
 
             frames_processed += 1
             if progress_callback and frames_processed % 50 == 0:
@@ -224,6 +273,19 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
         cap.release()
         det_L.close()
         det_R.close()
+
+        # Select the tapping hand for each camera based on oscillation
+        os_idx = _pick_tapping_track(os_tracks, f"{video_name}/OS")
+        od_idx = _pick_tapping_track(od_tracks, f"{video_name}/OD")
+
+        # Copy selected tracks into the global output arrays
+        for local_frame in range(actual_frame_count):
+            global_frame = start_frame + frame_offset + local_frame
+            if global_frame < total_frames:
+                OS_landmarks[global_frame] = os_tracks[local_frame, os_idx]
+                OD_landmarks[global_frame] = od_tracks[local_frame, od_idx]
+                confidence_OS[global_frame] = os_conf[local_frame, os_idx]
+                confidence_OD[global_frame] = od_conf[local_frame, od_idx]
 
     # Compute 3D distances if calibration is available
     distances = np.full(total_frames, np.nan)
