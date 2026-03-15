@@ -54,6 +54,8 @@ const labeler = (() => {
     let selectedStage = 'auto';       // 'auto' or specific stage name
 
     const STAGE_CHAIN = ['corrections', 'refine', 'dlc', 'labels', 'mp'];
+    // Events tab: whole-file priority (no frame-level merge), mediapipe before labels
+    const EVENTS_STAGE_CHAIN = ['corrections', 'refine', 'dlc', 'mp', 'labels'];
 
     // Subject navigation
     let allSubjects = [];
@@ -143,17 +145,26 @@ const labeler = (() => {
 
     // Events mode state
     let isEvents = false;
-    // (activeEventType removed — 1/2/3/4 keys directly place each event type)
-    let eventMarkers = { open: [], peak: [], close: [] };
-    // Tracks which frames are persisted to CSV (filled circles); rest are pending (outline circles)
-    let savedEventFrames = { open: new Set(), peak: new Set(), close: new Set() };
-    let eventVisibility = { open: true, peak: true, close: true };
-    const EVENT_COLORS = {
-        open:  '#00cc44',
-        peak:  '#ffcc00',
-        close: '#ff4444',
-    };
-    const EVENT_TYPES = ['open', 'peak', 'close'];
+    // Dynamic event types (loaded from settings via session info)
+    let EVENT_TYPES = ['open', 'peak', 'close', 'pause'];
+    let EVENT_COLORS = { open: '#00cc44', peak: '#ffcc00', close: '#ff4444', pause: '#cc66ff' };
+    let EVENT_SHORTCUTS = { open: '1', peak: '2', close: '3', pause: '4' };
+    const AUTO_DETECT_TYPES = ['open', 'peak', 'close']; // always fixed
+    let eventMarkers = {};
+    let savedEventFrames = {};
+    let eventVisibility = {};
+
+    function _initEventState() {
+        eventMarkers = {};
+        savedEventFrames = {};
+        eventVisibility = {};
+        EVENT_TYPES.forEach(t => {
+            eventMarkers[t] = [];
+            savedEventFrames[t] = new Set();
+            eventVisibility[t] = true;
+        });
+    }
+    _initEventState();
 
     // Per-trial event filtering
     let currentEventTrialIdx = 0;
@@ -182,36 +193,40 @@ const labeler = (() => {
     }
 
     function restorePreferences() {
+        // Only restore speed/stage when switching subjects within the labeling screen.
+        // Fresh navigation (from dashboard etc.) uses defaults: 1x speed, 'auto' label source.
+        const isSubjectSwitch = sessionStorage.getItem('dlc_subjectSwitch');
+        if (isSubjectSwitch) {
+            sessionStorage.removeItem('dlc_subjectSwitch');
+        }
+
         try {
             const saved = localStorage.getItem('dlc_labeler_prefs');
             if (saved) {
                 const prefs = JSON.parse(saved);
-                if (prefs.playbackRate) {
+                if (isSubjectSwitch && prefs.playbackRate) {
                     playbackRate = prefs.playbackRate;
                     const playbackSlider = document.getElementById('playbackRate');
                     if (playbackSlider) {
-                        // Find the index of this speed in the presets array
                         const index = SPEED_PRESETS.indexOf(playbackRate);
                         if (index !== -1) {
                             playbackSlider.value = index;
                         }
-                        // Update display label
                         const speedDisplay = document.getElementById('playbackRateDisplay');
                         if (speedDisplay) {
                             speedDisplay.textContent = `${playbackRate}x`;
                         }
                     }
                 }
-                if (prefs.selectedStage) {
+                if (isSubjectSwitch && prefs.selectedStage) {
                     selectedStage = prefs.selectedStage;
                 }
                 if (prefs.eventVisibility) {
                     eventVisibility = Object.assign({}, eventVisibility, prefs.eventVisibility);
-                    // Sync checkboxes
+                    // Sync dynamic checkboxes
                     EVENT_TYPES.forEach(t => {
-                        const id = 'show' + t[0].toUpperCase() + t.slice(1);
-                        const cb = document.getElementById(id);
-                        if (cb) cb.checked = eventVisibility[t];
+                        const cb = document.getElementById(`showEvent_${t}`);
+                        if (cb) cb.checked = eventVisibility[t] !== false;
                     });
                 }
             }
@@ -295,9 +310,19 @@ const labeler = (() => {
             trials = sessionInfo.trials;
             totalFrames = sessionInfo.total_frames;
 
-            // Get dynamic bodyparts and camera names from session info
+            // Get dynamic bodyparts, camera names, and event types from session info
             if (sessionInfo.bodyparts) bodyparts = sessionInfo.bodyparts;
             if (sessionInfo.camera_names) cameraNames = sessionInfo.camera_names;
+            if (sessionInfo.event_types && sessionInfo.event_types.length > 0) {
+                EVENT_TYPES = sessionInfo.event_types.map(et => et.name);
+                EVENT_COLORS = {};
+                EVENT_SHORTCUTS = {};
+                sessionInfo.event_types.forEach(et => {
+                    EVENT_COLORS[et.name] = et.color;
+                    EVENT_SHORTCUTS[et.name] = et.shortcut;
+                });
+                _initEventState();
+            }
             if (sessionInfo.committed_frame_count) committedFrameCount = sessionInfo.committed_frame_count;
             currentSide = cameraNames[0] || 'OS';
 
@@ -385,10 +410,8 @@ const labeler = (() => {
                     stageFiles = {};
                 }
 
-                // Default to corrections stage if available
-                if (availableStages.includes('corrections')) {
-                    selectedStage = 'corrections';
-                }
+                // selectedStage defaults to 'auto'; restorePreferences() may override
+                // it for intra-labeling subject switches.
 
                 // Load all stage data and merge distances
                 await loadAllStages();
@@ -400,6 +423,7 @@ const labeler = (() => {
                 if (isEvents) {
                     const timelineContainer = document.querySelector('.timeline-container');
                     if (timelineContainer) timelineContainer.style.display = 'none';
+                    buildEventsPanel(); // populate dynamic buttons/toggles
                     const eventsPanel = document.getElementById('eventsPanel');
                     if (eventsPanel) eventsPanel.style.display = 'block';
                     // Load saved events
@@ -815,8 +839,8 @@ const labeler = (() => {
             select.innerHTML = '';
         }
 
-        // Add available CSV-based stages
-        for (const stage of STAGE_CHAIN) {
+        // Add available stages (events mode uses its own priority order)
+        for (const stage of (isEvents ? EVENTS_STAGE_CHAIN : STAGE_CHAIN)) {
             if (!availableStages.includes(stage)) continue;
             const files = stageFiles[stage];
             const label = files
@@ -909,38 +933,62 @@ const labeler = (() => {
 
     function computeMergedDistances() {
         /** Build a single merged distance array from the selected stage or
-         *  priority chain.  Gaps in the selected stage stay as gaps. */
+         *  priority chain.
+         *
+         *  Events mode (auto): pick the first whole stage that has distances
+         *  in priority order — no frame-level gap-filling across files.
+         *
+         *  Other modes / explicit stage: frame-level priority merge so labels
+         *  from different stages can complement each other. */
         distances = null;
 
-        const stagesToUse = (selectedStage !== 'auto')
-            ? [selectedStage]
-            : STAGE_CHAIN.filter(s => availableStages.includes(s));
-
-        // Find total frames from any stage that has distances
-        let nFrames = 0;
-        for (const s of stagesToUse) {
-            const sd = stageData[s];
-            if (sd && sd.distances) {
-                nFrames = Math.max(nFrames, sd.distances.length);
+        if (selectedStage !== 'auto') {
+            // Explicit stage — use only that stage's distances
+            const sd = stageData[selectedStage];
+            if (sd && sd.distances && sd.distances.some(d => d !== null)) {
+                distances = sd.distances;
             }
-        }
-        if (nFrames === 0) return;
-
-        const merged = new Array(nFrames).fill(null);
-        for (let f = 0; f < nFrames; f++) {
-            for (const s of stagesToUse) {
+        } else if (isEvents) {
+            // Events auto: whole-file priority — first stage with distances wins
+            const chain = EVENTS_STAGE_CHAIN.filter(s => availableStages.includes(s));
+            for (const s of chain) {
                 const sd = stageData[s];
-                if (!sd || !sd.distances) continue;
-                const d = sd.distances[f];
-                if (d !== null && d !== undefined) {
-                    merged[f] = d;
+                if (sd && sd.distances && sd.distances.some(d => d !== null)) {
+                    distances = sd.distances;
                     break;
                 }
             }
+        } else {
+            // Non-events auto: frame-level merge across priority chain
+            const stagesToUse = STAGE_CHAIN.filter(s => availableStages.includes(s));
+
+            let nFrames = 0;
+            for (const s of stagesToUse) {
+                const sd = stageData[s];
+                if (sd && sd.distances) {
+                    nFrames = Math.max(nFrames, sd.distances.length);
+                }
+            }
+            if (nFrames === 0) return;
+
+            const merged = new Array(nFrames).fill(null);
+            for (let f = 0; f < nFrames; f++) {
+                for (const s of stagesToUse) {
+                    const sd = stageData[s];
+                    if (!sd || !sd.distances) continue;
+                    const d = sd.distances[f];
+                    if (d !== null && d !== undefined) {
+                        merged[f] = d;
+                        break;
+                    }
+                }
+            }
+            if (merged.some(d => d !== null)) {
+                distances = merged;
+            }
         }
 
-        if (merged.some(d => d !== null)) {
-            distances = merged;
+        if (distances) {
             const ymaxContainer = document.getElementById('ymaxContainer');
             if (ymaxContainer) ymaxContainer.style.display = 'flex';
             if (!isFinal) {
@@ -1549,7 +1597,9 @@ const labeler = (() => {
 
     // ── Undo / Redo ──────────────────────────────────
     function snapshotEventMarkers() {
-        return { open: [...eventMarkers.open], peak: [...eventMarkers.peak], close: [...eventMarkers.close] };
+        const snap = {};
+        EVENT_TYPES.forEach(t => snap[t] = [...(eventMarkers[t] || [])]);
+        return snap;
     }
 
     function pushUndo(key, bp, prevCoords) {
@@ -1569,7 +1619,7 @@ const labeler = (() => {
         if (action.type === 'events') {
             const currentSnapshot = snapshotEventMarkers();
             toStack.push({ type: 'events', prev: currentSnapshot, frame: action.frame });
-            for (const t of EVENT_TYPES) eventMarkers[t] = [...action.prev[t]];
+            for (const t of EVENT_TYPES) eventMarkers[t] = [...(action.prev[t] || [])];
             updateEventCounts();
             renderDistanceTrace();
             goToFrame(action.frame);
@@ -2583,16 +2633,16 @@ const labeler = (() => {
                 case ']':
                     if (isEvents) { e.preventDefault(); shiftEvent(1); }
                     break;
-                case '1':
-                    if (isEvents) { e.preventDefault(); placeEventType('open'); }
-                    break;
-                case '2':
-                    if (isEvents) { e.preventDefault(); placeEventType('peak'); }
-                    break;
-                case '3':
-                    if (isEvents) { e.preventDefault(); placeEventType('close'); }
-                    break;
                 default:
+                    // Events mode: dynamic shortcut keys for placing events
+                    if (isEvents) {
+                        const evtType = EVENT_TYPES.find(t => EVENT_SHORTCUTS[t] === e.key);
+                        if (evtType) {
+                            e.preventDefault();
+                            placeEventType(evtType);
+                            break;
+                        }
+                    }
                     if (isFinal && !isEvents) break; // Read-only: no delete shortcuts
                     // D/F: delete bodypart by letter
                     if (e.key in DELETE_KEYS) {
@@ -2647,7 +2697,7 @@ const labeler = (() => {
 
     function updateLabelCount() {
         if (isEvents) {
-            const total = EVENT_TYPES.reduce((s, t) => s + eventMarkers[t].length, 0);
+            const total = EVENT_TYPES.reduce((s, t) => s + (eventMarkers[t] || []).length, 0);
             document.getElementById('labelCount').innerHTML =
                 `Events: <strong>${total}</strong>`;
             return;
@@ -3443,6 +3493,8 @@ const labeler = (() => {
             // Save current frame/zoom and preferences before switching
             saveNavState();
             savePreferences();
+            // Mark this as an intra-labeling subject switch so preferences are restored
+            sessionStorage.setItem('dlc_subjectSwitch', '1');
             // Update results nav link
             const resultsLink = document.getElementById('resultsLink');
             if (resultsLink) resultsLink.href = `/results?subject=${subjectId}&from=labeling`;
@@ -3582,6 +3634,81 @@ const labeler = (() => {
         return false;
     }
 
+    // ── Events panel builder (dynamic from EVENT_TYPES) ────────
+
+    function buildEventsPanel() {
+        // Populate event type buttons
+        const btnContainer = document.getElementById('eventTypeButtons');
+        if (btnContainer) {
+            btnContainer.innerHTML = '';
+            // 2 columns for sidebar width; 1 column if only 1 type
+            const cols = EVENT_TYPES.length === 1 ? 1 : 2;
+            btnContainer.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+            EVENT_TYPES.forEach(t => {
+                const displayName = t[0].toUpperCase() + t.slice(1);
+                const shortcut = EVENT_SHORTCUTS[t] || '';
+                const color = EVENT_COLORS[t] || '#888';
+                const btn = document.createElement('button');
+                btn.className = 'btn btn-sm';
+                btn.style.color = color;
+                btn.style.borderColor = color;
+                btn.title = `Place ${displayName} at current frame (${shortcut})`;
+                btn.textContent = `${shortcut} ${displayName}`;
+                btn.onclick = () => placeEventType(t);
+                btnContainer.appendChild(btn);
+            });
+        }
+
+        // Populate visibility toggles
+        const toggleContainer = document.getElementById('eventVisToggles');
+        if (toggleContainer) {
+            toggleContainer.innerHTML = '';
+            EVENT_TYPES.forEach(t => {
+                const displayName = t[0].toUpperCase() + t.slice(1);
+                const color = EVENT_COLORS[t] || '#888';
+                const label = document.createElement('label');
+                label.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.id = `showEvent_${t}`;
+                cb.checked = eventVisibility[t] !== false;
+                cb.onchange = () => setEventVisibility(t, cb.checked);
+                label.appendChild(cb);
+                const dot = document.createElement('span');
+                dot.style.color = color;
+                dot.textContent = '\u25cf';
+                label.appendChild(dot);
+                label.appendChild(document.createTextNode(` ${displayName}`));
+                toggleContainer.appendChild(label);
+            });
+        }
+
+        // Populate shortcuts list (events mode additions)
+        const shortcutList = document.getElementById('shortcutList');
+        if (shortcutList) {
+            // Remove any previously added event shortcuts
+            shortcutList.querySelectorAll('.event-shortcut').forEach(el => el.remove());
+            EVENT_TYPES.forEach(t => {
+                const displayName = t[0].toUpperCase() + t.slice(1);
+                const shortcut = EVENT_SHORTCUTS[t] || '';
+                if (shortcut) {
+                    const div = document.createElement('div');
+                    div.className = 'event-shortcut';
+                    div.innerHTML = `<kbd>${shortcut}</kbd> Place ${displayName}`;
+                    shortcutList.appendChild(div);
+                }
+            });
+            // Add standard event shortcuts
+            ['X Delete event', '[ Shift left', '] Shift right'].forEach(text => {
+                const div = document.createElement('div');
+                div.className = 'event-shortcut';
+                const [key, ...desc] = text.split(' ');
+                div.innerHTML = `<kbd>${key}</kbd> ${desc.join(' ')}`;
+                shortcutList.appendChild(div);
+            });
+        }
+    }
+
     // ── Events mode functions ──────────────────────────
 
     async function loadEvents() {
@@ -3600,12 +3727,11 @@ const labeler = (() => {
             updateEventCounts();
             renderDistanceTrace();
 
-            // Auto-compute metrics for all trials in background (fire-and-forget)
+            // Reset metrics cache — metrics are computed on demand when
+            // the auto-detect modal opens (and cached to disk on the server,
+            // so subsequent loads are instant).
             metricsCache = {};
             metricsLoading.clear();
-            for (let i = 0; i < trials.length; i++) {
-                computeMetricsForTrial(i);
-            }
         } catch (e) {
             console.log('Could not load events:', e);
         }
@@ -3800,10 +3926,25 @@ const labeler = (() => {
                 }
             }, 300);
         } else {
-            // Not cached and not loading — metrics unavailable
+            // Not cached and not loading — trigger computation now
             if (container) container.style.display = 'none';
-            if (loading) loading.style.display = 'none';
-            if (unavailable) unavailable.style.display = 'block';
+            if (unavailable) unavailable.style.display = 'none';
+            if (loading) loading.style.display = 'block';
+            computeMetricsForTrial(currentEventTrialIdx);
+            // Poll until done
+            const trialToWatch2 = currentEventTrialIdx;
+            const poll2 = setInterval(() => {
+                if (metricsCache[trialToWatch2]) {
+                    clearInterval(poll2);
+                    if (currentEventTrialIdx === trialToWatch2) showMetricPlotsForCurrentTrial();
+                } else if (!metricsLoading.has(trialToWatch2)) {
+                    clearInterval(poll2);
+                    if (currentEventTrialIdx === trialToWatch2) {
+                        if (loading) loading.style.display = 'none';
+                        if (unavailable) unavailable.style.display = 'block';
+                    }
+                }
+            }, 300);
         }
     }
 
@@ -4075,7 +4216,7 @@ const labeler = (() => {
             if (cached) showMetricPlotsForCurrentTrial();
 
             const trialEvents = eventsInTrial(currentEventTrialIdx);
-            const total = EVENT_TYPES.reduce((s, t) => s + trialEvents[t].length, 0);
+            const total = EVENT_TYPES.reduce((s, t) => s + (trialEvents[t] || []).length, 0);
             updateLabelInfo(`Detected ${total} events in ${trial.trial_name} — Save to keep`);
         } catch (e) {
             alert('Detection failed: ' + e.message);
@@ -4105,11 +4246,12 @@ const labeler = (() => {
     function updateEventCounts() {
         const el = document.getElementById('eventCounts');
         if (!el) return;
-        const names = { open: 'Open', peak: 'Peak', close: 'Close' };
         const trialEvents = eventsInTrial(currentEventTrialIdx);
-        el.innerHTML = EVENT_TYPES.map(t =>
-            `<span style="color:${EVENT_COLORS[t]};">●</span> ${names[t]}: <strong>${trialEvents[t].length}</strong>`
-        ).join('<br>');
+        el.innerHTML = EVENT_TYPES.map(t => {
+            const displayName = t[0].toUpperCase() + t.slice(1);
+            const count = (trialEvents[t] || []).length;
+            return `<span style="color:${EVENT_COLORS[t]};">●</span> ${displayName}: <strong>${count}</strong>`;
+        }).join('<br>');
     }
 
     // ── Public API ────────────────────────────────────

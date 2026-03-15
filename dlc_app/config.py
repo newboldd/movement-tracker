@@ -55,6 +55,15 @@ class Settings:
         # Diagnosis/Group settings (for dashboard organization)
         self.diagnosis_groups: list[str] = ["Control", "MSA", "PD", "PSP"]
 
+        # Event types for labeling (name, color, shortcut key)
+        # open/peak/close are "special" — auto-detection targets them specifically
+        self.event_types: list[dict] = [
+            {"name": "open",  "color": "#00cc44", "shortcut": "1"},
+            {"name": "peak",  "color": "#ffcc00", "shortcut": "2"},
+            {"name": "close", "color": "#ff4444", "shortcut": "3"},
+            {"name": "pause", "color": "#cc66ff", "shortcut": "4"},
+        ]
+
         # Remote training (optional)
         self.remote_host: str = ""       # e.g. user@192.168.1.50
         self.remote_python: str = ""     # e.g. /home/user/miniconda3/envs/dlc/bin/python
@@ -190,6 +199,8 @@ class Settings:
             self.calibrations = data["calibrations"]
         if "diagnosis_groups" in data and isinstance(data["diagnosis_groups"], list):
             self.diagnosis_groups = data["diagnosis_groups"]
+        if "event_types" in data and isinstance(data["event_types"], list):
+            self.event_types = data["event_types"]
         if "port" in data and data["port"] is not None:
             self.port = int(data["port"])
         if "remote_ssh_port" in data and data["remote_ssh_port"] is not None:
@@ -257,6 +268,7 @@ class Settings:
             "remote_ssh_key": self.remote_ssh_key,
             "remote_ssh_port": self.remote_ssh_port,
             "prefer_deidentified": self.prefer_deidentified,
+            "event_types": self.event_types,
         }
 
     def save(self):

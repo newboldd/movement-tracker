@@ -121,6 +121,50 @@
         }
         .calib-status.valid { background: var(--green); }
         .calib-status.invalid { background: var(--red); }
+        .event-type-row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+        .event-type-row input.et-name {
+            width: 140px;
+            padding: 6px 10px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            color: var(--text);
+            font-size: 13px;
+        }
+        .event-type-row input.et-color {
+            width: 40px;
+            height: 32px;
+            padding: 2px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--bg);
+            cursor: pointer;
+        }
+        .event-type-row input.et-shortcut {
+            width: 50px;
+            padding: 6px 10px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            color: var(--text);
+            font-size: 13px;
+            text-align: center;
+        }
+        .event-type-row .et-label {
+            font-size: 11px;
+            color: var(--text-muted);
+            min-width: 50px;
+        }
+        .event-type-row .et-special {
+            font-size: 10px;
+            color: var(--accent);
+            opacity: 0.7;
+        }
     </style>
 </head>
 <body>
@@ -248,6 +292,14 @@
                 <label style="font-size:13px;color:var(--text-muted);margin-bottom:8px;display:block;">Configure diagnosis groups for organizing subjects on the dashboard:</label>
                 <div id="diagnosisGroupsInput" class="tag-input"></div>
                 <div class="help" style="margin-top:6px;">Enter comma-separated diagnosis/group names. Subjects are organized into columns on the dashboard by their assigned diagnosis.</div>
+            </div>
+
+            <!-- Event Types -->
+            <div class="form-section">
+                <h3>Event Types</h3>
+                <div class="help" style="margin-bottom:8px;">Configure event types for labeling. <strong>open</strong>, <strong>peak</strong>, and <strong>close</strong> are used by auto-detection; additional types are manual-only.</div>
+                <div id="eventTypeRows"></div>
+                <button class="btn btn-sm" onclick="addEventTypeRow('', '#ffffff', '')" style="margin-top:8px;">+ Add Event Type</button>
             </div>
 
             <!-- Display -->

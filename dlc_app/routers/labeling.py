@@ -29,7 +29,12 @@ from ..services.dlc_predictions import (
     get_stage_csv_files,
     has_stage_data,
 )
-from ..services.metrics import compute_trial_metrics, detect_strategy_g
+from ..services.metrics import (
+    compute_trial_metrics,
+    detect_strategy_g,
+    get_cached_trial_metrics,
+    save_trial_metrics_to_cache,
+)
 
 router = APIRouter(prefix="/api/labeling", tags=["labeling"])
 
@@ -159,6 +164,7 @@ def get_session_info(session_id: int) -> dict:
         "bodyparts": settings.bodyparts,
         "camera_names": settings.camera_names,
         "committed_frame_count": committed_frame_count,
+        "event_types": settings.event_types,
     }
 
 
@@ -735,7 +741,13 @@ def commit_session(
     return result
 
 
-EVENT_TYPES = ("open", "peak", "close")
+AUTO_DETECT_TYPES = ("open", "peak", "close")  # used by auto-detection
+
+
+def _get_event_type_names() -> list[str]:
+    """Get configured event type names from settings."""
+    settings = get_settings()
+    return [et["name"] for et in settings.event_types]
 
 
 def _events_csv_path(subject_name: str) -> Path:
@@ -744,7 +756,8 @@ def _events_csv_path(subject_name: str) -> Path:
 
 
 def _read_events_csv(subject_name: str) -> dict:
-    result = {t: [] for t in EVENT_TYPES}
+    configured = _get_event_type_names()
+    result = {t: [] for t in configured}
     path = _events_csv_path(subject_name)
     if not path.exists():
         return result
@@ -753,7 +766,10 @@ def _read_events_csv(subject_name: str) -> dict:
         for row in reader:
             et = row.get("event_type", "").strip()
             fn = row.get("frame_num", "").strip()
-            if et in result and fn.isdigit():
+            if fn.isdigit():
+                # Accept any type found in CSV (even if not currently configured)
+                if et not in result:
+                    result[et] = []
                 result[et].append(int(fn))
     return result
 
@@ -762,10 +778,13 @@ def _write_events_csv(subject_name: str, events: dict) -> int:
     path = _events_csv_path(subject_name)
     path.parent.mkdir(parents=True, exist_ok=True)
     count = 0
+    # Write all types that have data, in configured order first, then extras
+    configured = _get_event_type_names()
+    all_types = list(configured) + [t for t in events if t not in configured]
     with open(path, "w", newline="") as f:
         writer = _csv.writer(f)
         writer.writerow(["event_type", "frame_num"])
-        for et in EVENT_TYPES:
+        for et in all_types:
             for fn in sorted(events.get(et, [])):
                 writer.writerow([et, fn])
                 count += 1
@@ -819,15 +838,16 @@ def save_events(session_id: int, body: dict = Body(...)) -> dict:
     """Update events for provided types only; preserve other types from existing CSV."""
     subject_name = _get_subject_name_for_session(session_id)
     existing = _read_events_csv(subject_name)
-    for et in EVENT_TYPES:
-        if et in body:
+    # Accept any types from the body (frontend sends only visible types)
+    for et in body:
+        if isinstance(body[et], list):
             existing[et] = [int(f) for f in body[et]]
     count = _write_events_csv(subject_name, existing)
 
-    # Update subject stage based on event completeness
-    types_with_data = [et for et in EVENT_TYPES if len(existing.get(et, [])) > 0]
+    # Update subject stage based on auto-detect type completeness (open/peak/close)
+    types_with_data = [et for et in AUTO_DETECT_TYPES if len(existing.get(et, [])) > 0]
     if types_with_data:
-        new_stage = "events_complete" if len(types_with_data) == len(EVENT_TYPES) else "events_partial"
+        new_stage = "events_complete" if len(types_with_data) == len(AUTO_DETECT_TYPES) else "events_partial"
         with get_db_ctx() as db:
             session = db.execute(
                 "SELECT subject_id FROM label_sessions WHERE id = ?", (session_id,)
@@ -868,8 +888,8 @@ def detect_events(session_id: int, body: dict = Body(default={})) -> dict:
 
     subject_name = subj["name"]
 
-    # Load distance data — prefer corrections stage (triangulated from full manual corrections,
-    # clean data with no tracking artifacts). Fall back to mediapipe if corrections unavailable.
+    # Load distance data — whole file from the first available source in
+    # priority order.  No frame-level gap-filling across sources.
     dist_raw = None
     for stage in ("corrections", "refine", "dlc"):
         stage_data = get_dlc_predictions_for_stage(subject_name, stage)
@@ -881,9 +901,21 @@ def detect_events(session_id: int, body: dict = Body(default={})) -> dict:
                 break
 
     if not dist_raw:
-        # Fallback: mediapipe (full coverage but may have tracking outliers)
-        data = get_mediapipe_for_session(subject_name)
-        dist_raw = data.get("distances") if data else None
+        # Mediapipe (full coverage but may have tracking outliers)
+        mp_data = get_mediapipe_for_session(subject_name)
+        if mp_data and mp_data.get("distances"):
+            dist_raw = mp_data["distances"]
+
+    if not dist_raw:
+        # Last resort: committed manual labels
+        with get_db_ctx() as db2:
+            subj_row = db2.execute(
+                "SELECT * FROM subjects WHERE name = ?", (subject_name,)
+            ).fetchone()
+        if subj_row:
+            labels_data = _committed_labels_to_array(subj_row)
+            if labels_data and labels_data.get("distances"):
+                dist_raw = labels_data["distances"]
 
     if not dist_raw:
         raise HTTPException(400, "No distance data available for auto-detection")
@@ -1170,20 +1202,38 @@ def detect_events(session_id: int, body: dict = Body(default={})) -> dict:
 def compute_metrics(session_id: int, body: dict = Body(...)) -> dict:
     """Compute reversal and SSD motion metrics for a single trial.
 
-    Request body: { "trial_index": int }
-    Returns: { distance, reversal, motion_ssd, per_cam_ssd, n_frames, trial_name }
+    Request body: { "trial_index": int, "force": bool (optional) }
+    Returns: { distance, reversal, motion_ssd, per_cam_ssd, n_frames, trial_name, cached: bool }
+
+    Results are cached to disk per subject. Subsequent requests for the same
+    trial return instantly from cache unless source data has changed.
     """
     subject_name = _get_subject_name_for_session(session_id)
     trial_index = int(body.get("trial_index", 0))
+    force = bool(body.get("force", False))
     trials = build_trial_map(subject_name)
     if trial_index < 0 or trial_index >= len(trials):
         raise HTTPException(400, f"Trial index {trial_index} out of range (0-{len(trials)-1})")
+
+    trial_name = trials[trial_index]["trial_name"]
+
+    # Check disk cache first (unless force recompute)
+    if not force:
+        cached = get_cached_trial_metrics(subject_name, trial_name)
+        if cached is not None:
+            cached["trial_name"] = trial_name
+            cached["cached"] = True
+            return cached
 
     settings = get_settings()
     cam_names = settings.camera_names
 
     result = compute_trial_metrics(subject_name, trials[trial_index], cam_names)
-    result["trial_name"] = trials[trial_index]["trial_name"]
+    result["trial_name"] = trial_name
+
+    # Persist to disk cache
+    save_trial_metrics_to_cache(subject_name, trial_name, result)
+    result["cached"] = False
     return result
 
 
@@ -1217,7 +1267,7 @@ def detect_events_v2(session_id: int, body: dict = Body(...)) -> dict:
 
     min_event_gap = int(params.get("min_event_gap", 10))
 
-    # Load distance data for this trial
+    # Load distance data — whole file from the first available source
     dist_raw = None
     for stage in ("corrections", "refine", "dlc"):
         stage_data = get_dlc_predictions_for_stage(subject_name, stage)
@@ -1229,8 +1279,19 @@ def detect_events_v2(session_id: int, body: dict = Body(...)) -> dict:
                 break
 
     if not dist_raw:
-        data = get_mediapipe_for_session(subject_name)
-        dist_raw = data.get("distances") if data else None
+        mp_data = get_mediapipe_for_session(subject_name)
+        if mp_data and mp_data.get("distances"):
+            dist_raw = mp_data["distances"]
+
+    if not dist_raw:
+        with get_db_ctx() as db2:
+            subj_row = db2.execute(
+                "SELECT * FROM subjects WHERE name = ?", (subject_name,)
+            ).fetchone()
+        if subj_row:
+            labels_data = _committed_labels_to_array(subj_row)
+            if labels_data and labels_data.get("distances"):
+                dist_raw = labels_data["distances"]
 
     if not dist_raw:
         raise HTTPException(400, "No distance data available for auto-detection")
@@ -1257,7 +1318,7 @@ def detect_events_v2(session_id: int, body: dict = Body(...)) -> dict:
     def _trial_events(frames):
         return [f for f in frames if sf <= f <= ef]
 
-    for etype in EVENT_TYPES:
+    for etype in AUTO_DETECT_TYPES:
         trial_saved = _trial_events(saved_events.get(etype, []))
         detected[etype] = _merge_with_saved(detected[etype], trial_saved, min_event_gap)
 
@@ -1265,7 +1326,7 @@ def detect_events_v2(session_id: int, body: dict = Body(...)) -> dict:
     edge_margin = 2
     valid_start = sf + edge_margin
     valid_end = ef - edge_margin
-    for etype in EVENT_TYPES:
+    for etype in AUTO_DETECT_TYPES:
         detected[etype] = [f for f in detected[etype] if valid_start <= f <= valid_end]
 
     # Validate event sequence: open → peak → close → repeat

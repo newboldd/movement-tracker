@@ -499,10 +499,8 @@ function openCorrections(subjectId) {
 // ── Labeling navigation ──────────────────────────────
 function openLabeling(subjectId) {
     sessionStorage.setItem('dlc_lastSubjectId', String(subjectId));
-    // Use remembered mode if available, otherwise let server pick smart default
-    const lastMode = sessionStorage.getItem(`dlc_labelTab_${subjectId}`);
-    const url = `/labeling-select?subject=${subjectId}` + (lastMode ? `&mode=${lastMode}` : '');
-    window.location.href = url;
+    // Default to events mode; server _smart_mode handles subjects that aren't ready
+    window.location.href = `/labeling-select?subject=${subjectId}`;
 }
 
 // ── Batch preprocessing ─────────────────────────────

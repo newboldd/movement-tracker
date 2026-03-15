@@ -20,10 +20,15 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/results", tags=["results"])
 
-EVENT_TYPES = ("open", "peak", "close")
+AUTO_DETECT_TYPES = ("open", "peak", "close")  # used by auto-detection
 
 
 # ── helpers ─────────────────────────────────────────────────────────────
+
+def _get_event_type_names() -> list[str]:
+    """Get configured event type names from settings."""
+    return [et["name"] for et in get_settings().event_types]
+
 
 def _get_subject(subject_id: int) -> dict:
     """Look up a subject by ID; raise 404 if missing."""
@@ -40,7 +45,8 @@ def _read_events_csv(subject_name: str) -> dict:
     """Read events.csv → {event_type: [frame_nums]}."""
     settings = get_settings()
     path = settings.dlc_path / subject_name / "events.csv"
-    result = {t: [] for t in EVENT_TYPES}
+    configured = _get_event_type_names()
+    result = {t: [] for t in configured}
     if not path.exists():
         return result
     with open(path, newline="") as f:
@@ -48,7 +54,9 @@ def _read_events_csv(subject_name: str) -> dict:
         for row in reader:
             et = row.get("event_type", "").strip()
             fn = row.get("frame_num", "").strip()
-            if et in result and fn.isdigit():
+            if fn.isdigit():
+                if et not in result:
+                    result[et] = []
                 result[et].append(int(fn))
     return result
 
@@ -371,11 +379,14 @@ def get_group_comparison(include_auto: bool = Query(False)) -> dict:
                 mean_v = np.mean(vals)
                 std_v = np.std(vals)
                 entry[f"mean_{key}"] = round(float(mean_v), 4)
-                entry[f"cv_{key}"] = round(float(std_v / mean_v), 4) if mean_v != 0 else None
+                entry[f"cv_{key}"] = round(float(std_v / abs(mean_v)), 4) if mean_v != 0 else None
 
                 # Sequence effect: slope of parameter vs movement index
+                # Negate closing velocities (which are negative) so the
+                # sequence-effect slope reflects changes in magnitude.
+                seq_vals = [-v for v in vals] if key in ("peak_close_vel", "mean_close_vel") else vals
                 indices = [float(i) for i, m in enumerate(movements) if m[key] is not None]
-                slope = _linreg_slope(indices, vals)
+                slope = _linreg_slope(indices, seq_vals)
                 entry[f"seq_{key}"] = slope
             else:
                 entry[f"mean_{key}"] = None

@@ -7,7 +7,10 @@ distance-based event detection.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -18,6 +21,77 @@ from .dlc_predictions import get_corrections_with_dlc_fallback, get_dlc_predicti
 logger = logging.getLogger(__name__)
 
 CROP_HALF = 24  # 48x48 px crop around finger tips
+
+
+# ── Metrics disk cache ────────────────────────────────────────────────────────
+
+
+def _metrics_cache_path(subject_name: str) -> Path:
+    """Path to the metrics cache JSON for a subject."""
+    return get_settings().dlc_path / subject_name / "metrics_cache.json"
+
+
+def _source_mtime(subject_name: str) -> float:
+    """Get the latest mtime across all prediction/correction CSVs for a subject.
+
+    Used as a staleness check — if any source data is newer than the cache,
+    the cache is stale and metrics should be recomputed.
+    """
+    settings = get_settings()
+    dlc_dir = settings.dlc_path / subject_name
+    latest = 0.0
+    for subdir in ("corrections", "labels_v2", "labels_v1", "labels_v1.0", "labels_v0.1"):
+        d = dlc_dir / subdir
+        if d.is_dir():
+            for f in d.iterdir():
+                if f.suffix == ".csv":
+                    try:
+                        latest = max(latest, f.stat().st_mtime)
+                    except OSError:
+                        pass
+    return latest
+
+
+def _load_metrics_cache(subject_name: str) -> dict | None:
+    """Load the entire metrics cache for a subject, or None if stale/missing."""
+    path = _metrics_cache_path(subject_name)
+    if not path.exists():
+        return None
+    try:
+        cache = json.loads(path.read_text())
+        # Check staleness: if source CSVs are newer than cache, invalidate
+        cache_mtime = cache.get("_mtime", 0)
+        if _source_mtime(subject_name) > cache_mtime:
+            logger.info("Metrics cache stale for %s, will recompute", subject_name)
+            return None
+        return cache
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Could not read metrics cache for %s: %s", subject_name, e)
+        return None
+
+
+def _save_metrics_cache(subject_name: str, cache: dict):
+    """Persist the metrics cache for a subject."""
+    path = _metrics_cache_path(subject_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    import time as _time
+    cache["_mtime"] = _time.time()
+    path.write_text(json.dumps(cache))
+
+
+def get_cached_trial_metrics(subject_name: str, trial_name: str) -> dict | None:
+    """Return cached metrics for a single trial, or None if not cached/stale."""
+    cache = _load_metrics_cache(subject_name)
+    if cache is None:
+        return None
+    return cache.get(trial_name)
+
+
+def save_trial_metrics_to_cache(subject_name: str, trial_name: str, metrics: dict):
+    """Save metrics for a single trial into the subject's cache file."""
+    cache = _load_metrics_cache(subject_name) or {}
+    cache[trial_name] = metrics
+    _save_metrics_cache(subject_name, cache)
 BODYPARTS = ["index", "thumb"]
 
 

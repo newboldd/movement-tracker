@@ -101,6 +101,46 @@ async function validateCalibRow(btn) {
     }
 }
 
+// ── Event type rows ──────────────────────────────────────────
+const AUTO_DETECT_TYPES = ['open', 'peak', 'close'];
+
+function addEventTypeRow(name, color, shortcut) {
+    const container = document.getElementById('eventTypeRows');
+    const row = document.createElement('div');
+    row.className = 'event-type-row';
+    const isSpecial = AUTO_DETECT_TYPES.includes(name.toLowerCase());
+    row.innerHTML = `
+        <input type="text" class="et-name" placeholder="Event name" value="${name}">
+        <span class="et-label">Color</span>
+        <input type="color" class="et-color" value="${color}">
+        <span class="et-label">Key</span>
+        <input type="text" class="et-shortcut" placeholder="1" value="${shortcut}" maxlength="1">
+        ${isSpecial ? '<span class="et-special" title="Used by auto-detection">auto</span>' : ''}
+        <button class="btn btn-sm" onclick="this.closest('.event-type-row').remove()" style="color:var(--red);">&times;</button>
+    `;
+    container.appendChild(row);
+}
+
+function getEventTypes() {
+    const rows = document.querySelectorAll('.event-type-row');
+    const types = [];
+    rows.forEach(row => {
+        const name = row.querySelector('.et-name').value.trim().toLowerCase();
+        const color = row.querySelector('.et-color').value;
+        const shortcut = row.querySelector('.et-shortcut').value.trim();
+        if (name) types.push({ name, color, shortcut });
+    });
+    return types;
+}
+
+function setEventTypes(eventTypes) {
+    const container = document.getElementById('eventTypeRows');
+    container.innerHTML = '';
+    if (eventTypes && eventTypes.length > 0) {
+        eventTypes.forEach(et => addEventTypeRow(et.name || '', et.color || '#ffffff', et.shortcut || ''));
+    }
+}
+
 // ── Init ──────────────────────────────────────────────────────
 setupTagInput('camera_names_tags', 'camera_names_input');
 setupTagInput('bodyparts_tags', 'bodyparts_input');
@@ -154,6 +194,14 @@ async function loadSettings() {
         // Calibrations
         setCalibrations(settings.calibrations || {});
 
+        // Event types
+        setEventTypes(settings.event_types || [
+            { name: 'open',  color: '#00cc44', shortcut: '1' },
+            { name: 'peak',  color: '#ffcc00', shortcut: '2' },
+            { name: 'close', color: '#ff4444', shortcut: '3' },
+            { name: 'pause', color: '#cc66ff', shortcut: '4' },
+        ]);
+
         // Status banner
         renderStatus(status);
     } catch (e) {
@@ -201,6 +249,7 @@ function _gatherSettings() {
         remote_ssh_port: parseInt(document.getElementById('remote_ssh_port').value) || 22,
         calibrations: getCalibrations(),
         prefer_deidentified: document.getElementById('prefer_deidentified').checked,
+        event_types: getEventTypes(),
     };
 }
 

@@ -53,6 +53,298 @@ STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+def _recover_stale_jobs(s):
+    """Handle stale jobs from prior server sessions.
+
+    Key design: when a remote process has already finished, update the DB
+    **synchronously** so the status is correct even if a subsequent --reload
+    kills any background download thread.  Downloads are best-effort and
+    will be re-attempted on the next server restart if interrupted.
+    """
+    from .db import get_db_ctx
+    with get_db_ctx() as db:
+        stale_jobs = db.execute(
+            "SELECT id, job_type, tmux_session, remote_host, subject_id, log_path FROM jobs "
+            "WHERE status IN ('running', 'pending')"
+        ).fetchall()
+
+    if not stale_jobs:
+        return
+
+    remote_cfg = s.get_remote_config()
+    resumed = 0
+    failed = 0
+
+    TRAIN_JOB_TYPES = {"train", "analyze_v1", "analyze_v2"}
+    PREPROCESS_JOB_TYPES = {"mediapipe", "blur", "mediapipe+blur"}
+
+    for job in stale_jobs:
+        session_info = job.get("tmux_session") or ""
+        remote_host = job.get("remote_host")
+        job_type = job.get("job_type", "")
+
+        # Parse PID from session_info (format: "pid:12345")
+        remote_pid = None
+        if session_info.startswith("pid:"):
+            try:
+                remote_pid = int(session_info.split(":")[1])
+            except (ValueError, IndexError):
+                pass
+
+        if not (session_info and remote_host and remote_cfg):
+            # No remote info — mark failed
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status = 'failed', error_msg = 'Server restarted (no remote config)', "
+                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (job["id"],),
+                )
+            failed += 1
+            continue
+
+        from .services.remote import (
+            _check_remote_pid_alive, _read_remote_status,
+            remote_train_monitor, resume_preprocess_monitor,
+        )
+        from .services.jobs import registry
+
+        log_path = job["log_path"] or str(s.dlc_path / ".logs" / f"job_{job['id']}.log")
+        proc_alive = bool(remote_pid) and _check_remote_pid_alive(remote_cfg, remote_pid)
+
+        # ── Read remote status (works for both alive and dead processes) ──
+        if job_type in PREPROCESS_JOB_TYPES:
+            status_file = f"{remote_cfg.work_dir}/preprocess_{job['id']}_status.json"
+        elif job_type in TRAIN_JOB_TYPES:
+            with get_db_ctx() as db:
+                subj = db.execute(
+                    "SELECT name FROM subjects WHERE id = ?",
+                    (job["subject_id"],),
+                ).fetchone()
+            status_file = f"{remote_cfg.work_dir}/{subj['name']}/status.json" if subj else None
+        else:
+            status_file = None
+
+        remote_status = _read_remote_status(remote_cfg, status_file) if status_file else None
+        remote_done = remote_status and remote_status.get("status") == "completed"
+        remote_failed = remote_status and remote_status.get("status") == "failed"
+
+        # ── Case 1: Remote job completed ──────────────────────────
+        if remote_done:
+            # Mark completed SYNCHRONOUSLY so DB is correct even if
+            # --reload kills the download thread immediately after.
+            logger.info(f"Job {job['id']} ({job_type}): remote completed — marking done synchronously")
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'completed', progress_pct = 100,
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (job["id"],),
+                )
+
+            # Spawn best-effort background download (if killed, next startup will retry)
+            if job_type in PREPROCESS_JOB_TYPES:
+                _spawn_preprocess_download(job, remote_cfg, log_path, registry)
+            elif job_type in TRAIN_JOB_TYPES and subj:
+                _spawn_train_download(job, subj, s, remote_cfg, log_path, registry)
+
+            resumed += 1
+            continue
+
+        # ── Case 2: Remote job explicitly failed ──────────────────
+        if remote_failed:
+            error = remote_status.get("error", "Unknown error")
+            logger.info(f"Job {job['id']} ({job_type}): remote failed — {error}")
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status = 'failed', error_msg = ?, "
+                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (f"Remote: {error}", job["id"]),
+                )
+            failed += 1
+            continue
+
+        # ── Case 3: Remote process still alive ────────────────────
+        if proc_alive:
+            logger.info(f"Job {job['id']} ({job_type}): PID {remote_pid} alive, resuming monitor")
+            if job_type in PREPROCESS_JOB_TYPES:
+                thread = threading.Thread(
+                    target=resume_preprocess_monitor,
+                    kwargs=dict(
+                        job_id=job["id"], cfg=remote_cfg,
+                        log_path=log_path, registry=registry,
+                    ),
+                    daemon=True,
+                )
+                thread.start()
+                registry._threads[job["id"]] = thread
+            elif job_type in TRAIN_JOB_TYPES and subj:
+                subject_name = subj["name"]
+                local_dlc_dir = s.dlc_path / subject_name
+
+                def _on_resume_complete(jid, returncode, _subj=subject_name):
+                    if returncode == 0:
+                        from .services.dlc_wrapper import fix_project_path
+                        try:
+                            fix_project_path(_subj)
+                        except Exception:
+                            pass
+                        with get_db_ctx() as db2:
+                            db2.execute(
+                                "UPDATE subjects SET stage = 'trained', updated_at = CURRENT_TIMESTAMP "
+                                "WHERE name = ?", (_subj,),
+                            )
+
+                thread = threading.Thread(
+                    target=remote_train_monitor,
+                    kwargs=dict(
+                        job_id=job["id"], cfg=remote_cfg,
+                        local_dlc_dir=local_dlc_dir,
+                        subject_name=subject_name,
+                        log_path=log_path,
+                        progress_parser=None,
+                        on_complete=_on_resume_complete,
+                        registry=registry,
+                        resume=True,
+                    ),
+                    daemon=True,
+                )
+                thread.start()
+                registry._threads[job["id"]] = thread
+
+            resumed += 1
+            continue
+
+        # ── Case 4: Process dead + no completed/failed status ─────
+        with get_db_ctx() as db:
+            db.execute(
+                "UPDATE jobs SET status = 'failed', error_msg = 'Remote process exited without status', "
+                "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (job["id"],),
+            )
+        failed += 1
+
+    logger.info(f"Startup recovery: {resumed} resumed, {failed} marked failed")
+
+    # ── Resume any pending downloads for previously-completed jobs ──
+    _resume_pending_downloads(s, remote_cfg)
+
+
+def _spawn_preprocess_download(job, remote_cfg, log_path, registry):
+    """Spawn a best-effort background download for a completed preprocess job."""
+    from .services.remote import resume_preprocess_monitor
+    thread = threading.Thread(
+        target=resume_preprocess_monitor,
+        kwargs=dict(
+            job_id=job["id"], cfg=remote_cfg,
+            log_path=log_path, registry=registry,
+        ),
+        daemon=True,
+    )
+    thread.start()
+    registry._threads[job["id"]] = thread
+
+
+def _spawn_train_download(job, subj, settings, remote_cfg, log_path, registry):
+    """Spawn a best-effort background download for a completed train job."""
+    from .services.remote import remote_train_monitor
+    subject_name = subj["name"]
+    local_dlc_dir = settings.dlc_path / subject_name
+
+    def _on_dl_complete(jid, returncode, _subj=subject_name):
+        if returncode == 0:
+            from .services.dlc_wrapper import fix_project_path
+            try:
+                fix_project_path(_subj)
+            except Exception:
+                pass
+            from .db import get_db_ctx
+            with get_db_ctx() as db2:
+                db2.execute(
+                    "UPDATE subjects SET stage = 'trained', updated_at = CURRENT_TIMESTAMP "
+                    "WHERE name = ?", (_subj,),
+                )
+
+    thread = threading.Thread(
+        target=remote_train_monitor,
+        kwargs=dict(
+            job_id=job["id"], cfg=remote_cfg,
+            local_dlc_dir=local_dlc_dir,
+            subject_name=subject_name,
+            log_path=log_path,
+            progress_parser=None,
+            on_complete=_on_dl_complete,
+            registry=registry,
+            resume=True,
+        ),
+        daemon=True,
+    )
+    thread.start()
+    registry._threads[job["id"]] = thread
+
+
+def _resume_pending_downloads(s, remote_cfg):
+    """Check for completed preprocess jobs whose results weren't fully downloaded.
+
+    Compares each job's subject list against local .deidentified markers.
+    If any subjects are missing their blurred videos, spawns a download thread.
+    This ensures downloads eventually complete even after repeated --reload kills.
+    """
+    if not remote_cfg:
+        return
+
+    import json as _json
+    from .db import get_db_ctx
+    from .services.jobs import registry
+
+    with get_db_ctx() as db:
+        # Find completed preprocess jobs that have a queue entry with subject list
+        rows = db.execute(
+            """SELECT j.id, j.job_type, j.log_path, jq.subject_ids
+               FROM jobs j
+               JOIN job_queue jq ON jq.job_id = j.id
+               WHERE j.status = 'completed'
+               AND j.job_type IN ('blur', 'mediapipe', 'mediapipe+blur')
+               AND j.finished_at > datetime('now', '-7 days')"""
+        ).fetchall()
+
+    for row in rows:
+        try:
+            subjects = _json.loads(row["subject_ids"])
+        except (TypeError, _json.JSONDecodeError):
+            continue
+
+        job_type = row["job_type"]
+        has_blur = job_type in ("blur", "mediapipe+blur")
+
+        if has_blur:
+            # Check which subjects are missing the .deidentified marker
+            missing = [
+                subj for subj in subjects
+                if not (s.dlc_path / subj / ".deidentified").exists()
+            ]
+            if not missing:
+                continue
+
+            logger.info(
+                f"Job {row['id']} ({job_type}): {len(missing)}/{len(subjects)} "
+                f"subjects missing downloads, resuming"
+            )
+            log_path = row["log_path"] or str(s.dlc_path / ".logs" / f"job_{row['id']}.log")
+
+            from .services.remote import resume_preprocess_monitor
+            thread = threading.Thread(
+                target=resume_preprocess_monitor,
+                kwargs=dict(
+                    job_id=row["id"], cfg=remote_cfg,
+                    log_path=log_path, registry=registry,
+                ),
+                daemon=True,
+            )
+            thread.start()
+            registry._threads[row["id"]] = thread
+            # Only resume one download at a time to avoid hammering SSH
+            break
+
+
 @app.on_event("startup")
 def startup():
     """Initialize database and sync subjects from filesystem."""
@@ -65,198 +357,7 @@ def startup():
         return
 
     # Handle stale jobs from prior server sessions
-    from .db import get_db_ctx
-    with get_db_ctx() as db:
-        stale_jobs = db.execute(
-            "SELECT id, job_type, tmux_session, remote_host, subject_id, log_path FROM jobs "
-            "WHERE status IN ('running', 'pending')"
-        ).fetchall()
-
-    if stale_jobs:
-        remote_cfg = s.get_remote_config()
-        resumed = 0
-        failed = 0
-
-        # Job types that use remote_train_monitor
-        TRAIN_JOB_TYPES = {"train", "analyze_v1", "analyze_v2"}
-        # Job types that use remote_preprocess_batch
-        PREPROCESS_JOB_TYPES = {"mediapipe", "blur", "mediapipe+blur"}
-
-        for job in stale_jobs:
-            session_info = job.get("tmux_session") or ""
-            remote_host = job.get("remote_host")
-            job_type = job.get("job_type", "")
-
-            # Parse PID from session_info (format: "pid:12345" or legacy "dlc_job_N")
-            remote_pid = None
-            if session_info.startswith("pid:"):
-                try:
-                    remote_pid = int(session_info.split(":")[1])
-                except (ValueError, IndexError):
-                    pass
-
-            if session_info and remote_host and remote_cfg:
-                from .services.remote import (
-                    _check_remote_pid_alive, _read_remote_status,
-                    remote_train_monitor, resume_preprocess_monitor,
-                )
-                from .services.jobs import registry
-
-                if remote_pid and _check_remote_pid_alive(remote_cfg, remote_pid):
-                    # Process alive — resume monitoring based on job type
-                    log_path = job["log_path"] or str(s.dlc_path / ".logs" / f"job_{job['id']}.log")
-
-                    if job_type in PREPROCESS_JOB_TYPES:
-                        # Preprocessing job — use preprocess monitor
-                        logger.info(f"Job {job['id']} ({job_type}): remote PID {remote_pid} alive, resuming preprocess monitor")
-                        thread = threading.Thread(
-                            target=resume_preprocess_monitor,
-                            kwargs=dict(
-                                job_id=job["id"],
-                                cfg=remote_cfg,
-                                log_path=log_path,
-                                registry=registry,
-                            ),
-                            daemon=True,
-                        )
-                        thread.start()
-                        registry._threads[job["id"]] = thread
-                        resumed += 1
-                        continue
-
-                    elif job_type in TRAIN_JOB_TYPES:
-                        # Training/analyze job — use train monitor
-                        logger.info(f"Job {job['id']} ({job_type}): remote PID {remote_pid} alive, resuming train monitor")
-                        with get_db_ctx() as db:
-                            subj = db.execute(
-                                "SELECT name FROM subjects WHERE id = ?",
-                                (job["subject_id"],),
-                            ).fetchone()
-
-                        if subj:
-                            subject_name = subj["name"]
-                            local_dlc_dir = s.dlc_path / subject_name
-
-                            def _on_resume_complete(jid, returncode, _subj=subject_name):
-                                if returncode == 0:
-                                    from .services.dlc_wrapper import fix_project_path
-                                    try:
-                                        fix_project_path(_subj)
-                                    except Exception:
-                                        pass
-                                    with get_db_ctx() as db2:
-                                        db2.execute(
-                                            "UPDATE subjects SET stage = 'trained', updated_at = CURRENT_TIMESTAMP "
-                                            "WHERE name = ?", (_subj,),
-                                        )
-
-                            thread = threading.Thread(
-                                target=remote_train_monitor,
-                                kwargs=dict(
-                                    job_id=job["id"],
-                                    cfg=remote_cfg,
-                                    local_dlc_dir=local_dlc_dir,
-                                    subject_name=subject_name,
-                                    log_path=log_path,
-                                    progress_parser=None,
-                                    on_complete=_on_resume_complete,
-                                    registry=registry,
-                                    resume=True,
-                                ),
-                                daemon=True,
-                            )
-                            thread.start()
-                            registry._threads[job["id"]] = thread
-                            resumed += 1
-                            continue
-
-                    else:
-                        logger.warning(f"Job {job['id']}: unknown job_type '{job_type}' — keeping as running")
-                        resumed += 1
-                        continue
-
-                else:
-                    # Process dead or PID unknown — check final status
-                    if job_type in TRAIN_JOB_TYPES:
-                        with get_db_ctx() as db:
-                            subj = db.execute(
-                                "SELECT name FROM subjects WHERE id = ?",
-                                (job["subject_id"],),
-                            ).fetchone()
-                        if subj:
-                            status_file = f"{remote_cfg.work_dir}/{subj['name']}/status.json"
-                            remote_status = _read_remote_status(remote_cfg, status_file)
-                            if remote_status and remote_status.get("status") == "completed":
-                                logger.info(f"Job {job['id']}: process exited but status=completed, spawning download")
-                                subject_name = subj["name"]
-                                local_dlc_dir = s.dlc_path / subject_name
-                                log_path = job["log_path"] or str(s.dlc_path / ".logs" / f"job_{job['id']}.log")
-
-                                def _on_dl_complete(jid, returncode, _subj=subject_name):
-                                    if returncode == 0:
-                                        from .services.dlc_wrapper import fix_project_path
-                                        try:
-                                            fix_project_path(_subj)
-                                        except Exception:
-                                            pass
-                                        with get_db_ctx() as db2:
-                                            db2.execute(
-                                                "UPDATE subjects SET stage = 'trained', updated_at = CURRENT_TIMESTAMP "
-                                                "WHERE name = ?", (_subj,),
-                                            )
-
-                                thread = threading.Thread(
-                                    target=remote_train_monitor,
-                                    kwargs=dict(
-                                        job_id=job["id"],
-                                        cfg=remote_cfg,
-                                        local_dlc_dir=local_dlc_dir,
-                                        subject_name=subject_name,
-                                        log_path=log_path,
-                                        progress_parser=None,
-                                        on_complete=_on_dl_complete,
-                                        registry=registry,
-                                        resume=True,
-                                    ),
-                                    daemon=True,
-                                )
-                                thread.start()
-                                registry._threads[job["id"]] = thread
-                                resumed += 1
-                                continue
-
-                    elif job_type in PREPROCESS_JOB_TYPES:
-                        # Check preprocessing status file
-                        status_file = f"{remote_cfg.work_dir}/preprocess_{job['id']}_status.json"
-                        remote_status = _read_remote_status(remote_cfg, status_file)
-                        if remote_status and remote_status.get("status") == "completed":
-                            logger.info(f"Job {job['id']}: preprocess completed, spawning download")
-                            log_path = job["log_path"] or str(s.dlc_path / ".logs" / f"job_{job['id']}.log")
-                            thread = threading.Thread(
-                                target=resume_preprocess_monitor,
-                                kwargs=dict(
-                                    job_id=job["id"],
-                                    cfg=remote_cfg,
-                                    log_path=log_path,
-                                    registry=registry,
-                                ),
-                                daemon=True,
-                            )
-                            thread.start()
-                            registry._threads[job["id"]] = thread
-                            resumed += 1
-                            continue
-
-            # No remote session or process dead with no good status — mark failed
-            with get_db_ctx() as db:
-                db.execute(
-                    "UPDATE jobs SET status = 'failed', error_msg = 'Server restarted', "
-                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (job["id"],),
-                )
-            failed += 1
-
-        logger.info(f"Startup recovery: {resumed} resumed, {failed} marked failed")
+    _recover_stale_jobs(s)
 
     logger.info("Syncing subjects from filesystem...")
     from .routers.subjects import sync_from_filesystem
@@ -304,7 +405,7 @@ def labeling_select_page(subject: Optional[int] = None, mode: Optional[str] = No
     # Valid session types
     _VALID_MODES = {"initial", "refine", "corrections", "events", "final"}
 
-    def _get_or_get_or_create_session(db, sid: int, stype: str) -> Optional[int]:
+    def _get_or_create_session(db, sid: int, stype: str) -> Optional[int]:
         """Return an existing active session of the same type, or create one."""
         # Reuse existing active session (prefer one with labels)
         existing = db.execute(
@@ -333,12 +434,13 @@ def labeling_select_page(subject: Optional[int] = None, mode: Optional[str] = No
         return row["id"] if row else None
 
     def _smart_mode(stage: str) -> str:
-        """Pick the best labeling mode based on the subject's pipeline stage."""
+        """Pick the best labeling mode based on the subject's pipeline stage.
+
+        Default to events for all subjects past the initial labeling stages.
+        """
         if stage in _PRE_DLC_STAGES:
             return "initial"
-        if stage in _PRE_CORRECTIONS_STAGES:
-            return "corrections"
-        # corrected, events_partial, events_complete, complete, etc.
+        # All post-analysis stages default to events mode
         return "events"
 
     with get_db_ctx() as db:

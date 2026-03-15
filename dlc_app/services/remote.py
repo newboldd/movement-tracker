@@ -1658,10 +1658,13 @@ def resume_preprocess_monitor(
 
     def _fail(msg):
         logger.error(f"Job {job_id} resume preprocess monitor failed: {msg}")
+        # Don't overwrite a job already marked completed (startup may have
+        # set it synchronously before spawning this thread).
         with get_db_ctx() as db:
             db.execute(
                 """UPDATE jobs SET status = 'failed', error_msg = ?,
-                   finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                   finished_at = CURRENT_TIMESTAMP
+                   WHERE id = ? AND status != 'completed'""",
                 (msg, job_id),
             )
 
@@ -1686,62 +1689,68 @@ def resume_preprocess_monitor(
             logfile.write(f"\n=== Resuming preprocessing monitor (PID {remote_pid}) ===\n")
             logfile.flush()
 
-            # ── Monitor loop ─────────────────────────────────────
-            log_offset = 0
-            ssh_fail_count = 0
-            max_ssh_failures = 30
-            poll_interval = 10
+            # ── Check if already completed (skip monitor loop) ───
+            status = _read_remote_status(cfg, remote_status_file)
+            if status and status.get("status") == "completed":
+                logfile.write("=== Remote already completed, skipping to download ===\n")
+                logfile.flush()
+            else:
+                # ── Monitor loop ─────────────────────────────────
+                log_offset = 0
+                ssh_fail_count = 0
+                max_ssh_failures = 30
+                poll_interval = 10
 
-            while True:
-                _check_cancel()
-                time.sleep(poll_interval)
-                _check_cancel()
+                while True:
+                    _check_cancel()
+                    time.sleep(poll_interval)
+                    _check_cancel()
 
-                status = _read_remote_status(cfg, remote_status_file)
+                    status = _read_remote_status(cfg, remote_status_file)
 
-                if status and status.get("pid"):
-                    remote_pid = status["pid"]
+                    if status and status.get("pid"):
+                        remote_pid = status["pid"]
 
-                proc_alive = _check_remote_pid_alive(cfg, remote_pid) if remote_pid else False
+                    proc_alive = _check_remote_pid_alive(cfg, remote_pid) if remote_pid else False
 
-                new_log, log_offset = _tail_remote_log(cfg, remote_log_file, log_offset)
-                if new_log:
-                    logfile.write(new_log)
-                    logfile.flush()
-                    ssh_fail_count = 0
-
-                if status:
-                    ssh_fail_count = 0
-                    pct = status.get("progress_pct", 0)
-                    scaled = 7.0 + (pct / 100.0) * 78.0
-                    _update_progress(scaled)
-
-                    remote_status_val = status.get("status", "")
-                    if remote_status_val == "completed":
-                        error_info = status.get("error")
-                        if error_info:
-                            logfile.write(f"=== Remote preprocessing completed with errors: {error_info} ===\n")
-                        else:
-                            logfile.write("=== Remote preprocessing completed ===\n")
+                    new_log, log_offset = _tail_remote_log(cfg, remote_log_file, log_offset)
+                    if new_log:
+                        logfile.write(new_log)
                         logfile.flush()
-                        break
-                    elif remote_status_val == "failed":
-                        error = status.get("error", "Unknown error")
-                        _fail(f"Remote preprocessing failed: {error}")
-                        return
-                    elif not proc_alive:
-                        error = status.get("error", "Remote process exited unexpectedly")
-                        phase = status.get("phase", "unknown")
-                        _fail(f"Process exited during phase '{phase}': {error}")
-                        return
+                        ssh_fail_count = 0
 
-                elif not proc_alive:
-                    ssh_fail_count += 1
-                    logfile.write(f"Warning: process not found and no status.json, attempt {ssh_fail_count}/{max_ssh_failures}\n")
-                    logfile.flush()
-                    if ssh_fail_count >= max_ssh_failures:
-                        _fail("Remote process died and no status.json found")
-                        return
+                    if status:
+                        ssh_fail_count = 0
+                        pct = status.get("progress_pct", 0)
+                        scaled = 7.0 + (pct / 100.0) * 78.0
+                        _update_progress(scaled)
+
+                        remote_status_val = status.get("status", "")
+                        if remote_status_val == "completed":
+                            error_info = status.get("error")
+                            if error_info:
+                                logfile.write(f"=== Remote preprocessing completed with errors: {error_info} ===\n")
+                            else:
+                                logfile.write("=== Remote preprocessing completed ===\n")
+                            logfile.flush()
+                            break
+                        elif remote_status_val == "failed":
+                            error = status.get("error", "Unknown error")
+                            _fail(f"Remote preprocessing failed: {error}")
+                            return
+                        elif not proc_alive:
+                            error = status.get("error", "Remote process exited unexpectedly")
+                            phase = status.get("phase", "unknown")
+                            _fail(f"Process exited during phase '{phase}': {error}")
+                            return
+
+                    elif not proc_alive:
+                        ssh_fail_count += 1
+                        logfile.write(f"Warning: process not found and no status.json, attempt {ssh_fail_count}/{max_ssh_failures}\n")
+                        logfile.flush()
+                        if ssh_fail_count >= max_ssh_failures:
+                            _fail("Remote process died and no status.json found")
+                            return
 
             # ── Download results ──────────────────────────────────
             logfile.write(f"=== Downloading results from {cfg.host} ===\n")

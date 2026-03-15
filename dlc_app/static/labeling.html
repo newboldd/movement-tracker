@@ -124,11 +124,8 @@
                 <!-- Auto-detect -->
                 <button class="btn btn-sm" id="detectEventsBtn" onclick="labeler.detectEvents()" style="width:100%;margin-bottom:8px;">Auto-detect…</button>
 
-                <!-- Place event type buttons -->
-                <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;margin-bottom:8px;">
-                    <button class="btn btn-sm" onclick="labeler.placeEventType('open')" title="Place Open at current frame (1)" style="color:#00cc44;border-color:#00cc44;">1 Open</button>
-                    <button class="btn btn-sm" onclick="labeler.placeEventType('peak')" title="Place Peak at current frame (2)" style="color:#ffcc00;border-color:#ffcc00;">2 Peak</button>
-                    <button class="btn btn-sm" onclick="labeler.placeEventType('close')" title="Place Close at current frame (3)" style="color:#ff4444;border-color:#ff4444;">3 Close</button>
+                <!-- Place event type buttons (populated dynamically by labeler.js) -->
+                <div id="eventTypeButtons" style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:8px;">
                 </div>
 
                 <!-- Delete / Shift -->
@@ -140,21 +137,9 @@
                     <button class="btn btn-sm" onclick="labeler.shiftEvent(1)" title="Shift event forward 1 frame (])" style="flex:1;">Shift →</button>
                 </div>
 
-                <!-- Event type visibility toggles -->
+                <!-- Event type visibility toggles (populated dynamically by labeler.js) -->
                 <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">Show events:</div>
-                <div style="display:flex;flex-direction:column;gap:3px;">
-                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
-                        <input type="checkbox" id="showOpen" checked onchange="labeler.setEventVisibility('open', this.checked)">
-                        <span style="color:#00cc44;">●</span> Open
-                    </label>
-                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
-                        <input type="checkbox" id="showPeak" checked onchange="labeler.setEventVisibility('peak', this.checked)">
-                        <span style="color:#ffcc00;">●</span> Peak
-                    </label>
-                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
-                        <input type="checkbox" id="showClose" checked onchange="labeler.setEventVisibility('close', this.checked)">
-                        <span style="color:#ff4444;">●</span> Close
-                    </label>
+                <div id="eventVisToggles" style="display:flex;flex-direction:column;gap:3px;">
                 </div>
 
                 <!-- Save events -->
@@ -221,7 +206,7 @@
     </div>
 
     <script src="/static/js/api.js?v=10"></script>
-    <script src="/static/js/labeler.js?v=33"></script>
+    <script src="/static/js/labeler.js?v=35"></script>
     <script>
         // ── Mode Switcher ────────────────────────────────────────────
         async function switchMode(sessionType) {
@@ -239,6 +224,8 @@
                 if (typeof labeler !== 'undefined' && labeler.saveNavState) {
                     labeler.saveNavState();
                 }
+                // Mark as intra-labeling navigation so preferences are preserved
+                sessionStorage.setItem('dlc_subjectSwitch', '1');
 
                 // Create a new session with the selected mode
                 const session = await API.post(`/api/labeling/${subjectId}/sessions`, {

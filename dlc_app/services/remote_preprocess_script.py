@@ -49,10 +49,10 @@ FACE_CONF_THRESHOLD = 0.2
 FACE_MODEL_SELECTION = 1
 BLUR_KERNEL_SIZE = 99
 BLUR_SIGMA = 50
-FACE_BOX_EXPAND = 0.4
-FACE_BOX_EXPAND_UP = 0.6
-HAND_HULL_DILATION_PX = 30
-HAND_OVERLAP_PAD = 80
+FACE_BOX_EXPAND = 0.3
+FACE_BOX_EXPAND_UP = 0.5
+HAND_HULL_DILATION_PX = 55
+HAND_OVERLAP_PAD = 120
 HAND_OUTLIER_WINDOW = 15
 HAND_OUTLIER_THRESHOLD = 100
 TEMPORAL_SIGMA_FRAMES = 3.0
@@ -408,7 +408,7 @@ def _load_overrides(video_name: str, overrides_file: str | None = None) -> dict:
         "fixed_faces_L": None, "fixed_faces_R": None,
         "extra_blur_L": None, "extra_blur_R": None,
         "max_tracks_L": None, "max_tracks_R": None,
-        "reject_hand_outliers": False, "skip": False,
+        "reject_hand_outliers": True, "skip": False,
     }
     if not overrides_file or not os.path.exists(overrides_file):
         return defaults

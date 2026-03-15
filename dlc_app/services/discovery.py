@@ -146,20 +146,20 @@ def _infer_events_stage(dlc_path: Path) -> str | None:
     if not events_path.exists():
         return None
 
-    EVENT_TYPES = {"open", "peak", "close"}
+    AUTO_DETECT_TYPES = {"open", "peak", "close"}
     types_found: set[str] = set()
     try:
         with open(events_path, newline="") as f:
             for row in _csv.DictReader(f):
                 et = row.get("event_type", "").strip()
-                if et in EVENT_TYPES:
+                if et in AUTO_DETECT_TYPES:
                     types_found.add(et)
     except Exception:
         return None
 
     if not types_found:
         return None
-    return "events_complete" if types_found == EVENT_TYPES else "events_partial"
+    return "events_complete" if types_found == AUTO_DETECT_TYPES else "events_partial"
 
 
 def infer_stage(dlc_path: Path) -> str:
