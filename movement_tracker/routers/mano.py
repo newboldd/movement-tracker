@@ -120,8 +120,13 @@ def get_trial_heatmap(
 
 
 @router.get("/{subject_id}/trial/{trial_idx}/video")
-def get_trial_video(subject_id: int, trial_idx: int):
-    """Serve the video file for a trial, preferring de-identified if configured."""
+def get_trial_video(subject_id: int, trial_idx: int,
+                    camera: int | None = Query(None, ge=0)):
+    """Serve the video file for a trial, preferring de-identified if configured.
+
+    For multicam trials, pass ``camera=N`` to select a specific camera index.
+    Defaults to the primary (first) camera.
+    """
     name = _subject_name(subject_id)
     try:
         trials = build_trial_map(name)
@@ -131,7 +136,17 @@ def get_trial_video(subject_id: int, trial_idx: int):
     if trial_idx < 0 or trial_idx >= len(trials):
         raise HTTPException(404, f"Trial index {trial_idx} out of range")
 
-    video_path = trials[trial_idx]["video_path"]
+    trial = trials[trial_idx]
+    video_path = trial["video_path"]
+
+    # In multicam mode, select the requested camera file
+    cameras = trial.get("cameras", [])
+    if camera is not None and cameras:
+        cam = next((c for c in cameras if c["idx"] == camera), None)
+        if cam:
+            video_path = cam["path"]
+        else:
+            raise HTTPException(404, f"Camera index {camera} not found for trial {trial_idx}")
 
     # Prefer de-identified video if the setting is enabled
     settings = get_settings()
@@ -204,14 +219,21 @@ def get_mediapipe_hints(subject_id: int) -> list[dict]:
 
 @router.get("/{subject_id}/video_list")
 def get_video_list(subject_id: int) -> list[dict]:
-    """List all video trials for a subject (for Videos module — no MANO data required)."""
+    """List all video trials for a subject (for Videos module — no MANO data required).
+
+    Each trial includes a ``cameras`` list for multicam trials:
+    ``[{name, path, idx}]``.  Empty when trial is a single file.
+    """
     name = _subject_name(subject_id)
     try:
         trials = build_trial_map(name)
     except Exception:
         return []
-    return [
-        {
+
+    result = []
+    for i, t in enumerate(trials):
+        cameras = t.get("cameras", [])
+        entry = {
             "trial_idx": i,
             "trial_name": t["trial_name"],
             "n_frames": t["frame_count"],
@@ -221,5 +243,11 @@ def get_video_list(subject_id: int) -> list[dict]:
             # Stereo = side-by-side halves; heuristic: width >= 1.5 × height
             "is_stereo": t["width"] >= int(t["height"] * 1.5),
         }
-        for i, t in enumerate(trials)
-    ]
+        # Include camera info for multicam trials (>1 camera file)
+        if len(cameras) > 1:
+            entry["cameras"] = [
+                {"name": c["name"], "idx": c["idx"]}
+                for c in cameras
+            ]
+        result.append(entry)
+    return result

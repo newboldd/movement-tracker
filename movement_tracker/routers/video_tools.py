@@ -34,6 +34,7 @@ class SegmentDef(BaseModel):
     start_time: float
     end_time: float
     trial_label: str  # e.g. "L1", "R2"
+    camera_name: str | None = None  # e.g. "cam0" — set in multicam mode
 
 
 class ProcessSubjectRequest(BaseModel):
@@ -310,7 +311,11 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
                         raise InterruptedError("Job cancelled")
 
                     trial = seg["trial_label"]
-                    output_name = f"{subject_name}_{trial}.mp4"
+                    cam = seg.get("camera_name")
+                    if cam:
+                        output_name = f"{subject_name}_{trial}_{cam}.mp4"
+                    else:
+                        output_name = f"{subject_name}_{trial}.mp4"
                     output_path = str(output_dir / output_name)
 
                     seg_base = i * seg_span

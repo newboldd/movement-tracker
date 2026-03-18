@@ -141,14 +141,21 @@ def get_session_info(session_id: int) -> dict:
     total_frames = trials[-1]["end_frame"] + 1 if trials else 0
 
     # Simplify trial info for frontend
-    trial_info = [{
-        "trial_name": t["trial_name"],
-        "start_frame": t["start_frame"],
-        "end_frame": t["end_frame"],
-        "frame_count": t["frame_count"],
-        "fps": t["fps"],
-        "frame_offset": t.get("frame_offset", 0),
-    } for t in trials]
+    trial_info = []
+    for t in trials:
+        entry = {
+            "trial_name": t["trial_name"],
+            "start_frame": t["start_frame"],
+            "end_frame": t["end_frame"],
+            "frame_count": t["frame_count"],
+            "fps": t["fps"],
+            "frame_offset": t.get("frame_offset", 0),
+        }
+        # Include camera info for multicam trials
+        cameras = t.get("cameras", [])
+        if len(cameras) > 1:
+            entry["cameras"] = [{"name": c["name"], "idx": c["idx"]} for c in cameras]
+        trial_info.append(entry)
 
     # Count committed frames in DLC labeled-data/
     committed_frame_count = 0
@@ -164,6 +171,7 @@ def get_session_info(session_id: int) -> dict:
         "total_frames": total_frames,
         "bodyparts": settings.bodyparts,
         "camera_names": settings.camera_names,
+        "camera_mode": settings.camera_mode,
         "committed_frame_count": committed_frame_count,
         "event_types": settings.event_types,
     }
@@ -175,9 +183,13 @@ def get_frame(
     n: int = Query(..., description="Global frame number"),
     side: str = Query(..., description="Camera name"),
 ) -> Response:
-    """Serve a video frame as JPEG."""
+    """Serve a video frame as JPEG.
+
+    In multicam mode, ``side`` may be a per-camera name (e.g. "cam0") rather
+    than a global camera name from settings.  Validation is relaxed accordingly.
+    """
     settings = get_settings()
-    if side not in settings.camera_names:
+    if settings.camera_mode != "multicam" and side not in settings.camera_names:
         raise HTTPException(400, f"side must be one of {settings.camera_names}")
 
     with get_db_ctx() as db:

@@ -240,19 +240,98 @@ def get_subject_videos(subject_name: str, *, prefer_deidentified: bool = False,
     return videos
 
 
+def _group_multicam_videos(subject_name: str, videos: list[str]) -> list[dict]:
+    """Group video files by trial, detecting per-camera files in multicam mode.
+
+    Multicam naming convention: {Subject}_{Trial}_{CameraName}.mp4
+    e.g. Con01_L1_cam0.mp4, Con01_L1_cam1.mp4
+
+    Returns list of dicts:
+        [{trial_name, cameras: [{name, path, idx}]}]
+
+    In non-multicam mode, each video is its own trial with a single camera.
+    """
+    settings = get_settings()
+
+    if settings.camera_mode != "multicam" or len(videos) <= 1:
+        return [
+            {"trial_name": Path(v).stem,
+             "cameras": [{"name": "default", "path": v, "idx": 0}]}
+            for v in videos
+        ]
+
+    from collections import defaultdict
+    groups = defaultdict(list)
+
+    prefix = subject_name + "_"
+    prefix_lower = prefix.lower()
+
+    for v in videos:
+        stem = Path(v).stem
+        # Remove subject prefix to get Trial_Camera or just Trial
+        if stem.lower().startswith(prefix_lower):
+            rest = stem[len(prefix):]  # e.g. "L1_cam0"
+        else:
+            rest = stem
+
+        # Split on last underscore to separate trial and camera parts
+        parts = rest.rsplit("_", 1)
+        if len(parts) == 2:
+            trial_part, cam_part = parts
+            trial_stem = f"{subject_name}_{trial_part}"
+            groups[trial_stem].append({"cam_name": cam_part, "path": v})
+        else:
+            # No underscore in rest — single file, its own trial
+            groups[stem].append({"cam_name": "default", "path": v})
+
+    # Only treat as multicam if at least one group has multiple files
+    has_multicam = any(len(cams) > 1 for cams in groups.values())
+
+    if not has_multicam:
+        # Fall back to each file as its own trial
+        return [
+            {"trial_name": Path(v).stem,
+             "cameras": [{"name": "default", "path": v, "idx": 0}]}
+            for v in videos
+        ]
+
+    result = []
+    for trial_stem, cams in sorted(groups.items()):
+        cameras = [
+            {"name": c["cam_name"], "path": c["path"], "idx": i}
+            for i, c in enumerate(sorted(cams, key=lambda x: x["cam_name"]))
+        ]
+        result.append({"trial_name": trial_stem, "cameras": cameras})
+    return result
+
+
 def build_trial_map(subject_name: str) -> list[dict]:
-    """Build a virtual timeline mapping: list of {video_path, trial_name, start_frame, end_frame, frame_count}.
+    """Build a virtual timeline mapping for a subject's videos.
+
+    Returns list of dicts with keys:
+        video_path, trial_name, trial_stem, start_frame, end_frame,
+        frame_count, fps, width, height, frame_offset, cameras
+
+    In multicam mode, ``cameras`` contains [{name, path, idx}] for each
+    camera file in the trial.  ``video_path`` is the primary (first) camera.
 
     Multiple trials are concatenated into a single frame index space.
     """
     videos = get_subject_videos(subject_name)
+    settings = get_settings()
+
+    # Group multicam files by trial
+    grouped = _group_multicam_videos(subject_name, videos)
+
     trials = []
     offset = 0
-    for vpath in videos:
-        info = get_video_info(vpath)
+    for group in grouped:
+        primary_path = group["cameras"][0]["path"]
+        info = get_video_info(primary_path)
         trials.append({
-            "video_path": vpath,
-            "trial_name": Path(vpath).stem,
+            "video_path": primary_path,
+            "trial_name": group["trial_name"],
+            "trial_stem": Path(primary_path).stem,
             "start_frame": offset,
             "end_frame": offset + info.frame_count - 1,
             "frame_count": info.frame_count,
@@ -260,17 +339,18 @@ def build_trial_map(subject_name: str) -> list[dict]:
             "width": info.width,
             "height": info.height,
             "frame_offset": info.frame_offset,
+            "cameras": group["cameras"],
         })
         offset += info.frame_count
     return trials
 
 
-def _resolve_frame(trials: list[dict], global_frame: int) -> tuple[str, int]:
-    """Convert global frame index to (video_path, local_frame_num)."""
+def _resolve_frame(trials: list[dict], global_frame: int) -> tuple[str, int, dict]:
+    """Convert global frame index to (video_path, local_frame_num, trial_dict)."""
     for trial in trials:
         if trial["start_frame"] <= global_frame <= trial["end_frame"]:
             local = global_frame - trial["start_frame"]
-            return trial["video_path"], local
+            return trial["video_path"], local, trial
     raise ValueError(f"Frame {global_frame} out of range")
 
 
@@ -288,8 +368,9 @@ def _extract_frame_cached(video_path: str, frame_num: int, side: str) -> bytes:
 
     settings = get_settings()
 
-    # Single camera mode: return full frame, no cropping
-    if settings.camera_mode == "single":
+    # Single camera or multicam mode: return full frame, no cropping
+    # (multicam already resolved to the correct camera file before calling)
+    if settings.camera_mode in ("single", "multicam"):
         _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         return bytes(jpeg)
 
@@ -315,6 +396,21 @@ def _deidentified_path(video_path: str) -> str | None:
     return str(deident) if deident.exists() else None
 
 
+def _resolve_camera_path(trial: dict, side: str) -> str | None:
+    """For multicam trials, find the video path for the given camera/side name.
+
+    Returns None if this trial doesn't have multicam cameras or the side
+    doesn't match any camera name.
+    """
+    cameras = trial.get("cameras", [])
+    if len(cameras) <= 1:
+        return None
+    for cam in cameras:
+        if cam["name"] == side:
+            return cam["path"]
+    return None
+
+
 def extract_frame(subject_name: str, global_frame: int, side: str,
                   trials: list[dict] | None = None) -> bytes:
     """Extract a frame for a subject at a global frame index.
@@ -322,7 +418,8 @@ def extract_frame(subject_name: str, global_frame: int, side: str,
     Args:
         subject_name: Subject identifier
         global_frame: Frame number in the virtual timeline
-        side: Camera name (first or second from settings.camera_names)
+        side: Camera name (first or second from settings.camera_names),
+              or multicam camera name
         trials: Pre-computed trial map (optional, computed if None)
 
     Returns:
@@ -330,11 +427,18 @@ def extract_frame(subject_name: str, global_frame: int, side: str,
     """
     if trials is None:
         trials = build_trial_map(subject_name)
-    video_path, local_frame = _resolve_frame(trials, global_frame)
+    video_path, local_frame, trial = _resolve_frame(trials, global_frame)
+
+    settings = get_settings()
+
+    # In multicam mode, resolve to the camera-specific file
+    if settings.camera_mode == "multicam":
+        cam_path = _resolve_camera_path(trial, side)
+        if cam_path:
+            video_path = cam_path
 
     # Optionally display deidentified version (frame numbering from originals)
     # Skip deidentified swap for videos marked as no-face
-    settings = get_settings()
     if settings.prefer_deidentified:
         stem = Path(video_path).stem
         no_face = _get_no_face_videos(subject_name)
@@ -358,10 +462,11 @@ def extract_frame_raw(video_path: str, frame_num: int, side: str) -> np.ndarray:
 
     settings = get_settings()
 
-    # Single camera mode: return full frame
-    if settings.camera_mode == "single":
+    # Single camera or multicam mode: return full frame (no cropping)
+    if settings.camera_mode in ("single", "multicam"):
         return frame
 
+    # Stereo mode: crop to left or right half
     h, w = frame.shape[:2]
     midline = w // 2
 

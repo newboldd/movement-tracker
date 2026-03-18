@@ -14,7 +14,12 @@ SKIP_NAMES = {"README.md"}
 
 
 def _find_videos(subject_name: str) -> list[str]:
-    """Find stereo videos for a subject in videos/."""
+    """Find videos for a subject in videos/.
+
+    In multicam mode, groups per-camera files so each trial is counted once
+    (e.g. Subject_L1_cam0.mp4 + Subject_L1_cam1.mp4 → one trial "Subject_L1").
+    Returns a list of display names (trial names for multicam, filenames otherwise).
+    """
     settings = get_settings()
     video_dir = settings.video_path
     pattern = str(video_dir / f"{subject_name}_*.mp4")
@@ -27,6 +32,27 @@ def _find_videos(subject_name: str) -> list[str]:
             v for v in all_vids
             if Path(v).name.lower().startswith(prefix_lower)
         )
+
+    if settings.camera_mode == "multicam" and len(videos) > 1:
+        # Group by trial stem — strip last _segment as camera name
+        trial_stems = set()
+        prefix = subject_name + "_"
+        prefix_lower = prefix.lower()
+        for v in videos:
+            stem = Path(v).stem
+            if stem.lower().startswith(prefix_lower):
+                rest = stem[len(prefix):]
+            else:
+                rest = stem
+            parts = rest.rsplit("_", 1)
+            if len(parts) == 2:
+                trial_stems.add(f"{subject_name}_{parts[0]}")
+            else:
+                trial_stems.add(stem)
+        # Only use grouped names if grouping actually reduced count
+        if len(trial_stems) < len(videos):
+            return sorted(trial_stems)
+
     return [Path(v).name for v in videos]
 
 

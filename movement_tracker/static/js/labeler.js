@@ -11,6 +11,7 @@ const labeler = (() => {
     // Dynamic from settings
     let bodyparts = ['thumb', 'index'];
     let cameraNames = ['OS', 'OD'];
+    let cameraMode = 'stereo';  // 'single', 'stereo', or 'multicam'
 
     let currentFrame = 0;
     let currentSide = 'OS';
@@ -327,7 +328,15 @@ const labeler = (() => {
                 _initEventState();
             }
             if (sessionInfo.committed_frame_count) committedFrameCount = sessionInfo.committed_frame_count;
-            currentSide = cameraNames[0] || 'OS';
+            if (sessionInfo.camera_mode) cameraMode = sessionInfo.camera_mode;
+
+            // In multicam mode, default to first trial's first camera name
+            if (cameraMode === 'multicam' && trials.length > 0
+                && trials[0].cameras && trials[0].cameras.length > 0) {
+                currentSide = trials[0].cameras[0].name;
+            } else {
+                currentSide = cameraNames[0] || 'OS';
+            }
 
             isRefine = sessionInfo.session && sessionInfo.session.session_type === 'refine';
             isCorrections = sessionInfo.session && sessionInfo.session.session_type === 'corrections';
@@ -616,12 +625,18 @@ const labeler = (() => {
         const vw = videoEl.videoWidth;
         const vh = videoEl.videoHeight;
         if (vw > 0 && vh > 0) {
-            const midline = Math.floor(vw / 2);
             let sx, sw;
-            if (cameraNames.length >= 2 && currentSide === cameraNames[1]) {
-                sx = midline; sw = vw - midline;
+            if (cameraMode === 'multicam' || cameraMode === 'single') {
+                // Full frame — no stereo cropping
+                sx = 0; sw = vw;
             } else {
-                sx = 0; sw = midline;
+                // Stereo: crop to left or right half
+                const midline = Math.floor(vw / 2);
+                if (cameraNames.length >= 2 && currentSide === cameraNames[1]) {
+                    sx = midline; sw = vw - midline;
+                } else {
+                    sx = 0; sw = midline;
+                }
             }
             imgW = sw;
             imgH = vh;
@@ -1111,12 +1126,16 @@ const labeler = (() => {
             const vw = videoEl.videoWidth;
             const vh = videoEl.videoHeight;
             if (vw > 0 && vh > 0) {
-                const midline = Math.floor(vw / 2);
                 let sx, sw;
-                if (cameraNames.length >= 2 && currentSide === cameraNames[1]) {
-                    sx = midline; sw = vw - midline;
+                if (cameraMode === 'multicam' || cameraMode === 'single') {
+                    sx = 0; sw = vw;
                 } else {
-                    sx = 0; sw = midline;
+                    const midline = Math.floor(vw / 2);
+                    if (cameraNames.length >= 2 && currentSide === cameraNames[1]) {
+                        sx = midline; sw = vw - midline;
+                    } else {
+                        sx = 0; sw = midline;
+                    }
                 }
                 ctx.save();
                 ctx.translate(offsetX, offsetY);
@@ -2204,6 +2223,8 @@ const labeler = (() => {
     function recomputeCameraShift() {
         // Compute the average horizontal and vertical offset between cam0/cam1.
         // Uses manual labels first; falls back to MP detections for more samples.
+        // Only relevant for stereo mode (paired halves of a single image).
+        if (cameraMode === 'multicam' || cameraMode === 'single') return;
         if (cameraNames.length < 2) return;
         const cam0 = cameraNames[0];
         const cam1 = cameraNames[1];
@@ -2326,13 +2347,34 @@ const labeler = (() => {
         return 0;
     }
 
+    function _getActiveCameraNames() {
+        // In multicam mode, use per-trial camera names if available
+        if (cameraMode === 'multicam' && trials.length > 0) {
+            const trial = _currentTrial();
+            if (trial && trial.cameras && trial.cameras.length > 1) {
+                return trial.cameras.map(c => c.name);
+            }
+        }
+        return cameraNames;
+    }
+
+    function _currentTrial() {
+        if (!trials.length) return null;
+        for (const t of trials) {
+            if (currentFrame >= t.start_frame && currentFrame <= t.end_frame) return t;
+        }
+        return trials[0];
+    }
+
     function toggleSide() {
-        const idx = cameraNames.indexOf(currentSide);
-        const newIdx = (idx + 1) % cameraNames.length;
+        const activeCams = _getActiveCameraNames();
+        const idx = activeCams.indexOf(currentSide);
+        const newIdx = (idx + 1) % activeCams.length;
 
         // Shift viewport to keep targets roughly centered when switching cameras.
         // Uses computed shift from paired labels, falls back to 7% horizontal default.
-        if (hasUserZoom && imgW) {
+        // (Only for stereo — multicam files are separate so no cropping shift needed)
+        if (cameraMode !== 'multicam' && hasUserZoom && imgW) {
             let shiftX, shiftY;
             if (computedCameraShiftX != null) {
                 shiftX = computedCameraShiftX;
@@ -2347,7 +2389,7 @@ const labeler = (() => {
             offsetY += direction * shiftY * scale;
         }
 
-        currentSide = cameraNames[newIdx];
+        currentSide = activeCams[newIdx];
         document.getElementById('sideToggle').textContent = currentSide;
         goToFrame(currentFrame);
     }
@@ -2478,13 +2520,16 @@ const labeler = (() => {
         const vw = videoEl.videoWidth;
         const vh = videoEl.videoHeight;
         if (vw > 0 && vh > 0) {
-            const midline = Math.floor(vw / 2);
-            // Source crop: left half or right half of stereo video
             let sx, sw;
-            if (cameraNames.length >= 2 && currentSide === cameraNames[1]) {
-                sx = midline; sw = vw - midline;
+            if (cameraMode === 'multicam' || cameraMode === 'single') {
+                sx = 0; sw = vw;
             } else {
-                sx = 0; sw = midline;
+                const midline = Math.floor(vw / 2);
+                if (cameraNames.length >= 2 && currentSide === cameraNames[1]) {
+                    sx = midline; sw = vw - midline;
+                } else {
+                    sx = 0; sw = midline;
+                }
             }
 
             imgW = sw;

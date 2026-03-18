@@ -4,6 +4,8 @@ const onboard = (() => {
     let subjectName = '';
     let cameraMode = 'stereo';
     let selectedCameraSetup = null;
+    let cameraNames = [];         // populated from setup in multicam mode
+    let currentCameraIdx = 0;     // which camera we're selecting a video for
     let currentPath = '';
     let selectedVideoPath = null;
     let videoMeta = null;
@@ -66,14 +68,37 @@ const onboard = (() => {
         const setupId = select.value;
         if (!setupId) return alert('Select a camera setup or create a new one');
 
-        const opt = select.options[select.selectedIndex];
-        selectedCameraSetup = { id: parseInt(setupId), name: opt.dataset.name || opt.textContent };
+        // Fetch full setup details to get camera names
+        try {
+            const setup = await API.get(`/api/camera-setups/${setupId}`);
+            selectedCameraSetup = setup;
+            cameraNames = setup.camera_names || [];
+        } catch (e) {
+            const opt = select.options[select.selectedIndex];
+            selectedCameraSetup = { id: parseInt(setupId), name: opt.dataset.name || opt.textContent };
+            cameraNames = [];
+        }
 
+        currentCameraIdx = 0;
         document.getElementById('step1bNum').classList.add('done');
         document.getElementById('step2').style.display = 'block';
 
+        // In multicam mode, show which camera we're selecting for
+        _updateCameraLabel();
+
         await loadDirectory('');
         await prefillFromSession();
+    }
+
+    function _updateCameraLabel() {
+        const label = document.getElementById('cameraLabel');
+        if (!label) return;
+        if (cameraMode === 'multicam' && cameraNames.length > 1) {
+            label.textContent = `Selecting video for camera: ${cameraNames[currentCameraIdx]} (${currentCameraIdx + 1}/${cameraNames.length})`;
+            label.style.display = 'block';
+        } else {
+            label.style.display = 'none';
+        }
     }
 
     function _updateStepNumbers(showCameraStep) {
@@ -250,13 +275,20 @@ const onboard = (() => {
         if (!trial) return alert('Enter a trial name');
         const sourceName = selectedVideoPath.split(/[/\\]/).pop();
 
-        segments.push({
+        const seg = {
             source_path: selectedVideoPath,
             start_time: inPoint,
             end_time: outPoint,
             trial_label: trial,
             source_name: sourceName,
-        });
+        };
+
+        // In multicam mode, tag with camera name
+        if (cameraMode === 'multicam' && cameraNames.length > 1) {
+            seg.camera_name = cameraNames[currentCameraIdx];
+        }
+
+        segments.push(seg);
 
         inPoint = null;
         outPoint = null;
@@ -279,15 +311,20 @@ const onboard = (() => {
             return;
         }
 
-        list.innerHTML = segments.map((s, i) => `
-            <div class="segment-item">
-                <span class="trial">${s.trial_label}</span>
-                <span class="times">${formatTime(s.start_time)} - ${formatTime(s.end_time)}
-                    (${(s.end_time - s.start_time).toFixed(1)}s)</span>
-                <span class="source">${s.source_name}</span>
-                <span class="remove" onclick="onboard.removeSegment(${i})">&times;</span>
-            </div>
-        `).join('');
+        list.innerHTML = segments.map((s, i) => {
+            const camTag = s.camera_name
+                ? `<span style="color:var(--blue);font-size:11px;font-weight:600;">[${s.camera_name}]</span>`
+                : '';
+            return `
+                <div class="segment-item">
+                    <span class="trial">${s.trial_label} ${camTag}</span>
+                    <span class="times">${formatTime(s.start_time)} - ${formatTime(s.end_time)}
+                        (${(s.end_time - s.start_time).toFixed(1)}s)</span>
+                    <span class="source">${s.source_name}</span>
+                    <span class="remove" onclick="onboard.removeSegment(${i})">&times;</span>
+                </div>
+            `;
+        }).join('');
     }
 
     function pickAnotherVideo() {
@@ -320,14 +357,22 @@ const onboard = (() => {
             review.innerHTML = `
                 <p style="margin-bottom:8px;">Subject: <strong>${subjectName}</strong></p>
                 <p style="margin-bottom:8px;">${segments.length} segment(s) will be trimmed and saved.</p>
-            ` + segments.map(s => `
-                <div class="segment-item">
-                    <span class="trial">${s.trial_label}</span>
-                    <span class="times">${formatTime(s.start_time)} - ${formatTime(s.end_time)}</span>
-                    <span class="source">${s.source_name}</span>
-                    <span style="color:var(--text-muted);font-size:11px;">&#8594; ${subjectName}_${s.trial_label}.mp4</span>
-                </div>
-            `).join('');
+            ` + segments.map(s => {
+                const outName = s.camera_name
+                    ? `${subjectName}_${s.trial_label}_${s.camera_name}.mp4`
+                    : `${subjectName}_${s.trial_label}.mp4`;
+                const camTag = s.camera_name
+                    ? ` <span style="color:var(--blue);font-size:11px;">[${s.camera_name}]</span>`
+                    : '';
+                return `
+                    <div class="segment-item">
+                        <span class="trial">${s.trial_label}${camTag}</span>
+                        <span class="times">${formatTime(s.start_time)} - ${formatTime(s.end_time)}</span>
+                        <span class="source">${s.source_name}</span>
+                        <span style="color:var(--text-muted);font-size:11px;">&#8594; ${outName}</span>
+                    </div>
+                `;
+            }).join('');
 
             updateProcessButton();
         } else {
@@ -362,12 +407,16 @@ const onboard = (() => {
             const result = await API.post('/api/video-tools/process-subject', {
                 subject_name: subjectName,
                 blur_faces: blurFaces,
-                segments: segments.map(s => ({
-                    source_path: s.source_path,
-                    start_time: s.start_time,
-                    end_time: s.end_time,
-                    trial_label: s.trial_label,
-                })),
+                segments: segments.map(s => {
+                    const seg = {
+                        source_path: s.source_path,
+                        start_time: s.start_time,
+                        end_time: s.end_time,
+                        trial_label: s.trial_label,
+                    };
+                    if (s.camera_name) seg.camera_name = s.camera_name;
+                    return seg;
+                }),
             });
 
             if (result.job_id) {
