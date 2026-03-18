@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-command setup and launch for DLC Labeler.
+# One-command setup and launch for Movement Tracker.
 #
 # Usage:
 #   ./setup.sh
@@ -69,7 +69,7 @@ fi
 
 # ── Launch ───────────────────────────────────────────────────────────────
 echo ""
-echo "Starting DLC Labeler at http://localhost:$PORT"
+echo "Starting Movement Tracker at http://localhost:$PORT"
 echo "Press Ctrl+C to stop."
 echo ""
 
@@ -78,4 +78,4 @@ cd "$PROJECT_DIR"
 # Open browser after a short delay (background, non-fatal)
 (sleep 2 && open "http://localhost:$PORT" 2>/dev/null || xdg-open "http://localhost:$PORT" 2>/dev/null) &
 
-python -m uvicorn dlc_app.app:app --host 127.0.0.1 --port "$PORT" --reload
+python -m uvicorn movement_tracker.app:app --host 127.0.0.1 --port "$PORT" --reload

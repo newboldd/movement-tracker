@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch the DLC Labeler web app.
+# Launch the Movement Tracker web app.
 # Usage: ./run.sh
 
 set -e
@@ -21,10 +21,10 @@ if [ -d "$VENV_DIR" ]; then
     source "$VENV_DIR/bin/activate"
 fi
 
-echo "Starting DLC Labeler..."
+echo "Starting Movement Tracker..."
 echo ""
 echo "Dashboard will open at http://localhost:$PORT"
 echo ""
 
 cd "$PROJECT_DIR"
-python -m uvicorn dlc_app.app:app --host 127.0.0.1 --port $PORT --reload
+python -m uvicorn movement_tracker.app:app --host 127.0.0.1 --port $PORT --reload

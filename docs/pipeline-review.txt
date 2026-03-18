@@ -1,0 +1,166 @@
+Pipeline Review & Recommendations
+===================================
+Generated: 2026-03-16
+
+
+1. The Elephant in the Room: Is DLC Adding Value Over MediaPipe?
+-----------------------------------------------------------------
+
+Your pipeline already runs MediaPipe as the first step, extracting 21 hand
+landmarks with zero training. Recent clinical validation studies (Applied
+Sciences 2025) show MediaPipe achieves ICC 0.87-0.91 for finger tapping
+assessment compared to 3D infrared motion capture, with no statistically
+significant differences. Another study achieved 94.4% accuracy for
+bradykinesia detection using MediaPipe alone.
+
+You're tracking only 2 bodyparts (thumb tip, index tip) -- MediaPipe already
+gives you these (landmarks 4 and 8) plus 19 additional landmarks for free.
+The entire DLC training -> analysis -> refinement cycle exists to produce the
+same two points that MediaPipe gives you without any training.
+
+Recommendation: Before investing more in DLC optimization, benchmark
+MediaPipe-only distances against your final corrected DLC distances across a
+few subjects. If the correlation is high (r > 0.95) and the event detection
+results are equivalent, the DLC stages may be adding labor without
+proportional accuracy gain. You could redirect that effort to better event
+detection and clinical analysis.
+
+
+2. If Keeping DLC: Architecture & Training Changes
+----------------------------------------------------
+
+If DLC does provide meaningful accuracy improvements over MediaPipe for your
+data, several settings should change:
+
+Switch from ResNet-50 to HRNet-w32. HRNet maintains high-resolution feature
+maps throughout the network instead of progressively downsampling like ResNet.
+This is critical for closely-spaced keypoints like thumb and index tips, where
+heatmap resolution directly affects localization precision. DLC 3.0 supports
+it natively -- just change dlc_net_type in your settings.
+
+Add more bodyparts. Tracking only thumb tip + index tip gives the network
+minimal context. Adding DIP joints (landmarks just above the tips), the wrist,
+and perhaps MCP joints would:
+  - Give the network geometric constraints to resolve ambiguities
+  - Improve tracking robustness when one landmark is briefly occluded
+  - Let you compute additional clinical metrics (e.g., joint angles, movement
+    decomposition)
+
+Increase training images / use active learning. Your current approach labels
+frames from the initial manual pass. DLC's extract_outlier_frames function can
+identify frames where the model is least certain -- labeling those first gives
+much more training value per frame than random selection.
+
+Evaluate all snapshots. You use snapshotindex: -1 (latest). The final snapshot
+isn't always the best -- run deeplabcut.evaluate_network across all saved
+snapshots and select the one with lowest pixel error.
+
+
+3. Refinement Approach: Fine-Tune, Don't Retrain
+---------------------------------------------------
+
+Your current approach creates a fresh iteration for v2 training. When DLC
+creates iteration-1, it trains a new network from ImageNet weights, using both
+round1 and round2 labeled data. This discards all the task-specific features
+the v1 model already learned.
+
+Better approach: fine-tune from the v1 checkpoint. DLC supports initializing
+from a previous snapshot. This means:
+  - Faster convergence (the model already knows what fingers look like)
+  - Better performance with fewer correction labels
+  - The corrections act as targeted fixes rather than starting over
+
+To implement this, you'd set init_weights in the pose config to point to the
+v1 snapshot path. This could be automated in your remote training script.
+
+
+4. Cropping Strategy
+----------------------
+
+Your auto-computed crop from MediaPipe bounding box + 80px margin is
+reasonable, but consider:
+
+Tighter crops during training would force the network to focus on finger
+details rather than background. For a finger-tapping task where the hand
+position is relatively consistent, a crop centered on the hand region with
+minimal margin would be optimal.
+
+During analysis, use DLC's dynamic cropping feature -- it tracks the ROI
+across frames based on predictions from the previous frame, reducing
+computation and improving accuracy by keeping the hand centered.
+
+
+5. Consider Lightning Pose as a DLC Alternative
+--------------------------------------------------
+
+If you do need custom keypoint training beyond MediaPipe, Lightning Pose
+(Nature Methods 2024) is worth evaluating. Its key advantage for your
+workflow:
+
+  - Semi-supervised losses: trains on labeled AND unlabeled frames
+    simultaneously, penalizing predictions that violate temporal continuity
+    and multi-view geometry
+  - 50-100 labeled frames can be sufficient (vs. your current 200+ per
+    iteration)
+  - Built-in Bayesian ensembling + Kalman smoothing produces temporally
+    smooth outputs -- which would reduce the noise you're currently handling
+    in event detection
+  - PyTorch native, actively maintained
+
+This could replace DLC entirely and dramatically reduce your labeling burden.
+
+
+6. Specific Pipeline Optimizations
+-------------------------------------
+
+MediaPipe stage: Your oscillation-based hand selection is good. Consider also
+temporal smoothing (Savitzky-Golay or Kalman filter) on MediaPipe landmarks
+before computing distances -- this would reduce jitter and improve the
+prelabel quality.
+
+Event detection: Your Strategy G with the peaks-only workflow is solid. The
+main improvement would be using MediaPipe's additional landmarks -- wrist
+position change, MCP joint angles, etc. -- as additional signals for event
+detection beyond just thumb-index distance.
+
+Refinement workflow: Your corrections -> retrain cycle is the standard
+approach. The main optimization is switching from full retraining to
+fine-tuning (point 3 above), and using active learning to select which frames
+to correct rather than reviewing all frames manually.
+
+
+Summary: Recommended Action Priority
+---------------------------------------
+
+Priority | Action                                    | Effort  | Impact
+---------|-------------------------------------------|---------|---------------------------
+1        | Benchmark MediaPipe vs. DLC accuracy      | Low     | Could eliminate DLC entirely
+2        | If keeping DLC: switch to HRNet-w32       | Trivial | Better keypoint precision
+3        | Fine-tune v1->v2 instead of retraining    | Medium  | Faster, better refinement
+4        | Add more bodyparts (DIP, wrist)           | Medium  | More robust tracking
+5        | Evaluate Lightning Pose as DLC replacement| Medium  | Less labeling needed
+6        | Apply temporal smoothing to MediaPipe      | Low     | Cleaner prelabels
+7        | Use active learning for frame selection    | Medium  | More efficient labeling
+
+The biggest potential win is #1: if MediaPipe is already good enough for your
+clinical measurements, you can skip the entire DLC training/analysis/refinement
+pipeline and go straight from MediaPipe -> event detection -> results.
+
+
+Research Sources
+------------------
+
+DeepLabCut:
+  - DLC 3.0: github.com/DeepLabCut/DeepLabCut/releases
+  - SuperAnimal models: Nature Communications (2024), doi:10.1038/s41467-024-48792-2
+  - DLC architectures: deeplabcut.github.io/DeepLabCut/docs/pytorch/architectures.html
+
+Alternatives:
+  - SLEAP: Nature Methods (2022), doi:10.1038/s41592-022-01426-1
+  - Lightning Pose: Nature Methods (2024), doi:10.1038/s41592-024-02319-1
+  - ViTPose++: IEEE TPAMI (2023), doi:10.1109/TPAMI.2023.3330016
+
+Clinical validation:
+  - 2D Hand Pose for Finger Tapping: Applied Sciences (2025), doi:10.3390/app16010229
+  - Computer Vision for PD Finger Tapping: PMC (2024), doi:10.3390/s24030858
+  - MediaPipe Hand Clinical Validation: Biomedical Signal Processing (2024)

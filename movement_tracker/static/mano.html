@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MANO Viewer</title>
+    <link rel="stylesheet" href="/static/css/main.css?v=7">
+    <style>
+        body { overflow: hidden; }
+
+        /* ── Layer toggle styling ── */
+        .layer-toggle {
+            display: flex; align-items: center; gap: 6px;
+            padding: 3px 0; font-size: 12px; cursor: pointer;
+        }
+        .layer-toggle input { margin: 0; }
+        .layer-swatch {
+            display: inline-block; width: 10px; height: 10px;
+            border-radius: 2px; border: 1px solid rgba(255,255,255,0.2);
+        }
+
+        /* ── Finger toggle grid ── */
+        .finger-grid {
+            display: grid; grid-template-columns: 1fr 1fr;
+            gap: 2px 8px;
+        }
+        .finger-toggle {
+            display: flex; align-items: center; gap: 4px;
+            font-size: 11px; cursor: pointer;
+        }
+        .finger-toggle input { margin: 0; }
+
+        /* ── Main content area ── */
+        .mano-main {
+            flex: 1; display: flex; flex-direction: column;
+            overflow: hidden; padding: 8px;
+        }
+        .mano-viewports {
+            flex: 1; position: relative; min-height: 0;
+            background: #111; border-radius: 4px; overflow: hidden;
+        }
+        .canvas-wrap {
+            position: absolute; inset: 0;
+        }
+        .canvas-wrap canvas {
+            display: block; width: 100%; height: 100%;
+        }
+        .three-wrap {
+            position: absolute; inset: 0;
+            pointer-events: none; /* pass clicks through to video by default */
+        }
+        .three-wrap.interactive {
+            pointer-events: auto; /* enabled when 3D is visible */
+        }
+
+        /* ── Controls bar ── */
+        .controls-bar {
+            display: flex; align-items: center; gap: 12px;
+            padding: 6px 0; font-size: 12px; color: var(--text-muted);
+            flex-shrink: 0;
+        }
+        .controls-bar strong { color: var(--text); }
+
+        /* ── Distance trace ── */
+        #distanceCanvas {
+            width: 100%; height: 120px; cursor: crosshair;
+            background: var(--bg-card); border-radius: 4px;
+            flex-shrink: 0; margin-top: 4px;
+        }
+
+        /* Section headers */
+        .sidebar-section {
+            font-size: 13px; color: var(--text-muted);
+            margin: 12px 0 6px 0; font-weight: 600;
+        }
+        .sidebar-section:first-child { margin-top: 0; }
+
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div style="display:flex;align-items:center;gap:16px;">
+            <h1 style="margin:0;"><a href="/" style="font-size:18px;">Movement Tracker</a></h1>
+            <div style="display:flex;align-items:center;gap:8px;">
+                <span style="font-size:18px;font-weight:600;">MANO</span>
+                <select id="subjectSelect" class="subject-select"></select>
+                <button class="btn btn-sm" id="prevSubjectBtn" title="Previous subject">&larr;</button>
+                <button class="btn btn-sm" id="nextSubjectBtn" title="Next subject">&rarr;</button>
+            </div>
+        </div>
+        <nav>
+            <a href="/remote">Processing</a>
+            <a href="/videos">Videos</a>
+            <a href="/labeling-select">DLC</a>
+            <a href="/mano" class="active">MANO</a>
+            <a href="/results" id="resultsLink">Results</a>
+            <a href="/settings">Settings</a>
+        </nav>
+    </div>
+
+    <div class="labeling-layout">
+        <!-- Sidebar -->
+        <div class="labeling-sidebar">
+            <!-- Trial selector -->
+            <div class="sidebar-section">Trial</div>
+            <select id="trialSelect" style="width:100%;padding:4px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:12px;"></select>
+
+            <!-- Navigation -->
+            <div class="sidebar-section">Navigation</div>
+            <div style="display:flex;gap:4px;margin-bottom:6px;">
+                <button class="btn btn-sm" id="prevFrameBtn" title="Previous frame (A/Left)">&larr;</button>
+                <button class="btn btn-sm" id="playBtn" title="Play/Pause (Space)">&#9654;</button>
+                <button class="btn btn-sm" id="nextFrameBtn" title="Next frame (S/Right)">&rarr;</button>
+            </div>
+            <div style="margin-bottom:6px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                    <label style="font-size:12px;color:var(--text-muted);">Speed</label>
+                    <span id="speedDisplay" style="font-size:12px;color:var(--accent);font-weight:bold;">1x</span>
+                </div>
+                <input type="range" id="speedSlider" min="0" max="10" value="4"
+                       style="width:100%;cursor:pointer;height:6px;">
+            </div>
+
+            <!-- View -->
+            <div class="sidebar-section">View</div>
+            <div style="display:flex;gap:4px;margin-bottom:6px;">
+                <button class="btn btn-sm" id="sideToggle" title="Toggle camera (E)">OS</button>
+                <button class="btn btn-sm" id="resetZoomBtn" title="Reset zoom (Z)">Reset Zoom</button>
+                <button class="btn btn-sm" id="snapCamBtn" title="Reset 3D view to camera (C)">Snap</button>
+            </div>
+
+            <!-- Layers -->
+            <div class="sidebar-section">Layers</div>
+            <label class="layer-toggle">
+                <input type="checkbox" id="showVideo" checked>
+                <span class="layer-swatch" style="background:#888;"></span> Video
+            </label>
+            <label class="layer-toggle">
+                <input type="checkbox" id="show3D" checked>
+                <span class="layer-swatch" style="background:#7c4dff;"></span> 3D Model
+            </label>
+            <hr style="border:none;border-top:1px solid var(--border);margin:4px 0;">
+            <label class="layer-toggle">
+                <input type="checkbox" id="showMano" checked>
+                <span class="layer-swatch" style="background:lime;"></span> MANO
+            </label>
+            <label class="layer-toggle">
+                <input type="checkbox" id="showMP">
+                <span class="layer-swatch" style="background:cyan;"></span> MediaPipe
+            </label>
+            <label class="layer-toggle">
+                <input type="checkbox" id="showDLC">
+                <span class="layer-swatch" style="background:#f44;"></span> DLC
+            </label>
+            <label class="layer-toggle">
+                <input type="checkbox" id="showSkeleton" checked>
+                <span class="layer-swatch" style="background:#aaa;"></span> Skeleton
+            </label>
+            <label class="layer-toggle">
+                <input type="checkbox" id="showHeatmap">
+                <span class="layer-swatch" style="background:#ff6600;"></span> Heatmap
+            </label>
+
+            <!-- Fingers -->
+            <div class="sidebar-section">Fingers</div>
+            <div class="finger-grid" id="fingerToggles">
+                <label class="finger-toggle"><input type="checkbox" data-finger="wrist" checked> Wrist</label>
+                <label class="finger-toggle"><input type="checkbox" data-finger="thumb" checked> Thumb</label>
+                <label class="finger-toggle"><input type="checkbox" data-finger="index" checked> Index</label>
+                <label class="finger-toggle"><input type="checkbox" data-finger="middle" checked> Middle</label>
+                <label class="finger-toggle"><input type="checkbox" data-finger="ring" checked> Ring</label>
+                <label class="finger-toggle"><input type="checkbox" data-finger="pinky" checked> Pinky</label>
+            </div>
+
+            <!-- Heatmap joint -->
+            <div id="heatmapControls" style="display:none;margin-top:8px;">
+                <div class="sidebar-section">Heatmap Joint</div>
+                <select id="jointSelect" style="width:100%;padding:4px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:11px;"></select>
+            </div>
+
+            <!-- Distance -->
+            <div class="sidebar-section">Distance</div>
+            <select id="distanceSelect" style="width:100%;padding:4px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:11px;"></select>
+
+            <!-- Export -->
+            <div class="sidebar-section" style="margin-top:16px;">Export</div>
+            <button class="btn btn-sm" id="exportVideoBtn" style="width:100%;">Export Video</button>
+
+            <!-- Shortcuts -->
+            <div class="sidebar-section" style="margin-top:16px;">Shortcuts</div>
+            <div style="font-size:10px;color:var(--text-muted);line-height:1.6;">
+                <b>A/&larr;</b> prev frame &nbsp; <b>S/&rarr;</b> next frame<br>
+                <b>Space</b> play/pause &nbsp; <b>E</b> toggle camera<br>
+                <b>Z</b> reset zoom &nbsp; <b>C</b> snap camera<br>
+                <b>Scroll</b> zoom
+            </div>
+        </div>
+
+        <!-- Main content -->
+        <div class="mano-main">
+            <div class="mano-viewports">
+                <div class="canvas-wrap">
+                    <canvas id="videoCanvas"></canvas>
+                    <video id="videoEl" style="display:none;" muted></video>
+                </div>
+                <div class="three-wrap" id="threejsContainer"></div>
+            </div>
+            <div class="controls-bar">
+                <span>Frame: <strong id="frameDisplay">0</strong> / <span id="totalFrames">0</span></span>
+                <span>Trial: <strong id="trialName">-</strong></span>
+                <span>Err: <strong id="fitError">-</strong></span>
+            </div>
+            <canvas id="distanceCanvas"></canvas>
+        </div>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+    <script src="/static/js/mano.js?v=17" type="module"></script>
+    <script src="/static/js/video-export.js?v=1"></script>
+    <script>
+        document.getElementById('exportVideoBtn').addEventListener('click', () => {
+            if (window.manoViewer && window.manoViewer.getExportContext) {
+                VideoExport.open(window.manoViewer.getExportContext());
+            } else {
+                alert('Viewer not ready — load a trial first.');
+            }
+        });
+    </script>
+</body>
+</html>
