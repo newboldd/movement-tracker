@@ -180,6 +180,7 @@ async function loadSettings() {
         document.getElementById('remote_ssh_port').value = settings.remote_ssh_port || 22;
 
         // Select
+        document.getElementById('camera_mode').value = settings.camera_mode || 'stereo';
         const netType = document.getElementById('dlc_net_type');
         netType.value = settings.dlc_net_type || 'resnet_50';
 
@@ -234,6 +235,7 @@ function _gatherSettings() {
         dlc_dir: document.getElementById('dlc_dir').value.trim(),
         calibration_3d_config: document.getElementById('calibration_3d_config').value.trim(),
         python_executable: document.getElementById('python_executable').value.trim(),
+        camera_mode: document.getElementById('camera_mode').value,
         camera_names: getTagValues('camera_names_tags'),
         bodyparts: getTagValues('bodyparts_tags'),
         diagnosis_groups: getTagValues('diagnosisGroupsInput') || ["Control", "MSA", "PD", "PSP"],

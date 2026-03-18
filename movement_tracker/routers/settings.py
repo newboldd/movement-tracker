@@ -15,6 +15,7 @@ class SettingsUpdate(BaseModel):
     dlc_dir: Optional[str] = None
     calibration_3d_config: Optional[str] = None
     python_executable: Optional[str] = None
+    camera_mode: Optional[str] = None
     camera_names: Optional[list[str]] = None
     bodyparts: Optional[list[str]] = None
     dlc_scorer: Optional[str] = None

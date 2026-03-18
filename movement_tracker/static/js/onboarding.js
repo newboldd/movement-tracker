@@ -2,6 +2,8 @@
 
 const onboard = (() => {
     let subjectName = '';
+    let cameraMode = 'stereo';
+    let selectedCameraSetup = null;
     let currentPath = '';
     let selectedVideoPath = null;
     let videoMeta = null;
@@ -18,12 +20,76 @@ const onboard = (() => {
 
         subjectName = name;
         document.getElementById('step1Num').classList.add('done');
-        document.getElementById('step2').style.display = 'block';
         document.getElementById('subjectName').disabled = true;
 
-        // Load initial file browser, then try to prefill from video viewer
+        // Check camera mode to decide whether to show camera setup step
+        try {
+            const settings = await API.get('/api/settings');
+            cameraMode = settings.camera_mode || 'stereo';
+        } catch (e) { /* default to stereo */ }
+
+        if (cameraMode === 'single') {
+            // Skip camera setup step — go straight to file browser
+            _updateStepNumbers(false);
+            document.getElementById('step2').style.display = 'block';
+            await loadDirectory('');
+            await prefillFromSession();
+        } else {
+            // Show camera setup selection
+            _updateStepNumbers(true);
+            await _loadCameraSetups();
+            document.getElementById('step1b').style.display = 'block';
+        }
+    }
+
+    // ── Step 1b: Camera setup selection ───────────────────
+
+    async function _loadCameraSetups() {
+        const select = document.getElementById('cameraSetupSelect');
+        try {
+            const setups = await API.get('/api/camera-setups');
+            select.innerHTML = '<option value="">-- Select --</option>';
+            for (const s of setups) {
+                const calib = s.has_calibration ? ' (calibrated)' : '';
+                select.innerHTML += `<option value="${s.id}" data-name="${s.name}">${s.name} — ${s.mode}, ${s.camera_count} cams${calib}</option>`;
+            }
+            if (setups.length === 0) {
+                select.innerHTML = '<option value="">No setups — create one first</option>';
+            }
+        } catch (e) {
+            select.innerHTML = '<option value="">Error loading setups</option>';
+        }
+    }
+
+    async function confirmCameraSetup() {
+        const select = document.getElementById('cameraSetupSelect');
+        const setupId = select.value;
+        if (!setupId) return alert('Select a camera setup or create a new one');
+
+        const opt = select.options[select.selectedIndex];
+        selectedCameraSetup = { id: parseInt(setupId), name: opt.dataset.name || opt.textContent };
+
+        document.getElementById('step1bNum').classList.add('done');
+        document.getElementById('step2').style.display = 'block';
+
         await loadDirectory('');
         await prefillFromSession();
+    }
+
+    function _updateStepNumbers(showCameraStep) {
+        // Adjust step numbers based on whether camera setup step is shown
+        if (showCameraStep) {
+            // Steps: 1=Name, 2=Camera, 3=Video, 4=Trim, 5=Process
+            document.getElementById('step1bNum').textContent = '2';
+            document.getElementById('step2Num').textContent = '3';
+            document.getElementById('step3Num').textContent = '4';
+            document.getElementById('step4Num').textContent = '5';
+        } else {
+            // Steps: 1=Name, 2=Video, 3=Trim, 4=Process
+            document.getElementById('step2Num').textContent = '2';
+            document.getElementById('step3Num').textContent = '3';
+            document.getElementById('step4Num').textContent = '4';
+        }
     }
 
     // ── Step 2: File browser ──────────────────────────────
@@ -400,6 +466,7 @@ const onboard = (() => {
 
     return {
         confirmName,
+        confirmCameraSetup,
         browse,
         selectFile,
         dblClickFile,

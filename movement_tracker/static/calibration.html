@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Movement Tracker</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+    <style>
+        .calib-container { max-width: 900px; margin: 0 auto; padding: 24px; }
+
+        .setup-list { margin-bottom: 24px; }
+        .setup-card {
+            display: flex; align-items: center; gap: 16px;
+            padding: 12px 16px; background: var(--bg-card);
+            border: 1px solid var(--border); border-radius: var(--radius);
+            margin-bottom: 8px; cursor: pointer;
+        }
+        .setup-card:hover { background: var(--bg-hover); }
+        .setup-card.selected { border-color: var(--blue); background: rgba(74,158,255,0.1); }
+        .setup-card .name { font-weight: 600; font-size: 14px; }
+        .setup-card .meta { font-size: 12px; color: var(--text-muted); }
+        .setup-card .status-dot {
+            width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+        }
+        .status-dot.calibrated { background: var(--green); }
+        .status-dot.uncalibrated { background: var(--orange); }
+
+        .create-form {
+            padding: 16px; background: var(--bg-card);
+            border: 1px solid var(--border); border-radius: var(--radius);
+            margin-bottom: 16px;
+        }
+        .form-row { margin-bottom: 12px; }
+        .form-row label {
+            display: block; font-size: 13px;
+            color: var(--text-muted); margin-bottom: 4px;
+        }
+        .form-row input, .form-row select {
+            width: 100%; padding: 8px 12px; background: var(--bg);
+            border: 1px solid var(--border); border-radius: var(--radius);
+            color: var(--text); font-size: 14px;
+        }
+        .form-row input[type="number"] { width: 120px; }
+        .form-row .help { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+        .inline-row { display: flex; gap: 12px; align-items: flex-end; }
+        .inline-row .form-row { flex: 1; margin-bottom: 0; }
+
+        /* File browser (reused from onboarding) */
+        .file-browser {
+            border: 1px solid var(--border); border-radius: var(--radius);
+            max-height: 300px; overflow-y: auto; background: var(--bg);
+        }
+        .fb-breadcrumbs {
+            padding: 8px 12px; border-bottom: 1px solid var(--border);
+            font-size: 12px; display: flex; gap: 4px; flex-wrap: wrap;
+        }
+        .fb-breadcrumbs a { color: var(--blue); cursor: pointer; text-decoration: none; }
+        .fb-breadcrumbs a:hover { text-decoration: underline; }
+        .fb-item {
+            padding: 6px 12px; cursor: pointer; display: flex;
+            align-items: center; gap: 8px; font-size: 13px;
+            border-bottom: 1px solid rgba(42,58,92,0.3);
+        }
+        .fb-item:hover { background: var(--bg-hover); }
+        .fb-item.selected { background: rgba(74,158,255,0.15); }
+        .fb-item .icon { font-size: 16px; width: 20px; text-align: center; }
+
+        /* Video trimmer */
+        .trimmer video {
+            width: 100%; max-height: 250px;
+            border-radius: var(--radius); background: #000;
+        }
+        .trim-controls {
+            display: flex; gap: 8px; align-items: center;
+            margin-top: 8px; flex-wrap: wrap;
+        }
+        .time-display {
+            font-family: monospace; font-size: 13px;
+            color: var(--text-muted); min-width: 60px;
+        }
+
+        .progress-section {
+            margin-top: 16px; padding: 16px; background: var(--bg-card);
+            border: 1px solid var(--border); border-radius: var(--radius);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1><a href="/">Movement Tracker</a></h1>
+        <nav>
+            <a href="/videos">Videos</a>
+            <a href="/labeling-select">DLC</a>
+            <a href="/mano">MANO</a>
+            <a href="/results">Results</a>
+            <a href="/remote">Processing</a>
+            <a href="/settings">Settings</a>
+        </nav>
+    </div>
+
+    <div class="calib-container">
+        <h2 style="margin-bottom:16px;">Camera Setup & Calibration</h2>
+
+        <!-- Existing setups -->
+        <div class="card">
+            <h3 style="margin-bottom:12px;">Camera Setups</h3>
+            <div id="setupList" class="setup-list">
+                <div style="color:var(--text-muted);font-size:13px;">Loading...</div>
+            </div>
+            <button class="btn btn-sm btn-primary" onclick="calibUI.showCreateForm()">+ New Camera Setup</button>
+        </div>
+
+        <!-- Create form (hidden by default) -->
+        <div class="card" id="createSection" style="display:none;">
+            <h3 style="margin-bottom:12px;">New Camera Setup</h3>
+            <div class="create-form">
+                <div class="form-row">
+                    <label>Setup Name</label>
+                    <input type="text" id="setupName" placeholder="e.g. lab_stereo, multicam_3">
+                </div>
+                <div class="form-row">
+                    <label>Mode</label>
+                    <select id="setupMode" onchange="calibUI.onModeChange()">
+                        <option value="stereo">Stereo (2 cameras in one video)</option>
+                        <option value="multicam">Multi-camera (separate video files)</option>
+                    </select>
+                </div>
+                <div class="form-row" id="camCountRow" style="display:none;">
+                    <label>Number of Cameras</label>
+                    <input type="number" id="camCount" value="2" min="2" max="10" onchange="calibUI.updateCamNames()">
+                </div>
+                <div class="form-row">
+                    <label>Camera Names (comma-separated)</label>
+                    <input type="text" id="camNames" placeholder="cam1, cam2" value="cam1, cam2">
+                    <div class="help">Names used for video file suffixes in multicam mode</div>
+                </div>
+                <div style="display:flex;gap:8px;margin-top:12px;">
+                    <button class="btn btn-primary" onclick="calibUI.createSetup()">Create</button>
+                    <button class="btn" onclick="calibUI.hideCreateForm()">Cancel</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Calibration section (shown when setup is selected) -->
+        <div class="card" id="calibrateSection" style="display:none;">
+            <h3 style="margin-bottom:4px;">Calibrate: <span id="calibSetupName"></span></h3>
+            <p id="calibStatus" style="font-size:13px;color:var(--text-muted);margin-bottom:12px;"></p>
+
+            <div style="margin-bottom:16px;">
+                <label style="font-size:13px;color:var(--text-muted);display:block;margin-bottom:8px;">Calibration Source</label>
+                <div style="display:flex;gap:8px;">
+                    <button class="btn btn-sm" id="srcVideoBtn" onclick="calibUI.setSource('video')" style="border-color:var(--blue);">From Video</button>
+                    <button class="btn btn-sm" id="srcImagesBtn" onclick="calibUI.setSource('images')">From Image Pairs</button>
+                </div>
+            </div>
+
+            <!-- Checkerboard params -->
+            <div class="inline-row" style="margin-bottom:16px;">
+                <div class="form-row">
+                    <label>Checkerboard Rows (inner corners)</label>
+                    <input type="number" id="cbRows" value="9" min="3" max="30">
+                </div>
+                <div class="form-row">
+                    <label>Checkerboard Cols (inner corners)</label>
+                    <input type="number" id="cbCols" value="6" min="3" max="30">
+                </div>
+                <div class="form-row">
+                    <label>Square Size (mm)</label>
+                    <input type="number" id="cbSquare" value="25" min="1" step="0.1">
+                </div>
+            </div>
+
+            <!-- Video source -->
+            <div id="videoSourceSection">
+                <label style="font-size:13px;color:var(--text-muted);display:block;margin-bottom:8px;">Select calibration video</label>
+                <div class="file-browser" id="calibFileBrowser"></div>
+                <div id="calibVideoTrimmer" style="display:none;margin-top:12px;">
+                    <div id="calibVideoName" style="font-size:13px;color:var(--text-muted);margin-bottom:4px;"></div>
+                    <div class="trimmer">
+                        <video id="calibTrimVideo" controls preload="auto"></video>
+                        <div class="trim-controls">
+                            <button class="btn btn-sm" onclick="calibUI.setIn()">Set In (I)</button>
+                            <span class="time-display" id="calibInTime">In: --</span>
+                            <button class="btn btn-sm" onclick="calibUI.setOut()">Set Out (O)</button>
+                            <span class="time-display" id="calibOutTime">Out: --</span>
+                            <button class="btn btn-sm" onclick="calibUI.pickAnotherCalibVideo()">Pick Another</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Image source -->
+            <div id="imageSourceSection" style="display:none;">
+                <label style="font-size:13px;color:var(--text-muted);display:block;margin-bottom:8px;">
+                    Select directory containing paired calibration images
+                    (e.g. left_01.png + right_01.png)
+                </label>
+                <div class="file-browser" id="calibImageBrowser"></div>
+                <div id="selectedImageDir" style="font-size:13px;color:var(--green);margin-top:8px;display:none;"></div>
+            </div>
+
+            <div style="margin-top:16px;">
+                <button class="btn btn-primary" id="runCalibBtn" onclick="calibUI.runCalibration()">Run Calibration</button>
+            </div>
+
+            <!-- Progress -->
+            <div id="calibProgress" style="display:none;" class="progress-section">
+                <div class="progress-bar" style="margin-bottom:8px;">
+                    <div class="fill" id="calibFill" style="width:0%"></div>
+                </div>
+                <div id="calibMsg" style="font-size:13px;color:var(--text-muted);"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/api.js?v=8"></script>
+    <script src="/static/js/calibration.js?v=1"></script>
+</body>
+</html>

@@ -91,10 +91,29 @@
             </div>
         </div>
 
+        <!-- Step 1b: Camera setup selection (stereo/multicam only) -->
+        <div class="card" id="step1b" style="display:none;">
+            <div class="step-header">
+                <div class="step-num" id="step1bNum">2</div>
+                <h3>Camera Setup</h3>
+            </div>
+            <div class="form-row" style="margin-bottom:8px;">
+                <label>Select a camera setup for this subject</label>
+                <select id="cameraSetupSelect" style="width:100%;padding:8px 12px;background:var(--bg);
+                    border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:14px;">
+                    <option value="">-- Select --</option>
+                </select>
+            </div>
+            <div style="display:flex;gap:8px;">
+                <button class="btn btn-primary" onclick="onboard.confirmCameraSetup()">Continue</button>
+                <a href="/calibration" class="btn" style="text-decoration:none;">+ New Camera Setup</a>
+            </div>
+        </div>
+
         <!-- Step 2: Browse & select videos -->
         <div class="card" id="step2" style="display:none;">
             <div class="step-header">
-                <div class="step-num" id="step2Num">2</div>
+                <div class="step-num" id="step2Num">3</div>
                 <h3>Select Source Video</h3>
             </div>
             <div class="file-browser" id="fileBrowser"></div>
@@ -108,7 +127,7 @@
         <!-- Step 3: Trim & label segments -->
         <div class="card" id="step3" style="display:none;">
             <div class="step-header">
-                <div class="step-num" id="step3Num">3</div>
+                <div class="step-num" id="step3Num">4</div>
                 <h3>Trim Segments & Label Trials</h3>
             </div>
             <div id="selectedVideoName" style="font-size:13px;color:var(--text-muted);margin-bottom:4px;"></div>
@@ -138,7 +157,7 @@
         <!-- Step 4: Review & process -->
         <div class="card" id="step4" style="display:none;">
             <div class="step-header">
-                <div class="step-num" id="step4Num">4</div>
+                <div class="step-num" id="step4Num">5</div>
                 <h3>Review & Process</h3>
             </div>
             <div id="reviewSegments"></div>

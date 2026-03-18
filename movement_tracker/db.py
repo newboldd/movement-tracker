@@ -94,6 +94,18 @@ CREATE INDEX IF NOT EXISTS idx_sessions_subject ON label_sessions(subject_id);
 CREATE INDEX IF NOT EXISTS idx_job_queue_status ON job_queue(status, resource);
 CREATE INDEX IF NOT EXISTS idx_job_queue_status_target ON job_queue(status, execution_target);
 CREATE INDEX IF NOT EXISTS idx_subject_events ON subject_events(subject_id, event_type);
+
+CREATE TABLE IF NOT EXISTS camera_setups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'stereo',
+    camera_count INTEGER NOT NULL DEFAULT 2,
+    camera_names TEXT NOT NULL DEFAULT '[]',
+    calibration_path TEXT,
+    checkerboard_rows INTEGER,
+    checkerboard_cols INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -264,6 +276,28 @@ def _migrate_add_epoch_info(conn):
         logger.info("Added epoch_info column to jobs")
 
 
+def _migrate_add_camera_setups(conn):
+    """Create camera_setups table if missing."""
+    tables = [r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()]
+    if "camera_setups" not in tables:
+        conn.execute("""
+            CREATE TABLE camera_setups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'stereo',
+                camera_count INTEGER NOT NULL DEFAULT 2,
+                camera_names TEXT NOT NULL DEFAULT '[]',
+                calibration_path TEXT,
+                checkerboard_rows INTEGER,
+                checkerboard_cols INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        logger.info("Created camera_setups table")
+
+
 def init_db():
     """Create tables if they don't exist, run migrations."""
     conn = get_db()
@@ -297,6 +331,9 @@ def init_db():
     if "jobs" in tables:
         _migrate_add_epoch_info(conn)
         conn.commit()
+
+    _migrate_add_camera_setups(conn)
+    conn.commit()
 
     conn.executescript(SCHEMA)
     conn.commit()

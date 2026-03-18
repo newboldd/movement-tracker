@@ -193,14 +193,20 @@ def _get_no_face_videos(subject_name: str) -> list[str]:
     return result
 
 
-def get_subject_videos(subject_name: str, *, prefer_deidentified: bool = False) -> list[str]:
-    """Find all stereo video files for a subject.
+def get_subject_videos(subject_name: str, *, prefer_deidentified: bool = False,
+                       camera_name: str | None = None) -> list[str]:
+    """Find all video files for a subject.
+
+    In multicam mode with camera_name specified, returns only videos for
+    that camera (e.g. Subject_Trial_CamName.mp4). Otherwise returns all
+    videos matching Subject_*.mp4.
 
     Args:
         subject_name: Subject identifier (e.g. 'Con07')
         prefer_deidentified: If True, return deidentified versions when
             available. Default False — always returns originals so frame
             numbering stays consistent with labels in the database.
+        camera_name: For multicam mode, filter to a specific camera's videos.
     """
     import glob
     settings = get_settings()
@@ -216,6 +222,12 @@ def get_subject_videos(subject_name: str, *, prefer_deidentified: bool = False) 
             v for v in all_vids
             if Path(v).name.lower().startswith(prefix_lower)
         )
+
+    # In multicam mode, filter by camera name suffix if specified
+    if camera_name and settings.camera_mode == "multicam":
+        cam_suffix = f"_{camera_name}.mp4"
+        cam_suffix_lower = cam_suffix.lower()
+        videos = [v for v in videos if Path(v).name.lower().endswith(cam_suffix_lower)]
 
     # Optionally swap in deidentified versions
     if prefer_deidentified and deident_dir.is_dir():
@@ -265,7 +277,7 @@ def _resolve_frame(trials: list[dict], global_frame: int) -> tuple[str, int]:
 # LRU cache for frame extraction — keyed by (video_path, frame_num, side)
 @lru_cache(maxsize=FRAME_CACHE_SIZE)
 def _extract_frame_cached(video_path: str, frame_num: int, side: str) -> bytes:
-    """Extract a single frame from video, crop to left or right side, return JPEG bytes."""
+    """Extract a single frame from video, optionally crop to left or right side, return JPEG bytes."""
     cap = cv2.VideoCapture(video_path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
     ret, frame = cap.read()
@@ -274,10 +286,17 @@ def _extract_frame_cached(video_path: str, frame_num: int, side: str) -> bytes:
     if not ret or frame is None:
         raise ValueError(f"Could not read frame {frame_num} from {video_path}")
 
+    settings = get_settings()
+
+    # Single camera mode: return full frame, no cropping
+    if settings.camera_mode == "single":
+        _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+        return bytes(jpeg)
+
+    # Stereo mode: crop to left or right half
     h, w = frame.shape[:2]
     midline = w // 2
 
-    settings = get_settings()
     cam_names = settings.camera_names
     # First camera = left half, second camera = right half
     if len(cam_names) >= 2 and side == cam_names[1]:
@@ -337,10 +356,15 @@ def extract_frame_raw(video_path: str, frame_num: int, side: str) -> np.ndarray:
     if not ret or frame is None:
         raise ValueError(f"Could not read frame {frame_num} from {video_path}")
 
+    settings = get_settings()
+
+    # Single camera mode: return full frame
+    if settings.camera_mode == "single":
+        return frame
+
     h, w = frame.shape[:2]
     midline = w // 2
 
-    settings = get_settings()
     cam_names = settings.camera_names
     if len(cam_names) >= 2 and side == cam_names[1]:
         return frame[:, midline:]

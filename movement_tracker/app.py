@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 
 from .config import get_settings
 from .db import init_db
-from .routers import subjects, labeling, pipeline, jobs, results, settings, filebrowser, video_tools, batch, remote_jobs, mano, export
+from .routers import subjects, labeling, pipeline, jobs, results, settings, filebrowser, video_tools, batch, remote_jobs, mano, export, camera_setups
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ class NoCacheMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
         if request.url.path.startswith("/static") or request.url.path in (
-            "/", "/labeling", "/results", "/settings", "/onboarding", "/remote", "/mano", "/videos"
+            "/", "/labeling", "/results", "/settings", "/onboarding", "/remote", "/mano", "/videos", "/calibration"
         ):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return response
@@ -49,6 +49,7 @@ app.include_router(batch.router)
 app.include_router(remote_jobs.router)
 app.include_router(mano.router)
 app.include_router(export.router)
+app.include_router(camera_setups.router)
 
 # Mount static files
 STATIC_DIR = Path(__file__).parent / "static"
@@ -546,6 +547,12 @@ def videos_page():
 def mano_page():
     """Serve the MANO 3D hand model viewer page."""
     return FileResponse(str(STATIC_DIR / "mano.html"))
+
+
+@app.get("/calibration")
+def calibration_page():
+    """Serve the camera calibration page."""
+    return FileResponse(str(STATIC_DIR / "calibration.html"))
 
 
 if __name__ == "__main__":

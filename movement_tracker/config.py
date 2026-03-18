@@ -39,6 +39,7 @@ class Settings:
         self.dlc_dir: str = ""
         self.calibration_3d_config: str = ""
         self.python_executable: str = sys.executable
+        self.camera_mode: str = "stereo"  # "single", "stereo", or "multicam"
         self.camera_names: list[str] = ["OS", "OD"]
         self.bodyparts: list[str] = ["thumb", "index"]
         self.dlc_scorer: str = "labels"
@@ -194,7 +195,8 @@ class Settings:
         """Apply a dict of settings values."""
         for key in [
             "video_dir", "dlc_dir", "calibration_3d_config",
-            "python_executable", "dlc_scorer", "dlc_date", "dlc_net_type",
+            "python_executable", "camera_mode",
+            "dlc_scorer", "dlc_date", "dlc_net_type",
             "calibration_dir",
             "host",
             "remote_host", "remote_python", "remote_work_dir", "remote_ssh_key",
@@ -263,6 +265,7 @@ class Settings:
             "dlc_dir": self.dlc_dir,
             "calibration_3d_config": self.calibration_3d_config,
             "python_executable": self.python_executable,
+            "camera_mode": self.camera_mode,
             "camera_names": self.camera_names,
             "bodyparts": self.bodyparts,
             "dlc_scorer": self.dlc_scorer,

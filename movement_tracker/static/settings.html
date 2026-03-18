@@ -203,6 +203,15 @@
             <div class="form-section">
                 <h3>Cameras</h3>
                 <div class="form-row">
+                    <label>Camera Mode</label>
+                    <select id="camera_mode">
+                        <option value="single">Single camera (no stereo cropping)</option>
+                        <option value="stereo">Stereo (one video, left/right halves)</option>
+                        <option value="multicam">Multi-camera (separate video files per camera)</option>
+                    </select>
+                    <div class="help">Single: full frame. Stereo: splits each video in half. Multicam: separate video files per camera per trial.</div>
+                </div>
+                <div class="form-row">
                     <label>Camera Names</label>
                     <div class="tag-input" id="camera_names_tags" onclick="this.querySelector('input').focus()">
                         <input type="text" placeholder="Add camera..." id="camera_names_input">
