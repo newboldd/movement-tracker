@@ -159,9 +159,12 @@ source "$VENV_DIR/bin/activate"
 
 if [ ! -f "$VENV_DIR/.installed" ] || [ "$REQUIREMENTS" -nt "$VENV_DIR/.installed" ]; then
     print_header "Installing Python dependencies"
+    echo "This may take several minutes on first run (DeepLabCut and friends are large)."
+    echo ""
     pip install --upgrade pip -q
-    pip install -r "$REQUIREMENTS" -q
+    pip install -r "$REQUIREMENTS"
     touch "$VENV_DIR/.installed"
+    echo ""
     echo "Dependencies installed."
 fi
 
