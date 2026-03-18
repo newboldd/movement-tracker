@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "Movement Tracker"
+abstract: >
+  A web-based tool for video-based movement analysis, integrating DeepLabCut
+  pose estimation, MediaPipe hand tracking, and MANO hand model fitting.
+  Designed for clinical research on fine motor impairment.
+authors:
+  - family-names: Newbold
+    given-names: David
+repository-code: https://github.com/newboldd/movement-tracker
+license: CC-BY-NC-4.0
+type: software

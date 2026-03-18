@@ -15,3 +15,12 @@ Thumbs.db
 # Data directories (created at runtime)
 videos/
 dlc/
+
+# Sample data (downloaded separately via scripts/download_sample.py)
+sample_data/
+
+# Development scratch scripts (contain hardcoded local paths/subject IDs)
+scratch/
+
+# Claude conversation history
+.claude/
