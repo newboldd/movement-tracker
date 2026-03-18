@@ -85,15 +85,20 @@ function renderDiagnosisGroups() {
         } else {
             groupSubjects.forEach(s => {
                 const stageColor = `badge-${s.stage}`;
+                const manoStyle = s.has_mano ? '' : 'opacity:0.35;cursor:not-allowed;';
                 html += `
-                    <div style="padding: 8px; background: var(--bg); border-radius: 4px; border: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 8px;">
-                        <div style="cursor: pointer; flex: 1;" onclick="showDetail(${s.id})">
-                            <div style="font-weight: 600; font-size: 13px; margin-bottom: 4px;">${s.name}</div>
-                            <span class="badge ${stageColor}" style="font-size: 11px;">${s.stage.replace(/_/g, ' ')}</span>
+                    <div style="padding: 8px; background: var(--bg); border-radius: 4px; border: 1px solid var(--border);">
+                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                            <span style="font-weight:600;font-size:13px;">${s.name}</span>
+                            <span class="badge ${stageColor}" style="font-size:11px;">${stageLabel(s.stage)}</span>
                         </div>
-                        <button class="btn btn-sm" style="white-space: nowrap;" onclick="openLabeling(${s.id})">Labels</button>
-                        ${s.has_mano ? `<button class="btn btn-sm" style="white-space: nowrap;" onclick="window.location.href='/mano?subject=${s.id}'">MANO</button>` : ''}
-                        <button class="btn btn-sm" style="white-space: nowrap;" onclick="sessionStorage.setItem('dlc_lastSubjectId','${s.id}');window.location.href='/results?subject=${s.id}&from=dashboard'">Results</button>
+                        <div style="display:flex;gap:4px;flex-wrap:wrap;">
+                            ${s.video_count > 0 ? `<button class="btn btn-sm" style="white-space:nowrap;" onclick="window.location.href='/videos?subject=${s.id}'">Video</button>` : ''}
+                            <button class="btn btn-sm" style="white-space:nowrap;" onclick="openLabeling(${s.id})">DLC</button>
+                            <button class="btn btn-sm" style="white-space:nowrap;${manoStyle}" ${s.has_mano ? `onclick="window.location.href='/mano?subject=${s.id}'"` : 'disabled'}>MANO</button>
+                            <button class="btn btn-sm" style="white-space:nowrap;" onclick="sessionStorage.setItem('dlc_lastSubjectId','${s.id}');window.location.href='/results?subject=${s.id}&from=dashboard'">Results</button>
+                            <button class="btn btn-sm" style="white-space:nowrap;" onclick="showDetail(${s.id})">Details</button>
+                        </div>
                     </div>
                 `;
             });
@@ -104,6 +109,12 @@ function renderDiagnosisGroups() {
 
     html += '</div>';
     container.innerHTML = html;
+}
+
+// ── Stage label shortening ────────────────────────────
+function stageLabel(stage) {
+    const overrides = { events_partial: 'events', events_complete: 'complete' };
+    return (overrides[stage] || stage).replace(/_/g, ' ');
 }
 
 // Canonical stage order (matches pipeline progression)
@@ -123,12 +134,12 @@ function populateStageFilter() {
     // Add stages in pipeline order
     STAGE_ORDER.forEach(st => {
         if (present.has(st)) {
-            sel.innerHTML += `<option value="${st}">${st.replace(/_/g, ' ')}</option>`;
+            sel.innerHTML += `<option value="${st}">${stageLabel(st)}</option>`;
         }
     });
     // Any stages not in the canonical list (e.g. error states) go at the end
     [...present].filter(st => !STAGE_ORDER.includes(st)).sort().forEach(st => {
-        sel.innerHTML += `<option value="${st}">${st.replace(/_/g, ' ')}</option>`;
+        sel.innerHTML += `<option value="${st}">${stageLabel(st)}</option>`;
     });
 }
 

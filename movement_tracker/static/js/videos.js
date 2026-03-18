@@ -21,10 +21,11 @@
     let currentFrame = 0;
     let playing = false;
     let playTimer = null;
-    let playbackRate = 0.5;
+    let playbackRate = 1;
 
     let cameraNames = ['OS', 'OD'];
     let currentSide = 'OS';
+    let mpHints = [];  // per-trial mediapipe hints
 
     let videoEl = null;
     let vidW = 0, vidH = 0, midline = 0;
@@ -86,10 +87,15 @@
             sel.appendChild(opt);
         });
 
-        // Restore from URL
+        // Restore from URL, or default to first subject with videos
         const params = new URLSearchParams(window.location.search);
         const subParam = params.get('subject');
-        if (subParam) sel.value = subParam;
+        if (subParam) {
+            sel.value = subParam;
+        } else {
+            const first = allSubjects.find(s => s.video_count > 0);
+            if (first) sel.value = first.id;
+        }
 
         setupControls();
         setupCanvasEvents();
@@ -108,11 +114,63 @@
         history.replaceState(null, '', u);
 
         trials = [];
+        mpHints = [];
         try { trials = await api(`/api/mano/${sid}/video_list`); } catch { /* no videos */ }
+        try { mpHints = await api(`/api/mano/${sid}/mediapipe_hints`); } catch { /* no hints */ }
 
         buildTrialButtons();
 
         if (trials.length) loadTrial(0);
+    }
+
+    /** Load a video file selected via the Browse button (outside the dataset). */
+    function loadBrowsedFile(file) {
+        // Clear subject context
+        subjectId = null;
+        subjectName = '';
+        trials = [];
+        mpHints = [];
+        $('trialBtns').innerHTML = '';
+
+        // Store filename so onboarding can prefill it
+        sessionStorage.setItem('onboard_prefill_video', file.name);
+
+        // Show "Add Subject" link next to browse button
+        let addLink = $('addSubjectLink');
+        if (!addLink) {
+            addLink = document.createElement('a');
+            addLink.id = 'addSubjectLink';
+            addLink.href = '/onboarding';
+            addLink.className = 'btn btn-sm btn-primary';
+            addLink.textContent = '+ Add Subject';
+            addLink.style.textDecoration = 'none';
+            $('browseBtn').insertAdjacentElement('afterend', addLink);
+        }
+
+        trialMeta = { n_frames: 0, fps: 30, trial_idx: -1, trial_name: file.name, is_stereo: true };
+        isStereo = true;
+        currentFrame = 0;
+        scale = 1; offsetX = 0; offsetY = 0;
+
+        $('frameDisplay').textContent = 0;
+        $('totalFramesDisplay').textContent = '?';
+        $('timelineSlider').value = 0;
+
+        const url = URL.createObjectURL(file);
+        videoEl.src = url;
+        videoEl.addEventListener('loadedmetadata', () => {
+            vidW = videoEl.videoWidth;
+            vidH = videoEl.videoHeight;
+            midline = Math.round(vidW / 2);
+            isStereo = vidW >= vidH * 1.5;
+            trialMeta.n_frames = Math.round(videoEl.duration * trialMeta.fps);
+            trialMeta.is_stereo = isStereo;
+            $('totalFramesDisplay').textContent = trialMeta.n_frames;
+            $('timelineSlider').max = trialMeta.n_frames - 1;
+            sizeCanvas();
+            videoEl.currentTime = 0.01;
+            videoEl.addEventListener('seeked', render, { once: true });
+        }, { once: true });
     }
 
     function buildTrialButtons() {
@@ -139,6 +197,13 @@
         trialMeta = trials[idx];
         isStereo = trialMeta.is_stereo !== false;
 
+        // Apply best camera from mediapipe hints
+        const hint = mpHints.find(h => h.trial_idx === trialMeta.trial_idx);
+        if (hint && isStereo) {
+            currentSide = hint.best_camera === 1 ? cameraNames[1] : cameraNames[0];
+            $('sideToggle').textContent = currentSide;
+        }
+
         highlightTrialButton(idx);
 
         currentFrame = 0;
@@ -155,10 +220,27 @@
             vidH = videoEl.videoHeight;
             midline = isStereo ? Math.round(vidW / 2) : vidW;
             sizeCanvas();
+            if (hint) applyMpCrop(hint);
             // Seek to midpoint of frame 0 — t=0 cannot be decoded by many codecs
             videoEl.currentTime = 0.5 / trialMeta.fps;
             videoEl.addEventListener('seeked', render, { once: true });
         }, { once: true });
+    }
+
+    /** Apply mediapipe-derived crop for the current camera side. */
+    function applyMpCrop(hint) {
+        const bbox = currentSide === cameraNames[0] ? hint.bbox_OS : hint.bbox_OD;
+        if (!bbox) return;
+        const [minX, minY, maxX, maxY] = bbox;
+        const cropW = maxX - minX;
+        const cropH = maxY - minY;
+        const cropCX = minX + cropW / 2;
+        const cropCY = minY + cropH / 2;
+        const cw = canvas.width, ch = canvas.height;
+        const bps = cw / midline;  // base pixel scale
+        scale = Math.min(cw / (cropW * bps), ch / (cropH * bps)) * 0.85;
+        offsetX = cw / 2 - scale * cropCX * bps;
+        offsetY = ch / 2 - scale * cropCY * bps;
     }
 
     // ── Controls setup ───────────────────────────────────────
@@ -173,9 +255,17 @@
             if (v) loadSubject(v);
         });
 
-        // Speed slider — start at index 2 = 0.5x
+        // Browse button — load a video file from outside the dataset
+        $('browseBtn').addEventListener('click', () => $('browseInput').click());
+        $('browseInput').addEventListener('change', e => {
+            const file = e.target.files[0];
+            if (file) loadBrowsedFile(file);
+            e.target.value = '';  // allow re-selecting same file
+        });
+
+        // Speed slider — start at index 3 = 1x
         const speedSlider = $('speedSlider');
-        speedSlider.value = 2;
+        speedSlider.value = 3;
         speedSlider.addEventListener('input', () => {
             playbackRate = SPEED_PRESETS[parseInt(speedSlider.value)];
             $('speedDisplay').textContent = playbackRate + 'x';
@@ -211,6 +301,9 @@
             ? (cameraNames[1] || cameraNames[0])
             : cameraNames[0];
         $('sideToggle').textContent = currentSide;
+        // Re-apply mediapipe crop for the new camera
+        const hint = mpHints.find(h => h.trial_idx === (trialMeta ? trialMeta.trial_idx : -1));
+        if (hint) { applyMpCrop(hint); }
         render();
     }
 
@@ -262,7 +355,12 @@
     }
 
     // ── Zoom / pan ───────────────────────────────────────────
-    function resetZoom() { scale = 1; offsetX = 0; offsetY = 0; render(); }
+    function resetZoom() {
+        scale = 1; offsetX = 0; offsetY = 0;
+        const hint = mpHints.find(h => h.trial_idx === (trialMeta ? trialMeta.trial_idx : -1));
+        if (hint) applyMpCrop(hint);
+        render();
+    }
 
     function setupCanvasEvents() {
         canvas.addEventListener('wheel', e => {

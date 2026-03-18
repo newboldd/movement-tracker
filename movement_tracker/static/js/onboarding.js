@@ -11,7 +11,7 @@ const onboard = (() => {
 
     // ── Step 1: Subject name ──────────────────────────────
 
-    function confirmName() {
+    async function confirmName() {
         const name = document.getElementById('subjectName').value.trim();
         if (!name) return alert('Enter a subject name');
         if (!/^[A-Za-z0-9_]+$/.test(name)) return alert('Name must be alphanumeric (letters, numbers, underscores)');
@@ -21,8 +21,9 @@ const onboard = (() => {
         document.getElementById('step2').style.display = 'block';
         document.getElementById('subjectName').disabled = true;
 
-        // Load initial file browser
-        loadDirectory('');
+        // Load initial file browser, then try to prefill from video viewer
+        await loadDirectory('');
+        await prefillFromSession();
     }
 
     // ── Step 2: File browser ──────────────────────────────
@@ -77,7 +78,7 @@ const onboard = (() => {
                     </div>`;
                 } else {
                     const dateStr = item.created ? new Date(item.created).toLocaleDateString(undefined, {year:'numeric',month:'short',day:'numeric'}) : '';
-                    html += `<div class="fb-item" id="fi-${item.name}" onclick="onboard.selectFile('${escPath(item.path)}', this)">
+                    html += `<div class="fb-item" data-path="${escPath(item.path)}" data-name="${item.name}" onclick="onboard.selectFile('${escPath(item.path)}', this)" ondblclick="onboard.dblClickFile('${escPath(item.path)}')">
                         <span class="icon">&#127909;</span>
                         <span>${item.name}</span>
                         <span style="color:var(--text-muted);font-size:11px;margin-left:auto;">${dateStr}</span>
@@ -335,6 +336,37 @@ const onboard = (() => {
         if (blur) blur.addEventListener('change', updateProcessButton);
     });
 
+    // ── Double-click to select + advance ─────────────────
+    function dblClickFile(path) {
+        // Single-click already fired (selectFile called), so selectedVideoPath is set.
+        selectVideo();
+    }
+
+    // ── Prefill from video viewer session ─────────────────
+    async function prefillFromSession() {
+        const videoName = sessionStorage.getItem('onboard_prefill_video');
+        if (!videoName) return;
+        sessionStorage.removeItem('onboard_prefill_video');
+
+        try {
+            const settings = await API.get('/api/settings');
+            if (!settings.video_path) return;
+
+            // Navigate file browser to the configured video directory
+            await loadDirectory(settings.video_path);
+
+            // Find and auto-select the matching file by name
+            const items = document.querySelectorAll('#fileBrowser .fb-item[data-name]');
+            for (const el of items) {
+                if (el.dataset.name === videoName) {
+                    selectFile(el.dataset.path, el);
+                    el.scrollIntoView({ block: 'nearest' });
+                    break;
+                }
+            }
+        } catch (e) { /* ignore — prefill is best-effort */ }
+    }
+
     // ── Keyboard shortcuts ────────────────────────────────
 
     document.addEventListener('keydown', (e) => {
@@ -369,6 +401,7 @@ const onboard = (() => {
         confirmName,
         browse,
         selectFile,
+        dblClickFile,
         selectVideo,
         setInPoint,
         setOutPoint,

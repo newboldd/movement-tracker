@@ -141,12 +141,12 @@
 <body>
     <div class="header">
         <h1><a href="/">Movement Tracker</a></h1>
-        <nav>
-            <a href="/remote">Processing</a>
-            <a href="/videos" class="active">Videos</a>
+        <nav>            <a href="/videos" class="active">Videos</a>
             <a href="/labeling-select">DLC</a>
             <a href="/mano">MANO</a>
             <a href="/results">Results</a>
+
+            <a href="/remote">Processing</a>
             <a href="/settings">Settings</a>
         </nav>
     </div>
@@ -157,6 +157,8 @@
         <div class="videos-topbar">
             <select id="subjectSelect"></select>
             <div id="trialBtns"></div>
+            <button class="btn btn-sm" id="browseBtn" title="Open any video file">Browse…</button>
+            <input type="file" id="browseInput" accept="video/*" style="display:none;">
         </div>
 
         <!-- Video canvas -->
@@ -184,7 +186,7 @@
                 <div class="speed-wrap">
                     <label>Speed</label>
                     <input type="range" id="speedSlider" min="0" max="10" value="3">
-                    <span id="speedDisplay">0.5x</span>
+                    <span id="speedDisplay">1x</span>
                 </div>
 
                 <div class="divider"></div>

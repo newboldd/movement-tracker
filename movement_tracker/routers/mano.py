@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 
+from ..config import get_settings
 from ..db import get_db_ctx
 from ..services.mano_data import (
     list_mano_trials,
@@ -17,6 +19,7 @@ from ..services.mano_data import (
     JOINT_NAMES,
 )
 from ..services.video import build_trial_map
+from ..services.mediapipe_prelabel import load_mediapipe_prelabels
 
 router = APIRouter(prefix="/api/mano", tags=["mano"])
 
@@ -118,7 +121,7 @@ def get_trial_heatmap(
 
 @router.get("/{subject_id}/trial/{trial_idx}/video")
 def get_trial_video(subject_id: int, trial_idx: int):
-    """Serve the video file for a trial."""
+    """Serve the video file for a trial, preferring de-identified if configured."""
     name = _subject_name(subject_id)
     try:
         trials = build_trial_map(name)
@@ -129,7 +132,74 @@ def get_trial_video(subject_id: int, trial_idx: int):
         raise HTTPException(404, f"Trial index {trial_idx} out of range")
 
     video_path = trials[trial_idx]["video_path"]
+
+    # Prefer de-identified video if the setting is enabled
+    settings = get_settings()
+    if settings.prefer_deidentified:
+        from pathlib import Path
+        p = Path(video_path)
+        nf_path = p.parent / (p.stem + "_nf" + p.suffix)
+        if nf_path.exists():
+            video_path = str(nf_path)
+
     return FileResponse(video_path, media_type="video/mp4")
+
+
+@router.get("/{subject_id}/mediapipe_hints")
+def get_mediapipe_hints(subject_id: int) -> list[dict]:
+    """Return per-trial MediaPipe crop hints: best camera and hand bounding boxes.
+
+    Each item: {trial_idx, best_camera (0|1), bbox_OS, bbox_OD,
+                detect_rate_OS, detect_rate_OD}
+    bbox_* are [minX, minY, maxX, maxY] in half-frame pixel coordinates,
+    padded by 15%, or null if no detections.
+    """
+    name = _subject_name(subject_id)
+    try:
+        trials = build_trial_map(name)
+    except Exception:
+        return []
+
+    hints = []
+    for i, t in enumerate(trials):
+        try:
+            prelabels = load_mediapipe_prelabels(name, t["trial_stem"])
+        except Exception:
+            continue
+
+        result: dict = {"trial_idx": i, "best_camera": 0,
+                        "bbox_OS": None, "bbox_OD": None,
+                        "detect_rate_OS": 0.0, "detect_rate_OD": 0.0}
+
+        for side_key, bbox_key, rate_key in [
+            ("OS_landmarks", "bbox_OS", "detect_rate_OS"),
+            ("OD_landmarks", "bbox_OD", "detect_rate_OD"),
+        ]:
+            lm = prelabels.get(side_key)  # shape (N, 21, 2) or None
+            if lm is None or not hasattr(lm, "shape"):
+                continue
+            # Detect rate = fraction of frames with at least one non-zero landmark
+            valid = np.any(lm != 0, axis=(1, 2))
+            rate = float(valid.mean())
+            result[rate_key] = rate
+
+            if valid.any():
+                pts = lm[valid]  # (M, 21, 2)
+                xs, ys = pts[:, :, 0].ravel(), pts[:, :, 1].ravel()
+                pad_x = (xs.max() - xs.min()) * 0.15
+                pad_y = (ys.max() - ys.min()) * 0.15
+                result[bbox_key] = [
+                    float(max(0, xs.min() - pad_x)),
+                    float(max(0, ys.min() - pad_y)),
+                    float(xs.max() + pad_x),
+                    float(ys.max() + pad_y),
+                ]
+
+        # Best camera = whichever side has higher detect rate
+        result["best_camera"] = 0 if result["detect_rate_OS"] >= result["detect_rate_OD"] else 1
+        hints.append(result)
+
+    return hints
 
 
 @router.get("/{subject_id}/video_list")
