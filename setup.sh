@@ -175,6 +175,9 @@ if [ ! -f "$PROJECT_DIR/sample_data/Con01_R1.mp4" ]; then
     "$PYTHON" "$PROJECT_DIR/scripts/download_sample.py"
 fi
 
+# ── Ensure default directories exist ─────────────────────────────────────
+mkdir -p "$PROJECT_DIR/dlc"
+
 # ── Kill any existing server on the port ─────────────────────────────────
 
 existing=$(lsof -ti :$PORT 2>/dev/null || true)
