@@ -180,7 +180,8 @@ const onboard = (() => {
             return alert('Out-point must be after in-point');
         }
 
-        const trial = document.getElementById('trialLabel').value;
+        const trial = document.getElementById('trialLabel').value.trim();
+        if (!trial) return alert('Enter a trial name');
         const sourceName = selectedVideoPath.split(/[/\\]/).pop();
 
         segments.push({
@@ -232,14 +233,14 @@ const onboard = (() => {
     }
 
     function autoAdvanceTrialLabel() {
-        const sel = document.getElementById('trialLabel');
+        const input = document.getElementById('trialLabel');
         const used = new Set(segments.map(s => s.trial_label));
-        for (const opt of sel.options) {
-            if (!used.has(opt.value)) {
-                sel.value = opt.value;
-                return;
-            }
-        }
+        // Suggest the next unused datalist option, or clear for free typing
+        const suggestions = Array.from(
+            document.querySelectorAll('#trialLabelSuggestions option')
+        ).map(o => o.value);
+        const next = suggestions.find(v => !used.has(v));
+        input.value = next || '';
     }
 
     function updateStep4Visibility() {

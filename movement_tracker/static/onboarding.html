@@ -120,14 +120,14 @@
                     <span class="time-display" id="inTime">In: --</span>
                     <button class="btn btn-sm" onclick="onboard.setOutPoint()">Set Out (O)</button>
                     <span class="time-display" id="outTime">Out: --</span>
-                    <select id="trialLabel">
-                        <option value="L1">L1</option>
-                        <option value="L2">L2</option>
-                        <option value="L3">L3</option>
-                        <option value="R1">R1</option>
-                        <option value="R2">R2</option>
-                        <option value="R3">R3</option>
-                    </select>
+                    <input type="text" id="trialLabel" list="trialLabelSuggestions"
+                        placeholder="Trial name, e.g. L1"
+                        style="width:100px;padding:4px 8px;background:var(--bg);border:1px solid var(--border);
+                               border-radius:var(--radius);color:var(--text);font-size:13px;">
+                    <datalist id="trialLabelSuggestions">
+                        <option value="L1"><option value="L2"><option value="L3">
+                        <option value="R1"><option value="R2"><option value="R3">
+                    </datalist>
                     <button class="btn btn-sm btn-primary" onclick="onboard.addSegment()">Add Segment</button>
                     <button class="btn btn-sm" onclick="onboard.pickAnotherVideo()">Pick Another Video</button>
                 </div>
