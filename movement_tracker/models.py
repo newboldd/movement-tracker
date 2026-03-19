@@ -33,6 +33,8 @@ class SubjectCreate(BaseModel):
 
 
 class SubjectUpdate(BaseModel):
+    name: Optional[str] = None
+    camera_mode: Optional[str] = None
     camera_name: Optional[str] = None
     no_face_videos: Optional[List[str]] = None
     diagnosis: Optional[str] = None
@@ -44,6 +46,7 @@ class SubjectResponse(BaseModel):
     stage: str
     stage_idx: int
     iteration: int
+    camera_mode: str = "stereo"
     camera_name: Optional[str]
     dlc_dir: Optional[str]
     diagnosis: str = "Control"
@@ -57,6 +60,7 @@ class SubjectResponse(BaseModel):
 class SubjectDetail(SubjectResponse):
     videos: List[str] = []
     trials: List[str] = []
+    segments: List[dict] = []
     no_face_videos: List[str] = []
     jobs: List[dict] = []
     label_sessions: List[dict] = []

@@ -242,7 +242,7 @@ def get_video_list(subject_id: int) -> list[dict]:
             "width": t["width"],
             "height": t["height"],
             # Stereo determined by camera_mode setting, not video dimensions
-            "is_stereo": settings.camera_mode == "stereo",
+            "is_stereo": settings.default_camera_mode == "stereo",
         }
         # Include camera info for multicam trials (>1 camera file)
         if len(cameras) > 1:

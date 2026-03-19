@@ -126,11 +126,23 @@ def create_subject(req: SubjectCreate) -> dict:
 
 @router.patch("/{subject_id}")
 def update_subject(subject_id: int, req: SubjectUpdate) -> dict:
-    """Update subject fields (e.g. camera_name, diagnosis)."""
+    """Update subject fields (e.g. name, camera_name, diagnosis)."""
     with get_db_ctx() as db:
         row = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Subject not found")
+
+        if req.name is not None and req.name != row["name"]:
+            _rename_subject(db, row, req.name)
+
+        if req.camera_mode is not None:
+            if req.camera_mode not in ("single", "stereo", "multicam"):
+                raise HTTPException(400, "camera_mode must be single, stereo, or multicam")
+            db.execute(
+                "UPDATE subjects SET camera_mode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (req.camera_mode, subject_id),
+            )
+
         if req.camera_name is not None:
             # camera_name: empty string → NULL
             camera_val = req.camera_name if req.camera_name else None
@@ -154,6 +166,98 @@ def update_subject(subject_id: int, req: SubjectUpdate) -> dict:
             )
         row = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
     return _subject_row_to_response(row)
+
+
+def _rename_subject(db, row, new_name: str):
+    """Rename a subject: update DB, rename video files, rename DLC dir."""
+    import re
+    old_name = row["name"]
+    subject_id = row["id"]
+
+    if not re.match(r'^[A-Za-z0-9_]+$', new_name):
+        raise HTTPException(400, "Name must be alphanumeric (letters, numbers, underscores)")
+
+    # Check no name collision
+    existing = db.execute("SELECT id FROM subjects WHERE name = ? AND id != ?",
+                          (new_name, subject_id)).fetchone()
+    if existing:
+        raise HTTPException(400, f"Subject '{new_name}' already exists")
+
+    settings = get_settings()
+
+    # Rename video files: {old_name}_{trial}.mp4 → {new_name}_{trial}.mp4
+    video_dir = settings.video_path
+    if video_dir.is_dir():
+        for vf in video_dir.iterdir():
+            if vf.is_file() and vf.stem.startswith(old_name + "_"):
+                suffix = vf.stem[len(old_name):]  # e.g. "_L1" or "_R1_cam0"
+                new_path = vf.parent / f"{new_name}{suffix}{vf.suffix}"
+                vf.rename(new_path)
+        # Also rename deidentified videos
+        deident_dir = video_dir / "deidentified"
+        if deident_dir.is_dir():
+            for vf in deident_dir.iterdir():
+                if vf.is_file() and vf.stem.startswith(old_name + "_"):
+                    suffix = vf.stem[len(old_name):]
+                    new_path = vf.parent / f"{new_name}{suffix}{vf.suffix}"
+                    vf.rename(new_path)
+
+    # Rename DLC directory
+    dlc_old = settings.dlc_path / old_name
+    dlc_new = settings.dlc_path / new_name
+    if dlc_old.is_dir() and not dlc_new.exists():
+        dlc_old.rename(dlc_new)
+
+    # Update DB
+    db.execute(
+        "UPDATE subjects SET name = ?, dlc_dir = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (new_name, new_name, subject_id),
+    )
+
+
+@router.delete("/{subject_id}/trials/{trial_label}")
+def delete_trial(subject_id: int, trial_label: str) -> dict:
+    """Delete a single trial: remove video file(s) and segment record."""
+    with get_db_ctx() as db:
+        row = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Subject not found")
+
+        subject_name = row["name"]
+        settings = get_settings()
+        video_dir = settings.video_path
+        deleted_files = []
+
+        # Find and delete matching video files
+        # Trial videos are named {subject}_{trial}.mp4 or {subject}_{trial}_{camera}.mp4
+        if video_dir.is_dir():
+            for vf in video_dir.iterdir():
+                stem = vf.stem
+                if vf.is_file() and (
+                    stem == f"{subject_name}_{trial_label}" or
+                    stem.startswith(f"{subject_name}_{trial_label}_")
+                ):
+                    vf.unlink()
+                    deleted_files.append(str(vf))
+            # Also remove deidentified versions
+            deident_dir = video_dir / "deidentified"
+            if deident_dir.is_dir():
+                for vf in deident_dir.iterdir():
+                    stem = vf.stem
+                    if vf.is_file() and (
+                        stem == f"{subject_name}_{trial_label}" or
+                        stem.startswith(f"{subject_name}_{trial_label}_")
+                    ):
+                        vf.unlink()
+                        deleted_files.append(str(vf))
+
+        # Remove segment record(s)
+        db.execute(
+            "DELETE FROM segments WHERE subject_id = ? AND trial_label = ?",
+            (subject_id, trial_label),
+        )
+
+    return {"deleted_files": deleted_files, "trial_label": trial_label}
 
 
 @router.delete("/{subject_id}")
@@ -204,6 +308,7 @@ def delete_subject(subject_id: int) -> dict:
             placeholders = ",".join("?" * len(session_ids))
             db.execute(f"DELETE FROM frame_labels WHERE session_id IN ({placeholders})", session_ids)
         db.execute("DELETE FROM label_sessions WHERE subject_id = ?", (subject_id,))
+        db.execute("DELETE FROM segments WHERE subject_id = ?", (subject_id,))
         db.execute("DELETE FROM jobs WHERE subject_id = ?", (subject_id,))
         db.execute("DELETE FROM subjects WHERE id = ?", (subject_id,))
 
@@ -235,6 +340,11 @@ def get_subject(subject_id: int) -> dict:
             (subject_id,),
         ).fetchall()
 
+        segments = db.execute(
+            "SELECT * FROM segments WHERE subject_id = ? ORDER BY created_at",
+            (subject_id,),
+        ).fetchall()
+
     resp = _subject_row_to_response(row)
     videos = _find_videos(row["name"])
     # Extract trial names from videos (e.g. "Con07_L1" from "Con07_L1.mp4")
@@ -242,6 +352,7 @@ def get_subject(subject_id: int) -> dict:
 
     resp["videos"] = videos
     resp["trials"] = trials
+    resp["segments"] = segments
     resp["jobs"] = jobs
     resp["label_sessions"] = sessions
     return resp

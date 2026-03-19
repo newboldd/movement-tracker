@@ -224,7 +224,7 @@ def get_subject_videos(subject_name: str, *, prefer_deidentified: bool = False,
         )
 
     # In multicam mode, filter by camera name suffix if specified
-    if camera_name and settings.camera_mode == "multicam":
+    if camera_name and settings.default_camera_mode == "multicam":
         cam_suffix = f"_{camera_name}.mp4"
         cam_suffix_lower = cam_suffix.lower()
         videos = [v for v in videos if Path(v).name.lower().endswith(cam_suffix_lower)]
@@ -253,7 +253,7 @@ def _group_multicam_videos(subject_name: str, videos: list[str]) -> list[dict]:
     """
     settings = get_settings()
 
-    if settings.camera_mode != "multicam" or len(videos) <= 1:
+    if settings.default_camera_mode != "multicam" or len(videos) <= 1:
         return [
             {"trial_name": Path(v).stem,
              "cameras": [{"name": "default", "path": v, "idx": 0}]}
@@ -370,7 +370,7 @@ def _extract_frame_cached(video_path: str, frame_num: int, side: str) -> bytes:
 
     # Single camera or multicam mode: return full frame, no cropping
     # (multicam already resolved to the correct camera file before calling)
-    if settings.camera_mode in ("single", "multicam"):
+    if settings.default_camera_mode in ("single", "multicam"):
         _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         return bytes(jpeg)
 
@@ -432,7 +432,7 @@ def extract_frame(subject_name: str, global_frame: int, side: str,
     settings = get_settings()
 
     # In multicam mode, resolve to the camera-specific file
-    if settings.camera_mode == "multicam":
+    if settings.default_camera_mode == "multicam":
         cam_path = _resolve_camera_path(trial, side)
         if cam_path:
             video_path = cam_path
@@ -463,7 +463,7 @@ def extract_frame_raw(video_path: str, frame_num: int, side: str) -> np.ndarray:
     settings = get_settings()
 
     # Single camera or multicam mode: return full frame (no cropping)
-    if settings.camera_mode in ("single", "multicam"):
+    if settings.default_camera_mode in ("single", "multicam"):
         return frame
 
     # Stereo mode: crop to left or right half

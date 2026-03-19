@@ -1,123 +1,28 @@
-/* Subject onboarding: file browser, video trimmer, segment management */
+/* Subject onboarding: file browser, video trimmer, segment management
+   New flow: 1) Select Video → 2) Preview + Name → 3) Camera Mode → 3b) Sync → 4) Trim → 5) Review */
 
 const onboard = (() => {
     let subjectName = '';
-    let cameraMode = 'stereo';
-    let selectedCameraSetup = null;
-    let cameraNames = [];         // populated from setup in multicam mode
-    let currentCameraIdx = 0;     // which camera we're selecting a video for
+    let cameraMode = 'stereo';      // single | stereo | multicam
+    let selectedCameraSetup = null;  // {id, name, camera_names, ...}
+    let cameraNames = [];            // from setup
     let currentPath = '';
     let selectedVideoPath = null;
     let videoMeta = null;
     let inPoint = null;
     let outPoint = null;
-    const segments = []; // {source_path, start_time, end_time, trial_label, source_name}
+    const segments = [];
 
-    // ── Step 1: Subject name ──────────────────────────────
+    // Multicam state
+    const multicamVideos = {};     // cameraName → path
+    const syncOffsets = {};        // cameraName → integer frame offset
+    let syncFps = 30;
+    let syncFrame = 0;
 
-    async function confirmName() {
-        const name = document.getElementById('subjectName').value.trim();
-        if (!name) return alert('Enter a subject name');
-        if (!/^[A-Za-z0-9_]+$/.test(name)) return alert('Name must be alphanumeric (letters, numbers, underscores)');
+    // Per-segment "has faces" state — true by default
+    const segmentHasFaces = [];    // parallel to segments[]
 
-        subjectName = name;
-        document.getElementById('step1Num').classList.add('done');
-        document.getElementById('subjectName').disabled = true;
-
-        // Check camera mode to decide whether to show camera setup step
-        try {
-            const settings = await API.get('/api/settings');
-            cameraMode = settings.camera_mode || 'stereo';
-        } catch (e) { /* default to stereo */ }
-
-        if (cameraMode === 'single') {
-            // Skip camera setup step — go straight to file browser
-            _updateStepNumbers(false);
-            document.getElementById('step2').style.display = 'block';
-            await loadDirectory('');
-            await prefillFromSession();
-        } else {
-            // Show camera setup selection
-            _updateStepNumbers(true);
-            await _loadCameraSetups();
-            document.getElementById('step1b').style.display = 'block';
-        }
-    }
-
-    // ── Step 1b: Camera setup selection ───────────────────
-
-    async function _loadCameraSetups() {
-        const select = document.getElementById('cameraSetupSelect');
-        try {
-            const setups = await API.get('/api/camera-setups');
-            select.innerHTML = '<option value="">-- Select --</option>';
-            for (const s of setups) {
-                const calib = s.has_calibration ? ' (calibrated)' : '';
-                select.innerHTML += `<option value="${s.id}" data-name="${s.name}">${s.name} — ${s.mode}, ${s.camera_count} cams${calib}</option>`;
-            }
-            if (setups.length === 0) {
-                select.innerHTML = '<option value="">No setups — create one first</option>';
-            }
-        } catch (e) {
-            select.innerHTML = '<option value="">Error loading setups</option>';
-        }
-    }
-
-    async function confirmCameraSetup() {
-        const select = document.getElementById('cameraSetupSelect');
-        const setupId = select.value;
-        if (!setupId) return alert('Select a camera setup or create a new one');
-
-        // Fetch full setup details to get camera names
-        try {
-            const setup = await API.get(`/api/camera-setups/${setupId}`);
-            selectedCameraSetup = setup;
-            cameraNames = setup.camera_names || [];
-        } catch (e) {
-            const opt = select.options[select.selectedIndex];
-            selectedCameraSetup = { id: parseInt(setupId), name: opt.dataset.name || opt.textContent };
-            cameraNames = [];
-        }
-
-        currentCameraIdx = 0;
-        document.getElementById('step1bNum').classList.add('done');
-        document.getElementById('step2').style.display = 'block';
-
-        // In multicam mode, show which camera we're selecting for
-        _updateCameraLabel();
-
-        await loadDirectory('');
-        await prefillFromSession();
-    }
-
-    function _updateCameraLabel() {
-        const label = document.getElementById('cameraLabel');
-        if (!label) return;
-        if (cameraMode === 'multicam' && cameraNames.length > 1) {
-            label.textContent = `Selecting video for camera: ${cameraNames[currentCameraIdx]} (${currentCameraIdx + 1}/${cameraNames.length})`;
-            label.style.display = 'block';
-        } else {
-            label.style.display = 'none';
-        }
-    }
-
-    function _updateStepNumbers(showCameraStep) {
-        // Adjust step numbers based on whether camera setup step is shown
-        if (showCameraStep) {
-            // Steps: 1=Name, 2=Camera, 3=Video, 4=Trim, 5=Process
-            document.getElementById('step1bNum').textContent = '2';
-            document.getElementById('step2Num').textContent = '3';
-            document.getElementById('step3Num').textContent = '4';
-            document.getElementById('step4Num').textContent = '5';
-        } else {
-            // Steps: 1=Name, 2=Video, 3=Trim, 4=Process
-            document.getElementById('step2Num').textContent = '2';
-            document.getElementById('step3Num').textContent = '3';
-            document.getElementById('step4Num').textContent = '4';
-        }
-    }
-
-    // ── Step 2: File browser ──────────────────────────────
+    // ── Step 1: File browser (opens immediately) ─────────────
 
     async function loadDirectory(path) {
         const browser = document.getElementById('fileBrowser');
@@ -131,7 +36,6 @@ const onboard = (() => {
 
             let html = '';
 
-            // Show locations if at root
             if (!currentPath && data.locations) {
                 html += '<div class="fb-locations">';
                 for (const loc of data.locations) {
@@ -141,10 +45,21 @@ const onboard = (() => {
                         <span style="color:var(--text-muted);font-size:11px;margin-left:auto;">${loc.path}</span>
                     </div>`;
                 }
+                // "Browse other…" option → derive home dir from existing locations
+                let homePath = '/';
+                if (data.locations.length > 0) {
+                    const parts = data.locations[0].path.replace(/\\\\/g, '/').split('/');
+                    // e.g. /Users/john/Desktop → /Users/john
+                    homePath = parts.length >= 3 ? parts.slice(0, 3).join('/') : parts.join('/');
+                }
+                html += `<div class="fb-loc" onclick="onboard.browse('${escPath(homePath)}')" style="border-top:1px solid var(--border);margin-top:4px;padding-top:10px;">
+                    <span class="icon">&#128269;</span>
+                    <span>Browse other location&hellip;</span>
+                    <span style="color:var(--text-muted);font-size:11px;margin-left:auto;">${homePath}</span>
+                </div>`;
                 html += '</div>';
             }
 
-            // Breadcrumbs
             if (data.breadcrumbs && data.breadcrumbs.length > 0) {
                 html += '<div class="fb-breadcrumbs">';
                 html += `<a onclick="onboard.browse('')">Home</a> /`;
@@ -154,7 +69,6 @@ const onboard = (() => {
                 html += '</div>';
             }
 
-            // Items
             if (data.parent) {
                 html += `<div class="fb-item" onclick="onboard.browse('${escPath(data.parent)}')">
                     <span class="icon">&#8592;</span> <span>..</span>
@@ -190,22 +104,22 @@ const onboard = (() => {
         }
     }
 
-    function browse(path) {
-        loadDirectory(path);
-    }
+    function browse(path) { loadDirectory(path); }
 
     function selectFile(path, el) {
-        // Deselect all
         document.querySelectorAll('.fb-item.selected').forEach(e => e.classList.remove('selected'));
         el.classList.add('selected');
         selectedVideoPath = path;
         document.getElementById('selectVideoBtn').disabled = false;
     }
 
+    function dblClickFile(path) { selectVideo(); }
+
+    // ── Step 1 → 2: Select video and show preview ───────────
+
     async function selectVideo() {
         if (!selectedVideoPath) return;
 
-        // Probe video
         try {
             videoMeta = await API.get(`/api/video-tools/probe?path=${encodeURIComponent(selectedVideoPath)}`);
         } catch (e) {
@@ -213,8 +127,8 @@ const onboard = (() => {
             return;
         }
 
-        document.getElementById('step2Num').classList.add('done');
-        document.getElementById('step3').style.display = 'block';
+        document.getElementById('step1Num').classList.add('done');
+        document.getElementById('step2').style.display = 'block';
 
         // Show video name and metadata
         const name = selectedVideoPath.split(/[/\\]/).pop();
@@ -229,20 +143,385 @@ const onboard = (() => {
             <span class="meta-badge">${videoMeta.codec}</span>
         `;
 
-        // Load video for trimming
+        // Load preview video
+        const video = document.getElementById('previewVideo');
+        video.src = `/api/video-tools/stream?path=${encodeURIComponent(selectedVideoPath)}`;
+
+        // Auto-detect camera mode from aspect ratio
+        if (videoMeta.is_stereo) {
+            _preselectCameraMode('stereo');
+        }
+
+        // Scroll to step 2
+        document.getElementById('step2').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    // ── Step 2: Confirm subject name ─────────────────────────
+
+    async function confirmName() {
+        const name = document.getElementById('subjectName').value.trim();
+        if (!name) return alert('Enter a subject name');
+        if (!/^[A-Za-z0-9_]+$/.test(name)) return alert('Name must be alphanumeric (letters, numbers, underscores)');
+
+        subjectName = name;
+        document.getElementById('step2Num').classList.add('done');
+        document.getElementById('subjectName').disabled = true;
+
+        // Show camera mode step
+        document.getElementById('step3').style.display = 'block';
+        await _loadCameraSetups();
+
+        document.getElementById('step3').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    // ── Step 3: Camera mode & setup ──────────────────────────
+
+    function _preselectCameraMode(mode) {
+        cameraMode = mode;
+        document.querySelectorAll('.camera-mode-option').forEach(el => {
+            el.classList.toggle('selected', el.querySelector('input').value === mode);
+            if (el.querySelector('input').value === mode) el.querySelector('input').checked = true;
+        });
+    }
+
+    function selectCameraMode(mode) {
+        cameraMode = mode;
+
+        // Update UI selection
+        document.querySelectorAll('.camera-mode-option').forEach(el => {
+            el.classList.toggle('selected', el.querySelector('input').value === mode);
+        });
+
+        // Show/hide sub-panels
+        document.getElementById('stereoPanel').style.display = (mode === 'stereo') ? 'block' : 'none';
+        document.getElementById('multicamPanel').style.display = (mode === 'multicam') ? 'block' : 'none';
+    }
+
+    async function _loadCameraSetups() {
+        const stereoSelect = document.getElementById('cameraSetupSelect');
+        const multicamSelect = document.getElementById('multicamSetupSelect');
+
+        try {
+            const setups = await API.get('/api/camera-setups');
+
+            // Stereo dropdown: existing calibrations + DB setups
+            stereoSelect.innerHTML = '<option value="">-- Select --</option>';
+
+            // Add preset calibrations from DEFAULT_CALIBRATIONS
+            const settings = await API.get('/api/settings');
+            const calibrations = settings.calibrations || {};
+            for (const [camName, calibPath] of Object.entries(calibrations)) {
+                // Check if already covered by a DB setup
+                const covered = setups.some(s => s.name === camName);
+                if (!covered) {
+                    stereoSelect.innerHTML += `<option value="preset:${camName}" data-name="${camName}">
+                        ${camName} (existing calibration)</option>`;
+                }
+            }
+
+            for (const s of setups) {
+                if (s.mode === 'stereo') {
+                    const calib = s.has_calibration ? ' (calibrated)' : '';
+                    stereoSelect.innerHTML += `<option value="db:${s.id}" data-name="${s.name}">
+                        ${s.name} — ${s.camera_count} cams${calib}</option>`;
+                }
+            }
+
+            // Multicam dropdown
+            multicamSelect.innerHTML = '<option value="">-- Select --</option>';
+            for (const s of setups) {
+                if (s.mode === 'multicam') {
+                    multicamSelect.innerHTML += `<option value="db:${s.id}" data-name="${s.name}">
+                        ${s.name} — ${s.camera_count} cams</option>`;
+                }
+            }
+        } catch (e) {
+            stereoSelect.innerHTML = '<option value="">Error loading setups</option>';
+            multicamSelect.innerHTML = '<option value="">Error loading setups</option>';
+        }
+    }
+
+    function toggleNewSetupForm(mode) {
+        if (mode === 'stereo') {
+            const form = document.getElementById('newSetupForm');
+            form.style.display = form.style.display === 'none' ? 'block' : 'none';
+        } else {
+            const form = document.getElementById('newMulticamSetupForm');
+            form.style.display = form.style.display === 'none' ? 'block' : 'none';
+        }
+    }
+
+    async function createCameraSetup(mode) {
+        let nameInput, camNamesInput;
+        if (mode === 'stereo') {
+            nameInput = document.getElementById('newSetupName');
+            camNamesInput = document.getElementById('newSetupCamNames');
+        } else {
+            nameInput = document.getElementById('newMulticamSetupName');
+            camNamesInput = document.getElementById('newMulticamCamNames');
+        }
+
+        const name = nameInput.value.trim();
+        if (!name) return alert('Enter a setup name');
+
+        const camNames = camNamesInput.value.split(',').map(s => s.trim()).filter(Boolean);
+        if (camNames.length < 2) return alert('Enter at least 2 camera names');
+
+        try {
+            const result = await API.post('/api/camera-setups', {
+                name,
+                mode: mode === 'multicam' ? 'multicam' : 'stereo',
+                camera_count: camNames.length,
+                camera_names: camNames,
+            });
+
+            // Reload dropdowns and select the new one
+            await _loadCameraSetups();
+
+            const select = mode === 'stereo'
+                ? document.getElementById('cameraSetupSelect')
+                : document.getElementById('multicamSetupSelect');
+
+            // Select the newly created option
+            for (const opt of select.options) {
+                if (opt.value === `db:${result.id}`) {
+                    opt.selected = true;
+                    break;
+                }
+            }
+
+            // Hide the form
+            if (mode === 'stereo') {
+                document.getElementById('newSetupForm').style.display = 'none';
+            } else {
+                document.getElementById('newMulticamSetupForm').style.display = 'none';
+            }
+
+            nameInput.value = '';
+        } catch (e) {
+            alert('Failed to create setup: ' + e.message);
+        }
+    }
+
+    function _updateMulticamVideoList() {
+        if (!selectedCameraSetup || cameraMode !== 'multicam') return;
+
+        const container = document.getElementById('multicamVideoList');
+        const items = document.getElementById('multicamCameraItems');
+        container.style.display = 'block';
+
+        // First camera uses the already-selected video
+        const firstName = selectedVideoPath ? selectedVideoPath.split(/[/\\]/).pop() : 'Not selected';
+
+        items.innerHTML = cameraNames.map((cam, i) => {
+            const file = i === 0 ? firstName : (multicamVideos[cam] ? multicamVideos[cam].split(/[/\\]/).pop() : '<em>Not selected</em>');
+            const btnHtml = i === 0
+                ? ''
+                : `<button class="btn btn-sm" onclick="onboard.pickMulticamVideo('${cam}')">Browse</button>`;
+            return `
+                <div class="multicam-video-item">
+                    <span class="cam-name">${cam}</span>
+                    <span class="cam-file">${file}</span>
+                    ${btnHtml}
+                </div>
+            `;
+        }).join('');
+    }
+
+    // Multicam: pick video for a specific camera
+    let _pickingForCamera = null;
+    let _pickingFileBrowserCB = null;
+
+    function pickMulticamVideo(cameraName) {
+        _pickingForCamera = cameraName;
+        // Show a modal file browser — reuse the main file browser but in a picking state
+        const step1 = document.getElementById('step1');
+        step1.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+        // Change the select button behavior temporarily
+        const btn = document.getElementById('selectVideoBtn');
+        btn.textContent = `Select for ${cameraName}`;
+        btn.onclick = () => _confirmMulticamPick();
+    }
+
+    function _confirmMulticamPick() {
+        if (!selectedVideoPath || !_pickingForCamera) return;
+
+        multicamVideos[_pickingForCamera] = selectedVideoPath;
+        _pickingForCamera = null;
+
+        // Restore button
+        const btn = document.getElementById('selectVideoBtn');
+        btn.textContent = 'Select Video';
+        btn.onclick = () => selectVideo();
+
+        // Update the multicam video list
+        _updateMulticamVideoList();
+
+        // Scroll back to step 3
+        document.getElementById('step3').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    async function confirmCameraMode() {
+        if (cameraMode === 'stereo') {
+            const select = document.getElementById('cameraSetupSelect');
+            const val = select.value;
+            if (!val) return alert('Select a camera setup');
+
+            if (val.startsWith('preset:')) {
+                const presetName = val.replace('preset:', '');
+                selectedCameraSetup = { name: presetName, preset: true };
+                cameraNames = ['OS', 'OD']; // default for presets
+            } else {
+                const setupId = parseInt(val.replace('db:', ''));
+                try {
+                    const setup = await API.get(`/api/camera-setups/${setupId}`);
+                    selectedCameraSetup = setup;
+                    cameraNames = setup.camera_names || ['OS', 'OD'];
+                } catch (e) {
+                    return alert('Error loading setup: ' + e.message);
+                }
+            }
+
+            document.getElementById('step3Num').classList.add('done');
+            _showTrimStep();
+
+        } else if (cameraMode === 'multicam') {
+            const select = document.getElementById('multicamSetupSelect');
+            const val = select.value;
+            if (!val) return alert('Select a camera setup');
+
+            const setupId = parseInt(val.replace('db:', ''));
+            try {
+                const setup = await API.get(`/api/camera-setups/${setupId}`);
+                selectedCameraSetup = setup;
+                cameraNames = setup.camera_names || [];
+            } catch (e) {
+                return alert('Error loading setup: ' + e.message);
+            }
+
+            // Assign first camera to already-selected video
+            if (cameraNames.length > 0) {
+                multicamVideos[cameraNames[0]] = selectedVideoPath;
+            }
+
+            // Check if all videos are selected
+            _updateMulticamVideoList();
+
+            const allSelected = cameraNames.every(cam => multicamVideos[cam]);
+            if (!allSelected) {
+                return alert('Please select a video for each camera before continuing.');
+            }
+
+            document.getElementById('step3Num').classList.add('done');
+
+            // Show sync step
+            _initSyncModule();
+
+        } else {
+            // Single camera — skip setup, go to trim
+            document.getElementById('step3Num').classList.add('done');
+            _showTrimStep();
+        }
+    }
+
+    function _showTrimStep() {
+        document.getElementById('step4').style.display = 'block';
+
+        // Load video for trimming (same video or first camera video)
         const video = document.getElementById('trimVideo');
         video.src = `/api/video-tools/stream?path=${encodeURIComponent(selectedVideoPath)}`;
 
-        // Reset trim points
         inPoint = null;
         outPoint = null;
         updateTrimDisplay();
-
-        // Auto-advance trial label
         autoAdvanceTrialLabel();
+
+        document.getElementById('step4').scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
-    // ── Step 3: Trimmer ───────────────────────────────────
+    // ── Step 3b: Multicam Sync ───────────────────────────────
+
+    function _initSyncModule() {
+        document.getElementById('step3b').style.display = 'block';
+
+        syncFps = videoMeta ? videoMeta.fps : 30;
+        syncFrame = 0;
+
+        const container = document.getElementById('syncContainer');
+        container.innerHTML = '';
+
+        // Initialize offsets
+        for (const cam of cameraNames) {
+            syncOffsets[cam] = 0;
+        }
+
+        // Create video panels
+        for (let i = 0; i < cameraNames.length; i++) {
+            const cam = cameraNames[i];
+            const videoPath = multicamVideos[cam];
+            if (!videoPath) continue;
+
+            const panel = document.createElement('div');
+            panel.className = 'sync-video-panel';
+            panel.innerHTML = `
+                <div class="cam-label">${cam}</div>
+                <video id="syncVideo_${i}" preload="auto" muted
+                    src="/api/video-tools/stream?path=${encodeURIComponent(videoPath)}"></video>
+                <div class="sync-offset-controls">
+                    <button onclick="onboard.syncStepSingle(${i}, -1)">-1</button>
+                    <span class="sync-offset-display" id="syncOffset_${i}">offset: 0</span>
+                    <button onclick="onboard.syncStepSingle(${i}, 1)">+1</button>
+                </div>
+            `;
+            container.appendChild(panel);
+        }
+
+        _updateSyncFrameDisplay();
+        document.getElementById('step3b').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function syncStepAll(delta) {
+        syncFrame += delta;
+        if (syncFrame < 0) syncFrame = 0;
+
+        for (let i = 0; i < cameraNames.length; i++) {
+            const cam = cameraNames[i];
+            const video = document.getElementById(`syncVideo_${i}`);
+            if (video) {
+                const targetFrame = syncFrame + syncOffsets[cam];
+                video.currentTime = Math.max(0, targetFrame / syncFps);
+            }
+        }
+        _updateSyncFrameDisplay();
+    }
+
+    function syncStepSingle(idx, delta) {
+        const cam = cameraNames[idx];
+        syncOffsets[cam] = (syncOffsets[cam] || 0) + delta;
+
+        const video = document.getElementById(`syncVideo_${idx}`);
+        if (video) {
+            const targetFrame = syncFrame + syncOffsets[cam];
+            video.currentTime = Math.max(0, targetFrame / syncFps);
+        }
+
+        document.getElementById(`syncOffset_${idx}`).textContent = `offset: ${syncOffsets[cam]}`;
+    }
+
+    function _updateSyncFrameDisplay() {
+        const el = document.getElementById('syncFrameDisplay');
+        if (el) el.textContent = `Frame: ${syncFrame}`;
+    }
+
+    function confirmSync() {
+        document.getElementById('step3bNum').textContent = '✓';
+
+        // Proceed to trim step using first camera's video
+        _showTrimStep();
+    }
+
+    // ── Step 4: Trimmer ──────────────────────────────────────
 
     function setInPoint() {
         const video = document.getElementById('trimVideo');
@@ -273,35 +552,68 @@ const onboard = (() => {
 
         const trial = document.getElementById('trialLabel').value.trim();
         if (!trial) return alert('Enter a trial name');
+
+        // In edit mode, warn if trial label matches an existing trial (unless actively editing it)
+        if (editMode && trial !== editingTrialLabel && existingTrials.some(t => {
+            const trialPart = t.replace(subjectName + '_', '');
+            return trialPart === trial;
+        })) {
+            if (!confirm(`Trial "${trial}" already exists for ${subjectName}. Adding a new segment will overwrite it. Continue?`)) return;
+        }
+        editingTrialLabel = null;
+
         const sourceName = selectedVideoPath.split(/[/\\]/).pop();
 
-        const seg = {
-            source_path: selectedVideoPath,
-            start_time: inPoint,
-            end_time: outPoint,
-            trial_label: trial,
-            source_name: sourceName,
-        };
-
-        // In multicam mode, tag with camera name
         if (cameraMode === 'multicam' && cameraNames.length > 1) {
-            seg.camera_name = cameraNames[currentCameraIdx];
+            // Add a segment for EACH camera with adjusted times based on sync offsets
+            for (const cam of cameraNames) {
+                const offset = syncOffsets[cam] || 0;
+                const offsetSec = offset / syncFps;
+                segments.push({
+                    source_path: multicamVideos[cam] || selectedVideoPath,
+                    start_time: inPoint + offsetSec,
+                    end_time: outPoint + offsetSec,
+                    trial_label: trial,
+                    camera_name: cam,
+                    source_name: (multicamVideos[cam] || selectedVideoPath).split(/[/\\]/).pop(),
+                });
+                segmentHasFaces.push(true);
+            }
+        } else {
+            segments.push({
+                source_path: selectedVideoPath,
+                start_time: inPoint,
+                end_time: outPoint,
+                trial_label: trial,
+                source_name: sourceName,
+            });
+            segmentHasFaces.push(true);
         }
-
-        segments.push(seg);
 
         inPoint = null;
         outPoint = null;
         updateTrimDisplay();
         renderSegments();
         autoAdvanceTrialLabel();
-        updateStep4Visibility();
+        updateStep5Visibility();
     }
 
     function removeSegment(idx) {
-        segments.splice(idx, 1);
+        // For multicam, remove all segments with same trial_label
+        if (cameraMode === 'multicam' && cameraNames.length > 1) {
+            const trial = segments[idx].trial_label;
+            for (let i = segments.length - 1; i >= 0; i--) {
+                if (segments[i].trial_label === trial) {
+                    segments.splice(i, 1);
+                    segmentHasFaces.splice(i, 1);
+                }
+            }
+        } else {
+            segments.splice(idx, 1);
+            segmentHasFaces.splice(idx, 1);
+        }
         renderSegments();
-        updateStep4Visibility();
+        updateStep5Visibility();
     }
 
     function renderSegments() {
@@ -311,34 +623,53 @@ const onboard = (() => {
             return;
         }
 
-        list.innerHTML = segments.map((s, i) => {
-            const camTag = s.camera_name
-                ? `<span style="color:var(--blue);font-size:11px;font-weight:600;">[${s.camera_name}]</span>`
-                : '';
-            return `
+        // For multicam, group by trial label to show condensed view
+        if (cameraMode === 'multicam' && cameraNames.length > 1) {
+            const trials = {};
+            segments.forEach((s, i) => {
+                if (!trials[s.trial_label]) trials[s.trial_label] = { seg: s, indices: [] };
+                trials[s.trial_label].indices.push(i);
+            });
+
+            list.innerHTML = Object.entries(trials).map(([trial, data]) => {
+                const s = data.seg;
+                return `
+                    <div class="segment-item">
+                        <span class="trial">${trial}</span>
+                        <span class="times">${formatTime(s.start_time)} - ${formatTime(s.end_time)}
+                            (${(s.end_time - s.start_time).toFixed(1)}s)</span>
+                        <span class="source">${cameraNames.length} cameras</span>
+                        <span class="remove" onclick="onboard.removeSegment(${data.indices[0]})">&times;</span>
+                    </div>
+                `;
+            }).join('');
+        } else {
+            list.innerHTML = segments.map((s, i) => `
                 <div class="segment-item">
-                    <span class="trial">${s.trial_label} ${camTag}</span>
+                    <span class="trial">${s.trial_label}</span>
                     <span class="times">${formatTime(s.start_time)} - ${formatTime(s.end_time)}
                         (${(s.end_time - s.start_time).toFixed(1)}s)</span>
                     <span class="source">${s.source_name}</span>
                     <span class="remove" onclick="onboard.removeSegment(${i})">&times;</span>
                 </div>
-            `;
-        }).join('');
+            `).join('');
+        }
     }
 
     function pickAnotherVideo() {
-        // Go back to file browser to pick a different source video
-        document.getElementById('step3').style.display = 'none';
-        document.getElementById('step2Num').classList.remove('done');
-        selectedVideoPath = null;
-        videoMeta = null;
+        document.getElementById('step4').style.display = 'none';
+        document.getElementById('step1Num').classList.remove('done');
+        document.getElementById('step1').scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
     function autoAdvanceTrialLabel() {
         const input = document.getElementById('trialLabel');
         const used = new Set(segments.map(s => s.trial_label));
-        // Suggest the next unused datalist option, or clear for free typing
+        if (editMode) {
+            for (const t of existingTrials) {
+                used.add(t.replace(subjectName + '_', ''));
+            }
+        }
         const suggestions = Array.from(
             document.querySelectorAll('#trialLabelSuggestions option')
         ).map(o => o.value);
@@ -346,52 +677,92 @@ const onboard = (() => {
         input.value = next || '';
     }
 
-    function updateStep4Visibility() {
-        const step4 = document.getElementById('step4');
-        if (segments.length > 0) {
-            step4.style.display = 'block';
-            document.getElementById('step3Num').classList.add('done');
+    // ── Step 5: Review & Process ─────────────────────────────
 
-            // Render review
+    function updateStep5Visibility() {
+        const step5 = document.getElementById('step5');
+        if (segments.length > 0) {
+            step5.style.display = 'block';
+            document.getElementById('step4Num').classList.add('done');
+
+            if (editMode) {
+                const btn = document.getElementById('processBtn');
+                const blur = document.getElementById('blurFaces');
+                if (btn) btn.textContent = blur && blur.checked ? 'Trim, Blur & Save' : 'Trim & Save';
+            }
+
+            // Render review with per-segment has-faces checkboxes
             const review = document.getElementById('reviewSegments');
-            review.innerHTML = `
-                <p style="margin-bottom:8px;">Subject: <strong>${subjectName}</strong></p>
-                <p style="margin-bottom:8px;">${segments.length} segment(s) will be trimmed and saved.</p>
-            ` + segments.map(s => {
+            const editNote = editMode
+                ? `<p style="margin-bottom:8px;color:var(--blue);">Adding to existing subject <strong>${subjectName}</strong> (${existingTrials.length} existing trial${existingTrials.length !== 1 ? 's' : ''}).</p>`
+                : '';
+
+            // Group segments by trial for display
+            const trialMap = {};
+            segments.forEach((s, i) => {
+                if (!trialMap[s.trial_label]) trialMap[s.trial_label] = [];
+                trialMap[s.trial_label].push({ seg: s, idx: i });
+            });
+
+            let segHtml = '';
+            for (const [trial, items] of Object.entries(trialMap)) {
+                const s = items[0].seg;
+                const firstIdx = items[0].idx;
                 const outName = s.camera_name
-                    ? `${subjectName}_${s.trial_label}_${s.camera_name}.mp4`
-                    : `${subjectName}_${s.trial_label}.mp4`;
-                const camTag = s.camera_name
-                    ? ` <span style="color:var(--blue);font-size:11px;">[${s.camera_name}]</span>`
-                    : '';
-                return `
+                    ? `${subjectName}_${trial}_*.mp4 (${items.length} cameras)`
+                    : `${subjectName}_${trial}.mp4`;
+                const hasFacesChecked = segmentHasFaces[firstIdx] !== false ? 'checked' : '';
+
+                segHtml += `
                     <div class="segment-item">
-                        <span class="trial">${s.trial_label}${camTag}</span>
+                        <span class="trial">${trial}</span>
                         <span class="times">${formatTime(s.start_time)} - ${formatTime(s.end_time)}</span>
-                        <span class="source">${s.source_name}</span>
-                        <span style="color:var(--text-muted);font-size:11px;">&#8594; ${outName}</span>
+                        <span class="source" style="flex:0;">&#8594; ${outName}</span>
+                        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;margin-left:auto;">
+                            <input type="checkbox" ${hasFacesChecked}
+                                onchange="onboard.toggleSegmentFaces('${trial}', this.checked)">
+                            Has faces
+                        </label>
                     </div>
                 `;
-            }).join('');
+            }
+
+            review.innerHTML = `
+                <p style="margin-bottom:8px;">Subject: <strong>${subjectName}</strong>
+                    <span class="meta-badge" style="margin-left:8px;">${cameraMode}</span>
+                    ${selectedCameraSetup ? `<span class="meta-badge">${selectedCameraSetup.name}</span>` : ''}
+                </p>
+                ${editNote}
+                <p style="margin-bottom:8px;">${Object.keys(trialMap).length} trial(s) will be trimmed and saved.</p>
+                ${segHtml}
+            `;
 
             updateProcessButton();
         } else {
-            step4.style.display = 'none';
-            document.getElementById('step3Num').classList.remove('done');
+            step5.style.display = 'none';
+            document.getElementById('step4Num').classList.remove('done');
         }
+    }
+
+    function toggleSegmentFaces(trialLabel, hasFaces) {
+        segments.forEach((s, i) => {
+            if (s.trial_label === trialLabel) {
+                segmentHasFaces[i] = hasFaces;
+            }
+        });
     }
 
     function updateProcessButton() {
         const blur = document.getElementById('blurFaces');
         const btn = document.getElementById('processBtn');
         if (blur && btn) {
-            btn.textContent = blur.checked
-                ? 'Trim, Blur Faces & Create Subject'
-                : 'Trim & Create Subject';
+            if (editMode) {
+                btn.textContent = blur.checked ? 'Trim, Blur & Save' : 'Trim & Save';
+            } else {
+                btn.textContent = blur.checked ? 'Trim, Blur Faces & Create Subject' : 'Trim & Create Subject';
+            }
         }
     }
-
-    // ── Step 4: Process ───────────────────────────────────
 
     async function startProcessing() {
         if (segments.length === 0) return;
@@ -404,9 +775,25 @@ const onboard = (() => {
 
         try {
             const blurFaces = document.getElementById('blurFaces').checked;
+
+            // Build no_face_trials from segmentHasFaces
+            const noFaceTrials = [];
+            const seen = new Set();
+            segments.forEach((s, i) => {
+                if (!seen.has(s.trial_label)) {
+                    seen.add(s.trial_label);
+                    if (segmentHasFaces[i] === false) {
+                        noFaceTrials.push(s.trial_label);
+                    }
+                }
+            });
+
             const result = await API.post('/api/video-tools/process-subject', {
                 subject_name: subjectName,
                 blur_faces: blurFaces,
+                camera_mode: cameraMode,
+                camera_name: selectedCameraSetup ? selectedCameraSetup.name : null,
+                no_face_trials: noFaceTrials,
                 segments: segments.map(s => {
                     const seg = {
                         source_path: s.source_path,
@@ -420,7 +807,6 @@ const onboard = (() => {
             });
 
             if (result.job_id) {
-                // Track job progress
                 API.streamJob(result.job_id,
                     (data) => {
                         const pct = data.progress_pct || 0;
@@ -429,7 +815,9 @@ const onboard = (() => {
                     },
                     (data) => {
                         if (data.status === 'completed') {
-                            msgEl.textContent = 'Complete! Redirecting to dashboard...';
+                            msgEl.textContent = editMode
+                                ? 'Segments added! Redirecting to dashboard...'
+                                : 'Complete! Redirecting to dashboard...';
                             fillEl.style.width = '100%';
                             setTimeout(() => { window.location.href = '/'; }, 1500);
                         } else if (data.status === 'failed') {
@@ -445,20 +833,220 @@ const onboard = (() => {
         }
     }
 
-    // ── Checkbox listener ─────────────────────────────────
+    // ── Edit mode ────────────────────────────────────────────
 
-    document.addEventListener('DOMContentLoaded', () => {
-        const blur = document.getElementById('blurFaces');
-        if (blur) blur.addEventListener('change', updateProcessButton);
-    });
+    let editMode = false;
+    let editSubjectId = null;
+    let existingTrials = [];
+    let existingSegments = [];
+    let editDetail = null;
+    let editingTrialLabel = null;
 
-    // ── Double-click to select + advance ─────────────────
-    function dblClickFile(path) {
-        // Single-click already fired (selectFile called), so selectedVideoPath is set.
-        selectVideo();
+    async function initEditMode(subjectId) {
+        editMode = true;
+        editSubjectId = subjectId;
+
+        try {
+            const detail = await API.get(`/api/subjects/${subjectId}`);
+            editDetail = detail;
+            subjectName = detail.name;
+            cameraMode = detail.camera_mode || 'stereo';
+            existingTrials = detail.trials || [];
+            existingSegments = detail.segments || [];
+
+            // Step 1 becomes a file browser (already visible)
+            // Show existing trials card
+            _renderExistingTrials();
+
+            // Also show the name field pre-filled in step 2
+            document.getElementById('step2').style.display = 'block';
+            document.getElementById('step2Num').classList.add('done');
+
+            // Replace step 2 header and contents for edit mode
+            const step2 = document.getElementById('step2');
+            const nameInput = step2.querySelector('#subjectName');
+            if (nameInput) {
+                nameInput.value = subjectName;
+            }
+            // Replace Confirm button with Rename
+            const confirmBtn = step2.querySelector('.btn-primary');
+            if (confirmBtn) {
+                confirmBtn.textContent = 'Rename';
+                confirmBtn.onclick = () => renameSubject();
+            }
+            const step2Header = step2.querySelector('h3');
+            if (step2Header) step2Header.textContent = 'Edit Subject';
+
+            // Skip camera mode step in edit mode (already set)
+            document.getElementById('step3Num').classList.add('done');
+
+            // Open the file browser
+            await loadDirectory('');
+            await prefillFromSession();
+
+        } catch (e) {
+            alert('Error loading subject: ' + e.message);
+        }
     }
 
-    // ── Prefill from video viewer session ─────────────────
+    async function renameSubject() {
+        const nameInput = document.getElementById('subjectName');
+        const newName = nameInput.value.trim();
+        if (!newName) return alert('Enter a subject name');
+        if (!/^[A-Za-z0-9_]+$/.test(newName)) return alert('Name must be alphanumeric (letters, numbers, underscores)');
+        if (newName === subjectName) return;
+
+        try {
+            await API.patch(`/api/subjects/${editSubjectId}`, { name: newName });
+            const oldName = subjectName;
+            subjectName = newName;
+
+            existingTrials = existingTrials.map(t => t.replace(oldName, newName));
+            _renderExistingTrials();
+            alert(`Subject renamed to "${newName}"`);
+        } catch (e) {
+            alert('Rename failed: ' + e.message);
+        }
+    }
+
+    async function deleteExistingTrial(trialLabel) {
+        if (!confirm(`Delete trial "${trialLabel}" and its video file(s)? This cannot be undone.`)) return;
+        try {
+            await API.del(`/api/subjects/${editSubjectId}/trials/${encodeURIComponent(trialLabel)}`);
+            existingTrials = existingTrials.filter(t => {
+                const label = t.replace(subjectName + '_', '');
+                return label !== trialLabel;
+            });
+            existingSegments = existingSegments.filter(s => s.trial_label !== trialLabel);
+            _renderExistingTrials();
+        } catch (e) {
+            alert('Delete failed: ' + e.message);
+        }
+    }
+
+    async function editExistingTrial(trialLabel) {
+        editingTrialLabel = trialLabel;
+
+        const seg = existingSegments.find(s => s.trial_label === trialLabel);
+        if (!seg) {
+            alert('No source metadata found for this trial. You can delete it and re-add from a source video.');
+            return;
+        }
+
+        selectedVideoPath = seg.source_path;
+
+        try {
+            videoMeta = await API.get(`/api/video-tools/probe?path=${encodeURIComponent(selectedVideoPath)}`);
+        } catch (e) {
+            alert('Cannot load source video. The file may have been moved.\n\n' + e.message);
+            return;
+        }
+
+        // Show trimmer
+        document.getElementById('step4').style.display = 'block';
+
+        const video = document.getElementById('trimVideo');
+        video.src = `/api/video-tools/stream?path=${encodeURIComponent(selectedVideoPath)}`;
+
+        inPoint = seg.start_time;
+        outPoint = seg.end_time;
+        updateTrimDisplay();
+
+        document.getElementById('trialLabel').value = trialLabel;
+
+        video.addEventListener('loadedmetadata', function _seek() {
+            video.currentTime = seg.start_time;
+            video.removeEventListener('loadedmetadata', _seek);
+        });
+
+        document.getElementById('step4').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function _renderExistingTrials() {
+        const segMap = {};
+        for (const s of existingSegments) {
+            segMap[s.trial_label] = s;
+        }
+
+        let existingCard = document.getElementById('existingTrialsCard');
+        if (!existingCard) {
+            existingCard = document.createElement('div');
+            existingCard.className = 'card';
+            existingCard.id = 'existingTrialsCard';
+            const step1 = document.getElementById('step1');
+            step1.parentNode.insertBefore(existingCard, step1);
+        }
+
+        if (existingTrials.length === 0) {
+            existingCard.innerHTML = `
+                <div class="step-header">
+                    <div class="step-num" style="background:var(--border);color:var(--text-muted);">0</div>
+                    <h3>No Existing Trials</h3>
+                </div>
+                <p style="font-size:13px;color:var(--text-muted);">
+                    Add segments below to create trials for this subject.
+                </p>
+            `;
+            return;
+        }
+
+        existingCard.innerHTML = `
+            <div class="step-header">
+                <div class="step-num done" style="background:var(--green);">&#10003;</div>
+                <h3>Existing Trials (${existingTrials.length})</h3>
+            </div>
+            <p style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">
+                Edit or delete existing trials, or add new segments below.
+            </p>
+            <div class="segment-list">
+                ${existingTrials.map(t => {
+                    const trialLabel = t.replace(subjectName + '_', '');
+                    const seg = segMap[trialLabel];
+                    const sourceName = seg ? seg.source_path.split(/[/\\]/).pop() : '';
+                    const timeStr = seg
+                        ? `${formatTime(seg.start_time)} - ${formatTime(seg.end_time)} (${(seg.end_time - seg.start_time).toFixed(1)}s)`
+                        : '';
+                    return `
+                        <div class="segment-item">
+                            <span class="trial" style="min-width:50px;">${trialLabel}</span>
+                            ${seg ? `
+                                <span class="times">${timeStr}</span>
+                                <span class="source">${sourceName}</span>
+                                <span class="edit-trial" onclick="onboard.editExistingTrial('${trialLabel}')"
+                                    style="cursor:pointer;color:var(--blue);font-size:12px;font-weight:600;"
+                                    title="Re-trim this trial from source video">edit</span>
+                            ` : `
+                                <span class="source" style="flex:1;">${t}.mp4</span>
+                                <span style="color:var(--text-muted);font-size:11px;" title="Source metadata not available">no source info</span>
+                            `}
+                            <span class="remove" onclick="onboard.deleteExistingTrial('${trialLabel}')"
+                                title="Delete this trial">&times;</span>
+                        </div>
+                    `;
+                }).join('')}
+            </div>
+        `;
+    }
+
+    // ── Checkbox listener & init ─────────────────────────────
+
+    document.addEventListener('DOMContentLoaded', async () => {
+        const blur = document.getElementById('blurFaces');
+        if (blur) blur.addEventListener('change', updateProcessButton);
+
+        const params = new URLSearchParams(window.location.search);
+        const subjectId = params.get('subject');
+        if (subjectId) {
+            initEditMode(parseInt(subjectId));
+        } else {
+            // Normal flow: open file browser immediately
+            await loadDirectory('');
+            await prefillFromSession();
+        }
+    });
+
+    // ── Prefill from video viewer session ────────────────────
+
     async function prefillFromSession() {
         const videoName = sessionStorage.getItem('onboard_prefill_video');
         if (!videoName) return;
@@ -468,10 +1056,8 @@ const onboard = (() => {
             const settings = await API.get('/api/settings');
             if (!settings.video_path) return;
 
-            // Navigate file browser to the configured video directory
             await loadDirectory(settings.video_path);
 
-            // Find and auto-select the matching file by name
             const items = document.querySelectorAll('#fileBrowser .fb-item[data-name]');
             for (const el of items) {
                 if (el.dataset.name === videoName) {
@@ -480,14 +1066,15 @@ const onboard = (() => {
                     break;
                 }
             }
-        } catch (e) { /* ignore — prefill is best-effort */ }
+        } catch (e) { /* best-effort */ }
     }
 
-    // ── Keyboard shortcuts ────────────────────────────────
+    // ── Keyboard shortcuts ───────────────────────────────────
 
     document.addEventListener('keydown', (e) => {
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
 
+        // Trim shortcuts
         if (e.key === 'i' || e.key === 'I') {
             e.preventDefault();
             setInPoint();
@@ -495,9 +1082,20 @@ const onboard = (() => {
             e.preventDefault();
             setOutPoint();
         }
+
+        // Sync shortcuts (arrow keys)
+        if (document.getElementById('step3b').style.display !== 'none') {
+            if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                syncStepAll(-1);
+            } else if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                syncStepAll(1);
+            }
+        }
     });
 
-    // ── Helpers ───────────────────────────────────────────
+    // ── Helpers ──────────────────────────────────────────────
 
     function formatTime(seconds) {
         if (seconds == null) return '--';
@@ -507,24 +1105,34 @@ const onboard = (() => {
     }
 
     function escPath(path) {
-        // Escape single quotes and backslashes for inline onclick
         return path.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
     }
 
-    // ── Public API ────────────────────────────────────────
+    // ── Public API ───────────────────────────────────────────
 
     return {
-        confirmName,
-        confirmCameraSetup,
         browse,
         selectFile,
         dblClickFile,
         selectVideo,
+        confirmName,
+        selectCameraMode,
+        toggleNewSetupForm,
+        createCameraSetup,
+        confirmCameraMode,
+        pickMulticamVideo,
+        syncStepAll,
+        syncStepSingle,
+        confirmSync,
         setInPoint,
         setOutPoint,
         addSegment,
         removeSegment,
         pickAnotherVideo,
         startProcessing,
+        toggleSegmentFaces,
+        renameSubject,
+        deleteExistingTrial,
+        editExistingTrial,
     };
 })();

@@ -33,7 +33,7 @@ def _find_videos(subject_name: str) -> list[str]:
             if Path(v).name.lower().startswith(prefix_lower)
         )
 
-    if settings.camera_mode == "multicam" and len(videos) > 1:
+    if settings.default_camera_mode == "multicam" and len(videos) > 1:
         # Group by trial stem — strip last _segment as camera name
         trial_stems = set()
         prefix = subject_name + "_"

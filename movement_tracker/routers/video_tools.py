@@ -41,6 +41,9 @@ class ProcessSubjectRequest(BaseModel):
     subject_name: str
     segments: list[SegmentDef]
     blur_faces: bool = True
+    camera_mode: str = "stereo"
+    camera_name: str | None = None  # camera setup name
+    no_face_trials: list[str] = []  # trial labels that have no faces
 
 
 # ── Probe ─────────────────────────────────────────────────────────────────
@@ -238,13 +241,19 @@ def process_subject(req: ProcessSubjectRequest) -> dict:
         if not subj:
             dlc_dir = req.subject_name
             db.execute(
-                """INSERT INTO subjects (name, stage, dlc_dir)
-                   VALUES (?, 'created', ?)""",
-                (req.subject_name, dlc_dir),
+                """INSERT INTO subjects (name, stage, dlc_dir, camera_mode, camera_name)
+                   VALUES (?, 'created', ?, ?, ?)""",
+                (req.subject_name, dlc_dir, req.camera_mode, req.camera_name),
             )
             subj = db.execute(
                 "SELECT * FROM subjects WHERE name = ?", (req.subject_name,)
             ).fetchone()
+        else:
+            # Update camera mode/name on existing subject
+            db.execute(
+                "UPDATE subjects SET camera_mode = ?, camera_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (req.camera_mode, req.camera_name, subj["id"]),
+            )
 
         log_dir = settings.dlc_path / ".logs"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -259,6 +268,15 @@ def process_subject(req: ProcessSubjectRequest) -> dict:
             "SELECT * FROM jobs WHERE subject_id = ? ORDER BY id DESC LIMIT 1",
             (subj["id"],),
         ).fetchone()
+
+    # Save no_face_videos on subject
+    if req.no_face_trials:
+        import json as _json
+        with get_db_ctx() as db:
+            db.execute(
+                "UPDATE subjects SET no_face_videos = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (_json.dumps(req.no_face_trials), subj["id"]),
+            )
 
     # Run in background thread
     _do_process_subject(
@@ -418,6 +436,19 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
                 dlc_path = settings.dlc_path / subject_name
                 dlc_path.mkdir(parents=True, exist_ok=True)
                 (dlc_path / ".deidentified").write_text("")
+
+            # Persist segment metadata for future editing
+            with get_db_ctx() as db:
+                for seg in segments:
+                    trial = seg["trial_label"]
+                    cam = seg.get("camera_name")
+                    db.execute(
+                        """INSERT OR REPLACE INTO segments
+                           (subject_id, trial_label, source_path, start_time, end_time, camera_name)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (subject_id, trial, seg["source_path"],
+                         seg["start_time"], seg["end_time"], cam),
+                    )
 
             # Mark complete
             with get_db_ctx() as db:

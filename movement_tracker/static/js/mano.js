@@ -102,10 +102,10 @@ const manoViewer = (() => {
         const params = new URLSearchParams(window.location.search);
         const subjectParam = params.get('subject');
 
-        // Load camera mode and names from settings
+        // Load camera names from settings (camera mode is per-subject)
         try {
             const cfg = await api('/api/settings');
-            if (cfg.camera_mode) cameraMode = cfg.camera_mode;
+            if (cfg.default_camera_mode) cameraMode = cfg.default_camera_mode;
             if (Array.isArray(cfg.camera_names) && cfg.camera_names.length >= 1) {
                 cameraNames = cfg.camera_names;
                 currentSide = cameraNames[0];
@@ -180,6 +180,8 @@ const manoViewer = (() => {
         subjectId = sid;
         const subj = allSubjects.find(s => s.id === sid);
         subjectName = subj ? subj.name : '';
+        // Per-subject camera mode
+        if (subj && subj.camera_mode) cameraMode = subj.camera_mode;
 
         try {
             trials = await api(`/api/mano/${sid}/trials`);

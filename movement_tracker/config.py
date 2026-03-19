@@ -39,7 +39,7 @@ class Settings:
         self.dlc_dir: str = ""
         self.calibration_3d_config: str = ""
         self.python_executable: str = sys.executable
-        self.camera_mode: str = "stereo"  # "single", "stereo", or "multicam"
+        self.default_camera_mode: str = "stereo"  # "single", "stereo", or "multicam"
         self.camera_names: list[str] = ["OS", "OD"]
         self.bodyparts: list[str] = ["thumb", "index"]
         self.dlc_scorer: str = "labels"
@@ -196,7 +196,7 @@ class Settings:
         """Apply a dict of settings values."""
         for key in [
             "video_dir", "dlc_dir", "calibration_3d_config",
-            "python_executable", "camera_mode",
+            "python_executable", "default_camera_mode",
             "dlc_scorer", "dlc_date", "dlc_net_type",
             "calibration_dir",
             "host",
@@ -205,6 +205,9 @@ class Settings:
             if key in data and data[key] is not None:
                 setattr(self, key, data[key])
 
+        # Backward compat: old "camera_mode" key → "default_camera_mode"
+        if "camera_mode" in data and "default_camera_mode" not in data:
+            self.default_camera_mode = data["camera_mode"]
         if "camera_names" in data and isinstance(data["camera_names"], list):
             self.camera_names = data["camera_names"]
         if "bodyparts" in data and isinstance(data["bodyparts"], list):
@@ -268,7 +271,7 @@ class Settings:
             "dlc_dir": self.dlc_dir,
             "calibration_3d_config": self.calibration_3d_config,
             "python_executable": self.python_executable,
-            "camera_mode": self.camera_mode,
+            "default_camera_mode": self.default_camera_mode,
             "camera_names": self.camera_names,
             "bodyparts": self.bodyparts,
             "dlc_scorer": self.dlc_scorer,

@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -44,7 +44,7 @@ def _cleanup_stale():
             logger.info(f"Cleaned stale export {eid}")
 
 
-# ── Endpoints ─────────────────────────────────────────────────────────────
+# ── Static-path endpoints (MUST be defined before /{export_id} routes) ───
 
 @router.post("/start")
 def start_export(req: ExportStartRequest) -> dict:
@@ -68,6 +68,104 @@ def start_export(req: ExportStartRequest) -> dict:
                 f"{req.width}x{req.height} @ {req.fps}fps)")
     return {"export_id": export_id}
 
+
+@router.get("/browse-dirs")
+def browse_directories(
+    path: str = Query("", description="Directory path to list. Empty = home."),
+) -> dict:
+    """List subdirectories only (for choosing a save location)."""
+    if not path:
+        path = str(Path.home())
+
+    dir_path = Path(path)
+    if not dir_path.exists():
+        raise HTTPException(404, f"Path not found: {path}")
+    if not dir_path.is_dir():
+        raise HTTPException(400, f"Not a directory: {path}")
+
+    dirs = []
+    try:
+        for entry in dir_path.iterdir():
+            if entry.name.startswith("."):
+                continue
+            if entry.is_dir():
+                dirs.append({"name": entry.name, "path": str(entry)})
+    except PermissionError:
+        raise HTTPException(403, f"Permission denied: {path}")
+
+    dirs.sort(key=lambda d: d["name"].lower())
+
+    # Build breadcrumbs
+    parts = dir_path.parts
+    breadcrumbs = []
+    for i in range(len(parts)):
+        crumb_path = parts[0] if i == 0 else str(Path(*parts[:i + 1]))
+        breadcrumbs.append({"name": parts[i], "path": crumb_path})
+
+    return {
+        "path": str(dir_path),
+        "parent": str(dir_path.parent) if dir_path.parent != dir_path else "",
+        "breadcrumbs": breadcrumbs,
+        "dirs": dirs,
+    }
+
+
+class MkdirRequest(BaseModel):
+    path: str
+
+
+@router.post("/mkdir")
+def make_directory(req: MkdirRequest) -> dict:
+    """Create a new directory."""
+    p = Path(req.path)
+    if p.exists():
+        raise HTTPException(400, f"Already exists: {req.path}")
+    try:
+        p.mkdir(parents=False, exist_ok=False)
+    except PermissionError:
+        raise HTTPException(403, f"Permission denied: {req.path}")
+    except OSError as exc:
+        raise HTTPException(500, f"Failed to create directory: {exc}")
+    return {"status": "created", "path": str(p)}
+
+
+@router.post("/save-file")
+async def save_file(request: Request):
+    """Save an uploaded MP4 file to a server-side path.
+
+    Accepts multipart form data with:
+      - file: the MP4 blob
+      - path: full destination path including filename
+    """
+    form = await request.form()
+    file_field = form.get("file")
+    dest_path = form.get("path", "")
+
+    if not file_field or not hasattr(file_field, "read"):
+        raise HTTPException(400, "No file provided")
+    if not dest_path:
+        raise HTTPException(400, "No destination path provided")
+
+    dest = Path(str(dest_path))
+    if not dest.parent.exists():
+        raise HTTPException(400, f"Directory does not exist: {dest.parent}")
+    if dest.suffix.lower() != ".mp4":
+        dest = dest.with_suffix(".mp4")
+
+    try:
+        data = await file_field.read()
+        with open(str(dest), "wb") as f:
+            f.write(data)
+    except PermissionError:
+        raise HTTPException(403, f"Permission denied: {dest}")
+    except OSError as exc:
+        raise HTTPException(500, f"Failed to save: {exc}")
+
+    logger.info(f"Saved export file to {dest} ({len(data) / 1024 / 1024:.1f} MB)")
+    return {"status": "saved", "path": str(dest)}
+
+
+# ── Dynamic-path endpoints (/{export_id}/...) ────────────────────────────
 
 @router.post("/{export_id}/frames")
 async def upload_frames(export_id: str, request: Request) -> dict:

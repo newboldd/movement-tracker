@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS subjects (
     name TEXT UNIQUE NOT NULL,
     stage TEXT NOT NULL DEFAULT 'created',
     iteration INTEGER NOT NULL DEFAULT 1,
+    camera_mode TEXT DEFAULT 'stereo',
     camera_name TEXT,
     no_face_videos TEXT,
     dlc_dir TEXT,
@@ -94,6 +95,21 @@ CREATE INDEX IF NOT EXISTS idx_sessions_subject ON label_sessions(subject_id);
 CREATE INDEX IF NOT EXISTS idx_job_queue_status ON job_queue(status, resource);
 CREATE INDEX IF NOT EXISTS idx_job_queue_status_target ON job_queue(status, execution_target);
 CREATE INDEX IF NOT EXISTS idx_subject_events ON subject_events(subject_id, event_type);
+
+CREATE TABLE IF NOT EXISTS segments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_id INTEGER NOT NULL REFERENCES subjects(id),
+    trial_label TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    start_time REAL NOT NULL,
+    end_time REAL NOT NULL,
+    camera_name TEXT,
+    frame_offset INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(subject_id, trial_label, camera_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_segments_subject ON segments(subject_id);
 
 CREATE TABLE IF NOT EXISTS camera_setups (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -276,6 +292,49 @@ def _migrate_add_epoch_info(conn):
         logger.info("Added epoch_info column to jobs")
 
 
+def _migrate_add_camera_mode(conn):
+    """Add camera_mode column to subjects table if missing."""
+    columns = _get_table_columns(conn, "subjects")
+    if "camera_mode" not in columns:
+        conn.execute("ALTER TABLE subjects ADD COLUMN camera_mode TEXT DEFAULT 'stereo'")
+        logger.info("Added camera_mode column to subjects table")
+
+
+def _migrate_add_frame_offset(conn):
+    """Add frame_offset column to segments table if missing."""
+    tables = [r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()]
+    if "segments" in tables:
+        columns = _get_table_columns(conn, "segments")
+        if "frame_offset" not in columns:
+            conn.execute("ALTER TABLE segments ADD COLUMN frame_offset INTEGER DEFAULT 0")
+            logger.info("Added frame_offset column to segments table")
+
+
+def _migrate_add_segments(conn):
+    """Create segments table if missing."""
+    tables = [r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()]
+    if "segments" not in tables:
+        conn.execute("""
+            CREATE TABLE segments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject_id INTEGER NOT NULL REFERENCES subjects(id),
+                trial_label TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                start_time REAL NOT NULL,
+                end_time REAL NOT NULL,
+                camera_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(subject_id, trial_label, camera_name)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_segments_subject ON segments(subject_id)")
+        logger.info("Created segments table")
+
+
 def _migrate_add_camera_setups(conn):
     """Create camera_setups table if missing."""
     tables = [r["name"] for r in conn.execute(
@@ -319,6 +378,7 @@ def init_db():
         _migrate_add_no_face_videos(conn)
         _migrate_relative_dlc_dir(conn)
         _migrate_add_diagnosis(conn)
+        _migrate_add_camera_mode(conn)
         conn.commit()
 
     if "job_queue" in tables:
@@ -333,6 +393,12 @@ def init_db():
         conn.commit()
 
     _migrate_add_camera_setups(conn)
+    conn.commit()
+
+    _migrate_add_segments(conn)
+    conn.commit()
+
+    _migrate_add_frame_offset(conn)
     conn.commit()
 
     conn.executescript(SCHEMA)

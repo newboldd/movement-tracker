@@ -61,12 +61,60 @@
         .video-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
         .meta-badge { background: var(--accent); color: var(--text); padding: 2px 8px;
             border-radius: 10px; font-size: 11px; }
+
+        /* Camera mode radios */
+        .camera-mode-options { display: flex; gap: 16px; margin: 12px 0; }
+        .camera-mode-option { display: flex; align-items: center; gap: 6px; cursor: pointer;
+            padding: 8px 16px; border: 2px solid var(--border); border-radius: var(--radius);
+            font-size: 14px; transition: border-color 0.2s; }
+        .camera-mode-option:hover { border-color: var(--blue); }
+        .camera-mode-option.selected { border-color: var(--blue); background: rgba(74,158,255,0.08); }
+        .camera-mode-option input[type="radio"] { display: none; }
+
+        /* Camera setup sub-panels */
+        .camera-sub-panel { margin-top: 12px; padding: 12px; background: var(--bg);
+            border: 1px solid var(--border); border-radius: var(--radius); }
+        .new-setup-form { margin-top: 12px; padding: 12px; background: rgba(74,158,255,0.05);
+            border: 1px dashed var(--border); border-radius: var(--radius); }
+        .new-setup-form input, .new-setup-form select { padding: 6px 10px;
+            background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+            color: var(--text); font-size: 13px; }
+
+        /* Multicam video list */
+        .multicam-video-list { margin-top: 8px; }
+        .multicam-video-item { display: flex; align-items: center; gap: 8px; padding: 6px 0;
+            border-bottom: 1px solid var(--border); font-size: 13px; }
+        .multicam-video-item .cam-name { font-weight: 600; color: var(--blue); min-width: 80px; }
+        .multicam-video-item .cam-file { flex: 1; color: var(--text-muted); overflow: hidden;
+            text-overflow: ellipsis; white-space: nowrap; }
+
+        /* Multicam sync module */
+        .sync-container { display: flex; gap: 8px; margin-top: 12px; }
+        .sync-video-panel { flex: 1; min-width: 0; }
+        .sync-video-panel video { width: 100%; max-height: 240px; border-radius: var(--radius);
+            background: #000; }
+        .sync-video-panel .cam-label { text-align: center; font-size: 12px; font-weight: 600;
+            color: var(--blue); margin-bottom: 4px; }
+        .sync-offset-controls { display: flex; align-items: center; justify-content: center;
+            gap: 6px; margin-top: 4px; }
+        .sync-offset-controls button { padding: 2px 10px; font-size: 12px; cursor: pointer;
+            background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+            color: var(--text); }
+        .sync-offset-controls button:hover { background: var(--bg-hover); }
+        .sync-offset-display { font-family: monospace; font-size: 12px; color: var(--text-muted);
+            min-width: 60px; text-align: center; }
+        .sync-shared-controls { display: flex; align-items: center; justify-content: center;
+            gap: 12px; margin-top: 12px; padding: 8px; background: var(--bg);
+            border: 1px solid var(--border); border-radius: var(--radius); }
+        .sync-shared-controls button { padding: 4px 12px; font-size: 13px; }
+        .sync-frame-display { font-family: monospace; font-size: 14px; font-weight: 600; }
     </style>
 </head>
 <body>
     <div class="header">
         <h1><a href="/">Movement Tracker</a></h1>
-        <nav>            <a href="/videos">Videos</a>
+        <nav>            <a href="/">Dashboard</a>
+            <a href="/videos">Videos</a>
             <a href="/labeling-select">DLC</a>
             <a href="/mano">MANO</a>
             <a href="/results">Results</a>
@@ -78,43 +126,10 @@
     </div>
 
     <div class="onboard-container">
-        <!-- Step 1: Subject name -->
+        <!-- Step 1: Select Source Video -->
         <div class="card" id="step1">
             <div class="step-header">
                 <div class="step-num" id="step1Num">1</div>
-                <h3>Subject Name</h3>
-            </div>
-            <div style="display:flex;gap:8px;">
-                <input type="text" id="subjectName" placeholder="e.g. MSA20, Con10, PD15"
-                    style="flex:1;padding:8px 12px;background:var(--bg);border:1px solid var(--border);
-                    border-radius:var(--radius);color:var(--text);font-size:14px;">
-                <button class="btn btn-primary" onclick="onboard.confirmName()">Confirm</button>
-            </div>
-        </div>
-
-        <!-- Step 1b: Camera setup selection (stereo/multicam only) -->
-        <div class="card" id="step1b" style="display:none;">
-            <div class="step-header">
-                <div class="step-num" id="step1bNum">2</div>
-                <h3>Camera Setup</h3>
-            </div>
-            <div class="form-row" style="margin-bottom:8px;">
-                <label>Select a camera setup for this subject</label>
-                <select id="cameraSetupSelect" style="width:100%;padding:8px 12px;background:var(--bg);
-                    border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:14px;">
-                    <option value="">-- Select --</option>
-                </select>
-            </div>
-            <div style="display:flex;gap:8px;">
-                <button class="btn btn-primary" onclick="onboard.confirmCameraSetup()">Continue</button>
-                <a href="/calibration" class="btn" style="text-decoration:none;">+ New Camera Setup</a>
-            </div>
-        </div>
-
-        <!-- Step 2: Browse & select videos -->
-        <div class="card" id="step2" style="display:none;">
-            <div class="step-header">
-                <div class="step-num" id="step2Num">3</div>
                 <h3>Select Source Video</h3>
             </div>
             <div id="cameraLabel" style="display:none;margin-bottom:8px;padding:6px 12px;
@@ -128,14 +143,141 @@
             </div>
         </div>
 
-        <!-- Step 3: Trim & label segments -->
-        <div class="card" id="step3" style="display:none;">
+        <!-- Step 2: Video Preview + Subject Name -->
+        <div class="card" id="step2" style="display:none;">
             <div class="step-header">
-                <div class="step-num" id="step3Num">4</div>
-                <h3>Trim Segments & Label Trials</h3>
+                <div class="step-num" id="step2Num">2</div>
+                <h3>Video Preview & Subject Name</h3>
             </div>
             <div id="selectedVideoName" style="font-size:13px;color:var(--text-muted);margin-bottom:4px;"></div>
             <div class="video-meta" id="videoMeta"></div>
+            <div class="trimmer" style="margin-bottom:12px;">
+                <video id="previewVideo" controls preload="auto" style="max-height:240px;"></video>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;">
+                <label style="font-size:14px;font-weight:600;">Subject Name:</label>
+                <input type="text" id="subjectName" placeholder="e.g. MSA20, Con10, PD15"
+                    style="flex:1;padding:8px 12px;background:var(--bg);border:1px solid var(--border);
+                    border-radius:var(--radius);color:var(--text);font-size:14px;">
+                <button class="btn btn-primary" onclick="onboard.confirmName()">Confirm</button>
+            </div>
+        </div>
+
+        <!-- Step 3: Camera Mode & Setup -->
+        <div class="card" id="step3" style="display:none;">
+            <div class="step-header">
+                <div class="step-num" id="step3Num">3</div>
+                <h3>Camera Mode & Setup</h3>
+            </div>
+            <p style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">
+                How was this video recorded?
+            </p>
+            <div class="camera-mode-options" id="cameraModeOptions">
+                <label class="camera-mode-option" onclick="onboard.selectCameraMode('single')">
+                    <input type="radio" name="cameraMode" value="single">
+                    <span>Single Camera</span>
+                </label>
+                <label class="camera-mode-option selected" onclick="onboard.selectCameraMode('stereo')">
+                    <input type="radio" name="cameraMode" value="stereo" checked>
+                    <span>Stereo</span>
+                </label>
+                <label class="camera-mode-option" onclick="onboard.selectCameraMode('multicam')">
+                    <input type="radio" name="cameraMode" value="multicam">
+                    <span>Multi-Camera</span>
+                </label>
+            </div>
+
+            <!-- Stereo sub-panel -->
+            <div class="camera-sub-panel" id="stereoPanel">
+                <label style="font-size:13px;font-weight:600;margin-bottom:6px;display:block;">Camera Setup</label>
+                <select id="cameraSetupSelect" style="width:100%;padding:8px 12px;background:var(--bg);
+                    border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:14px;">
+                    <option value="">-- Select --</option>
+                </select>
+                <div style="margin-top:8px;">
+                    <button class="btn btn-sm" onclick="onboard.toggleNewSetupForm('stereo')" id="newSetupToggle">
+                        + New Camera Setup
+                    </button>
+                </div>
+                <div class="new-setup-form" id="newSetupForm" style="display:none;">
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end;">
+                        <div>
+                            <label style="font-size:11px;display:block;margin-bottom:2px;">Name</label>
+                            <input type="text" id="newSetupName" placeholder="e.g. my_camera">
+                        </div>
+                        <div>
+                            <label style="font-size:11px;display:block;margin-bottom:2px;">Camera Names</label>
+                            <input type="text" id="newSetupCamNames" placeholder="OS, OD" value="OS, OD">
+                        </div>
+                        <button class="btn btn-sm btn-primary" onclick="onboard.createCameraSetup('stereo')">Create</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Multicam sub-panel -->
+            <div class="camera-sub-panel" id="multicamPanel" style="display:none;">
+                <label style="font-size:13px;font-weight:600;margin-bottom:6px;display:block;">Multi-Camera Setup</label>
+                <select id="multicamSetupSelect" style="width:100%;padding:8px 12px;background:var(--bg);
+                    border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:14px;">
+                    <option value="">-- Select --</option>
+                </select>
+                <div style="margin-top:8px;">
+                    <button class="btn btn-sm" onclick="onboard.toggleNewSetupForm('multicam')">
+                        + New Camera Setup
+                    </button>
+                </div>
+                <div class="new-setup-form" id="newMulticamSetupForm" style="display:none;">
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end;">
+                        <div>
+                            <label style="font-size:11px;display:block;margin-bottom:2px;">Name</label>
+                            <input type="text" id="newMulticamSetupName" placeholder="e.g. multi_rig">
+                        </div>
+                        <div>
+                            <label style="font-size:11px;display:block;margin-bottom:2px;">Camera Names (comma-separated)</label>
+                            <input type="text" id="newMulticamCamNames" placeholder="cam0, cam1, cam2" value="cam0, cam1, cam2">
+                        </div>
+                        <button class="btn btn-sm btn-primary" onclick="onboard.createCameraSetup('multicam')">Create</button>
+                    </div>
+                </div>
+                <div class="multicam-video-list" id="multicamVideoList" style="display:none;">
+                    <p style="font-size:12px;color:var(--text-muted);margin:8px 0;">
+                        Select a video file for each camera. The first camera uses the video from Step 1.
+                    </p>
+                    <div id="multicamCameraItems"></div>
+                </div>
+            </div>
+
+            <div style="margin-top:12px;">
+                <button class="btn btn-primary" id="confirmCameraModeBtn" onclick="onboard.confirmCameraMode()">Continue</button>
+            </div>
+        </div>
+
+        <!-- Step 3b: Multicam Sync (only for multicam) -->
+        <div class="card" id="step3b" style="display:none;">
+            <div class="step-header">
+                <div class="step-num" id="step3bNum">&#9881;</div>
+                <h3>Synchronize Videos</h3>
+            </div>
+            <p style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">
+                Navigate frames until all cameras show the same moment, then adjust individual offsets.
+                Press <kbd>&larr;</kbd> / <kbd>&rarr;</kbd> to step all videos, or use per-camera buttons.
+            </p>
+            <div class="sync-container" id="syncContainer"></div>
+            <div class="sync-shared-controls" id="syncSharedControls">
+                <button class="btn btn-sm" onclick="onboard.syncStepAll(-1)">&larr; Prev Frame</button>
+                <span class="sync-frame-display" id="syncFrameDisplay">Frame: 0</span>
+                <button class="btn btn-sm" onclick="onboard.syncStepAll(1)">Next Frame &rarr;</button>
+                <span style="flex:1;"></span>
+                <button class="btn btn-primary" onclick="onboard.confirmSync()">Videos are aligned &rarr;</button>
+            </div>
+        </div>
+
+        <!-- Step 4: Trim & label segments -->
+        <div class="card" id="step4" style="display:none;">
+            <div class="step-header">
+                <div class="step-num" id="step4Num">4</div>
+                <h3>Trim Segments & Label Trials</h3>
+            </div>
             <div class="trimmer">
                 <video id="trimVideo" controls preload="auto"></video>
                 <div class="trim-controls">
@@ -158,10 +300,10 @@
             <div class="segment-list" id="segmentList"></div>
         </div>
 
-        <!-- Step 4: Review & process -->
-        <div class="card" id="step4" style="display:none;">
+        <!-- Step 5: Review & process -->
+        <div class="card" id="step5" style="display:none;">
             <div class="step-header">
-                <div class="step-num" id="step4Num">5</div>
+                <div class="step-num" id="step5Num">5</div>
                 <h3>Review & Process</h3>
             </div>
             <div id="reviewSegments"></div>
@@ -188,6 +330,6 @@
 
     <script src="/static/js/nav.js"></script>
     <script src="/static/js/api.js?v=8"></script>
-    <script src="/static/js/onboarding.js?v=2"></script>
+    <script src="/static/js/onboarding.js?v=3"></script>
 </body>
 </html>

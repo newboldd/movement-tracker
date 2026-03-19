@@ -67,10 +67,10 @@
         videoEl.muted = true;
         videoEl.crossOrigin = 'anonymous';
 
-        // Load camera names and mode from settings
+        // Load camera names from settings (camera mode is per-subject)
         try {
             const cfg = await api('/api/settings');
-            if (cfg.camera_mode) cameraMode = cfg.camera_mode;
+            if (cfg.default_camera_mode) cameraMode = cfg.default_camera_mode;
             if (Array.isArray(cfg.camera_names) && cfg.camera_names.length >= 1) {
                 cameraNames = cfg.camera_names;
                 currentSide = cameraNames[0];
@@ -111,6 +111,8 @@
         subjectId = sid;
         const subj = allSubjects.find(s => s.id === sid);
         subjectName = subj ? subj.name : '';
+        // Per-subject camera mode
+        if (subj && subj.camera_mode) cameraMode = subj.camera_mode;
 
         const u = new URL(window.location);
         u.searchParams.set('subject', sid);
@@ -258,6 +260,7 @@
         $('subjectSelect').addEventListener('change', e => {
             const v = parseInt(e.target.value);
             if (v) loadSubject(v);
+            e.target.blur();  // return focus so keyboard shortcuts work
         });
 
         // Browse button — load a video file from outside the dataset
@@ -278,6 +281,9 @@
                 videoEl.playbackRate = Math.min(playbackRate, 16);
             }
         });
+        speedSlider.addEventListener('change', () => {
+            speedSlider.blur();  // return focus so keyboard shortcuts work
+        });
 
         // Timeline seek
         const timeline = $('timelineSlider');
@@ -286,9 +292,9 @@
             goToFrame(parseInt(timeline.value));
         });
 
-        // Keyboard
+        // Keyboard — blur focused controls so shortcuts always work
         document.addEventListener('keydown', e => {
-            if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
             switch (e.key) {
                 case 'a': case 'ArrowLeft':  goToFrame(currentFrame - 1); e.preventDefault(); break;
                 case 's': case 'ArrowRight': goToFrame(currentFrame + 1); e.preventDefault(); break;
@@ -325,7 +331,13 @@
             videoEl.currentTime = t;
             videoEl.addEventListener('seeked', render, { once: true });
         } else {
-            render();
+            // Video not ready — wait for it to become ready then seek+render.
+            // Calling render() here would flash the stale decoded frame.
+            videoEl.addEventListener('loadeddata', () => {
+                const t = (currentFrame + 0.5) / (trialMeta.fps || 30);
+                videoEl.currentTime = t;
+                videoEl.addEventListener('seeked', render, { once: true });
+            }, { once: true });
         }
     }
 
@@ -373,7 +385,7 @@
             const rect = canvas.getBoundingClientRect();
             const mx = e.clientX - rect.left;
             const my = e.clientY - rect.top;
-            const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+            const factor = e.deltaY < 0 ? 1.05 : 1 / 1.05;
             const ns = Math.max(0.1, Math.min(scale * factor, 50));
             offsetX = mx - (mx - offsetX) * (ns / scale);
             offsetY = my - (my - offsetY) * (ns / scale);
@@ -444,9 +456,25 @@
             fps: trialMeta ? trialMeta.fps : 30,
             playbackRate,
             nFrames: trialMeta ? trialMeta.n_frames : 0,
+            get currentFrame() { return currentFrame; },
             canvasLayers: [canvas],
             distanceCanvas: null,
-            seekAndRender(frameNum) { goToFrame(frameNum); },
+            getCompositeSize() { return { width: canvas.width, height: canvas.height }; },
+            renderThreeJS() { return null; },
+            seekAndRender(frameNum) {
+                return new Promise(resolve => {
+                    currentFrame = Math.max(0, Math.min(frameNum, (trialMeta ? trialMeta.n_frames - 1 : 0)));
+                    $('frameDisplay').textContent = currentFrame;
+                    $('timelineSlider').value = currentFrame;
+                    if (videoEl.readyState >= 2 && trialMeta && trialMeta.fps) {
+                        const t = (currentFrame + 0.5) / trialMeta.fps;
+                        videoEl.currentTime = t;
+                        videoEl.addEventListener('seeked', () => { render(); resolve(); }, { once: true });
+                    } else {
+                        resolve();
+                    }
+                });
+            },
         };
     }
 

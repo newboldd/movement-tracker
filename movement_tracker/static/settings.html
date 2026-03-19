@@ -170,7 +170,8 @@
 <body>
     <div class="header">
         <h1><a href="/">Movement Tracker</a></h1>
-        <nav>            <a href="/videos">Videos</a>
+        <nav>            <a href="/">Dashboard</a>
+            <a href="/videos">Videos</a>
             <a href="/labeling-select">DLC</a>
             <a href="/mano">MANO</a>
             <a href="/results">Results</a>
@@ -204,13 +205,13 @@
             <div class="form-section">
                 <h3>Cameras</h3>
                 <div class="form-row">
-                    <label>Camera Mode</label>
-                    <select id="camera_mode">
+                    <label>Default Camera Mode (new subjects)</label>
+                    <select id="default_camera_mode">
                         <option value="single">Single camera (no stereo cropping)</option>
                         <option value="stereo">Stereo (one video, left/right halves)</option>
                         <option value="multicam">Multi-camera (separate video files per camera)</option>
                     </select>
-                    <div class="help">Single: full frame. Stereo: splits each video in half. Multicam: separate video files per camera per trial.</div>
+                    <div class="help">Default for new subjects. Each subject's mode can be set during onboarding.</div>
                 </div>
                 <div class="form-row">
                     <label>Camera Names</label>

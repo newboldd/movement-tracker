@@ -171,7 +171,7 @@ def get_session_info(session_id: int) -> dict:
         "total_frames": total_frames,
         "bodyparts": settings.bodyparts,
         "camera_names": settings.camera_names,
-        "camera_mode": settings.camera_mode,
+        "camera_mode": subj.get("camera_mode") or settings.default_camera_mode,
         "committed_frame_count": committed_frame_count,
         "event_types": settings.event_types,
     }
@@ -189,7 +189,7 @@ def get_frame(
     than a global camera name from settings.  Validation is relaxed accordingly.
     """
     settings = get_settings()
-    if settings.camera_mode != "multicam" and side not in settings.camera_names:
+    if settings.default_camera_mode != "multicam" and side not in settings.camera_names:
         raise HTTPException(400, f"side must be one of {settings.camera_names}")
 
     with get_db_ctx() as db:

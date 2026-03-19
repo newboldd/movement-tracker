@@ -5,7 +5,6 @@ let activeJobs = [];
 let appStatus = { configured: true, has_calibration: false };
 let calibrationNames = [];
 let diagnosisGroups = ["Control", "MSA", "PD", "PSP"];
-
 // ── Check settings status ────────────────────────────────
 async function checkStatus() {
     try {
@@ -256,27 +255,26 @@ async function showDetail(subjectId) {
                         ${diagnosisGroups.map(dg => `<option value="${dg}"${dg === (detail.diagnosis || 'Control') ? ' selected' : ''}>${dg}</option>`).join('')}
                     </select>
                 </span></div>
+                <div class="info-row"><span class="label">Video Type</span><span class="badge">${(detail.camera_mode || 'stereo') === 'single' ? 'Single Camera' : (detail.camera_mode || 'stereo') === 'multicam' ? 'Multi-Camera' : 'Stereo'}</span></div>
                 <div class="info-row"><span class="label">DLC Dir</span><span style="font-size:11px;word-break:break-all">${detail.dlc_dir || 'N/A'}</span></div>
                 <div class="info-row"><span class="label">Camera</span><span>
-                    <select id="cameraSelect" onchange="updateSubjectCamera(${detail.id}, this.value)" style="padding:2px 6px;font-size:13px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);">
-                        <option value="">None</option>
-                        ${calibrationNames.map(n => `<option value="${n}"${n === (detail.camera_name || '') ? ' selected' : ''}>${n}</option>`).join('')}
-                    </select>
+                    ${detail.camera_name
+                        ? `<select id="cameraSelect" onchange="updateSubjectCamera(${detail.id}, this.value)" style="padding:2px 6px;font-size:13px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);">
+                            <option value="">None</option>
+                            ${calibrationNames.map(n => `<option value="${n}"${n === detail.camera_name ? ' selected' : ''}>${n}</option>`).join('')}
+                          </select>`
+                        : `<span style="background:var(--red);color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;">None</span>
+                           <select id="cameraSelect" onchange="updateSubjectCamera(${detail.id}, this.value)" style="margin-left:6px;padding:2px 6px;font-size:13px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);">
+                            <option value="">-- Assign --</option>
+                            ${calibrationNames.map(n => `<option value="${n}">${n}</option>`).join('')}
+                          </select>`
+                    }
                 </span></div>
             </div>
             <div class="detail-section">
                 <h3>Trials</h3>
                 ${detail.trials.length > 0
-                    ? detail.trials.map(t => {
-                        const noFace = (detail.no_face_videos || []).includes(t);
-                        return `<div class="info-row" style="gap:8px;">
-                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;">
-                                <input type="checkbox" class="no-face-cb" data-stem="${t}" ${!noFace ? 'checked' : ''} onchange="updateNoFaceVideos(${detail.id})" />
-                                Has faces
-                            </label>
-                            <span>${t}</span>
-                        </div>`;
-                    }).join('')
+                    ? detail.trials.map(t => `<div class="info-row"><span>${t}</span></div>`).join('')
                     : '<div class="info-row"><span class="label">No videos found</span></div>'
                 }
             </div>

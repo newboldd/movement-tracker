@@ -187,6 +187,17 @@ if [ -n "$existing" ]; then
     sleep 1
 fi
 
+# ── Shortcut hint (first run only) ────────────────────────────────────────
+
+if [ ! -f "$VENV_DIR/.shortcut_hint_shown" ]; then
+    echo ""
+    echo "┌──────────────────────────────────────────────────────────────┐"
+    echo "│  TIP: Drag 'Movement Tracker.command' to your Dock  │"
+    echo "│  or Desktop for quick access — just double-click to launch. │"
+    echo "└──────────────────────────────────────────────────────────────┘"
+    touch "$VENV_DIR/.shortcut_hint_shown"
+fi
+
 # ── Launch ────────────────────────────────────────────────────────────────
 
 echo ""

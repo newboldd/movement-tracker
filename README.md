@@ -35,6 +35,8 @@ cd movement-tracker
 2. Download the sample video (~24 MB) from Zenodo on first run
 3. Start the app and open `http://localhost:8080` in your browser
 
+> **Shortcut:** The repo includes `Movement Tracker.command` — on macOS you can drag it to your Dock or Desktop to launch the app with a double-click.
+
 On first launch, open **Settings** and point the app at your video directory and DeepLabCut project directory. To explore with the included sample data, set the video directory to `sample_data/` and click **Sync from disk** on the dashboard.
 
 ### Windows
