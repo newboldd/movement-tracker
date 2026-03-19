@@ -52,6 +52,7 @@ class Settings:
 
         # Display preferences
         self.prefer_deidentified: bool = False  # show deidentified videos in labeling UI
+        self.show_tutorials: bool = True  # show Tutorials link in nav bar
 
         # Diagnosis/Group settings (for dashboard organization)
         self.diagnosis_groups: list[str] = ["Control", "MSA", "PD", "PSP"]
@@ -220,6 +221,8 @@ class Settings:
             self.remote_ssh_port = int(data["remote_ssh_port"])
         if "prefer_deidentified" in data and data["prefer_deidentified"] is not None:
             self.prefer_deidentified = bool(data["prefer_deidentified"])
+        if "show_tutorials" in data and data["show_tutorials"] is not None:
+            self.show_tutorials = bool(data["show_tutorials"])
 
     def _apply_env_overrides(self):
         """Override settings from DLC_APP_* environment variables."""
@@ -282,6 +285,7 @@ class Settings:
             "remote_ssh_key": self.remote_ssh_key,
             "remote_ssh_port": self.remote_ssh_port,
             "prefer_deidentified": self.prefer_deidentified,
+            "show_tutorials": self.show_tutorials,
             "event_types": self.event_types,
         }
 

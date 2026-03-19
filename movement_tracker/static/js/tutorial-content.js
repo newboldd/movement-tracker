@@ -1,11 +1,12 @@
 /**
- * Tutorial content data for the Movement Tracker beginner series.
+ * Tutorial content data for the Movement Tracker tutorial series.
  *
  * Each tutorial is an object with:
  *   id        – integer (1-based, matches ?id= param)
  *   title     – short display title
  *   subtitle  – one-line description
  *   time      – estimated reading/doing time
+ *   series    – "beginner" or "advanced"
  *   steps     – array of { title, body (HTML string), tips[] }
  */
 window.TUTORIALS = [
@@ -15,6 +16,7 @@ window.TUTORIALS = [
         title: 'Viewing a Video',
         subtitle: 'Browse and play back videos with zoom, speed, and camera controls.',
         time: '~3 min',
+        series: 'beginner',
         steps: [
             {
                 title: 'Open the Videos page',
@@ -62,6 +64,7 @@ window.TUTORIALS = [
         title: 'Adding a Subject',
         subtitle: 'Use the onboarding wizard to create a subject from raw video.',
         time: '~5 min',
+        series: 'beginner',
         steps: [
             {
                 title: 'Start onboarding',
@@ -105,6 +108,7 @@ window.TUTORIALS = [
         title: 'De-identifying (Blurring Faces)',
         subtitle: 'Blur faces in videos for privacy before sharing or analysis.',
         time: '~3 min',
+        series: 'beginner',
         steps: [
             {
                 title: 'Open the Processing page',
@@ -133,7 +137,7 @@ window.TUTORIALS = [
             },
             {
                 title: 'Prefer de-identified videos',
-                body: 'Go to <a href="/settings"><strong>Settings</strong></a> and check <strong>"Prefer de-identified videos"</strong>. The video viewer and labeler will now show blurred versions by default wherever available.',
+                body: 'Go to <a href="/settings"><strong>Settings</strong></a> and check <strong>"Show deidentified videos"</strong>. The video viewer and labeler will now show blurred versions by default wherever available.',
                 tips: [
                     'You can also blur during onboarding by checking "Blur faces" in Step 4 \u2014 this runs the same process as part of subject creation.',
                 ],
@@ -147,6 +151,7 @@ window.TUTORIALS = [
         title: 'Fitting MediaPipe Labels',
         subtitle: 'Run automatic hand landmark detection to generate starting labels.',
         time: '~3 min',
+        series: 'beginner',
         steps: [
             {
                 title: 'Open the Processing page',
@@ -185,6 +190,7 @@ window.TUTORIALS = [
         title: 'Labeling with DLC & Training',
         subtitle: 'Manually annotate keypoints, then train a DeepLabCut model.',
         time: '~10 min',
+        series: 'beginner',
         steps: [
             {
                 title: 'Open the DLC labeler',
@@ -232,12 +238,13 @@ window.TUTORIALS = [
         ],
     },
 
-    // ── 6. Viewing Results ──────────────────────────────────
+    // ── 6. DLC Analysis & Viewing Predictions ───────────────
     {
         id: 6,
-        title: 'Viewing Results',
-        subtitle: 'Run DLC analysis and explore distance traces and movement parameters.',
+        title: 'DLC Analysis & Viewing Predictions',
+        subtitle: 'Run your trained model on all frames and view the predictions.',
         time: '~5 min',
+        series: 'beginner',
         steps: [
             {
                 title: 'Run DLC analysis',
@@ -250,13 +257,137 @@ window.TUTORIALS = [
                 tips: ['The model\u2019s confidence is reflected in the marker size and opacity.'],
             },
             {
+                title: 'Spot-check across the trial',
+                body: 'Scrub through the video and look for frames where the predicted keypoints drift off the hand or land on the wrong finger. Note these \u2014 you\u2019ll fix them in the next tutorial (Refinement).',
+                tips: [
+                    'Pay attention to frames where the hand is partially occluded or rapidly moving \u2014 models often struggle there.',
+                ],
+            },
+            {
+                title: 'Check the Dashboard',
+                body: 'Return to the <a href="/"><strong>Dashboard</strong></a>. Your subject\u2019s stage badge should now say <strong>"analyzed"</strong>, confirming that DLC analysis is complete.',
+                tips: [],
+            },
+        ],
+    },
+
+    // ── 7. Refinement & Correction ──────────────────────────
+    {
+        id: 7,
+        title: 'Refinement & Correction',
+        subtitle: 'Fix DLC prediction errors and retrain for better accuracy.',
+        time: '~8 min',
+        series: 'advanced',
+        steps: [
+            {
+                title: 'Open a refinement session',
+                body: 'Go to <a href="/labeling-select"><strong>DLC</strong></a> and select your subject. Choose <strong>Refinement</strong> mode. This loads DLC\u2019s predictions as editable labels so you can correct mistakes.',
+                tips: [],
+            },
+            {
+                title: 'Find frames that need correction',
+                body: 'Scrub through the trial using <kbd>\u2190</kbd> / <kbd>\u2192</kbd>. Look for keypoints that are visibly misplaced \u2014 on the wrong finger, off the hand entirely, or jittering between frames.',
+                tips: [
+                    'The <strong>confidence heatmap</strong> in the timeline highlights low-confidence frames in red \u2014 start there.',
+                    'Press <kbd>D</kbd> / <kbd>F</kbd> to jump between frames that already have corrections.',
+                ],
+            },
+            {
+                title: 'Correct misplaced keypoints',
+                body: 'Click a bodypart in the sidebar to select it, then click the correct position on the video to move the label. You can also <strong>drag</strong> existing labels directly. <strong>Right-click</strong> a label to delete it if the bodypart is not visible.',
+                tips: [],
+            },
+            {
+                title: 'Focus on outlier frames',
+                body: 'You don\u2019t need to fix every frame \u2014 focus on the <strong>worst outliers</strong>. Correcting 10\u201320 frames where the model is clearly wrong gives the biggest improvement per frame labeled.',
+                tips: [
+                    'Frames where the hand changes direction (opening to closing) are often the hardest for the model.',
+                ],
+            },
+            {
+                title: 'Save corrections and commit',
+                body: 'Click <strong>Save &amp; Commit</strong>. Your corrections are merged into the training dataset alongside your original labels.',
+                tips: [],
+            },
+            {
+                title: 'Retrain with corrections',
+                body: 'Go to <a href="/remote"><strong>Processing</strong></a>, select <strong>Train</strong>, and submit. The model will now train on both your original labels and your corrections, producing better predictions.',
+                tips: [
+                    'After retraining, run <strong>Analyze v1</strong> again to see the improved predictions.',
+                    'You can repeat the refine\u2013retrain cycle multiple times. Each round typically improves accuracy, especially for difficult frames.',
+                ],
+            },
+            {
+                title: 'Re-analyze and verify',
+                body: 'Run <strong>Analyze v1</strong> again on your subject. Open the labeler and compare the new predictions to the old ones \u2014 the corrected frames should now track much more accurately.',
+                tips: [],
+            },
+        ],
+    },
+
+    // ── 8. Event Detection & Correction ─────────────────────
+    {
+        id: 8,
+        title: 'Event Detection & Correction',
+        subtitle: 'Automatically detect movement events and manually correct them.',
+        time: '~7 min',
+        series: 'advanced',
+        steps: [
+            {
+                title: 'Run event detection',
+                body: 'Go to <a href="/remote"><strong>Processing</strong></a>. Select <strong>Events</strong> from the Step dropdown, check your subject, and submit. The algorithm detects <strong>open</strong>, <strong>peak</strong>, and <strong>close</strong> events from the distance traces.',
+                tips: [],
+            },
+            {
+                title: 'View detected events in Results',
+                body: 'Open <a href="/results"><strong>Results</strong></a> and select your subject. The <strong>Distances</strong> tab now shows colored vertical markers for each detected event overlaid on the distance trace.',
+                tips: [
+                    'Open events are green, peak events are yellow, and close events are red \u2014 matching the colors configured in Settings.',
+                ],
+            },
+            {
+                title: 'Understand the event types',
+                body: '<strong>Open</strong> marks the start of a finger-opening movement. <strong>Peak</strong> marks the maximum opening amplitude. <strong>Close</strong> marks the return to a closed position. Together, they define one complete movement cycle.',
+                tips: [],
+            },
+            {
+                title: 'Correct event positions',
+                body: 'In the Results page, click an event marker to select it. <strong>Drag</strong> it left or right along the timeline to adjust its frame position. The event snaps to the nearest frame.',
+                tips: [
+                    'If an event was detected in the wrong place, drag it to the correct frame. If an event is missing, right-click the timeline to add one.',
+                ],
+            },
+            {
+                title: 'Add or remove events',
+                body: 'To add a missing event, <strong>right-click</strong> on the distance trace at the desired frame and select the event type from the context menu. To remove a false detection, select the event marker and press <kbd>Delete</kbd>.',
+                tips: [],
+            },
+            {
+                title: 'Save corrected events',
+                body: 'Click <strong>Save Events</strong> to persist your corrections. The movement parameters in the <strong>Movements</strong> tab will update to reflect the corrected event boundaries.',
+                tips: [
+                    'Accurate event boundaries are critical for reliable amplitude, velocity, and inter-movement interval calculations.',
+                ],
+            },
+        ],
+    },
+
+    // ── 9. Viewing Results ──────────────────────────────────
+    {
+        id: 9,
+        title: 'Viewing Results',
+        subtitle: 'Explore distance traces, movement parameters, and export data.',
+        time: '~5 min',
+        series: 'advanced',
+        steps: [
+            {
                 title: 'Open the Results page',
-                body: 'Click <a href="/results"><strong>Results</strong></a> in the nav bar and select your subject.',
+                body: 'Click <a href="/results"><strong>Results</strong></a> in the nav bar and select your subject from the dropdown.',
                 tips: [],
             },
             {
                 title: 'Explore the Distances tab',
-                body: 'The <strong>Distances</strong> tab shows line plots of 3D distances (e.g.&nbsp;thumb-to-index opening) over time for each trial. Each trial gets its own plot.',
+                body: 'The <strong>Distances</strong> tab shows line plots of 3D distances (e.g.&nbsp;thumb-to-index opening) over time for each trial. Each trial gets its own plot. Event markers (if detected) appear as colored vertical lines.',
                 tips: ['Check <strong>Lock Y-axis</strong> to use the same scale across all trial plots for easier comparison.'],
             },
             {
@@ -265,10 +396,68 @@ window.TUTORIALS = [
                 tips: [],
             },
             {
-                title: 'Check the Dashboard',
-                body: 'Return to the <a href="/"><strong>Dashboard</strong></a>. Your subject\u2019s stage badge should now say <strong>"analyzed"</strong>, confirming the full pipeline is complete.',
+                title: 'Compare across trials',
+                body: 'Use the trial selector to switch between trials, or view all trials side by side. Look for trends like decreasing amplitude or increasing interval \u2014 these may indicate fatigue or disease progression.',
+                tips: [],
+            },
+            {
+                title: 'Export data',
+                body: 'Click <strong>Export</strong> to download the results as a CSV file. This includes per-event parameters for each trial, ready for statistical analysis in R, Python, or Excel.',
                 tips: [
-                    'From here, you can refine labels, correct errors, annotate events, and fit MANO models \u2014 covered in the advanced tutorial series.',
+                    'The exported CSV uses one row per movement event, with columns for amplitude, velocity, duration, and interval.',
+                ],
+            },
+            {
+                title: 'Check the Dashboard',
+                body: 'Return to the <a href="/"><strong>Dashboard</strong></a>. Your subject\u2019s stage badge should now reflect the full pipeline completion. From here, you can proceed to MANO fitting for 3D hand model reconstruction.',
+                tips: [],
+            },
+        ],
+    },
+
+    // ── 10. MANO Fitting & Viewing ──────────────────────────
+    {
+        id: 10,
+        title: 'MANO Fitting & Viewing',
+        subtitle: 'Fit a 3D hand model to your tracked keypoints and visualize the results.',
+        time: '~5 min',
+        series: 'advanced',
+        steps: [
+            {
+                title: 'Prerequisites',
+                body: 'MANO fitting requires completed DLC analysis (keypoints on all frames) and stereo calibration. Ensure your subject has been analyzed and a calibration file is assigned in Settings.',
+                tips: [],
+            },
+            {
+                title: 'Run MANO fitting',
+                body: 'Go to <a href="/remote"><strong>Processing</strong></a>. Select <strong>MANO Fit</strong> from the Step dropdown, check your subject, and submit. This is a GPU-accelerated job that fits the MANO 3D hand model to your 2D keypoint detections across all frames.',
+                tips: [
+                    'MANO fitting is computationally intensive \u2014 a GPU is strongly recommended. On CPU it may take significantly longer.',
+                    'If you have a remote GPU configured, select <strong>Remote</strong> as the execution target.',
+                ],
+            },
+            {
+                title: 'Monitor the fitting job',
+                body: 'The job appears in the <strong>Queue</strong>. MANO fitting typically takes a few minutes per trial on GPU. The progress indicator shows which trial is currently being processed.',
+                tips: [],
+            },
+            {
+                title: 'Open the MANO viewer',
+                body: 'Once fitting completes, click <a href="/mano"><strong>MANO</strong></a> in the nav bar and select your subject. The viewer shows a 3D hand mesh overlaid on the video frame.',
+                tips: [],
+            },
+            {
+                title: 'Navigate the 3D view',
+                body: 'The MANO viewer has the same frame navigation as the video viewer (<kbd>\u2190</kbd> / <kbd>\u2192</kbd>, <kbd>Space</kbd> to play). Additionally, you can <strong>rotate</strong> the 3D view by dragging, and <strong>zoom</strong> with the scroll wheel.',
+                tips: [
+                    'Toggle between the video overlay and a standalone 3D mesh view using the view mode selector.',
+                ],
+            },
+            {
+                title: 'Assess fit quality',
+                body: 'Scrub through the trial and check that the 3D mesh follows the actual hand movement. The mesh should align with the fingers during opening and closing. Misalignment usually indicates DLC prediction errors upstream.',
+                tips: [
+                    'If the mesh doesn\u2019t align well, go back to the Refinement tutorial to correct DLC predictions, retrain, re-analyze, and re-fit MANO.',
                 ],
             },
         ],

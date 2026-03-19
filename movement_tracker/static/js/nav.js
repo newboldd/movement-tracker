@@ -6,3 +6,12 @@
               || document.querySelector('nav a[href*="labeling-select"]');
     if (link) link.href = '/labeling?session=' + sid;
 })();
+
+/* Conditionally show/hide Tutorials nav link based on setting. */
+(function() {
+    const tutLink = document.querySelector('nav a[href="/tutorials"]');
+    if (!tutLink) return;
+    fetch('/api/settings').then(r => r.json()).then(cfg => {
+        if (cfg.show_tutorials === false) tutLink.style.display = 'none';
+    }).catch(() => {});
+})();

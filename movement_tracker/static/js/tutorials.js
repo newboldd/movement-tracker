@@ -1,14 +1,22 @@
 /**
- * Tutorials index page — renders card grid from TUTORIALS data.
+ * Tutorials index page — renders card grid from TUTORIALS data,
+ * grouped by series (beginner / advanced).
  */
 (function () {
     'use strict';
 
-    function init() {
-        const grid = document.getElementById('tutGrid');
-        if (!grid || !window.TUTORIALS) return;
+    function renderSection(container, title, description, tutorials) {
+        const heading = document.createElement('div');
+        heading.className = 'tut-section-header';
+        heading.innerHTML = `
+            <h3 style="margin:0 0 4px;font-size:18px;font-weight:600;">${title}</h3>
+            <p style="margin:0;font-size:14px;color:var(--text-muted,#aaa);">${description}</p>
+        `;
+        container.appendChild(heading);
 
-        window.TUTORIALS.forEach(t => {
+        const grid = document.createElement('div');
+        grid.className = 'tut-grid';
+        tutorials.forEach(t => {
             const a = document.createElement('a');
             a.className = 'tut-card';
             a.href = `/tutorial?id=${t.id}`;
@@ -25,6 +33,29 @@
             `;
             grid.appendChild(a);
         });
+        container.appendChild(grid);
+    }
+
+    function init() {
+        const container = document.getElementById('tutGrid');
+        if (!container || !window.TUTORIALS) return;
+
+        const beginner = window.TUTORIALS.filter(t => t.series === 'beginner');
+        const advanced = window.TUTORIALS.filter(t => t.series === 'advanced');
+
+        renderSection(container, 'Getting Started',
+            'Learn the basics: from raw video to trained DLC model.',
+            beginner);
+
+        if (advanced.length) {
+            const spacer = document.createElement('div');
+            spacer.style.height = '32px';
+            container.appendChild(spacer);
+
+            renderSection(container, 'Advanced',
+                'Refinement, event analysis, results, and 3D hand fitting.',
+                advanced);
+        }
     }
 
     if (document.readyState === 'loading') {

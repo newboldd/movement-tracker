@@ -184,8 +184,9 @@ async function loadSettings() {
         const netType = document.getElementById('dlc_net_type');
         netType.value = settings.dlc_net_type || 'resnet_50';
 
-        // Checkbox
+        // Checkboxes
         document.getElementById('prefer_deidentified').checked = !!settings.prefer_deidentified;
+        document.getElementById('show_tutorials').checked = settings.show_tutorials !== false;
 
         // Tag inputs
         setTagValues('camera_names_tags', settings.camera_names || []);
@@ -251,6 +252,7 @@ function _gatherSettings() {
         remote_ssh_port: parseInt(document.getElementById('remote_ssh_port').value) || 22,
         calibrations: getCalibrations(),
         prefer_deidentified: document.getElementById('prefer_deidentified').checked,
+        show_tutorials: document.getElementById('show_tutorials').checked,
         event_types: getEventTypes(),
     };
 }
