@@ -120,7 +120,15 @@ const labeler = (() => {
     let videoEl = null;
     let videoPlaying = false;
     let currentTrialIdx = -1; // which trial the video element is loaded with
+    let currentVideoSide = ''; // which camera side the video element is loaded with
     let videoFrameMode = false; // true when video element is the frame source (vs JPEG)
+
+    // MediaPipe bounding-box crop state
+    let mpCropMode = false;            // bounding box editing active
+    let mpCropBoxes = {};              // {side: {x1, y1, x2, y2}} in image coords (saved)
+    let mpCropEditBox = null;          // current editing box {x1, y1, x2, y2} (unsaved)
+    let mpCropDragHandle = null;       // which handle is being dragged
+    let mpCropDragStart = null;        // {mx, my, box: {...}} at drag start
 
     // Deleted frame/side keys — sent to server on save so DB stays in sync
     const deletedKeys = new Set();
@@ -310,6 +318,7 @@ const labeler = (() => {
     async function loadSession() {
         try {
             currentTrialIdx = -1;  // force video reload (e.g. after blur setting change)
+            currentVideoSide = '';
             sessionInfo = await API.get(`/api/labeling/sessions/${sessionId}/info`);
             trials = sessionInfo.trials;
             totalFrames = sessionInfo.total_frames;
@@ -330,10 +339,16 @@ const labeler = (() => {
             if (sessionInfo.committed_frame_count) committedFrameCount = sessionInfo.committed_frame_count;
             if (sessionInfo.camera_mode) cameraMode = sessionInfo.camera_mode;
 
-            // In multicam mode, default to first trial's first camera name
-            if (cameraMode === 'multicam' && trials.length > 0
+            // Adjust cameraNames and currentSide based on camera_mode
+            if (cameraMode === 'single') {
+                // Single camera: collapse to one entry
+                cameraNames = [cameraNames[0] || 'OS'];
+                currentSide = cameraNames[0];
+            } else if (cameraMode === 'multicam' && trials.length > 0
                 && trials[0].cameras && trials[0].cameras.length > 0) {
-                currentSide = trials[0].cameras[0].name;
+                // Multicam: use actual camera names from trial data
+                cameraNames = trials[0].cameras.map(c => c.name);
+                currentSide = cameraNames[0];
             } else {
                 currentSide = cameraNames[0] || 'OS';
             }
@@ -396,7 +411,36 @@ const labeler = (() => {
 
             // Update sidebar with dynamic shortcuts
             updateShortcutsSidebar();
-            document.getElementById('sideToggle').textContent = currentSide;
+
+            // ── Camera button: hide for single, update label for multicam ──
+            const sideBtn = document.getElementById('sideToggle');
+            if (cameraMode === 'single') {
+                sideBtn.style.display = 'none';
+            } else {
+                sideBtn.style.display = '';
+                sideBtn.textContent = currentSide;
+            }
+
+            // ── Show MediaPipe crop section in label/refine modes ──
+            const mpCropSection = document.getElementById('mpCropSection');
+            if (mpCropSection) {
+                mpCropSection.style.display = (!isEvents && !isFinal && !isCorrections) ? 'block' : 'none';
+            }
+
+            // ── Tab visibility: restrict tabs based on subject stage ──
+            const subjectStage = (sessionInfo.subject && sessionInfo.subject.stage) || 'created';
+            const ADVANCED_STAGES = [
+                'analyzed', 'triangulated', 'refined', 'corrected',
+                'retraining', 'retrained',
+                'events_partial', 'events_complete', 'complete',
+            ];
+            const canUseAdvanced = ADVANCED_STAGES.includes(subjectStage);
+            const refineBtn = document.getElementById('modeRefine');
+            const correctBtn = document.getElementById('modeCorrect');
+            const eventsBtn = document.getElementById('modeEvents');
+            if (refineBtn) refineBtn.style.display = canUseAdvanced ? '' : 'none';
+            if (correctBtn) correctBtn.style.display = canUseAdvanced ? '' : 'none';
+            if (eventsBtn) eventsBtn.style.display = canUseAdvanced ? '' : 'none';
 
             // Setup keyboard after bodyparts are known
             setupKeyboard();
@@ -470,21 +514,20 @@ const labeler = (() => {
                     console.log('No DLC predictions available');
                 }
 
-                if (isRefine) {
-                    try {
-                        const committed = await API.get(`/api/labeling/sessions/${sessionId}/committed_labels`);
-                        if (committed && committed.length > 0) {
-                            committed.forEach(l => {
-                                const key = `${l.frame_num}_${l.side}`;
-                                if (!committedLabels.has(key)) {
-                                    committedLabels.set(key, l.keypoints || {});
-                                }
-                            });
-                            console.log(`Loaded ${committedLabels.size} committed manual labels`);
-                        }
-                    } catch (e) {
-                        console.log('No committed labels available');
+                // Load committed labels for timeline display (all session types)
+                try {
+                    const committed = await API.get(`/api/labeling/sessions/${sessionId}/committed_labels`);
+                    if (committed && committed.length > 0) {
+                        committed.forEach(l => {
+                            const key = `${l.frame_num}_${l.side}`;
+                            if (!committedLabels.has(key)) {
+                                committedLabels.set(key, l.keypoints || {});
+                            }
+                        });
+                        console.log(`Loaded ${committedLabels.size} committed manual labels`);
                     }
+                } catch (e) {
+                    console.log('No committed labels available');
                 }
             }
 
@@ -575,11 +618,13 @@ const labeler = (() => {
         if (!trial) return false;
 
         // Load correct trial's video into the element if needed.
+        // Also reload when the camera side changes (multicam subjects have separate video files per camera).
         let justLoaded = false;
-        if (currentTrialIdx !== trialIdx) {
-            const videoUrl = `/api/labeling/sessions/${sessionId}/video?trial=${trialIdx}&_=${Date.now()}`;
+        if (currentTrialIdx !== trialIdx || currentVideoSide !== currentSide) {
+            const videoUrl = `/api/labeling/sessions/${sessionId}/video?trial=${trialIdx}&side=${encodeURIComponent(currentSide)}&_=${Date.now()}`;
             videoEl.src = videoUrl;
             currentTrialIdx = trialIdx;
+            currentVideoSide = currentSide;
             // Wait for video metadata to load so we can seek accurately
             const loaded = await new Promise(resolve => {
                 if (videoEl.readyState >= 1) { resolve(true); return; }
@@ -640,7 +685,7 @@ const labeler = (() => {
             }
             imgW = sw;
             imgH = vh;
-            if (!hasUserZoom) {
+            if (!hasUserZoom && !mpCropMode) {
                 if (isFinal && !isEvents && finalCropBoxes) {
                     zoomToCropBox();
                     hasUserZoom = true;
@@ -659,6 +704,7 @@ const labeler = (() => {
         }
 
         drawLabelsOverlay();
+        if (mpCropMode && mpCropEditBox) drawMpCropOverlay();
         videoFrameMode = true;
         return true;
     }
@@ -693,7 +739,7 @@ const labeler = (() => {
                 currentImage = await loadImage(frame, currentSide);
                 imgW = currentImage.width;
                 imgH = currentImage.height;
-                if (!hasUserZoom) {
+                if (!hasUserZoom && !mpCropMode) {
                     if (isFinal && !isEvents && finalCropBoxes) {
                         // Final mode: zoom to crop box, then lock
                         zoomToCropBox();
@@ -1152,6 +1198,7 @@ const labeler = (() => {
         }
 
         drawLabelsOverlay();
+        if (mpCropMode && mpCropEditBox) drawMpCropOverlay();
     }
 
     function zoomToCropBox() {
@@ -1269,6 +1316,242 @@ const labeler = (() => {
             if (isGhost) ctx.setLineDash([4, 4]);
             ctx.stroke();
             ctx.setLineDash([]);
+        }
+    }
+
+    // ── MediaPipe crop box overlay ───────────────────
+    function drawMpCropOverlay() {
+        const box = mpCropEditBox;
+        if (!box) return;
+        const cw = canvas.width;
+        const ch = canvas.height;
+
+        // Convert box corners to screen coords
+        const s1 = imageToScreen(box.x1, box.y1);
+        const s2 = imageToScreen(box.x2, box.y2);
+        const sx1 = s1.x, sy1 = s1.y, sx2 = s2.x, sy2 = s2.y;
+
+        // Dim outside the crop box
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        // Top
+        ctx.fillRect(0, 0, cw, sy1);
+        // Bottom
+        ctx.fillRect(0, sy2, cw, ch - sy2);
+        // Left
+        ctx.fillRect(0, sy1, sx1, sy2 - sy1);
+        // Right
+        ctx.fillRect(sx2, sy1, cw - sx2, sy2 - sy1);
+
+        // Dashed border
+        ctx.strokeStyle = '#00ff88';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.strokeRect(sx1, sy1, sx2 - sx1, sy2 - sy1);
+        ctx.setLineDash([]);
+
+        // Draw 8 handles: 4 corners + 4 edge midpoints
+        const handles = _getMpCropHandles(sx1, sy1, sx2, sy2);
+        const handleSize = 6;
+        for (const h of handles) {
+            ctx.fillStyle = '#00ff88';
+            ctx.fillRect(h.x - handleSize, h.y - handleSize, handleSize * 2, handleSize * 2);
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(h.x - handleSize, h.y - handleSize, handleSize * 2, handleSize * 2);
+        }
+    }
+
+    function _getMpCropHandles(sx1, sy1, sx2, sy2) {
+        const mx = (sx1 + sx2) / 2;
+        const my = (sy1 + sy2) / 2;
+        return [
+            { name: 'nw', x: sx1, y: sy1 },
+            { name: 'n',  x: mx,  y: sy1 },
+            { name: 'ne', x: sx2, y: sy1 },
+            { name: 'e',  x: sx2, y: my  },
+            { name: 'se', x: sx2, y: sy2 },
+            { name: 's',  x: mx,  y: sy2 },
+            { name: 'sw', x: sx1, y: sy2 },
+            { name: 'w',  x: sx1, y: my  },
+        ];
+    }
+
+    function _mpCropHitTest(sx, sy) {
+        /** Hit-test the crop box handles / interior. Returns handle name or 'move' or null. */
+        const box = mpCropEditBox;
+        if (!box) return null;
+        const s1 = imageToScreen(box.x1, box.y1);
+        const s2 = imageToScreen(box.x2, box.y2);
+        const handles = _getMpCropHandles(s1.x, s1.y, s2.x, s2.y);
+        const thresh = 10;
+
+        for (const h of handles) {
+            if (Math.abs(sx - h.x) < thresh && Math.abs(sy - h.y) < thresh) return h.name;
+        }
+        // Interior: move
+        if (sx >= s1.x && sx <= s2.x && sy >= s1.y && sy <= s2.y) return 'move';
+        return null;
+    }
+
+    function _mpCropCursor(handle) {
+        const cursors = {
+            'nw': 'nwse-resize', 'se': 'nwse-resize',
+            'ne': 'nesw-resize', 'sw': 'nesw-resize',
+            'n': 'ns-resize', 's': 'ns-resize',
+            'e': 'ew-resize', 'w': 'ew-resize',
+            'move': 'move',
+        };
+        return cursors[handle] || 'default';
+    }
+
+    function _applyMpCropDrag(sx, sy) {
+        /** Update mpCropEditBox based on current drag handle and mouse position. */
+        if (!mpCropDragStart || !mpCropDragHandle) return;
+        const { mx: startMx, my: startMy, box: origBox } = mpCropDragStart;
+        const dxImg = (sx - startMx) / scale;
+        const dyImg = (sy - startMy) / scale;
+
+        let { x1, y1, x2, y2 } = origBox;
+
+        if (mpCropDragHandle === 'move') {
+            x1 += dxImg; x2 += dxImg;
+            y1 += dyImg; y2 += dyImg;
+        } else {
+            if (mpCropDragHandle.includes('w')) x1 += dxImg;
+            if (mpCropDragHandle.includes('e')) x2 += dxImg;
+            if (mpCropDragHandle.includes('n')) y1 += dyImg;
+            if (mpCropDragHandle.includes('s')) y2 += dyImg;
+        }
+
+        // Ensure min size and correct ordering
+        if (x2 - x1 < 20) x2 = x1 + 20;
+        if (y2 - y1 < 20) y2 = y1 + 20;
+
+        // Clamp to image bounds
+        x1 = Math.max(0, x1); y1 = Math.max(0, y1);
+        x2 = Math.min(imgW, x2); y2 = Math.min(imgH, y2);
+
+        mpCropEditBox = {
+            x1: Math.round(x1), y1: Math.round(y1),
+            x2: Math.round(x2), y2: Math.round(y2),
+        };
+    }
+
+    function toggleMpCrop(enabled) {
+        mpCropMode = enabled;
+        const actionsEl = document.getElementById('mpCropActions');
+        if (enabled) {
+            // Initialize edit box from saved or full frame
+            mpCropEditBox = mpCropBoxes[currentSide]
+                ? { ...mpCropBoxes[currentSide] }
+                : { x1: 0, y1: 0, x2: imgW, y2: imgH };
+            if (actionsEl) actionsEl.style.display = 'flex';
+            // Lock zoom so frame navigation doesn't shift the view
+            hasUserZoom = true;
+        } else {
+            mpCropEditBox = null;
+            mpCropDragHandle = null;
+            mpCropDragStart = null;
+            if (actionsEl) actionsEl.style.display = 'none';
+        }
+        render();
+    }
+
+    function saveMpCrop() {
+        if (mpCropEditBox) {
+            mpCropBoxes[currentSide] = { ...mpCropEditBox };
+        }
+        mpCropMode = false;
+        mpCropEditBox = null;
+        const toggle = document.getElementById('mpCropToggle');
+        if (toggle) toggle.checked = false;
+        const actionsEl = document.getElementById('mpCropActions');
+        if (actionsEl) actionsEl.style.display = 'none';
+        // Show rerun button
+        const rerunBtn = document.getElementById('mpRerunBtn');
+        if (rerunBtn && mpCropBoxes[currentSide]) rerunBtn.style.display = 'block';
+        render();
+    }
+
+    function cancelMpCrop() {
+        mpCropMode = false;
+        mpCropEditBox = null;
+        mpCropDragHandle = null;
+        mpCropDragStart = null;
+        const toggle = document.getElementById('mpCropToggle');
+        if (toggle) toggle.checked = false;
+        const actionsEl = document.getElementById('mpCropActions');
+        if (actionsEl) actionsEl.style.display = 'none';
+        render();
+    }
+
+    async function rerunMediapipe() {
+        const crop = mpCropBoxes[currentSide];
+        if (!crop) return;
+
+        // Find which trial the current frame belongs to
+        let trialIdx = 0;
+        for (let i = 0; i < trials.length; i++) {
+            if (currentFrame >= trials[i].start_frame && currentFrame <= trials[i].end_frame) {
+                trialIdx = i;
+                break;
+            }
+        }
+
+        const statusEl = document.getElementById('mpRerunStatus');
+        const rerunBtn = document.getElementById('mpRerunBtn');
+        if (statusEl) statusEl.textContent = 'Re-running MediaPipe…';
+        if (rerunBtn) rerunBtn.disabled = true;
+
+        try {
+            const result = await API.post(`/api/labeling/sessions/${sessionId}/rerun-mediapipe`, {
+                trial_idx: trialIdx,
+                side: currentSide,
+                crop: crop,
+            });
+
+            const jobId = result.job_id;
+            if (!jobId) throw new Error('No job_id returned');
+
+            // Track progress via SSE stream (also visible on dashboard/processing page)
+            const evtSource = new EventSource(`/api/jobs/${jobId}/stream`);
+            evtSource.onmessage = async (event) => {
+                const data = JSON.parse(event.data);
+                if (data.status === 'running') {
+                    const pct = data.progress_pct ? Math.round(data.progress_pct) : 0;
+                    if (statusEl) statusEl.textContent = `Re-running MediaPipe… ${pct}%`;
+                } else if (data.status === 'completed') {
+                    evtSource.close();
+                    if (statusEl) statusEl.textContent = 'Done! Reloading labels…';
+                    // Reload mediapipe data
+                    const mpResp = await API.get(`/api/labeling/sessions/${sessionId}/mediapipe`);
+                    mpLabels = (mpResp && Object.keys(mpResp).length) ? mpResp : null;
+                    if (mpLabels && mpLabels.distances) {
+                        distances = mpLabels.distances;
+                    }
+                    render();
+                    renderTimeline();
+                    renderDistanceTrace();
+                    if (statusEl) statusEl.textContent = 'MediaPipe updated successfully.';
+                    if (rerunBtn) rerunBtn.disabled = false;
+                } else if (data.status === 'failed') {
+                    evtSource.close();
+                    if (statusEl) statusEl.textContent = 'Error: ' + (data.error_msg || 'unknown');
+                    if (rerunBtn) rerunBtn.disabled = false;
+                } else if (data.status === 'cancelled') {
+                    evtSource.close();
+                    if (statusEl) statusEl.textContent = 'Cancelled.';
+                    if (rerunBtn) rerunBtn.disabled = false;
+                }
+            };
+            evtSource.onerror = () => {
+                evtSource.close();
+                if (statusEl) statusEl.textContent = 'Connection lost — check job status on dashboard.';
+                if (rerunBtn) rerunBtn.disabled = false;
+            };
+        } catch (err) {
+            if (statusEl) statusEl.textContent = 'Error: ' + (err.message || err);
+            if (rerunBtn) rerunBtn.disabled = false;
         }
     }
 
@@ -1450,6 +1733,18 @@ const labeler = (() => {
         const sx = e.clientX - rect.left;
         const sy = e.clientY - rect.top;
 
+        // MediaPipe crop mode: intercept for box manipulation
+        if (mpCropMode && mpCropEditBox) {
+            const handle = _mpCropHitTest(sx, sy);
+            if (handle) {
+                mpCropDragHandle = handle;
+                mpCropDragStart = { mx: sx, my: sy, box: { ...mpCropEditBox } };
+                canvas.style.cursor = _mpCropCursor(handle);
+                return;
+            }
+            // Click outside box — fall through to normal pan
+        }
+
         // Final mode: only allow pan, no label interaction
         if (isFinal) {
             dragging = 'pending';
@@ -1541,10 +1836,23 @@ const labeler = (() => {
     }
 
     function onMouseMove(e) {
-        if (!dragging) return;
         const rect = canvas.getBoundingClientRect();
         const sx = e.clientX - rect.left;
         const sy = e.clientY - rect.top;
+
+        // MediaPipe crop mode drag
+        if (mpCropDragHandle && mpCropDragStart) {
+            _applyMpCropDrag(sx, sy);
+            render();
+            return;
+        }
+        // MediaPipe crop mode hover cursor
+        if (mpCropMode && mpCropEditBox && !dragging) {
+            const handle = _mpCropHitTest(sx, sy);
+            canvas.style.cursor = handle ? _mpCropCursor(handle) : 'crosshair';
+        }
+
+        if (!dragging) return;
 
         if (dragging === 'pending') {
             // Check if mouse has moved enough to become a pan drag
@@ -1575,6 +1883,14 @@ const labeler = (() => {
     }
 
     function onMouseUp(e) {
+        // MediaPipe crop mode: finish drag
+        if (mpCropDragHandle) {
+            mpCropDragHandle = null;
+            mpCropDragStart = null;
+            canvas.style.cursor = 'crosshair';
+            return;
+        }
+
         if (dragging === 'pending') {
             // Mouse didn't move much — this is a click
             if (!isFinal) {
@@ -2367,6 +2683,7 @@ const labeler = (() => {
     }
 
     function toggleSide() {
+        if (cameraMode === 'single') return;
         const activeCams = _getActiveCameraNames();
         const idx = activeCams.indexOf(currentSide);
         const newIdx = (idx + 1) % activeCams.length;
@@ -2389,8 +2706,32 @@ const labeler = (() => {
             offsetY += direction * shiftY * scale;
         }
 
+        // --- Per-camera bounding box handling on camera switch ---
+        if (mpCropMode) {
+            // Save current edit box for the old camera before switching
+            if (mpCropEditBox) {
+                mpCropBoxes[currentSide] = { ...mpCropEditBox };
+            }
+        }
+
         currentSide = activeCams[newIdx];
         document.getElementById('sideToggle').textContent = currentSide;
+
+        if (mpCropMode) {
+            // Load saved box for new camera, or initialize to full frame
+            mpCropEditBox = mpCropBoxes[currentSide]
+                ? { ...mpCropBoxes[currentSide] }
+                : { x1: 0, y1: 0, x2: imgW, y2: imgH };
+            mpCropDragHandle = null;
+            mpCropDragStart = null;
+        }
+
+        // Update rerun button visibility for new camera
+        const rerunBtn = document.getElementById('mpRerunBtn');
+        if (rerunBtn) {
+            rerunBtn.style.display = mpCropBoxes[currentSide] ? 'block' : 'none';
+        }
+
         goToFrame(currentFrame);
     }
 
@@ -2424,10 +2765,11 @@ const labeler = (() => {
         const startTime = Math.max(0, (localFrame - frameOffset + 0.5) / trial.fps);
 
         // Use streaming URL (not blob) — browser handles buffering natively
-        const videoUrl = `/api/labeling/sessions/${sessionId}/video?trial=${trialIdx}&_=${Date.now()}`;
-        if (currentTrialIdx !== trialIdx) {
+        const videoUrl = `/api/labeling/sessions/${sessionId}/video?trial=${trialIdx}&side=${encodeURIComponent(currentSide)}&_=${Date.now()}`;
+        if (currentTrialIdx !== trialIdx || currentVideoSide !== currentSide) {
             videoEl.src = videoUrl;
             currentTrialIdx = trialIdx;
+            currentVideoSide = currentSide;
             console.log(`[video] Loading trial ${trialIdx}, readyState=${videoEl.readyState}`);
 
             // Wait for enough data to play, with error/timeout fallback
@@ -2534,7 +2876,7 @@ const labeler = (() => {
 
             imgW = sw;
             imgH = vh;
-            if (!hasUserZoom) fitImage();
+            if (!hasUserZoom && !mpCropMode) fitImage();
 
             ctx.save();
             ctx.translate(offsetX, offsetY);
@@ -2544,6 +2886,7 @@ const labeler = (() => {
         }
 
         drawLabelsOverlay();
+        if (mpCropMode && mpCropEditBox) drawMpCropOverlay();
         updateFrameDisplay();
 
         // Only update timeline/trace every ~10 frames to reduce work during playback
@@ -2667,8 +3010,10 @@ const labeler = (() => {
                     cycleReviewMode();
                     break;
                 case 'e':
-                    e.preventDefault();
-                    toggleSide();
+                    if (cameraMode !== 'single') {
+                        e.preventDefault();
+                        toggleSide();
+                    }
                     break;
                 case 'z':
                     e.preventDefault();
@@ -2959,8 +3304,8 @@ const labeler = (() => {
             });
         }
 
-        // Manual label dots (bright, on top of MP bars)
-        labels.forEach((lbl, key) => {
+        // Committed label dots (filled circles, dimmer)
+        committedLabels.forEach((lbl, key) => {
             const [frameStr, side] = key.split('_');
             const frame = parseInt(frameStr);
             const yBase = labelY[side];
@@ -2974,7 +3319,30 @@ const labeler = (() => {
                     tlCtx.beginPath();
                     tlCtx.arc(x, dotY, 2.5, 0, Math.PI * 2);
                     tlCtx.fillStyle = bpColor(idx);
+                    tlCtx.globalAlpha = 0.5;
                     tlCtx.fill();
+                    tlCtx.globalAlpha = 1;
+                }
+            });
+        });
+
+        // Unsaved label dots (open circles with stroke, on top)
+        labels.forEach((lbl, key) => {
+            const [frameStr, side] = key.split('_');
+            const frame = parseInt(frameStr);
+            const yBase = labelY[side];
+            if (yBase === undefined) return;
+
+            const x = barX + (frame / totalFrames) * barW;
+            bodyparts.forEach((bp, idx) => {
+                const coords = lbl[bp];
+                if (coords && coords[0] != null) {
+                    const dotY = yBase + rowH / 2 + (idx - bodyparts.length / 2) * 6;
+                    tlCtx.beginPath();
+                    tlCtx.arc(x, dotY, 3, 0, Math.PI * 2);
+                    tlCtx.strokeStyle = bpColor(idx);
+                    tlCtx.lineWidth = 1.5;
+                    tlCtx.stroke();
                 }
             });
         });
@@ -4401,6 +4769,8 @@ const labeler = (() => {
         saveNavState,
         // Video export
         getExportContext,
+        // MediaPipe crop box
+        toggleMpCrop, saveMpCrop, cancelMpCrop, rerunMediapipe,
     };
 })();
 

@@ -128,8 +128,17 @@ def get_trial_video(subject_id: int, trial_idx: int,
     Defaults to the primary (first) camera.
     """
     name = _subject_name(subject_id)
+
+    # Use per-subject camera_mode so trial grouping matches video_list
+    from ..db import get_db
+    db = get_db()
+    row = db.execute("SELECT camera_mode FROM subjects WHERE id = ?", (subject_id,)).fetchone()
+    settings = get_settings()
+    subject_camera_mode = (row["camera_mode"] if row and row["camera_mode"] else
+                           settings.default_camera_mode)
+
     try:
-        trials = build_trial_map(name)
+        trials = build_trial_map(name, camera_mode=subject_camera_mode)
     except Exception:
         raise HTTPException(404, "No videos found")
 
@@ -226,8 +235,16 @@ def get_video_list(subject_id: int) -> list[dict]:
     """
     settings = get_settings()
     name = _subject_name(subject_id)
+
+    # Use per-subject camera_mode if set, otherwise fall back to global default
+    from ..db import get_db
+    db = get_db()
+    row = db.execute("SELECT camera_mode FROM subjects WHERE id = ?", (subject_id,)).fetchone()
+    subject_camera_mode = (row["camera_mode"] if row and row["camera_mode"] else
+                           settings.default_camera_mode)
+
     try:
-        trials = build_trial_map(name)
+        trials = build_trial_map(name, camera_mode=subject_camera_mode)
     except Exception:
         return []
 
@@ -241,8 +258,8 @@ def get_video_list(subject_id: int) -> list[dict]:
             "fps": t["fps"],
             "width": t["width"],
             "height": t["height"],
-            # Stereo determined by camera_mode setting, not video dimensions
-            "is_stereo": settings.default_camera_mode == "stereo",
+            # Stereo determined by per-subject camera_mode
+            "is_stereo": subject_camera_mode == "stereo",
         }
         # Include camera info for multicam trials (>1 camera file)
         if len(cameras) > 1:

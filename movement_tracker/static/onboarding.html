@@ -91,8 +91,11 @@
         /* Multicam sync module */
         .sync-container { display: flex; gap: 8px; margin-top: 12px; }
         .sync-video-panel { flex: 1; min-width: 0; }
-        .sync-video-panel video { width: 100%; max-height: 240px; border-radius: var(--radius);
-            background: #000; }
+        .sync-video-wrap { overflow: hidden; border-radius: var(--radius); background: #000;
+            position: relative; cursor: grab; max-height: 320px; }
+        .sync-video-wrap:active { cursor: grabbing; }
+        .sync-video-panel video { width: 100%; display: block;
+            transition: transform 0.1s ease; transform-origin: center center; }
         .sync-video-panel .cam-label { text-align: center; font-size: 12px; font-weight: 600;
             color: var(--blue); margin-bottom: 4px; }
         .sync-offset-controls { display: flex; align-items: center; justify-content: center;
@@ -103,11 +106,34 @@
         .sync-offset-controls button:hover { background: var(--bg-hover); }
         .sync-offset-display { font-family: monospace; font-size: 12px; color: var(--text-muted);
             min-width: 60px; text-align: center; }
-        .sync-shared-controls { display: flex; align-items: center; justify-content: center;
-            gap: 12px; margin-top: 12px; padding: 8px; background: var(--bg);
+
+        /* Timeline scrubber */
+        .sync-timeline { margin-top: 12px; padding: 0 4px; }
+        .sync-timeline-bar { position: relative; height: 20px; background: var(--bg);
+            border: 1px solid var(--border); border-radius: 10px; cursor: pointer;
+            user-select: none; }
+        .sync-timeline-thumb { position: absolute; top: 2px; bottom: 2px; width: 14px;
+            background: var(--blue); border-radius: 7px; transform: translateX(-50%);
+            left: 0%; cursor: grab; transition: left 0.05s linear; }
+        .sync-timeline-thumb:hover { background: var(--accent); }
+
+        /* Shared controls bar */
+        .sync-shared-controls { display: flex; align-items: center; flex-wrap: wrap;
+            gap: 8px; margin-top: 8px; padding: 8px 12px; background: var(--bg);
             border: 1px solid var(--border); border-radius: var(--radius); }
-        .sync-shared-controls button { padding: 4px 12px; font-size: 13px; }
-        .sync-frame-display { font-family: monospace; font-size: 14px; font-weight: 600; }
+        .sync-transport { display: flex; align-items: center; gap: 4px; }
+        .sync-play-btn { font-size: 16px !important; min-width: 36px; text-align: center; }
+        .sync-frame-display { font-family: monospace; font-size: 13px; font-weight: 600;
+            margin-left: 8px; white-space: nowrap; }
+        .sync-speed { display: flex; align-items: center; gap: 2px; margin-left: 8px;
+            padding-left: 8px; border-left: 1px solid var(--border); }
+        .sync-rate-label { font-family: monospace; font-size: 11px; color: var(--text-muted);
+            min-width: 24px; text-align: center; }
+        .sync-zoom-controls { display: flex; align-items: center; gap: 4px; margin-left: 8px;
+            padding-left: 8px; border-left: 1px solid var(--border); }
+        .sync-zoom-label { font-family: monospace; font-size: 12px; font-weight: 600;
+            min-width: 40px; text-align: center; }
+        .btn-xs { padding: 1px 6px !important; font-size: 11px !important; }
     </style>
 </head>
 <body>
@@ -116,7 +142,6 @@
         <nav>            <a href="/">Dashboard</a>
             <a href="/videos">Videos</a>
             <a href="/labeling-select">DLC</a>
-            <a href="/mano">MANO</a>
             <a href="/results">Results</a>
 
             <a href="/remote">Processing</a>
@@ -154,11 +179,16 @@
             <div class="trimmer" style="margin-bottom:12px;">
                 <video id="previewVideo" controls preload="auto" style="max-height:240px;"></video>
             </div>
-            <div style="display:flex;gap:8px;align-items:center;">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
                 <label style="font-size:14px;font-weight:600;">Subject Name:</label>
                 <input type="text" id="subjectName" placeholder="e.g. MSA20, Con10, PD15"
-                    style="flex:1;padding:8px 12px;background:var(--bg);border:1px solid var(--border);
+                    style="flex:1;min-width:140px;padding:8px 12px;background:var(--bg);border:1px solid var(--border);
                     border-radius:var(--radius);color:var(--text);font-size:14px;">
+                <label style="font-size:14px;font-weight:600;">Group:</label>
+                <select id="subjectGroup"
+                    style="padding:8px 12px;background:var(--bg);border:1px solid var(--border);
+                    border-radius:var(--radius);color:var(--text);font-size:14px;">
+                </select>
                 <button class="btn btn-primary" onclick="onboard.confirmName()">Confirm</button>
             </div>
         </div>
@@ -259,14 +289,41 @@
                 <h3>Synchronize Videos</h3>
             </div>
             <p style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">
-                Navigate frames until all cameras show the same moment, then adjust individual offsets.
-                Press <kbd>&larr;</kbd> / <kbd>&rarr;</kbd> to step all videos, or use per-camera buttons.
+                Navigate frames until all cameras show the same moment, then adjust individual offsets.<br>
+                <kbd>←</kbd>/<kbd>→</kbd> step frames · <kbd>Shift</kbd>+arrow ±10 · <kbd>Space</kbd> play/pause · <kbd>+</kbd>/<kbd>-</kbd> zoom · scroll to zoom · drag to pan
             </p>
             <div class="sync-container" id="syncContainer"></div>
+
+            <!-- Timeline scrubber -->
+            <div class="sync-timeline" id="syncTimeline">
+                <div class="sync-timeline-bar" id="syncTimelineBar" onmousedown="onboard.syncTimelineDrag(event)">
+                    <div class="sync-timeline-thumb" id="syncTimelineThumb"></div>
+                </div>
+            </div>
+
+            <!-- Transport & zoom controls -->
             <div class="sync-shared-controls" id="syncSharedControls">
-                <button class="btn btn-sm" onclick="onboard.syncStepAll(-1)">&larr; Prev Frame</button>
-                <span class="sync-frame-display" id="syncFrameDisplay">Frame: 0</span>
-                <button class="btn btn-sm" onclick="onboard.syncStepAll(1)">Next Frame &rarr;</button>
+                <div class="sync-transport">
+                    <button class="btn btn-sm" onclick="onboard.syncStepAll(-10)" title="Back 10 frames">⏪</button>
+                    <button class="btn btn-sm" onclick="onboard.syncStepAll(-1)" title="Prev frame (←)">◀</button>
+                    <button class="btn btn-sm sync-play-btn" id="syncPlayBtn" onclick="onboard.syncTogglePlay()" title="Play (Space)">▶</button>
+                    <button class="btn btn-sm" onclick="onboard.syncStepAll(1)" title="Next frame (→)">▶▶</button>
+                    <button class="btn btn-sm" onclick="onboard.syncStepAll(10)" title="Forward 10 frames">⏩</button>
+                    <span class="sync-frame-display" id="syncFrameDisplay">Frame 0</span>
+                </div>
+                <div class="sync-speed">
+                    <button class="btn btn-xs" onclick="onboard.syncSetRate(0.25)">¼×</button>
+                    <button class="btn btn-xs" onclick="onboard.syncSetRate(0.5)">½×</button>
+                    <button class="btn btn-xs sync-rate-active" onclick="onboard.syncSetRate(1)">1×</button>
+                    <button class="btn btn-xs" onclick="onboard.syncSetRate(2)">2×</button>
+                    <span class="sync-rate-label" id="syncRateLabel">1x</span>
+                </div>
+                <div class="sync-zoom-controls">
+                    <button class="btn btn-sm" onclick="onboard.syncZoomOut()" title="Zoom out (-)">−</button>
+                    <span class="sync-zoom-label" id="syncZoomLabel">100%</span>
+                    <button class="btn btn-sm" onclick="onboard.syncZoomIn()" title="Zoom in (+)">+</button>
+                    <button class="btn btn-xs" onclick="onboard.syncZoomReset()" title="Reset zoom">Fit</button>
+                </div>
                 <span style="flex:1;"></span>
                 <button class="btn btn-primary" onclick="onboard.confirmSync()">Videos are aligned &rarr;</button>
             </div>
@@ -290,8 +347,6 @@
                         style="width:100px;padding:4px 8px;background:var(--bg);border:1px solid var(--border);
                                border-radius:var(--radius);color:var(--text);font-size:13px;">
                     <datalist id="trialLabelSuggestions">
-                        <option value="L1"><option value="L2"><option value="L3">
-                        <option value="R1"><option value="R2"><option value="R3">
                     </datalist>
                     <button class="btn btn-sm btn-primary" onclick="onboard.addSegment()">Add Segment</button>
                     <button class="btn btn-sm" onclick="onboard.pickAnotherVideo()">Pick Another Video</button>

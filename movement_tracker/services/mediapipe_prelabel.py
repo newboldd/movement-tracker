@@ -642,6 +642,192 @@ def recompute_distance_for_frame(subject_name: str, frame_num: int,
     return round(float(np.linalg.norm(pts_3d[0] - pts_3d[1])), 2)
 
 
+def run_mediapipe_cropped(
+    subject_name: str,
+    video_path: str,
+    start_frame: int,
+    frame_count: int,
+    crop: dict,
+    camera_key: str,
+    is_stereo_video: bool = False,
+    stereo_side: str = "",
+    progress_callback=None,
+) -> None:
+    """Re-run MediaPipe on a single trial's video with a bounding-box crop.
+
+    Crops each frame to the given region before passing to MediaPipe Hands,
+    then transforms detected landmarks back to full-frame coordinates.
+    Merges results into the existing mediapipe_prelabels.npz file.
+
+    Args:
+        subject_name: Subject identifier.
+        video_path: Path to the video file.
+        start_frame: Global frame index where this trial starts in the npz arrays.
+        frame_count: Number of frames expected for this trial.
+        crop: Dict with x1, y1, x2, y2 in image pixel coordinates.
+        camera_key: Which camera slot to update in the npz ('OS' or 'OD').
+        is_stereo_video: True if the video is side-by-side stereo.
+        stereo_side: For stereo videos, which half to use ('OS'/'OD' or first/second camera name).
+        progress_callback: Optional callable(pct: float).
+    """
+    import mediapipe as mp_lib
+
+    settings = get_settings()
+    x1, y1, x2, y2 = int(crop["x1"]), int(crop["y1"]), int(crop["x2"]), int(crop["y2"])
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Cannot open video: {video_path}")
+
+    ret, frame0 = cap.read()
+    if not ret:
+        cap.release()
+        raise ValueError(f"Cannot read video: {video_path}")
+
+    full_h, full_w = frame0.shape[:2]
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+    # Determine which region of the full frame to extract first
+    # (for stereo, we split left/right; for multicam/single, use the whole frame)
+    if is_stereo_video:
+        midline = full_w // 2
+        cam_names = settings.camera_names
+        # Determine if this is left or right camera
+        is_right = False
+        if len(cam_names) >= 2 and stereo_side == cam_names[1]:
+            is_right = True
+        elif stereo_side in ("OD", "right"):
+            is_right = True
+    else:
+        midline = full_w
+
+    # Actual video frame count
+    actual_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    n_frames = min(frame_count, actual_frames) if actual_frames > 0 else frame_count
+
+    # Handle frame offset (same logic as run_mediapipe)
+    frame_offset = max(0, frame_count - n_frames)
+
+    # Run MediaPipe on cropped frames with 2-hand tracking
+    mp_hands = mp_lib.solutions.hands
+    detector = mp_hands.Hands(
+        static_image_mode=False, max_num_hands=2,
+        min_detection_confidence=0.5, min_tracking_confidence=0.5,
+    )
+
+    tracks = np.full((n_frames, 2, N_JOINTS, 2), np.nan)
+    conf = np.full((n_frames, 2), np.nan)
+    prev_wrists = [None, None]
+
+    crop_w = x2 - x1
+    crop_h = y2 - y1
+
+    for local_frame in range(n_frames):
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        frame = np.ascontiguousarray(frame, dtype=np.uint8)
+
+        # Extract camera half for stereo
+        if is_stereo_video:
+            if is_right:
+                cam_frame = frame[:, midline:, :]
+            else:
+                cam_frame = frame[:, :midline, :]
+        else:
+            cam_frame = frame
+
+        # Apply crop
+        cam_h, cam_w = cam_frame.shape[:2]
+        cx1 = max(0, min(x1, cam_w))
+        cy1 = max(0, min(y1, cam_h))
+        cx2 = max(0, min(x2, cam_w))
+        cy2 = max(0, min(y2, cam_h))
+        cropped = cam_frame[cy1:cy2, cx1:cx2, :]
+
+        if cropped.size == 0:
+            continue
+
+        # Run MediaPipe on the cropped region
+        rgb = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
+        results = detector.process(rgb)
+
+        crop_actual_h, crop_actual_w = cropped.shape[:2]
+        hands, scores, _ = _extract_hands(results, crop_actual_w, crop_actual_h)
+
+        # Transform landmarks back to full camera-frame coordinates
+        for i, hand_kp in enumerate(hands):
+            hand_kp[:, 0] += cx1  # x offset
+            hand_kp[:, 1] += cy1  # y offset
+
+        _assign_hands_to_tracks(hands, scores, prev_wrists, tracks, conf, local_frame)
+
+        if progress_callback and local_frame % 50 == 0:
+            progress_callback(local_frame / n_frames * 100)
+
+    cap.release()
+    detector.close()
+
+    # Pick the tapping hand
+    track_idx = _pick_tapping_track(tracks, f"{subject_name}/{camera_key}/cropped")
+
+    # Load existing npz and merge
+    npz_path = settings.dlc_path / subject_name / "mediapipe_prelabels.npz"
+    if npz_path.exists():
+        data = dict(np.load(str(npz_path)))
+    else:
+        # Create new arrays if no existing file
+        trials = build_trial_map(subject_name)
+        total = trials[-1]["end_frame"] + 1 if trials else start_frame + frame_count
+        data = {
+            "OS_landmarks": np.full((total, N_JOINTS, 2), np.nan),
+            "OD_landmarks": np.full((total, N_JOINTS, 2), np.nan),
+            "confidence_OS": np.full(total, np.nan),
+            "confidence_OD": np.full(total, np.nan),
+            "distances": np.full(total, np.nan),
+            "total_frames": np.array(total),
+        }
+
+    lm_key = "OS_landmarks" if camera_key == "OS" else "OD_landmarks"
+    conf_key = "confidence_OS" if camera_key == "OS" else "confidence_OD"
+    total_frames = data[lm_key].shape[0]
+
+    # Overwrite the trial's frame range with new detections
+    for local_frame in range(n_frames):
+        global_frame = start_frame + frame_offset + local_frame
+        if global_frame < total_frames:
+            data[lm_key][global_frame] = tracks[local_frame, track_idx]
+            data[conf_key][global_frame] = conf[local_frame, track_idx]
+
+    # Recompute distances if calibration is available
+    calib = get_calibration_for_subject(subject_name)
+    if calib is not None:
+        data["distances"] = _compute_distances(data["OS_landmarks"], data["OD_landmarks"], calib)
+
+    # Save updated npz
+    npz_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        str(npz_path),
+        OS_landmarks=data["OS_landmarks"],
+        OD_landmarks=data["OD_landmarks"],
+        confidence_OS=data["confidence_OS"],
+        confidence_OD=data["confidence_OD"],
+        distances=data["distances"],
+        total_frames=data.get("total_frames", total_frames),
+    )
+
+    valid_new = np.sum(~np.isnan(tracks[:, track_idx, 0, 0]))
+    logger.info(
+        f"MediaPipe cropped rerun: {subject_name}/{camera_key}, "
+        f"trial frames {start_frame}-{start_frame + frame_count - 1}, "
+        f"crop ({x1},{y1})-({x2},{y2}), detected {valid_new}/{n_frames} frames"
+    )
+
+    if progress_callback:
+        progress_callback(100.0)
+
+
 def compute_optimal_crop(subject_name: str) -> dict:
     """Compute optimal crop regions per camera from MP predictions + manual corrections.
 

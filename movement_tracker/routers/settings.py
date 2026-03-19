@@ -59,18 +59,11 @@ def settings_status() -> dict:
     settings = get_settings()
     issues = []
 
-    if not settings.video_dir:
-        issues.append("video_dir not set")
-    elif not Path(settings.video_dir).exists():
-        issues.append(f"video_dir does not exist: {settings.video_dir}")
-
-    if not settings.dlc_dir:
-        issues.append("dlc_dir not set")
-    elif not Path(settings.dlc_dir).exists():
-        issues.append(f"dlc_dir does not exist: {settings.dlc_dir}")
-
     if not settings.python_executable:
         issues.append("python_executable not set")
+
+    # Ensure DLC directory exists
+    settings.dlc_path.mkdir(parents=True, exist_ok=True)
 
     # Get GPU information
     local_gpu_available = settings.local_gpu_available

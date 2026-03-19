@@ -25,6 +25,8 @@
 
     let cameraNames = ['OS', 'OD'];
     let currentSide = 'OS';
+    let currentCameraIdx = 0;   // index into multicamCameras or cameraNames
+    let multicamCameras = [];   // [{name, idx}] from trial data (multicam only)
     let mpHints = [];  // per-trial mediapipe hints
 
     let cameraMode = 'stereo'; // 'single', 'stereo', or 'multicam'
@@ -77,7 +79,7 @@
             }
         } catch { /* defaults */ }
 
-        $('sideToggle').textContent = currentSide;
+        updateCameraButton();
 
         // Load subjects
         allSubjects = await api('/api/subjects');
@@ -204,12 +206,26 @@
         // Use camera_mode setting; trialMeta.is_stereo is authoritative from server
         isStereo = cameraMode === 'stereo' && trialMeta.is_stereo !== false;
 
-        // Apply best camera from mediapipe hints
-        const hint = mpHints.find(h => h.trial_idx === trialMeta.trial_idx);
-        if (hint && isStereo) {
-            currentSide = hint.best_camera === 1 ? cameraNames[1] : cameraNames[0];
-            $('sideToggle').textContent = currentSide;
+        // Multicam: populate camera list from trial data
+        multicamCameras = trialMeta.cameras || [];
+        if (cameraMode === 'multicam' && multicamCameras.length > 0) {
+            currentCameraIdx = 0;
+            currentSide = multicamCameras[0].name;
+        } else if (isStereo) {
+            // Apply best camera from mediapipe hints
+            const hint = mpHints.find(h => h.trial_idx === trialMeta.trial_idx);
+            if (hint) {
+                currentCameraIdx = hint.best_camera === 1 ? 1 : 0;
+                currentSide = cameraNames[currentCameraIdx];
+            } else {
+                currentCameraIdx = 0;
+                currentSide = cameraNames[0];
+            }
+        } else {
+            currentCameraIdx = 0;
+            currentSide = cameraNames[0];
         }
+        updateCameraButton();
 
         highlightTrialButton(idx);
 
@@ -221,17 +237,38 @@
         $('timelineSlider').max = trialMeta.n_frames - 1;
         $('timelineSlider').value = 0;
 
-        videoEl.src = `/api/mano/${subjectId}/trial/${trialMeta.trial_idx}/video`;
+        loadCurrentCameraVideo();
+    }
+
+    /** Build the video URL for the current trial + camera and load it. */
+    function loadCurrentCameraVideo() {
+        let src = `/api/mano/${subjectId}/trial/${trialMeta.trial_idx}/video`;
+        if (cameraMode === 'multicam' && multicamCameras.length > 0) {
+            src += `?camera=${multicamCameras[currentCameraIdx].idx}`;
+        }
+        videoEl.src = src;
         videoEl.addEventListener('loadedmetadata', () => {
             vidW = videoEl.videoWidth;
             vidH = videoEl.videoHeight;
             midline = isStereo ? Math.round(vidW / 2) : vidW;
             sizeCanvas();
-            if (hint) applyMpCrop(hint);
+            const hint = mpHints.find(h => h.trial_idx === trialMeta.trial_idx);
+            if (hint && isStereo) applyMpCrop(hint);
             // Seek to midpoint of frame 0 — t=0 cannot be decoded by many codecs
-            videoEl.currentTime = 0.5 / trialMeta.fps;
+            const seekTarget = trialMeta.fps ? 0.5 / trialMeta.fps : 0.01;
+            videoEl.currentTime = seekTarget;
             videoEl.addEventListener('seeked', render, { once: true });
         }, { once: true });
+    }
+
+    /** Compute base pixel scale that fits the full frame in the canvas. */
+    function getBaseMetrics() {
+        const w = canvas.width, h = canvas.height;
+        const sw = isStereo ? midline : vidW;
+        const bps = Math.min(w / sw, h / vidH);
+        const baseOX = (w - sw * bps) / 2;
+        const baseOY = (h - vidH * bps) / 2;
+        return { bps, baseOX, baseOY, sw };
     }
 
     /** Apply mediapipe-derived crop for the current camera side. */
@@ -244,10 +281,11 @@
         const cropCX = minX + cropW / 2;
         const cropCY = minY + cropH / 2;
         const cw = canvas.width, ch = canvas.height;
-        const bps = cw / midline;  // base pixel scale
+        const { bps, baseOX, baseOY } = getBaseMetrics();
         scale = Math.min(cw / (cropW * bps), ch / (cropH * bps)) * 0.85;
-        offsetX = cw / 2 - scale * cropCX * bps;
-        offsetY = ch / 2 - scale * cropCY * bps;
+        // Offset is relative to the base-centered origin (render adds baseOX/baseOY)
+        offsetX = cw / 2 - baseOX - scale * cropCX * bps;
+        offsetY = ch / 2 - baseOY - scale * cropCY * bps;
     }
 
     // ── Controls setup ───────────────────────────────────────
@@ -255,7 +293,7 @@
         $('prevFrameBtn').addEventListener('click', () => goToFrame(currentFrame - 1));
         $('nextFrameBtn').addEventListener('click', () => goToFrame(currentFrame + 1));
         $('playBtn').addEventListener('click', togglePlay);
-        $('sideToggle').addEventListener('click', toggleSide);
+        $('sideToggle').addEventListener('click', switchCamera);
         $('resetZoomBtn').addEventListener('click', resetZoom);
         $('subjectSelect').addEventListener('change', e => {
             const v = parseInt(e.target.value);
@@ -299,23 +337,72 @@
                 case 'a': case 'ArrowLeft':  goToFrame(currentFrame - 1); e.preventDefault(); break;
                 case 's': case 'ArrowRight': goToFrame(currentFrame + 1); e.preventDefault(); break;
                 case ' ': togglePlay(); e.preventDefault(); break;
-                case 'e': case 'E': toggleSide(); break;
+                case 'e': case 'E': switchCamera(); break;
                 case 'z': case 'Z': resetZoom(); break;
             }
         });
     }
 
-    // ── Camera toggle ────────────────────────────────────────
-    function toggleSide() {
-        if (!isStereo) return;
-        currentSide = currentSide === cameraNames[0]
-            ? (cameraNames[1] || cameraNames[0])
-            : cameraNames[0];
-        $('sideToggle').textContent = currentSide;
-        // Re-apply mediapipe crop for the new camera
-        const hint = mpHints.find(h => h.trial_idx === (trialMeta ? trialMeta.trial_idx : -1));
-        if (hint) { applyMpCrop(hint); }
-        render();
+    // ── Camera switching ─────────────────────────────────────
+
+    /** Update the camera toggle button label and visibility. */
+    function updateCameraButton() {
+        const btn = $('sideToggle');
+        if (cameraMode === 'single') {
+            btn.style.display = 'none';
+        } else {
+            btn.style.display = '';
+            btn.textContent = currentSide;
+        }
+    }
+
+    /** Cycle to the next camera view. */
+    function switchCamera() {
+        if (cameraMode === 'single') return;
+
+        if (cameraMode === 'multicam' && multicamCameras.length > 1) {
+            // Multicam: cycle through camera files (blink-free preload)
+            currentCameraIdx = (currentCameraIdx + 1) % multicamCameras.length;
+            currentSide = multicamCameras[currentCameraIdx].name;
+            updateCameraButton();
+
+            const frameToRestore = currentFrame;
+            let src = `/api/mano/${subjectId}/trial/${trialMeta.trial_idx}/video`;
+            src += `?camera=${multicamCameras[currentCameraIdx].idx}`;
+
+            // Preload in a temp video element so the canvas keeps showing the old frame
+            const tmp = document.createElement('video');
+            tmp.preload = 'auto';
+            tmp.muted = true;
+            tmp.src = src;
+            tmp.addEventListener('loadedmetadata', () => {
+                vidW = tmp.videoWidth;
+                vidH = tmp.videoHeight;
+                midline = vidW;
+                sizeCanvas();
+                const seekTarget = trialMeta.fps
+                    ? (frameToRestore + 0.5) / trialMeta.fps
+                    : 0.01;
+                tmp.currentTime = seekTarget;
+                tmp.addEventListener('seeked', () => {
+                    // Swap: replace the old video element
+                    videoEl.pause();
+                    videoEl.removeAttribute('src');
+                    videoEl.load(); // release old resources
+                    videoEl = tmp;
+                    render();
+                }, { once: true });
+            }, { once: true });
+        } else if (isStereo && cameraNames.length > 1) {
+            // Stereo: toggle left/right crop
+            currentCameraIdx = (currentCameraIdx + 1) % cameraNames.length;
+            currentSide = cameraNames[currentCameraIdx];
+            updateCameraButton();
+            // Re-apply mediapipe crop for the new camera
+            const hint = mpHints.find(h => h.trial_idx === (trialMeta ? trialMeta.trial_idx : -1));
+            if (hint) { applyMpCrop(hint); }
+            render();
+        }
     }
 
     // ── Playback ─────────────────────────────────────────────
@@ -385,10 +472,14 @@
             const rect = canvas.getBoundingClientRect();
             const mx = e.clientX - rect.left;
             const my = e.clientY - rect.top;
+            const { baseOX, baseOY } = getBaseMetrics();
+            // Zoom pivot relative to the base-centered origin
+            const lx = mx - baseOX;
+            const ly = my - baseOY;
             const factor = e.deltaY < 0 ? 1.05 : 1 / 1.05;
             const ns = Math.max(0.1, Math.min(scale * factor, 50));
-            offsetX = mx - (mx - offsetX) * (ns / scale);
-            offsetY = my - (my - offsetY) * (ns / scale);
+            offsetX = lx - (lx - offsetX) * (ns / scale);
+            offsetY = ly - (ly - offsetY) * (ns / scale);
             scale = ns;
             render();
         }, { passive: false });
@@ -433,11 +524,10 @@
 
         const isFirst = currentSide === cameraNames[0];
         const sx = isStereo ? (isFirst ? 0 : midline) : 0;
-        const sw = isStereo ? midline : vidW;
-        const bps = w / sw;  // base pixel scale at scale=1
+        const { bps, baseOX, baseOY, sw } = getBaseMetrics();
 
         ctx.save();
-        ctx.translate(offsetX, offsetY);
+        ctx.translate(baseOX + offsetX, baseOY + offsetY);
         ctx.scale(scale, scale);
         ctx.drawImage(videoEl, sx, 0, sw, vidH, 0, 0, sw * bps, vidH * bps);
         ctx.restore();

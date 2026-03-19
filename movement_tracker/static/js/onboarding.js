@@ -3,6 +3,8 @@
 
 const onboard = (() => {
     let subjectName = '';
+    let subjectGroup = 'Control';   // diagnosis group
+    let diagnosisGroups = ['Control', 'MSA', 'PD', 'PSP'];
     let cameraMode = 'stereo';      // single | stereo | multicam
     let selectedCameraSetup = null;  // {id, name, camera_names, ...}
     let cameraNames = [];            // from setup
@@ -18,9 +20,56 @@ const onboard = (() => {
     const syncOffsets = {};        // cameraName → integer frame offset
     let syncFps = 30;
     let syncFrame = 0;
+    let syncTotalFrames = 0;       // max frames across all cameras
+    let syncPlaying = false;       // play/pause state
+    let syncPlayTimer = null;      // requestAnimationFrame id
+    let syncPlayRate = 1;          // playback speed multiplier
+    let syncZoom = 1;              // zoom level for sync video panels
+    let syncPanX = 0;              // horizontal pan offset (fraction)
+    let syncPanY = 0;              // vertical pan offset (fraction)
+    let syncDragging = false;      // true during pan drag
+    let syncDragStart = null;      // {x, y} of mouse at drag start
+    let syncPanStart = null;       // {x, y} of pan at drag start
 
     // Per-segment "has faces" state — true by default
     const segmentHasFaces = [];    // parallel to segments[]
+
+    // ── Group dropdown helpers ────────────────────────────────
+
+    function _populateGroupDropdown(sel, selectedValue) {
+        sel.innerHTML = diagnosisGroups
+            .map(g => `<option value="${g}">${g}</option>`)
+            .join('') +
+            '<option value="__new__">+ New Group…</option>';
+        if (selectedValue && diagnosisGroups.includes(selectedValue)) {
+            sel.value = selectedValue;
+        }
+    }
+
+    async function _onGroupSelectChange(sel) {
+        if (sel.value !== '__new__') {
+            subjectGroup = sel.value;
+            return;
+        }
+        const name = prompt('Enter new group name:');
+        if (!name || !name.trim()) {
+            sel.value = subjectGroup; // revert
+            return;
+        }
+        const trimmed = name.trim();
+        if (!diagnosisGroups.includes(trimmed)) {
+            diagnosisGroups.push(trimmed);
+            // Save to settings so it persists
+            try {
+                const cfg = await API.get('/api/settings');
+                cfg.diagnosis_groups = diagnosisGroups;
+                await API.put('/api/settings', cfg);
+            } catch { /* best-effort */ }
+        }
+        _populateGroupDropdown(sel, trimmed);
+        sel.value = trimmed;
+        subjectGroup = trimmed;
+    }
 
     // ── Step 1: File browser (opens immediately) ─────────────
 
@@ -152,6 +201,21 @@ const onboard = (() => {
             _preselectCameraMode('stereo');
         }
 
+        // Auto-infer group from subject name input as user types
+        const nameInput = document.getElementById('subjectName');
+        const groupSel = document.getElementById('subjectGroup');
+        if (nameInput && groupSel) {
+            nameInput.addEventListener('input', () => {
+                const val = nameInput.value.trim().toLowerCase();
+                for (const g of diagnosisGroups) {
+                    if (val.startsWith(g.toLowerCase().slice(0, 3))) {
+                        groupSel.value = g;
+                        break;
+                    }
+                }
+            });
+        }
+
         // Scroll to step 2
         document.getElementById('step2').scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
@@ -164,8 +228,10 @@ const onboard = (() => {
         if (!/^[A-Za-z0-9_]+$/.test(name)) return alert('Name must be alphanumeric (letters, numbers, underscores)');
 
         subjectName = name;
+        subjectGroup = document.getElementById('subjectGroup').value || 'Control';
         document.getElementById('step2Num').classList.add('done');
         document.getElementById('subjectName').disabled = true;
+        document.getElementById('subjectGroup').disabled = true;
 
         // Show camera mode step
         document.getElementById('step3').style.display = 'block';
@@ -350,6 +416,11 @@ const onboard = (() => {
         multicamVideos[_pickingForCamera] = selectedVideoPath;
         _pickingForCamera = null;
 
+        // Restore selectedVideoPath to the first camera's video (the original selection)
+        if (cameraNames.length > 0 && multicamVideos[cameraNames[0]]) {
+            selectedVideoPath = multicamVideos[cameraNames[0]];
+        }
+
         // Restore button
         const btn = document.getElementById('selectVideoBtn');
         btn.textContent = 'Select Video';
@@ -400,8 +471,8 @@ const onboard = (() => {
                 return alert('Error loading setup: ' + e.message);
             }
 
-            // Assign first camera to already-selected video
-            if (cameraNames.length > 0) {
+            // Assign first camera to already-selected video (only if not yet assigned)
+            if (cameraNames.length > 0 && !multicamVideos[cameraNames[0]]) {
                 multicamVideos[cameraNames[0]] = selectedVideoPath;
             }
 
@@ -447,6 +518,12 @@ const onboard = (() => {
 
         syncFps = videoMeta ? videoMeta.fps : 30;
         syncFrame = 0;
+        syncTotalFrames = 0;
+        syncPlaying = false;
+        syncPlayRate = 1;
+        syncZoom = 1;
+        syncPanX = 0;
+        syncPanY = 0;
 
         const container = document.getElementById('syncContainer');
         container.innerHTML = '';
@@ -466,8 +543,10 @@ const onboard = (() => {
             panel.className = 'sync-video-panel';
             panel.innerHTML = `
                 <div class="cam-label">${cam}</div>
-                <video id="syncVideo_${i}" preload="auto" muted
-                    src="/api/video-tools/stream?path=${encodeURIComponent(videoPath)}"></video>
+                <div class="sync-video-wrap" id="syncWrap_${i}">
+                    <video id="syncVideo_${i}" preload="auto" muted
+                        src="/api/video-tools/stream?path=${encodeURIComponent(videoPath)}"></video>
+                </div>
                 <div class="sync-offset-controls">
                     <button onclick="onboard.syncStepSingle(${i}, -1)">-1</button>
                     <span class="sync-offset-display" id="syncOffset_${i}">offset: 0</span>
@@ -475,16 +554,44 @@ const onboard = (() => {
                 </div>
             `;
             container.appendChild(panel);
+
+            // Setup pan drag on the wrapper
+            const wrap = panel.querySelector('.sync-video-wrap');
+            wrap.addEventListener('mousedown', _syncPanStart);
+            wrap.addEventListener('wheel', _syncOnWheel, { passive: false });
+        }
+
+        // Determine total frames once videos load metadata
+        let loaded = 0;
+        const total = cameraNames.length;
+        for (let i = 0; i < cameraNames.length; i++) {
+            const video = document.getElementById(`syncVideo_${i}`);
+            if (!video) continue;
+            video.addEventListener('loadedmetadata', () => {
+                const frames = Math.round(video.duration * syncFps);
+                if (frames > syncTotalFrames) syncTotalFrames = frames;
+                loaded++;
+                if (loaded >= total) _updateSyncTimeline();
+            }, { once: true });
         }
 
         _updateSyncFrameDisplay();
+        _updateSyncTimeline();
+        _updateSyncZoomDisplay();
         document.getElementById('step3b').scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
     function syncStepAll(delta) {
         syncFrame += delta;
         if (syncFrame < 0) syncFrame = 0;
+        if (syncTotalFrames > 0 && syncFrame >= syncTotalFrames) syncFrame = syncTotalFrames - 1;
 
+        _syncSeekAll();
+        _updateSyncFrameDisplay();
+        _updateSyncTimeline();
+    }
+
+    function _syncSeekAll() {
         for (let i = 0; i < cameraNames.length; i++) {
             const cam = cameraNames[i];
             const video = document.getElementById(`syncVideo_${i}`);
@@ -493,7 +600,6 @@ const onboard = (() => {
                 video.currentTime = Math.max(0, targetFrame / syncFps);
             }
         }
-        _updateSyncFrameDisplay();
     }
 
     function syncStepSingle(idx, delta) {
@@ -509,12 +615,176 @@ const onboard = (() => {
         document.getElementById(`syncOffset_${idx}`).textContent = `offset: ${syncOffsets[cam]}`;
     }
 
+    // ── Sync play/pause ──────────────────────────────────────
+
+    function syncTogglePlay() {
+        syncPlaying = !syncPlaying;
+        const btn = document.getElementById('syncPlayBtn');
+        if (syncPlaying) {
+            btn.textContent = '⏸';
+            btn.title = 'Pause (Space)';
+            _syncPlayTick();
+        } else {
+            btn.textContent = '▶';
+            btn.title = 'Play (Space)';
+            if (syncPlayTimer) { cancelAnimationFrame(syncPlayTimer); syncPlayTimer = null; }
+        }
+    }
+
+    function _syncPlayTick() {
+        if (!syncPlaying) return;
+
+        syncFrame += 1;
+        if (syncTotalFrames > 0 && syncFrame >= syncTotalFrames) {
+            syncFrame = 0; // loop
+        }
+        _syncSeekAll();
+        _updateSyncFrameDisplay();
+        _updateSyncTimeline();
+
+        // Schedule next tick based on playback rate
+        const delay = 1000 / (syncFps * syncPlayRate);
+        syncPlayTimer = setTimeout(() => {
+            if (syncPlaying) requestAnimationFrame(_syncPlayTick);
+        }, delay);
+    }
+
+    function syncSetRate(rate) {
+        syncPlayRate = rate;
+        const label = document.getElementById('syncRateLabel');
+        if (label) label.textContent = rate + 'x';
+    }
+
+    // ── Sync timeline scrubber ───────────────────────────────
+
+    function _updateSyncTimeline() {
+        const bar = document.getElementById('syncTimelineBar');
+        const thumb = document.getElementById('syncTimelineThumb');
+        if (!bar || !thumb) return;
+
+        if (syncTotalFrames <= 0) {
+            thumb.style.left = '0%';
+            return;
+        }
+        const pct = (syncFrame / (syncTotalFrames - 1)) * 100;
+        thumb.style.left = `${Math.min(100, Math.max(0, pct))}%`;
+    }
+
+    function syncTimelineSeek(e) {
+        const bar = document.getElementById('syncTimelineBar');
+        if (!bar || syncTotalFrames <= 0) return;
+
+        const rect = bar.getBoundingClientRect();
+        const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        syncFrame = Math.round(pct * (syncTotalFrames - 1));
+
+        _syncSeekAll();
+        _updateSyncFrameDisplay();
+        _updateSyncTimeline();
+    }
+
+    function _syncTimelineDragStart(e) {
+        e.preventDefault();
+        syncTimelineSeek(e);
+
+        const onMove = (ev) => syncTimelineSeek(ev);
+        const onUp = () => {
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+    }
+
     function _updateSyncFrameDisplay() {
         const el = document.getElementById('syncFrameDisplay');
-        if (el) el.textContent = `Frame: ${syncFrame}`;
+        if (el) {
+            const time = (syncFrame / syncFps).toFixed(1);
+            el.textContent = `Frame ${syncFrame}` + (syncTotalFrames ? ` / ${syncTotalFrames}` : '') + ` (${time}s)`;
+        }
+    }
+
+    // ── Sync zoom & pan ──────────────────────────────────────
+
+    function syncZoomIn() {
+        syncZoom = Math.min(8, syncZoom * 1.3);
+        _applySyncZoom();
+    }
+
+    function syncZoomOut() {
+        syncZoom = Math.max(1, syncZoom / 1.3);
+        if (syncZoom < 1.05) { syncZoom = 1; syncPanX = 0; syncPanY = 0; }
+        _applySyncZoom();
+    }
+
+    function syncZoomReset() {
+        syncZoom = 1;
+        syncPanX = 0;
+        syncPanY = 0;
+        _applySyncZoom();
+    }
+
+    function _applySyncZoom() {
+        for (let i = 0; i < cameraNames.length; i++) {
+            const video = document.getElementById(`syncVideo_${i}`);
+            if (video) {
+                video.style.transform = `scale(${syncZoom}) translate(${syncPanX * 100}%, ${syncPanY * 100}%)`;
+                video.style.transformOrigin = 'center center';
+            }
+        }
+        _updateSyncZoomDisplay();
+    }
+
+    function _updateSyncZoomDisplay() {
+        const el = document.getElementById('syncZoomLabel');
+        if (el) el.textContent = `${Math.round(syncZoom * 100)}%`;
+    }
+
+    function _syncPanStart(e) {
+        if (syncZoom <= 1 || e.button !== 0) return;
+        e.preventDefault();
+        syncDragging = true;
+        syncDragStart = { x: e.clientX, y: e.clientY };
+        syncPanStart = { x: syncPanX, y: syncPanY };
+
+        const onMove = (ev) => {
+            if (!syncDragging) return;
+            // Translate mouse pixel delta into pan fraction (relative to video size)
+            const wrap = document.querySelector('.sync-video-wrap');
+            if (!wrap) return;
+            const w = wrap.clientWidth;
+            const h = wrap.clientHeight;
+            const dx = (ev.clientX - syncDragStart.x) / (w * syncZoom);
+            const dy = (ev.clientY - syncDragStart.y) / (h * syncZoom);
+            syncPanX = syncPanStart.x + dx;
+            syncPanY = syncPanStart.y + dy;
+            // Clamp pan so we don't pan beyond the video edge
+            const maxPan = (syncZoom - 1) / (2 * syncZoom);
+            syncPanX = Math.max(-maxPan, Math.min(maxPan, syncPanX));
+            syncPanY = Math.max(-maxPan, Math.min(maxPan, syncPanY));
+            _applySyncZoom();
+        };
+        const onUp = () => {
+            syncDragging = false;
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+    }
+
+    function _syncOnWheel(e) {
+        e.preventDefault();
+        if (e.deltaY < 0) {
+            syncZoomIn();
+        } else {
+            syncZoomOut();
+        }
     }
 
     function confirmSync() {
+        // Stop playback if running
+        if (syncPlaying) syncTogglePlay();
         document.getElementById('step3bNum').textContent = '✓';
 
         // Proceed to trim step using first camera's video
@@ -729,7 +999,8 @@ const onboard = (() => {
 
             review.innerHTML = `
                 <p style="margin-bottom:8px;">Subject: <strong>${subjectName}</strong>
-                    <span class="meta-badge" style="margin-left:8px;">${cameraMode}</span>
+                    <span class="meta-badge" style="margin-left:8px;">${subjectGroup}</span>
+                    <span class="meta-badge" style="margin-left:4px;">${cameraMode}</span>
                     ${selectedCameraSetup ? `<span class="meta-badge">${selectedCameraSetup.name}</span>` : ''}
                 </p>
                 ${editNote}
@@ -793,6 +1064,7 @@ const onboard = (() => {
                 blur_faces: blurFaces,
                 camera_mode: cameraMode,
                 camera_name: selectedCameraSetup ? selectedCameraSetup.name : null,
+                diagnosis: subjectGroup,
                 no_face_trials: noFaceTrials,
                 segments: segments.map(s => {
                     const seg = {
@@ -858,6 +1130,9 @@ const onboard = (() => {
             // Show existing trials card
             _renderExistingTrials();
 
+            // Pre-populate diagnosis group
+            subjectGroup = detail.diagnosis || 'Control';
+
             // Also show the name field pre-filled in step 2
             document.getElementById('step2').style.display = 'block';
             document.getElementById('step2Num').classList.add('done');
@@ -867,6 +1142,19 @@ const onboard = (() => {
             const nameInput = step2.querySelector('#subjectName');
             if (nameInput) {
                 nameInput.value = subjectName;
+            }
+            // Pre-populate group dropdown and wire up live-save
+            const groupSelect = step2.querySelector('#subjectGroup');
+            if (groupSelect) {
+                groupSelect.value = subjectGroup;
+                groupSelect.onchange = async () => {
+                    subjectGroup = groupSelect.value;
+                    try {
+                        await API.patch(`/api/subjects/${editSubjectId}`, { diagnosis: subjectGroup });
+                    } catch (e) {
+                        alert('Error updating group: ' + e.message);
+                    }
+                };
             }
             // Replace Confirm button with Rename
             const confirmBtn = step2.querySelector('.btn-primary');
@@ -1034,6 +1322,19 @@ const onboard = (() => {
         const blur = document.getElementById('blurFaces');
         if (blur) blur.addEventListener('change', updateProcessButton);
 
+        // Populate subject group dropdown from settings
+        try {
+            const cfg = await API.get('/api/settings');
+            if (Array.isArray(cfg.diagnosis_groups) && cfg.diagnosis_groups.length) {
+                diagnosisGroups = cfg.diagnosis_groups;
+            }
+        } catch { /* use defaults */ }
+        const groupSel = document.getElementById('subjectGroup');
+        if (groupSel) {
+            _populateGroupDropdown(groupSel);
+            groupSel.addEventListener('change', () => _onGroupSelectChange(groupSel));
+        }
+
         const params = new URLSearchParams(window.location.search);
         const subjectId = params.get('subject');
         if (subjectId) {
@@ -1083,14 +1384,26 @@ const onboard = (() => {
             setOutPoint();
         }
 
-        // Sync shortcuts (arrow keys)
+        // Sync shortcuts (arrow keys, space, zoom)
         if (document.getElementById('step3b').style.display !== 'none') {
             if (e.key === 'ArrowLeft') {
                 e.preventDefault();
-                syncStepAll(-1);
+                syncStepAll(e.shiftKey ? -10 : -1);
             } else if (e.key === 'ArrowRight') {
                 e.preventDefault();
-                syncStepAll(1);
+                syncStepAll(e.shiftKey ? 10 : 1);
+            } else if (e.key === ' ') {
+                e.preventDefault();
+                syncTogglePlay();
+            } else if (e.key === '=' || e.key === '+') {
+                e.preventDefault();
+                syncZoomIn();
+            } else if (e.key === '-' || e.key === '_') {
+                e.preventDefault();
+                syncZoomOut();
+            } else if (e.key === '0') {
+                e.preventDefault();
+                syncZoomReset();
             }
         }
     });
@@ -1123,6 +1436,12 @@ const onboard = (() => {
         pickMulticamVideo,
         syncStepAll,
         syncStepSingle,
+        syncTogglePlay,
+        syncSetRate,
+        syncTimelineDrag: _syncTimelineDragStart,
+        syncZoomIn,
+        syncZoomOut,
+        syncZoomReset,
         confirmSync,
         setInPoint,
         setOutPoint,

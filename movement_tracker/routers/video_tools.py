@@ -44,6 +44,7 @@ class ProcessSubjectRequest(BaseModel):
     camera_mode: str = "stereo"
     camera_name: str | None = None  # camera setup name
     no_face_trials: list[str] = []  # trial labels that have no faces
+    diagnosis: str | None = None    # subject group (e.g. Control, MSA, PD)
 
 
 # ── Probe ─────────────────────────────────────────────────────────────────
@@ -241,18 +242,25 @@ def process_subject(req: ProcessSubjectRequest) -> dict:
         if not subj:
             dlc_dir = req.subject_name
             db.execute(
-                """INSERT INTO subjects (name, stage, dlc_dir, camera_mode, camera_name)
-                   VALUES (?, 'created', ?, ?, ?)""",
-                (req.subject_name, dlc_dir, req.camera_mode, req.camera_name),
+                """INSERT INTO subjects (name, stage, dlc_dir, camera_mode, camera_name, diagnosis)
+                   VALUES (?, 'created', ?, ?, ?, ?)""",
+                (req.subject_name, dlc_dir, req.camera_mode, req.camera_name,
+                 req.diagnosis or 'Control'),
             )
             subj = db.execute(
                 "SELECT * FROM subjects WHERE name = ?", (req.subject_name,)
             ).fetchone()
         else:
             # Update camera mode/name on existing subject
+            updates = ["camera_mode = ?", "camera_name = ?", "updated_at = CURRENT_TIMESTAMP"]
+            params = [req.camera_mode, req.camera_name]
+            if req.diagnosis is not None:
+                updates.append("diagnosis = ?")
+                params.append(req.diagnosis)
+            params.append(subj["id"])
             db.execute(
-                "UPDATE subjects SET camera_mode = ?, camera_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (req.camera_mode, req.camera_name, subj["id"]),
+                f"UPDATE subjects SET {', '.join(updates)} WHERE id = ?",
+                tuple(params),
             )
 
         log_dir = settings.dlc_path / ".logs"

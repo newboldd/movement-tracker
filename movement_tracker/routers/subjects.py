@@ -19,18 +19,6 @@ from ..services.discovery import (
 )
 
 
-def _has_mano(subject_name: str) -> bool:
-    """True if the subject has at least one MANO fit result."""
-    settings = get_settings()
-    mano_root = settings.dlc_path / subject_name / "mano"
-    if not mano_root.is_dir():
-        return False
-    return any(
-        (d / "mano_fit_v2.npz").exists()
-        for d in mano_root.iterdir()
-        if d.is_dir()
-    )
-
 router = APIRouter(prefix="/api/subjects", tags=["subjects"])
 
 
@@ -84,7 +72,6 @@ def _subject_row_to_response(row: dict) -> dict:
         "has_labels": _has_labeled_data(dlc_path) if dlc_path and dlc_path.exists() else False,
         "has_mediapipe": _has_mediapipe(dlc_path) if dlc_path and dlc_path.exists() else False,
         "has_blur": _has_blur_complete(dlc_path, row) if dlc_path and dlc_path.exists() else _all_no_face(row),
-        "has_mano": _has_mano(row["name"]) if row.get("name") else False,
     }
     resp["no_face_videos"] = _parse_no_face_videos(row.get("no_face_videos"))
     return resp
@@ -262,11 +249,7 @@ def delete_trial(subject_id: int, trial_label: str) -> dict:
 
 @router.delete("/{subject_id}")
 def delete_subject(subject_id: int) -> dict:
-    """Remove a subject: delete DLC dir, purge from DB if no videos remain.
-
-    Always deletes the DLC directory (config, models, labels — not trial/deidentified videos).
-    Only removes the DB record if no trial or deidentified videos exist.
-    """
+    """Fully remove a subject: delete all videos, DLC directory, and DB records."""
     with get_db_ctx() as db:
         row = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
         if not row:
@@ -274,6 +257,8 @@ def delete_subject(subject_id: int) -> dict:
 
         subject_name = row["name"]
         settings = get_settings()
+        video_dir = settings.video_path
+        deleted_files = []
 
         # Delete DLC directory
         dlc_path = _resolve_dlc_path(row.get("dlc_dir"))
@@ -282,25 +267,24 @@ def delete_subject(subject_id: int) -> dict:
             shutil.rmtree(dlc_path)
             dlc_deleted = True
 
-        # Check for remaining videos
-        trial_videos = _find_videos(subject_name)
-        deident_videos = _find_deidentified_videos(subject_name)
-        has_videos = bool(trial_videos or deident_videos)
+        # Delete trial videos ({subject}_{trial}.mp4 or {subject}_{trial}_{camera}.mp4)
+        if video_dir.is_dir():
+            prefix_lower = (subject_name + "_").lower()
+            for vf in video_dir.iterdir():
+                if vf.is_file() and vf.name.lower().startswith(prefix_lower):
+                    vf.unlink()
+                    deleted_files.append(str(vf))
 
-        if has_videos:
-            # Keep DB entry but clear dlc_dir
-            db.execute(
-                "UPDATE subjects SET dlc_dir = NULL, stage = 'created', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (subject_id,),
-            )
-            return {
-                "deleted_from_db": False,
-                "dlc_deleted": dlc_deleted,
-                "remaining_videos": len(trial_videos) + len(deident_videos),
-                "message": f"DLC dir removed. Subject kept — {len(trial_videos)} trial + {len(deident_videos)} deidentified videos remain.",
-            }
+        # Delete deidentified videos
+        deident_dir = video_dir / "deidentified"
+        if deident_dir.is_dir():
+            prefix_lower = (subject_name + "_").lower()
+            for vf in deident_dir.iterdir():
+                if vf.is_file() and vf.name.lower().startswith(prefix_lower):
+                    vf.unlink()
+                    deleted_files.append(str(vf))
 
-        # No videos — full purge from DB (cascade)
+        # Full purge from DB
         session_ids = [r["id"] for r in db.execute(
             "SELECT id FROM label_sessions WHERE subject_id = ?", (subject_id,)
         ).fetchall()]
@@ -315,8 +299,8 @@ def delete_subject(subject_id: int) -> dict:
         return {
             "deleted_from_db": True,
             "dlc_deleted": dlc_deleted,
-            "remaining_videos": 0,
-            "message": f"Subject '{subject_name}' fully removed.",
+            "deleted_videos": len(deleted_files),
+            "message": f"Subject '{subject_name}' fully removed ({len(deleted_files)} video files, DLC dir {'deleted' if dlc_deleted else 'N/A'}).",
         }
 
 

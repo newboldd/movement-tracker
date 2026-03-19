@@ -173,7 +173,6 @@
         <nav>            <a href="/">Dashboard</a>
             <a href="/videos">Videos</a>
             <a href="/labeling-select">DLC</a>
-            <a href="/mano">MANO</a>
             <a href="/results">Results</a>
 
             <a href="/remote">Processing</a>
@@ -186,42 +185,6 @@
         <div id="statusBanner" style="margin-bottom:16px;"></div>
 
         <div class="card settings-form">
-            <!-- Paths -->
-            <div class="form-section">
-                <h3>Paths</h3>
-                <div class="form-row">
-                    <label>Video Directory *</label>
-                    <input type="text" id="video_dir" placeholder="/path/to/videos">
-                    <div class="help">Directory containing stereo MP4 files (e.g. SubjectName_Trial1.mp4)</div>
-                </div>
-                <div class="form-row">
-                    <label>DLC Project Directory *</label>
-                    <input type="text" id="dlc_dir" placeholder="/path/to/dlc">
-                    <div class="help">Directory for DLC project folders (one per subject)</div>
-                </div>
-            </div>
-
-            <!-- Cameras -->
-            <div class="form-section">
-                <h3>Cameras</h3>
-                <div class="form-row">
-                    <label>Default Camera Mode (new subjects)</label>
-                    <select id="default_camera_mode">
-                        <option value="single">Single camera (no stereo cropping)</option>
-                        <option value="stereo">Stereo (one video, left/right halves)</option>
-                        <option value="multicam">Multi-camera (separate video files per camera)</option>
-                    </select>
-                    <div class="help">Default for new subjects. Each subject's mode can be set during onboarding.</div>
-                </div>
-                <div class="form-row">
-                    <label>Camera Names</label>
-                    <div class="tag-input" id="camera_names_tags" onclick="this.querySelector('input').focus()">
-                        <input type="text" placeholder="Add camera..." id="camera_names_input">
-                    </div>
-                    <div class="help">Names for left and right camera halves of the stereo video (e.g. OS, OD)</div>
-                </div>
-            </div>
-
             <!-- Bodyparts -->
             <div class="form-section">
                 <h3>Bodyparts</h3>
@@ -237,14 +200,6 @@
             <!-- DLC Config -->
             <div class="form-section">
                 <h3>DLC Configuration</h3>
-                <div class="form-row">
-                    <label>Scorer Name</label>
-                    <input type="text" id="dlc_scorer" placeholder="labels">
-                </div>
-                <div class="form-row">
-                    <label>Date Label</label>
-                    <input type="text" id="dlc_date" placeholder="Sep16">
-                </div>
                 <div class="form-row">
                     <label>Network Type</label>
                     <select id="dlc_net_type">
@@ -336,11 +291,6 @@
             <!-- Advanced -->
             <div class="form-section">
                 <h3>Advanced</h3>
-                <div class="form-row">
-                    <label>3D Calibration Config Path (legacy)</label>
-                    <input type="text" id="calibration_3d_config" placeholder="/path/to/config3d.yaml">
-                    <div class="help">Legacy DLC 3D calibration config. Prefer Stereo Calibrations above.</div>
-                </div>
                 <div class="form-row">
                     <label>Python Executable</label>
                     <input type="text" id="python_executable" placeholder="python">

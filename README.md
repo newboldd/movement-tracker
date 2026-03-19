@@ -12,7 +12,7 @@ The app manages the full pipeline: importing and de-identifying subject videos, 
 - **Face de-identification** — automatic face blurring before storage or sharing
 - **Video viewer** — scrub, zoom, and switch camera views; MediaPipe-guided auto-crop
 - **DLC labeling** — frame-by-frame keypoint annotation with keyboard shortcuts, auto-detection of movement events (open/peak/close/pause)
-- **MediaPipe prelabeling** — hand landmark tracking used to guide crop and camera selection
+- **MediaPipe prelabeling** — hand landmark tracking used to guide crop and camera selection; re-run with a custom bounding box per camera for improved detection
 - **MANO viewer** — 3D hand pose overlaid on stereo video with distance traces
 - **Results dashboard** — per-trial movement metrics with configurable sequence and group comparisons
 - **Remote processing** — run DLC inference and MediaPipe on a GPU server over SSH; results download automatically
@@ -39,6 +39,8 @@ cd movement-tracker
 
 On first launch, open **Settings** and point the app at your video directory and DeepLabCut project directory. To explore with the included sample data, set the video directory to `sample_data/` and click **Sync from disk** on the dashboard.
 
+> **Workshop?** See [`WORKSHOP.md`](WORKSHOP.md) for a guided 45-minute hands-on walkthrough — covers installation, MediaPipe, labeling, bounding box cropping, and results. Ideal for lab meetings or onboarding new team members.
+
 ### Windows
 
 ```bat
@@ -61,6 +63,7 @@ Or, using WSL, follow the same steps as macOS/Linux above.
 
 3. MediaPipe      (runs via Processing tab or automatically during import)
    Hand landmarks extracted per trial; used for auto-crop in the video viewer.
+   Draw a bounding box in the labeler to re-run on a cropped region per camera.
 
 4. MANO           (/mano)
    3D hand pose fitted to stereo video; distance traces computed per trial.

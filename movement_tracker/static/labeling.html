@@ -54,7 +54,6 @@
         <nav>            <a href="/">Dashboard</a>
             <a href="/videos">Videos</a>
             <a href="/labeling-select" class="active">DLC</a>
-            <a href="/mano">MANO</a>
             <a href="/results" id="resultsLink">Results</a>
 
             <a href="/remote">Processing</a>
@@ -104,6 +103,21 @@
                     </select>
                     <div id="stageCsvList" style="font-size:10px;color:var(--text-muted);margin-top:4px;max-height:60px;overflow-y:auto;"></div>
                 </div>
+            </div>
+
+            <!-- MediaPipe Region (Label/Refine modes) -->
+            <div id="mpCropSection" style="display:none;margin-bottom:16px;">
+                <h3 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">MediaPipe Region</h3>
+                <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:6px;">
+                    <input type="checkbox" id="mpCropToggle" onchange="labeler.toggleMpCrop(this.checked)">
+                    Edit bounding box
+                </label>
+                <div id="mpCropActions" style="display:none;gap:4px;margin-bottom:6px;">
+                    <button class="btn btn-sm" onclick="labeler.saveMpCrop()" style="flex:1;">Save</button>
+                    <button class="btn btn-sm" onclick="labeler.cancelMpCrop()" style="flex:1;">Cancel</button>
+                </div>
+                <button class="btn btn-sm" id="mpRerunBtn" onclick="labeler.rerunMediapipe()" style="width:100%;display:none;">Re-run MediaPipe (this trial)</button>
+                <div id="mpRerunStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
             </div>
 
             <div style="margin-bottom: 16px;">
@@ -216,7 +230,7 @@
 
     <script src="/static/js/nav.js"></script>
     <script src="/static/js/api.js?v=10"></script>
-    <script src="/static/js/labeler.js?v=36"></script>
+    <script src="/static/js/labeler.js?v=38"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

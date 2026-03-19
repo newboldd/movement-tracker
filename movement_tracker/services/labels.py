@@ -114,7 +114,7 @@ def backfill_label_metadata(subject_name: str):
             if "video_file" in info and "local_frame" in info:
                 continue  # Already has new fields
             try:
-                video_path, local_frame = _resolve_frame(trials, info["frame_num"])
+                video_path, local_frame, _trial = _resolve_frame(trials, info["frame_num"])
                 info["video_file"] = Path(video_path).name
                 info["local_frame"] = local_frame
                 changed = True
@@ -165,6 +165,7 @@ def commit_labels_to_dlc(
     subject_name: str,
     session_labels: list[dict],
     iteration: int = 1,
+    camera_mode: str | None = None,
 ):
     """Commit labeled frames: extract PNGs, write CSV/H5, create DLC structure.
 
@@ -172,6 +173,7 @@ def commit_labels_to_dlc(
         subject_name: Subject identifier
         session_labels: list of dicts from frame_labels table (with keypoints JSON)
         iteration: labeling iteration (1 = initial, 2+ = refinement)
+        camera_mode: Per-subject camera mode (falls back to global default)
 
     Returns:
         dict with paths and counts
@@ -192,7 +194,7 @@ def commit_labels_to_dlc(
         old_png.unlink()
 
     # Build trial map for frame resolution
-    trials = build_trial_map(subject_name)
+    trials = build_trial_map(subject_name, camera_mode=camera_mode)
     bodyparts = settings.bodyparts
 
     # Group labels by (frame_num, trial_idx, side) to handle both camera views
@@ -216,11 +218,19 @@ def commit_labels_to_dlc(
             continue
 
         # Resolve to video path and local frame
-        video_path, local_frame = _resolve_frame(trials, label["frame_num"])
+        video_path, local_frame, trial = _resolve_frame(trials, label["frame_num"])
+
+        # For multicam subjects, resolve to the camera-specific video file
+        if camera_mode == "multicam" and label.get("side"):
+            for cam in trial.get("cameras", []):
+                if cam["name"] == label["side"]:
+                    video_path = cam["path"]
+                    break
 
         # Extract frame as PNG
         img_filename = f"img{img_idx:04d}.png"
-        frame_array = extract_frame_raw(video_path, local_frame, label["side"])
+        frame_array = extract_frame_raw(video_path, local_frame, label["side"],
+                                        camera_mode=camera_mode)
         png_path = labeled_data_dir / img_filename
         cv2.imwrite(str(png_path), frame_array)
 

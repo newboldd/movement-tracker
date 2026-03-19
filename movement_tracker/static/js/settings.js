@@ -142,7 +142,6 @@ function setEventTypes(eventTypes) {
 }
 
 // ── Init ──────────────────────────────────────────────────────
-setupTagInput('camera_names_tags', 'camera_names_input');
 setupTagInput('bodyparts_tags', 'bodyparts_input');
 
 // Setup diagnosis groups tag input with initial input field
@@ -166,8 +165,7 @@ async function loadSettings() {
 
         // Populate simple fields
         const fields = [
-            'video_dir', 'dlc_dir', 'calibration_3d_config',
-            'python_executable', 'dlc_scorer', 'dlc_date', 'host',
+            'python_executable', 'host',
             'remote_host', 'remote_python', 'remote_work_dir', 'remote_ssh_key',
         ];
         fields.forEach(f => {
@@ -180,16 +178,14 @@ async function loadSettings() {
         document.getElementById('remote_ssh_port').value = settings.remote_ssh_port || 22;
 
         // Select
-        document.getElementById('default_camera_mode').value = settings.default_camera_mode || 'stereo';
         const netType = document.getElementById('dlc_net_type');
         netType.value = settings.dlc_net_type || 'resnet_50';
 
         // Checkboxes
-        document.getElementById('prefer_deidentified').checked = !!settings.prefer_deidentified;
+        document.getElementById('prefer_deidentified').checked = settings.prefer_deidentified !== false;
         document.getElementById('show_tutorials').checked = settings.show_tutorials !== false;
 
         // Tag inputs
-        setTagValues('camera_names_tags', settings.camera_names || []);
         setTagValues('bodyparts_tags', settings.bodyparts || []);
         setTagValues('diagnosisGroupsInput', settings.diagnosis_groups || ["Control", "MSA", "PD", "PSP"]);
 
@@ -232,16 +228,9 @@ function renderStatus(status) {
 // ── Save settings ─────────────────────────────────────────────
 function _gatherSettings() {
     return {
-        video_dir: document.getElementById('video_dir').value.trim(),
-        dlc_dir: document.getElementById('dlc_dir').value.trim(),
-        calibration_3d_config: document.getElementById('calibration_3d_config').value.trim(),
         python_executable: document.getElementById('python_executable').value.trim(),
-        default_camera_mode: document.getElementById('default_camera_mode').value,
-        camera_names: getTagValues('camera_names_tags'),
         bodyparts: getTagValues('bodyparts_tags'),
         diagnosis_groups: getTagValues('diagnosisGroupsInput') || ["Control", "MSA", "PD", "PSP"],
-        dlc_scorer: document.getElementById('dlc_scorer').value.trim(),
-        dlc_date: document.getElementById('dlc_date').value.trim(),
         dlc_net_type: document.getElementById('dlc_net_type').value,
         host: document.getElementById('host').value.trim(),
         port: parseInt(document.getElementById('port').value) || 8080,

@@ -28,7 +28,7 @@ class NoCacheMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
         if request.url.path.startswith("/static") or request.url.path in (
-            "/", "/labeling", "/results", "/settings", "/onboarding", "/remote", "/mano", "/videos", "/calibration", "/tutorials", "/tutorial"
+            "/", "/labeling", "/results", "/settings", "/onboarding", "/remote", "/videos", "/calibration", "/tutorials", "/tutorial"
         ):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return response
@@ -47,7 +47,8 @@ app.include_router(filebrowser.router)
 app.include_router(video_tools.router)
 app.include_router(batch.router)
 app.include_router(remote_jobs.router)
-app.include_router(mano.router)
+
+app.include_router(mano.router)  # API endpoints used by videos.js (page removed)
 app.include_router(export.router)
 app.include_router(camera_setups.router)
 
@@ -542,11 +543,6 @@ def videos_page():
     """Serve the videos viewer page."""
     return FileResponse(str(STATIC_DIR / "videos.html"))
 
-
-@app.get("/mano")
-def mano_page():
-    """Serve the MANO 3D hand model viewer page."""
-    return FileResponse(str(STATIC_DIR / "mano.html"))
 
 
 @app.get("/calibration")

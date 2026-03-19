@@ -84,7 +84,6 @@ function renderDiagnosisGroups() {
         } else {
             groupSubjects.forEach(s => {
                 const stageColor = `badge-${s.stage}`;
-                const manoStyle = s.has_mano ? '' : 'opacity:0.35;cursor:not-allowed;';
                 html += `
                     <div style="padding: 8px; background: var(--bg); border-radius: 4px; border: 1px solid var(--border);">
                         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
@@ -94,7 +93,6 @@ function renderDiagnosisGroups() {
                         <div style="display:flex;gap:4px;flex-wrap:wrap;">
                             ${s.video_count > 0 ? `<button class="btn btn-sm" style="white-space:nowrap;" onclick="window.location.href='/videos?subject=${s.id}'">Video</button>` : ''}
                             <button class="btn btn-sm" style="white-space:nowrap;" onclick="openLabeling(${s.id})">DLC</button>
-                            <button class="btn btn-sm" style="white-space:nowrap;${manoStyle}" ${s.has_mano ? `onclick="window.location.href='/mano?subject=${s.id}'"` : 'disabled'}>MANO</button>
                             <button class="btn btn-sm" style="white-space:nowrap;" onclick="sessionStorage.setItem('dlc_lastSubjectId','${s.id}');window.location.href='/results?subject=${s.id}&from=dashboard'">Results</button>
                             <button class="btn btn-sm" style="white-space:nowrap;" onclick="showDetail(${s.id})">Info</button>
                         </div>
@@ -225,6 +223,36 @@ async function updateSubjectDiagnosis(subjectId, diagnosis) {
     }
 }
 
+async function onDiagnosisSelectChange(subjectId, sel) {
+    if (sel.value !== '__new__') {
+        updateSubjectDiagnosis(subjectId, sel.value);
+        return;
+    }
+    const name = prompt('Enter new group name:');
+    if (!name || !name.trim()) {
+        sel.value = sel.dataset.prev || 'Control';
+        return;
+    }
+    const trimmed = name.trim();
+    if (!diagnosisGroups.includes(trimmed)) {
+        diagnosisGroups.push(trimmed);
+        try {
+            const cfg = await API.get('/api/settings');
+            cfg.diagnosis_groups = diagnosisGroups;
+            await API.put('/api/settings', cfg);
+        } catch { /* best-effort */ }
+    }
+    updateSubjectDiagnosis(subjectId, trimmed);
+}
+
+async function updateSubjectCameraMode(subjectId, cameraMode) {
+    try {
+        await API.patch(`/api/subjects/${subjectId}`, { camera_mode: cameraMode });
+    } catch (e) {
+        alert('Error updating camera mode: ' + e.message);
+    }
+}
+
 async function updateNoFaceVideos(subjectId) {
     const checkboxes = document.querySelectorAll('.no-face-cb');
     const noFaceVideos = [];
@@ -251,11 +279,18 @@ async function showDetail(subjectId) {
                 <div class="info-row"><span class="label">Stage</span><span class="badge badge-${detail.stage}">${detail.stage.replace(/_/g, ' ')}</span></div>
                 <div class="info-row"><span class="label">Iteration</span><span>${detail.iteration}</span></div>
                 <div class="info-row"><span class="label">Diagnosis</span><span>
-                    <select id="diagnosisSelect" onchange="updateSubjectDiagnosis(${detail.id}, this.value)" style="padding:2px 6px;font-size:13px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);">
+                    <select id="diagnosisSelect" onchange="onDiagnosisSelectChange(${detail.id}, this)" style="padding:2px 6px;font-size:13px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);">
                         ${diagnosisGroups.map(dg => `<option value="${dg}"${dg === (detail.diagnosis || 'Control') ? ' selected' : ''}>${dg}</option>`).join('')}
+                        <option value="__new__">+ New Group…</option>
                     </select>
                 </span></div>
-                <div class="info-row"><span class="label">Video Type</span><span class="badge">${(detail.camera_mode || 'stereo') === 'single' ? 'Single Camera' : (detail.camera_mode || 'stereo') === 'multicam' ? 'Multi-Camera' : 'Stereo'}</span></div>
+                <div class="info-row"><span class="label">Video Type</span><span>
+                    <select onchange="updateSubjectCameraMode(${detail.id}, this.value)" style="padding:2px 6px;font-size:13px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);">
+                        <option value="single"${(detail.camera_mode || 'stereo') === 'single' ? ' selected' : ''}>Single Camera</option>
+                        <option value="stereo"${(detail.camera_mode || 'stereo') === 'stereo' ? ' selected' : ''}>Stereo</option>
+                        <option value="multicam"${(detail.camera_mode || 'stereo') === 'multicam' ? ' selected' : ''}>Multi-Camera</option>
+                    </select>
+                </span></div>
                 <div class="info-row"><span class="label">DLC Dir</span><span style="font-size:11px;word-break:break-all">${detail.dlc_dir || 'N/A'}</span></div>
                 <div class="info-row"><span class="label">Camera</span><span>
                     ${detail.camera_name
@@ -481,7 +516,7 @@ async function autoAssignDiagnosis() {
 }
 
 async function removeSubject(subjectId, subjectName) {
-    if (!confirm(`Remove subject "${subjectName}"?\n\nThis will delete the DLC directory (models, labels, config).\nTrial and deidentified videos are NOT deleted.`)) {
+    if (!confirm(`Remove subject "${subjectName}"?\n\nThis will permanently delete:\n• All trial and deidentified videos\n• DLC directory (models, labels, config)\n• All database records\n\nThis cannot be undone.`)) {
         return;
     }
     try {

@@ -137,6 +137,19 @@ function renderAllDistancePlots() {
     if (!data || !data.trials) return;
 
     container.innerHTML = '';
+
+    // Show data source badge if using MediaPipe fallback
+    if (data.data_source && data.data_source !== 'dlc') {
+        const badge = document.createElement('div');
+        badge.style.cssText = 'padding:6px 12px;margin-bottom:8px;border-radius:4px;font-size:12px;display:inline-block;';
+        if (data.data_source === 'mediapipe') {
+            badge.style.background = 'rgba(255,152,0,0.15)';
+            badge.style.color = 'var(--orange)';
+            badge.textContent = 'Showing MediaPipe prelabel data (no DLC labels available)';
+        }
+        container.appendChild(badge);
+    }
+
     const yConfig = getYAxisConfig();
     const yRange = data.y_range;
 

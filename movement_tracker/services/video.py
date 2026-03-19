@@ -240,7 +240,8 @@ def get_subject_videos(subject_name: str, *, prefer_deidentified: bool = False,
     return videos
 
 
-def _group_multicam_videos(subject_name: str, videos: list[str]) -> list[dict]:
+def _group_multicam_videos(subject_name: str, videos: list[str],
+                           camera_mode: str | None = None) -> list[dict]:
     """Group video files by trial, detecting per-camera files in multicam mode.
 
     Multicam naming convention: {Subject}_{Trial}_{CameraName}.mp4
@@ -250,10 +251,14 @@ def _group_multicam_videos(subject_name: str, videos: list[str]) -> list[dict]:
         [{trial_name, cameras: [{name, path, idx}]}]
 
     In non-multicam mode, each video is its own trial with a single camera.
+
+    Args:
+        camera_mode: Override for camera mode. If None, uses global default.
     """
     settings = get_settings()
+    mode = camera_mode or settings.default_camera_mode
 
-    if settings.default_camera_mode != "multicam" or len(videos) <= 1:
+    if mode != "multicam" or len(videos) <= 1:
         return [
             {"trial_name": Path(v).stem,
              "cameras": [{"name": "default", "path": v, "idx": 0}]}
@@ -305,7 +310,7 @@ def _group_multicam_videos(subject_name: str, videos: list[str]) -> list[dict]:
     return result
 
 
-def build_trial_map(subject_name: str) -> list[dict]:
+def build_trial_map(subject_name: str, camera_mode: str | None = None) -> list[dict]:
     """Build a virtual timeline mapping for a subject's videos.
 
     Returns list of dicts with keys:
@@ -316,12 +321,15 @@ def build_trial_map(subject_name: str) -> list[dict]:
     camera file in the trial.  ``video_path`` is the primary (first) camera.
 
     Multiple trials are concatenated into a single frame index space.
+
+    Args:
+        camera_mode: Override for camera mode (per-subject). If None, uses global default.
     """
     videos = get_subject_videos(subject_name)
     settings = get_settings()
 
     # Group multicam files by trial
-    grouped = _group_multicam_videos(subject_name, videos)
+    grouped = _group_multicam_videos(subject_name, videos, camera_mode=camera_mode)
 
     trials = []
     offset = 0
@@ -356,7 +364,8 @@ def _resolve_frame(trials: list[dict], global_frame: int) -> tuple[str, int, dic
 
 # LRU cache for frame extraction — keyed by (video_path, frame_num, side)
 @lru_cache(maxsize=FRAME_CACHE_SIZE)
-def _extract_frame_cached(video_path: str, frame_num: int, side: str) -> bytes:
+def _extract_frame_cached(video_path: str, frame_num: int, side: str,
+                          camera_mode: str | None = None) -> bytes:
     """Extract a single frame from video, optionally crop to left or right side, return JPEG bytes."""
     cap = cv2.VideoCapture(video_path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
@@ -367,10 +376,11 @@ def _extract_frame_cached(video_path: str, frame_num: int, side: str) -> bytes:
         raise ValueError(f"Could not read frame {frame_num} from {video_path}")
 
     settings = get_settings()
+    mode = camera_mode or settings.default_camera_mode
 
     # Single camera or multicam mode: return full frame, no cropping
     # (multicam already resolved to the correct camera file before calling)
-    if settings.default_camera_mode in ("single", "multicam"):
+    if mode in ("single", "multicam"):
         _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         return bytes(jpeg)
 
@@ -412,7 +422,8 @@ def _resolve_camera_path(trial: dict, side: str) -> str | None:
 
 
 def extract_frame(subject_name: str, global_frame: int, side: str,
-                  trials: list[dict] | None = None) -> bytes:
+                  trials: list[dict] | None = None,
+                  camera_mode: str | None = None) -> bytes:
     """Extract a frame for a subject at a global frame index.
 
     Args:
@@ -421,18 +432,20 @@ def extract_frame(subject_name: str, global_frame: int, side: str,
         side: Camera name (first or second from settings.camera_names),
               or multicam camera name
         trials: Pre-computed trial map (optional, computed if None)
+        camera_mode: Per-subject camera mode (falls back to global default)
 
     Returns:
         JPEG bytes
     """
     if trials is None:
-        trials = build_trial_map(subject_name)
+        trials = build_trial_map(subject_name, camera_mode=camera_mode)
     video_path, local_frame, trial = _resolve_frame(trials, global_frame)
 
     settings = get_settings()
+    mode = camera_mode or settings.default_camera_mode
 
     # In multicam mode, resolve to the camera-specific file
-    if settings.default_camera_mode == "multicam":
+    if mode == "multicam":
         cam_path = _resolve_camera_path(trial, side)
         if cam_path:
             video_path = cam_path
@@ -447,10 +460,11 @@ def extract_frame(subject_name: str, global_frame: int, side: str,
             if deident:
                 video_path = deident
 
-    return _extract_frame_cached(video_path, local_frame, side)
+    return _extract_frame_cached(video_path, local_frame, side, camera_mode=mode)
 
 
-def extract_frame_raw(video_path: str, frame_num: int, side: str) -> np.ndarray:
+def extract_frame_raw(video_path: str, frame_num: int, side: str,
+                      camera_mode: str | None = None) -> np.ndarray:
     """Extract a frame as a raw numpy array (for saving PNGs on commit)."""
     cap = cv2.VideoCapture(video_path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
@@ -461,9 +475,10 @@ def extract_frame_raw(video_path: str, frame_num: int, side: str) -> np.ndarray:
         raise ValueError(f"Could not read frame {frame_num} from {video_path}")
 
     settings = get_settings()
+    mode = camera_mode or settings.default_camera_mode
 
     # Single camera or multicam mode: return full frame (no cropping)
-    if settings.default_camera_mode in ("single", "multicam"):
+    if mode in ("single", "multicam"):
         return frame
 
     # Stereo mode: crop to left or right half

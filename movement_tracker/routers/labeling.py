@@ -20,6 +20,7 @@ from ..services.labels import commit_labels_to_dlc, save_corrections_to_csv
 from ..services.mediapipe_prelabel import (
     get_mediapipe_for_session,
     recompute_distance_for_frame,
+    run_mediapipe_cropped,
 )
 from ..services.discovery import _count_labeled_frames, _has_mediapipe
 from ..services.dlc_predictions import (
@@ -137,7 +138,8 @@ def get_session_info(session_id: int) -> dict:
             "SELECT * FROM subjects WHERE id = ?", (session["subject_id"],)
         ).fetchone()
 
-    trials = build_trial_map(subj["name"])
+    subject_cam_mode = subj.get("camera_mode") if subj else None
+    trials = build_trial_map(subj["name"], camera_mode=subject_cam_mode)
     total_frames = trials[-1]["end_frame"] + 1 if trials else 0
 
     # Simplify trial info for frontend
@@ -189,8 +191,6 @@ def get_frame(
     than a global camera name from settings.  Validation is relaxed accordingly.
     """
     settings = get_settings()
-    if settings.default_camera_mode != "multicam" and side not in settings.camera_names:
-        raise HTTPException(400, f"side must be one of {settings.camera_names}")
 
     with get_db_ctx() as db:
         session = db.execute(
@@ -202,8 +202,14 @@ def get_frame(
             "SELECT * FROM subjects WHERE id = ?", (session["subject_id"],)
         ).fetchone()
 
+    # Validate side — multicam subjects use per-trial camera names, not global settings
+    subject_camera_mode = (subj.get("camera_mode") if subj else None) or settings.default_camera_mode
+    if subject_camera_mode != "multicam" and side not in settings.camera_names:
+        raise HTTPException(400, f"side must be one of {settings.camera_names}")
+
     try:
-        jpeg_bytes = extract_frame(subj["name"], n, side)
+        jpeg_bytes = extract_frame(subj["name"], n, side,
+                                   camera_mode=subject_camera_mode)
     except (ValueError, Exception) as e:
         raise HTTPException(400, str(e))
 
@@ -232,6 +238,7 @@ def get_labels(session_id: int) -> List[dict]:
 def get_video(
     session_id: int,
     trial: int = Query(0, description="Trial index"),
+    side: str = Query("", description="Camera name for multicam subjects"),
 ) -> FileResponse:
     """Stream a trial's raw video file for smooth HTML5 playback."""
     with get_db_ctx() as db:
@@ -244,11 +251,20 @@ def get_video(
             "SELECT * FROM subjects WHERE id = ?", (session["subject_id"],)
         ).fetchone()
 
-    trials = build_trial_map(subj["name"])
+    subject_camera_mode = subj.get("camera_mode") or "stereo"
+    trials = build_trial_map(subj["name"], camera_mode=subject_camera_mode)
     if trial < 0 or trial >= len(trials):
         raise HTTPException(400, f"Trial index {trial} out of range (0-{len(trials)-1})")
 
     video_path = trials[trial]["video_path"]
+
+    # For multicam subjects, resolve to the camera-specific video file
+    if subject_camera_mode == "multicam" and side:
+        cameras = trials[trial].get("cameras", [])
+        for cam in cameras:
+            if cam["name"] == side:
+                video_path = cam["path"]
+                break
 
     # Serve deidentified version when enabled
     settings = get_settings()
@@ -291,6 +307,24 @@ def get_mediapipe(session_id: int) -> dict:
     data = get_mediapipe_for_session(subj["name"])
     if data is None:
         return {}
+
+    # Remap camera names for multicam/non-standard subjects.
+    # MediaPipe stores data under global camera names (e.g., OS/OD),
+    # but multicam subjects use per-subject camera names (e.g., ipad/iphone).
+    subject_camera_mode = subj.get("camera_mode") or "stereo"
+    if subject_camera_mode == "multicam":
+        trials = build_trial_map(subj["name"], camera_mode="multicam")
+        if trials and trials[0].get("cameras"):
+            subject_cams = [c["name"] for c in trials[0]["cameras"]]
+            settings = get_settings()
+            global_cams = settings.camera_names
+            remapped = {}
+            for i, gcam in enumerate(global_cams):
+                if gcam in data and i < len(subject_cams):
+                    remapped[subject_cams[i]] = data[gcam]
+            if "distances" in data:
+                remapped["distances"] = data["distances"]
+            return remapped
 
     return data
 
@@ -730,12 +764,14 @@ def commit_session(
             subject_name=subj["name"],
             session_labels=training_labels,
             iteration=session["iteration"],
+            camera_mode=subj.get("camera_mode"),
         )
     else:
         result = commit_labels_to_dlc(
             subject_name=subj["name"],
             session_labels=labels,
             iteration=session["iteration"],
+            camera_mode=subj.get("camera_mode"),
         )
 
     # Update session and subject status
@@ -1466,3 +1502,143 @@ def save_corrections_only(session_id: int) -> dict:
         raise HTTPException(400, "No labels to save")
 
     return save_corrections_to_csv(subject_name=subj["name"], session_labels=labels)
+
+
+@router.post("/sessions/{session_id}/rerun-mediapipe")
+def rerun_mediapipe(session_id: int, body: dict = Body(...)) -> dict:
+    """Re-run MediaPipe on a single trial with a bounding-box crop.
+
+    Request body: { trial_idx: int, side: str, crop: {x1, y1, x2, y2} }
+
+    Creates a background job so the work appears in the dashboard and
+    processing page job queues.  Returns the job_id for SSE tracking.
+    """
+    import threading
+    from ..services.jobs import registry
+
+    with get_db_ctx() as db:
+        session = db.execute(
+            "SELECT * FROM label_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not session:
+            raise HTTPException(404, "Session not found")
+        subj = db.execute(
+            "SELECT * FROM subjects WHERE id = ?", (session["subject_id"],)
+        ).fetchone()
+
+    trial_idx = body.get("trial_idx", 0)
+    side = body.get("side", "")
+    crop = body.get("crop")
+    if not crop or not all(k in crop for k in ("x1", "y1", "x2", "y2")):
+        raise HTTPException(400, "crop must contain x1, y1, x2, y2")
+
+    subject_name = subj["name"]
+    subject_id = subj["id"]
+    camera_mode = subj.get("camera_mode") or "stereo"
+    trials = build_trial_map(subject_name, camera_mode=camera_mode)
+    if trial_idx < 0 or trial_idx >= len(trials):
+        raise HTTPException(400, f"Invalid trial_idx {trial_idx}")
+
+    trial = trials[trial_idx]
+
+    # Resolve video path — for multicam, find the specific camera file
+    video_path = trial["video_path"]
+    if camera_mode == "multicam" and side:
+        for cam in trial.get("cameras", []):
+            if cam["name"] == side:
+                video_path = cam["path"]
+                break
+
+    # Determine which npz camera key this side maps to.
+    # MediaPipe stores data under global camera names (OS/OD); for multicam
+    # subjects the side (e.g. ipad/iphone) must be mapped back.
+    settings = get_settings()
+    global_cams = settings.camera_names
+    if camera_mode == "multicam":
+        subject_cams = [c["name"] for c in trials[0].get("cameras", [])] if trials else []
+        try:
+            cam_idx = subject_cams.index(side)
+            camera_key = global_cams[cam_idx] if cam_idx < len(global_cams) else side
+        except ValueError:
+            camera_key = side
+    else:
+        camera_key = side if side in global_cams else (global_cams[0] if global_cams else "OS")
+
+    # is_full_frame: True when the video is a stereo side-by-side file
+    # (we need to split left/right halves before cropping)
+    is_stereo_video = camera_mode == "stereo"
+
+    # ── Create a job record so it appears in dashboard / processing page ──
+    with get_db_ctx() as db:
+        log_dir = settings.dlc_path / ".logs"
+        log_dir.mkdir(exist_ok=True)
+        log_path = str(log_dir / f"job_mediapipe_crop_{subject_id}.log")
+
+        db.execute(
+            """INSERT INTO jobs (subject_id, job_type, status, log_path)
+               VALUES (?, 'mediapipe', 'pending', ?)""",
+            (subject_id, log_path),
+        )
+        job = db.execute(
+            "SELECT * FROM jobs WHERE subject_id = ? ORDER BY id DESC LIMIT 1",
+            (subject_id,),
+        ).fetchone()
+
+    job_id = job["id"]
+    cancel_event = registry.register_cancel_event(job_id)
+
+    def _run():
+        try:
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (job_id,),
+                )
+
+            def progress_cb(pct):
+                if cancel_event.is_set():
+                    raise InterruptedError("Job cancelled")
+                with get_db_ctx() as db:
+                    db.execute(
+                        "UPDATE jobs SET progress_pct = ? WHERE id = ?",
+                        (pct, job_id),
+                    )
+
+            run_mediapipe_cropped(
+                subject_name=subject_name,
+                video_path=video_path,
+                start_frame=trial["start_frame"],
+                frame_count=trial["frame_count"],
+                crop=crop,
+                camera_key=camera_key,
+                is_stereo_video=is_stereo_video,
+                stereo_side=side,
+                progress_callback=progress_cb,
+            )
+
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'completed', progress_pct = 100,
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (job_id,),
+                )
+        except InterruptedError:
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'cancelled',
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (job_id,),
+                )
+        except Exception as e:
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'failed', error_msg = ?,
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (str(e), job_id),
+                )
+        finally:
+            registry.unregister_cancel_event(job_id)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+    return {"status": "ok", "job_id": job_id, "trial_idx": trial_idx, "side": side}

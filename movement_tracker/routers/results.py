@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Query
 from ..config import get_settings
 from ..db import get_db_ctx
 from ..services.dlc_predictions import get_dlc_predictions_for_session
+from ..services.mediapipe_prelabel import get_mediapipe_for_session
 from ..services.metrics import auto_detect_from_distance
 from ..services.video import build_trial_map
 
@@ -78,22 +79,30 @@ def _load_events(
     return auto, "auto"
 
 
-def _load_distances_and_trials(subject_name: str) -> tuple[list, list[dict]]:
-    """Return (distances, trials) for a subject.
+def _load_distances_and_trials(subject_name: str) -> tuple[list, list[dict], str]:
+    """Return (distances, trials, source) for a subject.
 
     distances: list[float|None] across all frames.
     trials: list of {name, fps, start_frame, end_frame, frame_count}.
+    source: 'dlc', 'mediapipe', or 'none'.
     """
     trials = build_trial_map(subject_name)
     if not trials:
-        return [], []
+        return [], [], "none"
 
+    # Try DLC predictions first (corrections > v2 > v1)
     preds = get_dlc_predictions_for_session(subject_name)
     distances = preds.get("distances") if preds else None
-    if not distances:
-        return [], trials
+    if distances:
+        return distances, trials, "dlc"
 
-    return distances, trials
+    # Fall back to MediaPipe prelabels
+    mp = get_mediapipe_for_session(subject_name)
+    distances = mp.get("distances") if mp else None
+    if distances:
+        return distances, trials, "mediapipe"
+
+    return [], trials, "none"
 
 
 def _compute_velocity(dist: list, fps: float, half_win: int = 2) -> list:
@@ -274,9 +283,9 @@ def get_traces(subject_id: int) -> dict:
     subj = _get_subject(subject_id)
     subject_name = subj["name"]
 
-    distances, trials = _load_distances_and_trials(subject_name)
+    distances, trials, data_source = _load_distances_and_trials(subject_name)
     if not distances:
-        return {"trials": [], "subject": subject_name}
+        return {"trials": [], "subject": subject_name, "data_source": "none"}
 
     result_trials = []
     all_dists: list[float] = []
@@ -308,7 +317,7 @@ def get_traces(subject_id: int) -> dict:
             "vel_max": round(max(all_vels), 2) if all_vels else 0,
         }
 
-    return {"trials": result_trials, "subject": subject_name, "y_range": y_range}
+    return {"trials": result_trials, "subject": subject_name, "y_range": y_range, "data_source": data_source}
 
 
 @router.get("/{subject_id}/movements")
@@ -317,7 +326,7 @@ def get_movements(subject_id: int) -> dict:
     subj = _get_subject(subject_id)
     subject_name = subj["name"]
 
-    distances, trials = _load_distances_and_trials(subject_name)
+    distances, trials, data_source = _load_distances_and_trials(subject_name)
     events, event_source = _load_events(subject_name, distances, trials)
 
     movements, trial_names = _build_movement_params(distances, events, trials)
@@ -327,6 +336,7 @@ def get_movements(subject_id: int) -> dict:
         "trial_names": trial_names,
         "subject": subject_name,
         "event_source": event_source,
+        "data_source": data_source,
     }
 
 
@@ -350,7 +360,7 @@ def get_group_comparison(include_auto: bool = Query(False)) -> dict:
         diagnosis = subj["diagnosis"] or "Control"
 
         try:
-            distances, trials = _load_distances_and_trials(subject_name)
+            distances, trials, _src = _load_distances_and_trials(subject_name)
             if include_auto:
                 events, event_source = _load_events(subject_name, distances, trials)
             else:

@@ -51,7 +51,7 @@ class Settings:
         self.port: int = 8080
 
         # Display preferences
-        self.prefer_deidentified: bool = False  # show deidentified videos in labeling UI
+        self.prefer_deidentified: bool = True  # show deidentified videos in labeling UI
         self.show_tutorials: bool = True  # show Tutorials link in nav bar
 
         # Diagnosis/Group settings (for dashboard organization)
@@ -77,7 +77,7 @@ class Settings:
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.video_dir) and bool(self.dlc_dir)
+        return True  # No required user configuration; dlc dir is hard-coded
 
     @property
     def video_path(self) -> Path:
@@ -85,7 +85,8 @@ class Settings:
 
     @property
     def dlc_path(self) -> Path:
-        return Path(self.dlc_dir) if self.dlc_dir else PROJECT_DIR / "dlc"
+        """Always use dlc/ at the project root as the DLC project directory."""
+        return PROJECT_DIR / "dlc"
 
     @property
     def remote_enabled(self) -> bool:
