@@ -1,0 +1,276 @@
+/**
+ * Tutorial content data for the Movement Tracker beginner series.
+ *
+ * Each tutorial is an object with:
+ *   id        – integer (1-based, matches ?id= param)
+ *   title     – short display title
+ *   subtitle  – one-line description
+ *   time      – estimated reading/doing time
+ *   steps     – array of { title, body (HTML string), tips[] }
+ */
+window.TUTORIALS = [
+    // ── 1. Viewing a Video ──────────────────────────────────
+    {
+        id: 1,
+        title: 'Viewing a Video',
+        subtitle: 'Browse and play back videos with zoom, speed, and camera controls.',
+        time: '~3 min',
+        steps: [
+            {
+                title: 'Open the Videos page',
+                body: 'Click <a href="/videos"><strong>Videos</strong></a> in the navigation bar at the top of any page.',
+                tips: [],
+            },
+            {
+                title: 'Select a subject',
+                body: 'Use the <strong>subject dropdown</strong> in the top toolbar. If the sample video has been added, select the subject that contains it (e.g.&nbsp;"Con01"). The first subject with videos is selected automatically.',
+                tips: [],
+            },
+            {
+                title: 'Choose a trial',
+                body: 'Trial buttons appear in the toolbar after selecting a subject. Click a button (e.g.&nbsp;<strong>R1</strong>) to load that trial\u2019s video.',
+                tips: [],
+            },
+            {
+                title: 'Play and navigate frames',
+                body: 'Press <kbd>Space</kbd> to play/pause. Step frame-by-frame with <kbd>\u2190</kbd> / <kbd>\u2192</kbd> (or <kbd>A</kbd> / <kbd>S</kbd>). The timeline slider at the bottom lets you scrub to any frame.',
+                tips: [],
+            },
+            {
+                title: 'Adjust playback speed',
+                body: 'Use the <strong>speed slider</strong> in the bottom toolbar. Speeds range from 0.1\u00d7 to 120\u00d7. The current speed is displayed next to the slider.',
+                tips: [],
+            },
+            {
+                title: 'Zoom and pan',
+                body: '<strong>Scroll wheel</strong> zooms in/out at the cursor position. <strong>Click and drag</strong> to pan. Press <kbd>Z</kbd> to reset the view.',
+                tips: [],
+            },
+            {
+                title: 'Toggle cameras',
+                body: 'For stereo videos, press <kbd>E</kbd> to switch between OS (left) and OD (right) camera views. The current camera is shown on the toggle button.',
+                tips: [
+                    'The <strong>Browse\u2026</strong> button lets you preview any MP4 file from disk without adding it as a subject.',
+                ],
+            },
+        ],
+    },
+
+    // ── 2. Adding a Subject ─────────────────────────────────
+    {
+        id: 2,
+        title: 'Adding a Subject',
+        subtitle: 'Use the onboarding wizard to create a subject from raw video.',
+        time: '~5 min',
+        steps: [
+            {
+                title: 'Start onboarding',
+                body: 'On the <a href="/"><strong>Dashboard</strong></a>, click <strong>+ Add Subject</strong>. You can also navigate directly to the <a href="/onboarding">Onboarding</a> page.',
+                tips: [],
+            },
+            {
+                title: 'Enter a subject name',
+                body: 'Type an alphanumeric identifier such as <code>Con01</code> or <code>MSA20</code>. No spaces \u2014 underscores are allowed. Press <strong>Confirm</strong> to continue.',
+                tips: [],
+            },
+            {
+                title: 'Browse to the source video',
+                body: 'The file browser shows your configured video directory. Navigate folders and click a video file (e.g.&nbsp;<code>Con01_R1.mp4</code>) to select it. Metadata like resolution, FPS, and duration appear automatically.',
+                tips: ['Double-click a file to select it immediately.'],
+            },
+            {
+                title: 'Set trim points',
+                body: 'Use the video player to find the start of the movement. Press <kbd>I</kbd> to mark the <strong>In point</strong>. Seek to the end of the movement and press <kbd>O</kbd> to mark the <strong>Out point</strong>.',
+                tips: [],
+            },
+            {
+                title: 'Label the trial and add segment',
+                body: 'Enter a trial label (e.g.&nbsp;<code>R1</code>, <code>L2</code>, or any name you like) in the trial name field. Suggestions appear but you can type freely. Click <strong>Add Segment</strong>.',
+                tips: ['Repeat steps 3\u20135 for each additional trial in the same session, even from different source videos.'],
+            },
+            {
+                title: 'Review and process',
+                body: 'The segment list shows all trials with their time ranges and output filenames. Optionally check <strong>"Blur faces (de-identify)"</strong>. Click <strong>Trim &amp; Create Subject</strong> to start processing.',
+                tips: [
+                    'Processing runs in the background \u2014 a progress bar shows the current step.',
+                    'When finished, you\u2019re redirected to the Dashboard where the new subject appears.',
+                ],
+            },
+        ],
+    },
+
+    // ── 3. De-identifying (Blurring Faces) ──────────────────
+    {
+        id: 3,
+        title: 'De-identifying (Blurring Faces)',
+        subtitle: 'Blur faces in videos for privacy before sharing or analysis.',
+        time: '~3 min',
+        steps: [
+            {
+                title: 'Open the Processing page',
+                body: 'Click <a href="/remote"><strong>Processing</strong></a> in the nav bar.',
+                tips: [],
+            },
+            {
+                title: 'Select the Blur step',
+                body: 'In the <strong>Step</strong> dropdown at the top of the Launch Job section, choose <strong>Blur</strong>.',
+                tips: [],
+            },
+            {
+                title: 'Select subjects',
+                body: 'Check the boxes next to the subject(s) you want to de-identify. Use <strong>Select All</strong> for batch processing.',
+                tips: [],
+            },
+            {
+                title: 'Choose execution target and submit',
+                body: 'Select <strong>Local CPU</strong> (fine for a few videos) or <strong>Local GPU</strong> if available. Click <strong>Submit</strong>.',
+                tips: [],
+            },
+            {
+                title: 'Monitor progress',
+                body: 'The job appears in the <strong>Queue</strong> section. When the status changes to complete (\u2713), blurring is done. Original videos are preserved; blurred copies go to a <code>deidentified/</code> subdirectory.',
+                tips: [],
+            },
+            {
+                title: 'Prefer de-identified videos',
+                body: 'Go to <a href="/settings"><strong>Settings</strong></a> and check <strong>"Prefer de-identified videos"</strong>. The video viewer and labeler will now show blurred versions by default wherever available.',
+                tips: [
+                    'You can also blur during onboarding by checking "Blur faces" in Step 4 \u2014 this runs the same process as part of subject creation.',
+                ],
+            },
+        ],
+    },
+
+    // ── 4. Fitting MediaPipe Labels ─────────────────────────
+    {
+        id: 4,
+        title: 'Fitting MediaPipe Labels',
+        subtitle: 'Run automatic hand landmark detection to generate starting labels.',
+        time: '~3 min',
+        steps: [
+            {
+                title: 'Open the Processing page',
+                body: 'Click <a href="/remote"><strong>Processing</strong></a> in the nav bar.',
+                tips: [],
+            },
+            {
+                title: 'Select the MediaPipe step',
+                body: 'Choose <strong>MediaPipe</strong> from the Step dropdown.',
+                tips: [],
+            },
+            {
+                title: 'Select subjects and submit',
+                body: 'Check your subject(s) and click <strong>Submit</strong>. MediaPipe detects 21 hand landmarks per frame for each camera view.',
+                tips: [],
+            },
+            {
+                title: 'Wait for completion',
+                body: 'The job runs in the background. Processing time depends on the number of frames \u2014 typically a few minutes per trial on CPU.',
+                tips: [],
+            },
+            {
+                title: 'View MediaPipe ghosts in the labeler',
+                body: 'Open the <a href="/labeling-select"><strong>DLC</strong></a> page and select your subject. You should see <strong>cyan ghost markers</strong> overlaid on the video \u2014 these are MediaPipe\u2019s predictions.',
+                tips: [
+                    'MediaPipe ghosts are a starting point \u2014 you\u2019ll correct them manually in the next tutorial.',
+                    'The video viewer also uses MediaPipe hints to auto-select the best camera and zoom to the hand region.',
+                ],
+            },
+        ],
+    },
+
+    // ── 5. Labeling with DLC & Training ─────────────────────
+    {
+        id: 5,
+        title: 'Labeling with DLC & Training',
+        subtitle: 'Manually annotate keypoints, then train a DeepLabCut model.',
+        time: '~10 min',
+        steps: [
+            {
+                title: 'Open the DLC labeler',
+                body: 'Click <a href="/labeling-select"><strong>DLC</strong></a> in the nav bar. Select your subject from the dropdown. If prompted, choose <strong>Initial</strong> mode to start a fresh labeling session.',
+                tips: [],
+            },
+            {
+                title: 'Understand the interface',
+                body: 'The main area shows the video frame. The sidebar lists <strong>bodyparts</strong> (e.g.&nbsp;thumb, index) in order. Cyan dots are MediaPipe ghosts. The timeline at the bottom shows which frames have labels (green dots).',
+                tips: [],
+            },
+            {
+                title: 'Place keypoints',
+                body: 'Click on the video frame to place a label for the current bodypart. The active bodypart is highlighted in the sidebar. After placing a label, the next bodypart activates automatically.',
+                tips: [
+                    'Click near a cyan MediaPipe ghost to accept its position, or click elsewhere to correct it.',
+                ],
+            },
+            {
+                title: 'Edit labels',
+                body: '<strong>Drag</strong> an existing label to reposition it. <strong>Right-click</strong> a label to delete it. Use <kbd>Ctrl+Z</kbd> to undo and <kbd>Ctrl+Shift+Z</kbd> to redo.',
+                tips: [],
+            },
+            {
+                title: 'Label multiple frames',
+                body: 'Navigate to different frames using <kbd>\u2190</kbd> / <kbd>\u2192</kbd> and label each one. Aim for <strong>15\u201320 frames</strong> spread across the trial, covering different hand positions (open, closed, mid-movement).',
+                tips: [
+                    'Press <kbd>D</kbd> / <kbd>F</kbd> to jump to the next/previous already-labeled frame.',
+                    'Spreading labels across diverse poses gives the model a better training set.',
+                ],
+            },
+            {
+                title: 'Save and commit',
+                body: 'Click <strong>Save &amp; Commit</strong> in the sidebar. This writes your labels to the DLC training data directory. The subject\u2019s stage updates to "labeled" on the Dashboard.',
+                tips: [],
+            },
+            {
+                title: 'Train a DLC model',
+                body: 'Go to <a href="/remote"><strong>Processing</strong></a>, select <strong>Train</strong>, check your subject, and submit. Training creates a neural network from your manual labels.',
+                tips: [
+                    'Training takes 30\u201360 minutes on a GPU, longer on CPU. A warning banner appears if you select CPU.',
+                    'If you have a remote GPU server configured in Settings, select <strong>Remote</strong> as the execution target.',
+                ],
+            },
+        ],
+    },
+
+    // ── 6. Viewing Results ──────────────────────────────────
+    {
+        id: 6,
+        title: 'Viewing Results',
+        subtitle: 'Run DLC analysis and explore distance traces and movement parameters.',
+        time: '~5 min',
+        steps: [
+            {
+                title: 'Run DLC analysis',
+                body: 'After training completes, go to <a href="/remote"><strong>Processing</strong></a>. Select <strong>Analyze v1</strong>, check your subject, and submit. This runs the trained DLC model on all video frames.',
+                tips: [],
+            },
+            {
+                title: 'View DLC predictions in the labeler',
+                body: 'Open the <a href="/labeling-select"><strong>DLC</strong></a> page. Alongside your manual labels, you\u2019ll see DLC prediction markers on every frame \u2014 not just the ones you labeled.',
+                tips: ['The model\u2019s confidence is reflected in the marker size and opacity.'],
+            },
+            {
+                title: 'Open the Results page',
+                body: 'Click <a href="/results"><strong>Results</strong></a> in the nav bar and select your subject.',
+                tips: [],
+            },
+            {
+                title: 'Explore the Distances tab',
+                body: 'The <strong>Distances</strong> tab shows line plots of 3D distances (e.g.&nbsp;thumb-to-index opening) over time for each trial. Each trial gets its own plot.',
+                tips: ['Check <strong>Lock Y-axis</strong> to use the same scale across all trial plots for easier comparison.'],
+            },
+            {
+                title: 'Explore the Movements tab',
+                body: 'The <strong>Movements</strong> tab computes per-event parameters: <strong>amplitude</strong> (max opening), <strong>velocity</strong> (peak opening/closing speed), <strong>inter-movement interval</strong>, and more. Use the checkboxes to toggle which parameters are visible.',
+                tips: [],
+            },
+            {
+                title: 'Check the Dashboard',
+                body: 'Return to the <a href="/"><strong>Dashboard</strong></a>. Your subject\u2019s stage badge should now say <strong>"analyzed"</strong>, confirming the full pipeline is complete.',
+                tips: [
+                    'From here, you can refine labels, correct errors, annotate events, and fit MANO models \u2014 covered in the advanced tutorial series.',
+                ],
+            },
+        ],
+    },
+];

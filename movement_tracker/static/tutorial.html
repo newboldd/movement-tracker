@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Movement Tracker</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+    <style>
+        .tut-layout {
+            display: flex;
+            gap: 0;
+            max-width: 1100px;
+            margin: 0 auto;
+            min-height: calc(100vh - 80px);
+        }
+
+        /* ── Sidebar / TOC ── */
+        .tut-sidebar {
+            width: 220px;
+            flex-shrink: 0;
+            padding: 24px 16px 24px 0;
+            border-right: 1px solid var(--border, #2a3a5c);
+            position: sticky;
+            top: 56px;
+            align-self: flex-start;
+            max-height: calc(100vh - 80px);
+            overflow-y: auto;
+        }
+        .tut-sidebar-title {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted, #aaa);
+            margin-bottom: 12px;
+            padding-left: 8px;
+        }
+        .toc-link {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            padding: 6px 8px;
+            border-radius: 4px;
+            text-decoration: none;
+            color: var(--text-muted, #aaa);
+            font-size: 13px;
+            line-height: 1.4;
+            transition: background 0.1s, color 0.1s;
+            cursor: pointer;
+        }
+        .toc-link:hover { background: rgba(74, 158, 255, 0.08); color: var(--text, #e0e0e0); }
+        .toc-link.active { background: rgba(74, 158, 255, 0.12); color: var(--blue, #4a9eff); }
+        .toc-num {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: var(--border, #2a3a5c);
+            color: var(--text-muted, #aaa);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            font-weight: 600;
+            flex-shrink: 0;
+            margin-top: 1px;
+        }
+        .toc-link.active .toc-num { background: var(--blue, #4a9eff); color: #fff; }
+
+        /* ── Main content ── */
+        .tut-main {
+            flex: 1;
+            padding: 24px 0 48px 32px;
+            min-width: 0;
+        }
+        .tut-breadcrumb {
+            font-size: 12px;
+            color: var(--text-muted, #aaa);
+            margin-bottom: 8px;
+        }
+        .tut-breadcrumb a { color: var(--blue, #4a9eff); text-decoration: none; }
+        .tut-breadcrumb a:hover { text-decoration: underline; }
+        .tut-title {
+            font-size: 28px;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+        .tut-subtitle {
+            font-size: 15px;
+            color: var(--text-muted, #aaa);
+            margin-bottom: 32px;
+        }
+
+        /* ── Step blocks ── */
+        .tut-step {
+            margin-bottom: 32px;
+            scroll-margin-top: 80px;
+        }
+        .tut-step-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+        .tut-step-num {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            background: var(--blue, #4a9eff);
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 13px;
+            flex-shrink: 0;
+        }
+        .tut-step-title {
+            font-size: 16px;
+            font-weight: 600;
+        }
+        .tut-step-body {
+            margin-left: 40px;
+            font-size: 14px;
+            line-height: 1.7;
+            color: var(--text, #e0e0e0);
+        }
+        .tut-step-body a { color: var(--blue, #4a9eff); }
+        .tut-step-body kbd {
+            display: inline-block;
+            padding: 1px 6px;
+            background: rgba(255,255,255,0.08);
+            border: 1px solid var(--border, #2a3a5c);
+            border-radius: 3px;
+            font-family: inherit;
+            font-size: 12px;
+        }
+        .tut-step-body code {
+            padding: 1px 5px;
+            background: rgba(255,255,255,0.06);
+            border-radius: 3px;
+            font-size: 13px;
+        }
+
+        /* ── Tip callouts ── */
+        .tut-tip {
+            margin: 10px 0 0 40px;
+            padding: 8px 12px;
+            border-left: 3px solid var(--blue, #4a9eff);
+            background: rgba(74, 158, 255, 0.06);
+            border-radius: 0 4px 4px 0;
+            font-size: 13px;
+            line-height: 1.5;
+            color: var(--text-muted, #aaa);
+        }
+        .tut-tip::before {
+            content: 'Tip: ';
+            font-weight: 600;
+            color: var(--blue, #4a9eff);
+        }
+
+        /* ── Bottom nav ── */
+        .tut-nav-bottom {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 48px;
+            padding-top: 24px;
+            border-top: 1px solid var(--border, #2a3a5c);
+        }
+        .tut-nav-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 16px;
+            background: var(--bg-card, #16213e);
+            border: 1px solid var(--border, #2a3a5c);
+            border-radius: var(--radius, 6px);
+            color: var(--text, #e0e0e0);
+            text-decoration: none;
+            font-size: 13px;
+            transition: border-color 0.15s;
+        }
+        .tut-nav-btn:hover { border-color: var(--blue, #4a9eff); }
+        .tut-nav-btn.disabled { opacity: 0.3; pointer-events: none; }
+
+        /* ── Responsive ── */
+        @media (max-width: 768px) {
+            .tut-sidebar { display: none; }
+            .tut-main { padding-left: 16px; padding-right: 16px; }
+            .tut-step-body, .tut-tip { margin-left: 0; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1><a href="/">Movement Tracker</a></h1>
+        <nav>
+            <a href="/videos">Videos</a>
+            <a href="/labeling-select">DLC</a>
+            <a href="/mano">MANO</a>
+            <a href="/results">Results</a>
+            <a href="/remote">Processing</a>
+            <a href="/settings">Settings</a>
+            <a href="/tutorials" class="active">Tutorials</a>
+        </nav>
+    </div>
+
+    <div class="tut-layout">
+        <aside class="tut-sidebar">
+            <div class="tut-sidebar-title">Steps</div>
+            <div id="tocList"></div>
+        </aside>
+        <main class="tut-main">
+            <div class="tut-breadcrumb">
+                <a href="/tutorials">Tutorials</a> &rsaquo; <span id="breadcrumbTitle"></span>
+            </div>
+            <h1 class="tut-title" id="tutTitle"></h1>
+            <p class="tut-subtitle" id="tutSubtitle"></p>
+            <div id="stepsContainer"></div>
+            <div class="tut-nav-bottom" id="tutNavBottom"></div>
+        </main>
+    </div>
+
+    <script src="/static/js/tutorial-content.js"></script>
+    <script src="/static/js/tutorial.js"></script>
+</body>
+</html>

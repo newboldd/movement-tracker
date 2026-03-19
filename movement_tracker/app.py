@@ -28,7 +28,7 @@ class NoCacheMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
         if request.url.path.startswith("/static") or request.url.path in (
-            "/", "/labeling", "/results", "/settings", "/onboarding", "/remote", "/mano", "/videos", "/calibration"
+            "/", "/labeling", "/results", "/settings", "/onboarding", "/remote", "/mano", "/videos", "/calibration", "/tutorials", "/tutorial"
         ):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return response
@@ -553,6 +553,18 @@ def mano_page():
 def calibration_page():
     """Serve the camera calibration page."""
     return FileResponse(str(STATIC_DIR / "calibration.html"))
+
+
+@app.get("/tutorials")
+def tutorials_page():
+    """Serve the tutorials index page."""
+    return FileResponse(str(STATIC_DIR / "tutorials.html"))
+
+
+@app.get("/tutorial")
+def tutorial_page():
+    """Serve a single tutorial viewer page."""
+    return FileResponse(str(STATIC_DIR / "tutorial.html"))
 
 
 if __name__ == "__main__":

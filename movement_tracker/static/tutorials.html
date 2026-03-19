@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Movement Tracker</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+    <style>
+        .tut-intro {
+            max-width: 720px;
+            margin: 0 auto 32px;
+            text-align: center;
+            color: var(--text-muted, #aaa);
+            font-size: 15px;
+            line-height: 1.6;
+        }
+        .tut-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+        .tut-card {
+            background: var(--bg-card, #16213e);
+            border: 1px solid var(--border, #2a3a5c);
+            border-radius: var(--radius, 6px);
+            padding: 24px;
+            text-decoration: none;
+            color: var(--text, #e0e0e0);
+            transition: border-color 0.15s, transform 0.15s;
+            display: flex;
+            flex-direction: column;
+        }
+        .tut-card:hover {
+            border-color: var(--blue, #4a9eff);
+            transform: translateY(-2px);
+        }
+        .tut-card-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .tut-num {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: var(--blue, #4a9eff);
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 14px;
+            flex-shrink: 0;
+        }
+        .tut-card-title {
+            font-size: 16px;
+            font-weight: 600;
+        }
+        .tut-card-desc {
+            font-size: 13px;
+            color: var(--text-muted, #aaa);
+            line-height: 1.5;
+            flex: 1;
+        }
+        .tut-card-footer {
+            margin-top: 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 12px;
+            color: var(--text-muted, #aaa);
+        }
+        .tut-card-footer .time {
+            opacity: 0.7;
+        }
+        .tut-card-footer .arrow {
+            color: var(--blue, #4a9eff);
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1><a href="/">Movement Tracker</a></h1>
+        <nav>
+            <a href="/videos">Videos</a>
+            <a href="/labeling-select">DLC</a>
+            <a href="/mano">MANO</a>
+            <a href="/results">Results</a>
+            <a href="/remote">Processing</a>
+            <a href="/settings">Settings</a>
+            <a href="/tutorials" class="active">Tutorials</a>
+        </nav>
+    </div>
+
+    <div class="container">
+        <div class="tut-intro">
+            <h2 style="margin-bottom: 8px;">Getting Started</h2>
+            <p>Learn the basics of Movement Tracker using the included sample video. Follow these tutorials in order to go from raw video to quantified movement results.</p>
+        </div>
+        <div class="tut-grid" id="tutGrid"></div>
+    </div>
+
+    <script src="/static/js/tutorial-content.js"></script>
+    <script src="/static/js/tutorials.js"></script>
+</body>
+</html>
