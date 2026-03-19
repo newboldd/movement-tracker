@@ -224,6 +224,7 @@ def get_video_list(subject_id: int) -> list[dict]:
     Each trial includes a ``cameras`` list for multicam trials:
     ``[{name, path, idx}]``.  Empty when trial is a single file.
     """
+    settings = get_settings()
     name = _subject_name(subject_id)
     try:
         trials = build_trial_map(name)
@@ -240,8 +241,8 @@ def get_video_list(subject_id: int) -> list[dict]:
             "fps": t["fps"],
             "width": t["width"],
             "height": t["height"],
-            # Stereo = side-by-side halves; heuristic: width >= 1.5 × height
-            "is_stereo": t["width"] >= int(t["height"] * 1.5),
+            # Stereo determined by camera_mode setting, not video dimensions
+            "is_stereo": settings.camera_mode == "stereo",
         }
         # Include camera info for multicam trials (>1 camera file)
         if len(cameras) > 1:

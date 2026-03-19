@@ -97,7 +97,7 @@ function renderDiagnosisGroups() {
                             <button class="btn btn-sm" style="white-space:nowrap;" onclick="openLabeling(${s.id})">DLC</button>
                             <button class="btn btn-sm" style="white-space:nowrap;${manoStyle}" ${s.has_mano ? `onclick="window.location.href='/mano?subject=${s.id}'"` : 'disabled'}>MANO</button>
                             <button class="btn btn-sm" style="white-space:nowrap;" onclick="sessionStorage.setItem('dlc_lastSubjectId','${s.id}');window.location.href='/results?subject=${s.id}&from=dashboard'">Results</button>
-                            <button class="btn btn-sm" style="white-space:nowrap;" onclick="showDetail(${s.id})">Details</button>
+                            <button class="btn btn-sm" style="white-space:nowrap;" onclick="showDetail(${s.id})">Info</button>
                         </div>
                     </div>
                 `;
@@ -279,6 +279,12 @@ async function showDetail(subjectId) {
                     }).join('')
                     : '<div class="info-row"><span class="label">No videos found</span></div>'
                 }
+            </div>
+            <div class="detail-section" style="grid-column: 1 / -1;">
+                <h3>Actions</h3>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;">
+                    <a class="btn btn-sm" href="/onboarding?subject=${detail.id}" style="text-decoration:none;">Edit Subject</a>
+                </div>
             </div>
             <div class="detail-section" style="grid-column: 1 / -1;">
                 <h3>Pipeline Steps</h3>

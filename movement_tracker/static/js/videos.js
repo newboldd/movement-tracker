@@ -27,6 +27,8 @@
     let currentSide = 'OS';
     let mpHints = [];  // per-trial mediapipe hints
 
+    let cameraMode = 'stereo'; // 'single', 'stereo', or 'multicam'
+
     let videoEl = null;
     let vidW = 0, vidH = 0, midline = 0;
     let isStereo = true;
@@ -65,9 +67,10 @@
         videoEl.muted = true;
         videoEl.crossOrigin = 'anonymous';
 
-        // Load camera names from settings
+        // Load camera names and mode from settings
         try {
             const cfg = await api('/api/settings');
+            if (cfg.camera_mode) cameraMode = cfg.camera_mode;
             if (Array.isArray(cfg.camera_names) && cfg.camera_names.length >= 1) {
                 cameraNames = cfg.camera_names;
                 currentSide = cameraNames[0];
@@ -161,8 +164,9 @@
         videoEl.addEventListener('loadedmetadata', () => {
             vidW = videoEl.videoWidth;
             vidH = videoEl.videoHeight;
-            midline = Math.round(vidW / 2);
-            isStereo = vidW >= vidH * 1.5;
+            // Use camera_mode setting, fall back to heuristic for browsed files
+            isStereo = cameraMode === 'stereo';
+            midline = isStereo ? Math.round(vidW / 2) : vidW;
             trialMeta.n_frames = Math.round(videoEl.duration * trialMeta.fps);
             trialMeta.is_stereo = isStereo;
             $('totalFramesDisplay').textContent = trialMeta.n_frames;
@@ -195,7 +199,8 @@
         if (idx < 0 || idx >= trials.length) return;
         currentTrialIdx = idx;
         trialMeta = trials[idx];
-        isStereo = trialMeta.is_stereo !== false;
+        // Use camera_mode setting; trialMeta.is_stereo is authoritative from server
+        isStereo = cameraMode === 'stereo' && trialMeta.is_stereo !== false;
 
         // Apply best camera from mediapipe hints
         const hint = mpHints.find(h => h.trial_idx === trialMeta.trial_idx);

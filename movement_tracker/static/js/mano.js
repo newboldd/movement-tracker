@@ -18,6 +18,7 @@ const manoViewer = (() => {
     let currentFrame = 0;
     let currentSide = 'OS';
     let cameraNames = ['OS', 'OD'];
+    let cameraMode = 'stereo'; // 'single', 'stereo', or 'multicam'
     let playing = false;
     let playTimer = null;
     let playbackRate = 1;
@@ -101,6 +102,16 @@ const manoViewer = (() => {
         const params = new URLSearchParams(window.location.search);
         const subjectParam = params.get('subject');
 
+        // Load camera mode and names from settings
+        try {
+            const cfg = await api('/api/settings');
+            if (cfg.camera_mode) cameraMode = cfg.camera_mode;
+            if (Array.isArray(cfg.camera_names) && cfg.camera_names.length >= 1) {
+                cameraNames = cfg.camera_names;
+                currentSide = cameraNames[0];
+            }
+        } catch { /* defaults */ }
+
         // Load subjects
         allSubjects = await api('/api/subjects');
         const sel = $('subjectSelect');
@@ -126,6 +137,12 @@ const manoViewer = (() => {
         distCanvas = $('distanceCanvas');
         distCtx = distCanvas.getContext('2d');
         videoEl = $('videoEl');
+
+        // Disable side toggle for non-stereo modes
+        if (cameraMode !== 'stereo') {
+            const btn = $('sideToggle');
+            if (btn) { btn.disabled = true; btn.title = 'Single camera'; }
+        }
 
         // Setup Three.js
         setup3D();
@@ -229,7 +246,7 @@ const manoViewer = (() => {
         videoEl.addEventListener('loadedmetadata', () => {
             vidW = videoEl.videoWidth;
             vidH = videoEl.videoHeight;
-            midline = vidW / 2;
+            midline = cameraMode === 'stereo' ? vidW / 2 : vidW;
             sizeCanvases();
             computeAutoCrop();
             snapToCamera(); // default view = snapped to calibration camera
@@ -319,6 +336,7 @@ const manoViewer = (() => {
     }
 
     function toggleSide() {
+        if (cameraMode !== 'stereo') return; // no side toggle in single/multicam
         currentSide = currentSide === cameraNames[0] ? cameraNames[1] : cameraNames[0];
         $('sideToggle').textContent = currentSide;
         computeAutoCrop();
@@ -352,10 +370,11 @@ const manoViewer = (() => {
             return;
         }
 
+        const isStereo = cameraMode === 'stereo';
         const isLeft = currentSide === cameraNames[0];
         const proj = isLeft ? trialData.mano_proj_L : trialData.mano_proj_R;
         const mp   = isLeft ? trialData.mp_tracked_L : trialData.mp_tracked_R;
-        const xOff = isLeft ? 0 : -midline;
+        const xOff = isStereo ? (isLeft ? 0 : -midline) : 0;
 
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
@@ -392,7 +411,7 @@ const manoViewer = (() => {
 
         const cw = canvas.width;
         const ch = canvas.height;
-        const sw = isLeft ? midline : vidW - midline;
+        const sw = isStereo ? (isLeft ? midline : vidW - midline) : vidW;
         const bps = cw / sw; // base pixel scale
 
         // We want the crop box to fill the canvas:
@@ -614,9 +633,10 @@ const manoViewer = (() => {
 
         // Draw video frame + overlays with consistent zoom/pan transform
         if (videoEl.readyState >= 2 && vidW > 0) {
+            const isStereo = cameraMode === 'stereo';
             const isLeft = currentSide === cameraNames[0];
-            const sx = isLeft ? 0 : midline;
-            const sw = isLeft ? midline : vidW - midline;
+            const sx = isStereo ? (isLeft ? 0 : midline) : 0;
+            const sw = isStereo ? (isLeft ? midline : vidW - midline) : vidW;
 
             // Base pixel scale: maps 1 video pixel to 1 canvas pixel at scale=1
             // We use the canvas width as reference so scale=1 means the half-frame
@@ -643,12 +663,13 @@ const manoViewer = (() => {
         const fn = currentFrame;
         if (!trialData || fn >= trialData.n_frames) return;
 
+        const isStereo = cameraMode === 'stereo';
         const isLeft = currentSide === cameraNames[0];
         const manoProj = isLeft ? trialData.mano_proj_L : trialData.mano_proj_R;
         const mpKp = isLeft ? trialData.mp_tracked_L : trialData.mp_tracked_R;
 
-        // For right camera, offset coordinates by -midline
-        const xOff = isLeft ? 0 : -midline;
+        // For stereo right camera, offset coordinates by -midline; single/multicam = no offset
+        const xOff = isStereo ? (isLeft ? 0 : -midline) : 0;
 
         // Draw skeleton lines
         if (showSkeleton && trialData.skeleton) {
@@ -1135,9 +1156,10 @@ const manoViewer = (() => {
     function applySnapProjection() {
         if (!trialData?.calib || !canvas || vidW === 0) return;
 
+        const isStereo = cameraMode === 'stereo';
         const isLeft = currentSide === cameraNames[0];
         const K = isLeft ? trialData.calib.K_L : trialData.calib.K_R;
-        const sw = isLeft ? midline : vidW - midline;
+        const sw = isStereo ? (isLeft ? midline : vidW - midline) : vidW;
 
         const fx = K[0][0], fy = K[1][1], cx = K[0][2], cy = K[1][2];
         const w = canvas.width, h = canvas.height;
