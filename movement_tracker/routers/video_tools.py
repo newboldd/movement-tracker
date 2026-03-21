@@ -97,6 +97,48 @@ def probe_video(path: str = Query(..., description="Path to video file")) -> dic
     }
 
 
+# ── Source videos (for dashboard panel) ───────────────────────────────────
+
+@router.get("/sources")
+def list_source_videos() -> dict:
+    """List available source videos: sample data + previously used sources.
+
+    Returns { videos: [{name, path, source}], browse_url: str }
+    """
+    import glob as _glob
+    from ..config import PROJECT_DIR
+
+    settings = get_settings()
+    seen_paths: set[str] = set()
+    videos: list[dict] = []
+
+    # 1. Sample data
+    sample_dir = PROJECT_DIR / "sample_data"
+    if sample_dir.exists():
+        for f in sorted(sample_dir.glob("*.mp4")):
+            p = str(f)
+            if p not in seen_paths:
+                seen_paths.add(p)
+                videos.append({"name": f.stem, "path": p, "source": "sample"})
+
+    # 2. Previously used source videos (from segments table)
+    with get_db_ctx() as db:
+        rows = db.execute(
+            "SELECT DISTINCT source_path FROM segments ORDER BY source_path"
+        ).fetchall()
+    for row in rows:
+        p = row["source_path"]
+        if p and p not in seen_paths and Path(p).exists():
+            seen_paths.add(p)
+            videos.append({
+                "name": Path(p).stem,
+                "path": p,
+                "source": "recent",
+            })
+
+    return {"videos": videos}
+
+
 # ── Stream ────────────────────────────────────────────────────────────────
 
 @router.get("/stream")

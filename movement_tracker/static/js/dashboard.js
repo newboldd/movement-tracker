@@ -589,8 +589,37 @@ async function startBatchPreprocess() {
 document.getElementById('filterInput').addEventListener('input', renderDiagnosisGroups);
 document.getElementById('stageFilter').addEventListener('change', renderDiagnosisGroups);
 
+// ── Videos panel ─────────────────────────────────────
+async function loadVideosPanel() {
+    const panel = document.getElementById('videosPanel');
+    try {
+        const data = await API.get('/api/video-tools/sources');
+        const videos = data.videos || [];
+
+        let html = '';
+
+        if (videos.length === 0) {
+            html += '<span style="color:var(--text-muted);font-size:13px;">No videos yet</span>';
+        } else {
+            videos.forEach(v => {
+                const icon = v.source === 'sample' ? '📦' : '🎬';
+                const label = v.source === 'sample' ? `${v.name} (sample)` : v.name;
+                html += `<a href="/videos" class="btn btn-sm" onclick="sessionStorage.setItem('browse_video_path','${v.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}')" style="text-decoration:none;display:inline-flex;align-items:center;gap:4px;">${icon} ${label}</a>`;
+            });
+        }
+
+        // Browse button always at the end
+        html += `<a href="/videos" class="btn btn-sm btn-primary" style="text-decoration:none;">Browse…</a>`;
+
+        panel.innerHTML = html;
+    } catch (e) {
+        panel.innerHTML = '<a href="/videos" class="btn btn-sm btn-primary" style="text-decoration:none;">Browse Videos</a>';
+    }
+}
+
 // ── Init ─────────────────────────────────────────────
 checkStatus().then(async () => {
     await loadCalibrationNames();
     loadSubjects();
+    loadVideosPanel();
 });
