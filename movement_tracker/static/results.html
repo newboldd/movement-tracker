@@ -50,6 +50,36 @@
             <div id="distancePlots">
                 <div class="results-no-data">Select a subject to view distance traces</div>
             </div>
+
+            <!-- Movement parameters (plotted below distance traces) -->
+            <div class="results-controls" id="distMovementControls" style="margin-top:12px;display:none;">
+                <span style="font-weight:600;font-size:12px;margin-right:8px;">Movements:</span>
+                <label><input type="checkbox" data-dparam="amplitude" checked> Amplitude</label>
+                <label><input type="checkbox" data-dparam="imi" checked> IMI</label>
+                <label><input type="checkbox" data-dparam="peak_open_vel" checked> Peak Opening Vel.</label>
+                <label><input type="checkbox" data-dparam="peak_close_vel" checked> Peak Closing Vel.</label>
+                <label><input type="checkbox" data-dparam="rel_amplitude"> Relative Amplitude</label>
+                <label><input type="checkbox" data-dparam="power"> Power</label>
+                <label><input type="checkbox" data-dparam="mean_open_vel"> Mean Opening Vel.</label>
+                <label><input type="checkbox" data-dparam="mean_close_vel"> Mean Closing Vel.</label>
+                <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
+                <label style="display:flex;align-items:center;gap:4px;">
+                    Fit:
+                    <select id="distSequenceMode"
+                        style="padding:3px 8px;background:#f0f0f0;border:1px solid #ccc;
+                               border-radius:4px;color:#444;font-size:12px;">
+                        <option value="none">None</option>
+                        <option value="linear_full">Linear (full)</option>
+                        <option value="linear_first10">Linear (first 10)</option>
+                        <option value="linear_multi">Linear (multi-seq)</option>
+                        <option value="exp_full">Exponential (full)</option>
+                        <option value="exp_first10">Exponential (first 10)</option>
+                        <option value="exp_multi" selected>Exponential (multi-seq)</option>
+                    </select>
+                </label>
+                <span id="distSeqInfo" style="font-size:11px;color:#666;"></span>
+            </div>
+            <div id="distMovementPlots" class="results-plot-grid"></div>
         </div>
 
         <!-- Movements Tab -->
@@ -101,6 +131,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=4"></script>
+    <script src="/static/js/results.js?v=5"></script>
 </body>
 </html>

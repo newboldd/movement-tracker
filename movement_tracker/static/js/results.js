@@ -99,27 +99,95 @@ function switchTab(tab) {
 
 async function loadDistances(subjectId) {
     const container = document.getElementById('distancePlots');
+    const movContainer = document.getElementById('distMovementPlots');
+    const movControls = document.getElementById('distMovementControls');
 
     if (!subjectId) {
         container.innerHTML = '<div class="results-no-data">Select a subject to view distance traces</div>';
+        if (movContainer) movContainer.innerHTML = '';
+        if (movControls) movControls.style.display = 'none';
         return;
     }
 
     container.innerHTML = '<div class="results-no-data">Loading...</div>';
 
     try {
-        const data = await API.get(`/api/results/${subjectId}/traces`);
-        cachedTraces = data;
+        // Load traces and movements in parallel
+        const [traceData, movData] = await Promise.all([
+            API.get(`/api/results/${subjectId}/traces`),
+            API.get(`/api/results/${subjectId}/movements`).catch(() => null),
+        ]);
 
-        if (!data.trials || data.trials.length === 0) {
+        cachedTraces = traceData;
+
+        if (!traceData.trials || traceData.trials.length === 0) {
             container.innerHTML = '<div class="results-no-data">No distance data available for this subject</div>';
+            if (movControls) movControls.style.display = 'none';
             return;
         }
 
         renderAllDistancePlots();
+
+        // Render movement parameters below distance traces
+        if (movData && movData.movements && movData.movements.length > 0) {
+            cachedMovements = movData;
+            cachedSequenceAssignments = null;
+            if (movControls) movControls.style.display = '';
+            renderDistMovementPlots();
+        } else {
+            if (movControls) movControls.style.display = 'none';
+            if (movContainer) movContainer.innerHTML = '';
+        }
     } catch (e) {
         container.innerHTML = `<div class="results-no-data" style="color:#d32f2f;">${e.message}</div>`;
     }
+}
+
+function getDistCheckedParams() {
+    const checks = document.querySelectorAll('#distMovementControls input[data-dparam]');
+    const params = [];
+    checks.forEach(cb => { if (cb.checked) params.push(cb.dataset.dparam); });
+    return params;
+}
+
+function renderDistMovementPlots() {
+    const container = document.getElementById('distMovementPlots');
+    const data = cachedMovements;
+    if (!container || !data || !data.movements || data.movements.length === 0) return;
+
+    const params = getDistCheckedParams();
+    if (params.length === 0) {
+        container.innerHTML = '';
+        return;
+    }
+
+    const seqMode = document.getElementById('distSequenceMode').value;
+
+    // Pre-compute sequence assignments if multi-seq mode
+    if (seqMode.endsWith('_multi') && data.movements.length > 0) {
+        if (!cachedSequenceAssignments) {
+            cachedSequenceAssignments = computeSequenceAssignments(data);
+        }
+        const el = document.getElementById('distSeqInfo');
+        if (el && cachedSequenceAssignments.totalSeqs > 0) {
+            el.textContent = `${cachedSequenceAssignments.totalSeqs} sequence${cachedSequenceAssignments.totalSeqs !== 1 ? 's' : ''} | R\u00b2 = ${cachedSequenceAssignments.totalR2.toFixed(3)}`;
+        } else if (el) {
+            el.textContent = 'No sequences detected';
+        }
+    } else {
+        const el = document.getElementById('distSeqInfo');
+        if (el) el.textContent = '';
+    }
+
+    container.innerHTML = '';
+
+    params.forEach(param => {
+        const div = document.createElement('div');
+        div.id = `distMovPlot_${param}`;
+        div.style.height = '320px';
+        container.appendChild(div);
+        renderMovementScatter(div.id, data, param, seqMode);
+    });
 }
 
 function getYAxisConfig() {
@@ -1038,6 +1106,17 @@ document.querySelectorAll('#movementControls input[data-param]').forEach(cb => {
 });
 document.getElementById('sequenceMode').addEventListener('change', () => {
     if (cachedMovements) renderMovementPlots();
+});
+
+// Distance tab movement controls: re-render on checkbox or fit mode change
+document.querySelectorAll('#distMovementControls input[data-dparam]').forEach(cb => {
+    cb.addEventListener('change', () => {
+        if (cachedMovements) renderDistMovementPlots();
+    });
+});
+document.getElementById('distSequenceMode').addEventListener('change', () => {
+    cachedSequenceAssignments = null;
+    if (cachedMovements) renderDistMovementPlots();
 });
 
 // Distance controls: re-render on y-axis changes
