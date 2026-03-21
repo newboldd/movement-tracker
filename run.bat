@@ -73,35 +73,8 @@ echo.
 
 set "INSTALL_OK=0"
 
-:: 5a. Try winget
-where winget >nul 2>nul && (
-    echo Trying winget...
-    winget install Python.Python.3.11 --accept-package-agreements --accept-source-agreements 2>nul && set "INSTALL_OK=1"
-)
-if "!INSTALL_OK!"=="1" (
-    set "PATH=%LOCALAPPDATA%\Programs\Python\Python311;%LOCALAPPDATA%\Programs\Python\Python311\Scripts;!PATH!"
-    if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" (
-        set "PYTHON=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
-        goto :found
-    )
-)
-
-:: 5b. Try exe installer (silent, no admin)
-echo Downloading Python installer...
-set "PY_INSTALLER=%TEMP%\python-3.11-installer.exe"
-powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe' -OutFile '!PY_INSTALLER!' }" 2>nul
-if exist "!PY_INSTALLER!" (
-    echo Installing Python 3.11...
-    "!PY_INSTALLER!" /quiet InstallAllUsers=0 PrependPath=1 Include_launcher=1 2>nul
-    del "!PY_INSTALLER!" 2>nul
-    if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" (
-        set "PYTHON=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
-        goto :found
-    )
-)
-
-:: 5c. Portable Python — download zip, extract locally (no install, no admin)
-echo Standard install blocked. Setting up portable Python...
+:: 5a. Portable Python — download zip, extract locally (no install, no admin)
+echo Setting up portable Python...
 set "PORTABLE_DIR=%~dp0.python"
 set "PY_ZIP=%TEMP%\python-3.11-embed.zip"
 set "GET_PIP=%TEMP%\get-pip.py"
