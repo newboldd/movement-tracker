@@ -2982,7 +2982,14 @@ const labeler = (() => {
         try {
             await videoEl.play();
             console.log(`[video] Playing trial ${trialIdx} at ${startTime.toFixed(2)}s (rate: ${playbackRate}x)`);
-            requestAnimationFrame(videoDrawLoop);
+            // Prefer requestVideoFrameCallback — fires only when a new frame
+            // is actually painted, keeping labels in sync with the displayed frame.
+            // Falls back to requestAnimationFrame for older browsers.
+            if ('requestVideoFrameCallback' in videoEl) {
+                videoEl.requestVideoFrameCallback(videoDrawLoop);
+            } else {
+                requestAnimationFrame(videoDrawLoop);
+            }
         } catch (e) {
             console.error('[video] play() rejected:', e);
             videoPlaying = false;
@@ -3011,9 +3018,9 @@ const labeler = (() => {
         const trial = trials[currentTrialIdx];
         if (!trial) return;
 
-        // Calculate current global frame from video time
-        // Add frame_offset back: browser time is in browser-space (no pre-roll frames),
-        // but our frame indices include OpenCV's extra pre-roll frames.
+        // Calculate current global frame from video time.
+        // When using requestVideoFrameCallback, this fires only after a new
+        // frame is actually painted, so labels stay perfectly in sync.
         const frameOffset = trial.frame_offset || 0;
         const localFrame = Math.floor(videoEl.currentTime * trial.fps) + frameOffset;
         currentFrame = trial.start_frame + Math.min(localFrame, trial.frame_count - 1);
@@ -3061,7 +3068,12 @@ const labeler = (() => {
             renderDistanceTrace();
         }
 
-        requestAnimationFrame(videoDrawLoop);
+        // Schedule next frame using the same mechanism we started with
+        if ('requestVideoFrameCallback' in videoEl) {
+            videoEl.requestVideoFrameCallback(videoDrawLoop);
+        } else {
+            requestAnimationFrame(videoDrawLoop);
+        }
     }
 
     function stopVideoPlayback() {
