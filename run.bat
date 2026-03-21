@@ -150,6 +150,10 @@ echo.
 echo Starting Movement Tracker...
 echo Dashboard will open at http://localhost:8080
 echo.
+
+:: Open browser after a short delay (background, non-blocking)
+start "" cmd /c "timeout /t 2 /nobreak >nul & start http://localhost:8080"
+
 %PYTHON% -m uvicorn movement_tracker.app:app --host 127.0.0.1 --port 8080
 
 pause
