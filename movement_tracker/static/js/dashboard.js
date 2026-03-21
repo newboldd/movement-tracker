@@ -340,10 +340,19 @@ async function showDetail(subjectId) {
                     </div>
                 `).join('')}
             </div>` : ''}
+            <div class="detail-section" style="grid-column: 1 / -1;">
+                <h3>Distance Trace</h3>
+                <div id="detailDistancePlots" style="min-height:60px;">
+                    <span style="font-size:12px;color:var(--text-muted);">Loading…</span>
+                </div>
+            </div>
         `;
 
         panel.classList.add('active');
         panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+        // Load and render distance traces
+        _loadDetailDistances(subjectId);
     } catch (e) {
         alert('Error loading subject: ' + e.message);
     }
@@ -614,6 +623,59 @@ async function loadVideosPanel() {
         panel.innerHTML = html;
     } catch (e) {
         panel.innerHTML = '<a href="/videos" class="btn btn-sm btn-primary" style="text-decoration:none;">Browse Videos</a>';
+    }
+}
+
+// ── Detail panel distance traces ─────────────────────
+async function _loadDetailDistances(subjectId) {
+    const container = document.getElementById('detailDistancePlots');
+    if (!container) return;
+
+    try {
+        const data = await API.get(`/api/results/${subjectId}/traces`);
+        if (!data.trials || data.trials.length === 0) {
+            container.innerHTML = '<span style="font-size:12px;color:var(--text-muted);">No distance data</span>';
+            return;
+        }
+
+        container.innerHTML = '';
+
+        data.trials.forEach((trial, idx) => {
+            const div = document.createElement('div');
+            div.id = `detailDist_${idx}`;
+            div.style.height = '140px';
+            container.appendChild(div);
+
+            const fps = trial.fps || 60;
+            const distances = trial.distances || [];
+            const times = distances.map((_, i) => i / fps);
+
+            const trace = {
+                x: times,
+                y: distances,
+                type: 'scattergl',
+                mode: 'lines',
+                line: { color: '#4a9eff', width: 1 },
+                name: trial.name,
+            };
+
+            const layout = {
+                title: { text: trial.name, font: { size: 12 } },
+                xaxis: { title: { text: 'Time (s)', font: { size: 10 } }, tickfont: { size: 9 } },
+                yaxis: { title: { text: 'Distance (mm)', font: { size: 10 } }, tickfont: { size: 9 } },
+                margin: { l: 45, r: 10, t: 25, b: 30 },
+                paper_bgcolor: 'transparent',
+                plot_bgcolor: 'transparent',
+                font: { color: 'var(--text)' },
+            };
+
+            Plotly.newPlot(div, [trace], layout, {
+                responsive: true,
+                displayModeBar: false,
+            });
+        });
+    } catch (e) {
+        container.innerHTML = '<span style="font-size:12px;color:var(--text-muted);">Could not load distance data</span>';
     }
 }
 
