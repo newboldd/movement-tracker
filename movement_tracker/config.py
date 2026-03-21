@@ -53,6 +53,7 @@ class Settings:
         # Display preferences
         self.prefer_deidentified: bool = True  # show deidentified videos in labeling UI
         self.show_tutorials: bool = True  # show Tutorials link in nav bar
+        self.show_example_subject: bool = True  # show the built-in Example subject
 
         # Diagnosis/Group settings (for dashboard organization)
         self.diagnosis_groups: list[str] = ["Control", "MSA", "PD", "PSP"]
@@ -227,6 +228,8 @@ class Settings:
             self.prefer_deidentified = bool(data["prefer_deidentified"])
         if "show_tutorials" in data and data["show_tutorials"] is not None:
             self.show_tutorials = bool(data["show_tutorials"])
+        if "show_example_subject" in data and data["show_example_subject"] is not None:
+            self.show_example_subject = bool(data["show_example_subject"])
 
     def _apply_env_overrides(self):
         """Override settings from DLC_APP_* environment variables."""
@@ -290,6 +293,7 @@ class Settings:
             "remote_ssh_port": self.remote_ssh_port,
             "prefer_deidentified": self.prefer_deidentified,
             "show_tutorials": self.show_tutorials,
+            "show_example_subject": self.show_example_subject,
             "event_types": self.event_types,
         }
 

@@ -350,6 +350,56 @@ def _resume_pending_downloads(s, remote_cfg):
             break
 
 
+EXAMPLE_SUBJECT_NAME = "Example"
+
+
+def _ensure_example_subject(settings):
+    """Create the built-in Example subject if sample data exists.
+
+    The Example subject uses the downloaded sample video (Con01_R1.mp4)
+    as its trial video. It's a Control subject that ships with the app
+    so new users have data to explore immediately.
+
+    Can be hidden via settings.show_example_subject = False.
+    """
+    import shutil
+    from .config import PROJECT_DIR
+    from .db import get_db_ctx
+
+    sample_video = PROJECT_DIR / "sample_data" / "Con01_R1.mp4"
+    if not sample_video.exists():
+        return
+
+    with get_db_ctx() as db:
+        existing = db.execute(
+            "SELECT * FROM subjects WHERE name = ?", (EXAMPLE_SUBJECT_NAME,)
+        ).fetchone()
+
+        if existing:
+            # If hidden via settings, soft-remove from subject list queries
+            # (but keep in DB so it can be re-shown)
+            return
+
+        # Create the subject
+        db.execute(
+            """INSERT INTO subjects (name, stage, dlc_dir, camera_mode, diagnosis)
+               VALUES (?, 'created', ?, 'stereo', 'Control')""",
+            (EXAMPLE_SUBJECT_NAME, EXAMPLE_SUBJECT_NAME),
+        )
+
+    # Copy sample video as the subject's trial video
+    video_dir = settings.video_path
+    video_dir.mkdir(parents=True, exist_ok=True)
+    dest = video_dir / f"{EXAMPLE_SUBJECT_NAME}_R1.mp4"
+    if not dest.exists():
+        shutil.copy2(str(sample_video), str(dest))
+        logger.info(f"Created Example subject with video: {dest}")
+
+    # Create DLC directory
+    dlc_dir = settings.dlc_path / EXAMPLE_SUBJECT_NAME
+    dlc_dir.mkdir(parents=True, exist_ok=True)
+
+
 @app.on_event("startup")
 def startup():
     """Initialize database and sync subjects from filesystem."""
@@ -369,6 +419,9 @@ def startup():
     result = sync_from_filesystem()
     removed = result.get('removed', 0)
     logger.info(f"Discovery: {result['created']} new, {result['updated']} updated, {removed} removed, {result['total']} total")
+
+    # Create the built-in Example subject if it doesn't exist
+    _ensure_example_subject(s)
 
     # Start queue manager
     from .services.queue_manager import queue_manager

@@ -184,6 +184,7 @@ async function loadSettings() {
         // Checkboxes
         document.getElementById('prefer_deidentified').checked = settings.prefer_deidentified !== false;
         document.getElementById('show_tutorials').checked = settings.show_tutorials !== false;
+        document.getElementById('show_example_subject').checked = settings.show_example_subject !== false;
 
         // Tag inputs
         setTagValues('bodyparts_tags', settings.bodyparts || []);
@@ -242,6 +243,7 @@ function _gatherSettings() {
         calibrations: getCalibrations(),
         prefer_deidentified: document.getElementById('prefer_deidentified').checked,
         show_tutorials: document.getElementById('show_tutorials').checked,
+        show_example_subject: document.getElementById('show_example_subject').checked,
         event_types: getEventTypes(),
     };
 }

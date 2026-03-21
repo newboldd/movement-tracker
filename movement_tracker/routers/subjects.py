@@ -80,10 +80,18 @@ def _subject_row_to_response(row: dict) -> dict:
 @router.get("")
 def list_subjects() -> List[dict]:
     """List all subjects with stage info."""
+    from ..config import get_settings
+    settings = get_settings()
+
     with get_db_ctx() as db:
         rows = db.execute(
             "SELECT * FROM subjects ORDER BY name"
         ).fetchall()
+
+    # Hide Example subject if disabled in settings
+    if not settings.show_example_subject:
+        rows = [r for r in rows if r["name"] != "Example"]
+
     return [_subject_row_to_response(r) for r in rows]
 
 
