@@ -3,6 +3,63 @@ setlocal enabledelayedexpansion
 
 cd /d "%~dp0"
 
+:: ── Upgrade: migrate data from a previous installation ─────────
+if "%~1"=="upgrade" (
+    if "%~2"=="" (
+        echo Usage: run.bat upgrade "C:\path\to\old\movement-tracker-master"
+        echo.
+        echo This copies your database, videos, DLC data, and settings from
+        echo a previous installation into this one.
+        pause
+        exit /b 1
+    )
+    set "OLD=%~2"
+
+    echo.
+    echo Migrating data from: !OLD!
+    echo                  to: %~dp0
+    echo.
+
+    :: Database
+    if exist "!OLD!\movement_tracker\dlc_app.db" (
+        echo Copying database...
+        copy /y "!OLD!\movement_tracker\dlc_app.db" "movement_tracker\dlc_app.db" >nul
+        echo   OK: dlc_app.db
+    )
+
+    :: Settings
+    if exist "!OLD!\movement_tracker\settings.json" (
+        echo Copying settings...
+        copy /y "!OLD!\movement_tracker\settings.json" "movement_tracker\settings.json" >nul
+        echo   OK: settings.json
+    )
+
+    :: Videos
+    if exist "!OLD!\videos" (
+        echo Copying videos...
+        xcopy /E /I /Y /Q "!OLD!\videos" "videos" >nul
+        echo   OK: videos\
+    )
+
+    :: DLC data
+    if exist "!OLD!\dlc" (
+        echo Copying DLC data...
+        xcopy /E /I /Y /Q "!OLD!\dlc" "dlc" >nul
+        echo   OK: dlc\
+    )
+
+    :: Portable Python (reuse if present, saves re-download)
+    if exist "!OLD!\.python" (
+        echo Copying portable Python...
+        xcopy /E /I /Y /Q "!OLD!\.python" ".python" >nul
+        echo   OK: .python\
+    )
+
+    echo.
+    echo Migration complete! Starting Movement Tracker...
+    echo.
+)
+
 :: ── Find Python ────────────────────────────────────────────────
 :: Priority: .venv > active conda env > mano conda env > Anaconda base > system python
 set "PYTHON="
