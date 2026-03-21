@@ -353,16 +353,19 @@ def _resume_pending_downloads(s, remote_cfg):
 EXAMPLE_SUBJECT_NAME = "Example"
 
 
+EXAMPLE_TRIM_START_FRAME = 273  # skip pre-roll frames in sample video
+
+
 def _ensure_example_subject(settings):
     """Create the built-in Example subject if sample data exists.
 
     The Example subject uses the downloaded sample video (Con01_R1.mp4)
-    as its trial video. It's a Control subject that ships with the app
-    so new users have data to explore immediately.
+    trimmed from frame 273 onwards. It's a Control subject that ships
+    with the app so new users have data to explore immediately.
 
     Can be hidden via settings.show_example_subject = False.
     """
-    import shutil
+    import cv2
     from .config import PROJECT_DIR
     from .db import get_db_ctx
 
@@ -376,8 +379,6 @@ def _ensure_example_subject(settings):
         ).fetchone()
 
         if existing:
-            # If hidden via settings, soft-remove from subject list queries
-            # (but keep in DB so it can be re-shown)
             return
 
         # Create the subject
@@ -387,13 +388,39 @@ def _ensure_example_subject(settings):
             (EXAMPLE_SUBJECT_NAME, EXAMPLE_SUBJECT_NAME),
         )
 
-    # Copy sample video as the subject's trial video
+    # Trim sample video from frame 273 onwards using OpenCV
     video_dir = settings.video_path
     video_dir.mkdir(parents=True, exist_ok=True)
     dest = video_dir / f"{EXAMPLE_SUBJECT_NAME}_R1.mp4"
     if not dest.exists():
-        shutil.copy2(str(sample_video), str(dest))
-        logger.info(f"Created Example subject with video: {dest}")
+        try:
+            cap = cv2.VideoCapture(str(sample_video))
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            writer = cv2.VideoWriter(str(dest), fourcc, fps, (w, h))
+
+            cap.set(cv2.CAP_PROP_POS_FRAMES, EXAMPLE_TRIM_START_FRAME)
+            written = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                writer.write(frame)
+                written += 1
+
+            cap.release()
+            writer.release()
+            logger.info(
+                f"Created Example subject: trimmed {sample_video.name} "
+                f"from frame {EXAMPLE_TRIM_START_FRAME} ({written} frames) → {dest}"
+            )
+        except Exception as e:
+            logger.warning(f"Could not trim Example video, copying full: {e}")
+            import shutil
+            shutil.copy2(str(sample_video), str(dest))
 
     # Create DLC directory
     dlc_dir = settings.dlc_path / EXAMPLE_SUBJECT_NAME
