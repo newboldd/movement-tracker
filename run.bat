@@ -66,45 +66,57 @@ where python >nul 2>nul && (
     )
 )
 
-:: 5. No Python found — try to auto-install via winget
+:: 5. No Python found — try to auto-install
 echo.
 echo Python not found. Attempting automatic install...
 echo.
-where winget >nul 2>nul
-if errorlevel 1 (
-    echo ERROR: Python not found and winget is not available.
-    echo.
-    echo Please install Python manually:
-    echo   1. Download from https://www.python.org/downloads/
-    echo   2. Check "Add Python to PATH" during installation
-    echo   3. Re-run this script
-    echo.
-    pause
-    exit /b 1
+
+:: Try winget first
+set "INSTALL_OK=0"
+where winget >nul 2>nul && (
+    echo Trying winget...
+    winget install Python.Python.3.11 --accept-package-agreements --accept-source-agreements 2>nul && set "INSTALL_OK=1"
 )
 
-echo Installing Python 3.11 via winget (this may take a minute^)...
-winget install Python.Python.3.11 --accept-package-agreements --accept-source-agreements
-if errorlevel 1 (
-    echo.
-    echo Automatic install failed. Please install Python manually:
-    echo   https://www.python.org/downloads/
-    echo.
-    pause
-    exit /b 1
+:: If winget failed or unavailable, download installer directly via PowerShell
+if "!INSTALL_OK!"=="0" (
+    echo Downloading Python installer...
+    set "PY_INSTALLER=%TEMP%\python-3.11-installer.exe"
+    powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe' -OutFile '!PY_INSTALLER!' }" 2>nul
+    if exist "!PY_INSTALLER!" (
+        echo Installing Python 3.11 (this may take a minute^)...
+        "!PY_INSTALLER!" /quiet InstallAllUsers=0 PrependPath=1 Include_launcher=1
+        if errorlevel 1 (
+            echo.
+            echo Automatic install failed. Your IT policy may block software installs.
+            echo Please ask IT to install Python 3.11 or Anaconda, then re-run this script.
+            echo.
+            del "!PY_INSTALLER!" 2>nul
+            pause
+            exit /b 1
+        )
+        del "!PY_INSTALLER!" 2>nul
+    ) else (
+        echo.
+        echo Could not download Python installer.
+        echo Please install Python manually from https://www.python.org/downloads/
+        echo.
+        pause
+        exit /b 1
+    )
 )
 
-:: Refresh PATH so we can find the newly installed python
-echo Refreshing PATH...
+:: Refresh PATH to find newly installed python
 set "PATH=%LOCALAPPDATA%\Programs\Python\Python311;%LOCALAPPDATA%\Programs\Python\Python311\Scripts;%PATH%"
 
-where python >nul 2>nul && (
-    set "PYTHON=python"
+:: Check the specific install path first (avoids Store alias)
+if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" (
+    set "PYTHON=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
     goto :found
 )
 
 echo.
-echo Python was installed but could not be found on PATH.
+echo Python was installed but could not be found.
 echo Please close this window, open a new terminal, and run this script again.
 echo.
 pause
