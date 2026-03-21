@@ -449,20 +449,7 @@ const labeler = (() => {
                 mpCropSection.style.display = (!isEvents && !isFinal && !isCorrections) ? 'block' : 'none';
             }
 
-            // ── Tab visibility: restrict tabs based on subject stage ──
-            const subjectStage = (sessionInfo.subject && sessionInfo.subject.stage) || 'created';
-            const ADVANCED_STAGES = [
-                'analyzed', 'triangulated', 'refined', 'corrected',
-                'retraining', 'retrained',
-                'events_partial', 'events_complete', 'complete',
-            ];
-            const canUseAdvanced = ADVANCED_STAGES.includes(subjectStage);
-            const refineBtn = document.getElementById('modeRefine');
-            const correctBtn = document.getElementById('modeCorrect');
-            const eventsBtn = document.getElementById('modeEvents');
-            if (refineBtn) refineBtn.style.display = canUseAdvanced ? '' : 'none';
-            if (correctBtn) correctBtn.style.display = canUseAdvanced ? '' : 'none';
-            if (eventsBtn) eventsBtn.style.display = canUseAdvanced ? '' : 'none';
+            // All tabs are always visible regardless of subject stage
 
             // Setup keyboard after bodyparts are known
             setupKeyboard();
