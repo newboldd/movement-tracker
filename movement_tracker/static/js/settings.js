@@ -321,7 +321,10 @@ async function checkForUpdates() {
 
     try {
         const resp = await fetch('/api/update/check');
-        if (!resp.ok) throw new Error('Failed to check for updates');
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.detail || 'Failed to check for updates');
+        }
         const data = await resp.json();
 
         versionEl.textContent = `Version: ${data.current_short}`;
