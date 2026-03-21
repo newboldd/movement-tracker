@@ -122,6 +122,21 @@ CREATE TABLE IF NOT EXISTS camera_setups (
     checkerboard_cols INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS mp_crop_boxes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_id INTEGER NOT NULL REFERENCES subjects(id),
+    trial_idx INTEGER NOT NULL,
+    camera_name TEXT NOT NULL,
+    x1 REAL NOT NULL,
+    y1 REAL NOT NULL,
+    x2 REAL NOT NULL,
+    y2 REAL NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(subject_id, trial_idx, camera_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mp_crop_boxes ON mp_crop_boxes(subject_id, trial_idx);
 """
 
 
@@ -357,6 +372,30 @@ def _migrate_add_camera_setups(conn):
         logger.info("Created camera_setups table")
 
 
+def _migrate_add_mp_crop_boxes(conn):
+    """Create mp_crop_boxes table if missing."""
+    tables = [r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()]
+    if "mp_crop_boxes" not in tables:
+        conn.execute("""
+            CREATE TABLE mp_crop_boxes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject_id INTEGER NOT NULL REFERENCES subjects(id),
+                trial_idx INTEGER NOT NULL,
+                camera_name TEXT NOT NULL,
+                x1 REAL NOT NULL,
+                y1 REAL NOT NULL,
+                x2 REAL NOT NULL,
+                y2 REAL NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(subject_id, trial_idx, camera_name)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mp_crop_boxes ON mp_crop_boxes(subject_id, trial_idx)")
+        logger.info("Created mp_crop_boxes table")
+
+
 def init_db():
     """Create tables if they don't exist, run migrations."""
     conn = get_db()
@@ -399,6 +438,9 @@ def init_db():
     conn.commit()
 
     _migrate_add_frame_offset(conn)
+    conn.commit()
+
+    _migrate_add_mp_crop_boxes(conn)
     conn.commit()
 
     conn.executescript(SCHEMA)

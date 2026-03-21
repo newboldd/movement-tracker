@@ -125,10 +125,12 @@ const labeler = (() => {
 
     // MediaPipe bounding-box crop state
     let mpCropMode = false;            // bounding box editing active
-    let mpCropBoxes = {};              // {side: {x1, y1, x2, y2}} in image coords (saved)
+    let mpCropBoxes = {};              // {trialIdx: {cam: {x1, y1, x2, y2}}} loaded from DB
     let mpCropEditBox = null;          // current editing box {x1, y1, x2, y2} (unsaved)
     let mpCropDragHandle = null;       // which handle is being dragged
     let mpCropDragStart = null;        // {mx, my, box: {...}} at drag start
+    let mpCropAdjusted = {};           // {cam: bool} whether user manually dragged each camera's box
+    let mpHasMediapipe = {};           // {trialIdx: bool} whether mediapipe labels exist per trial
 
     // Deleted frame/side keys — sent to server on save so DB stays in sync
     const deletedKeys = new Set();
@@ -421,6 +423,14 @@ const labeler = (() => {
                 sideBtn.textContent = currentSide;
             }
 
+            // ── Load saved crop boxes from session info ──
+            if (sessionInfo.crop_boxes) {
+                mpCropBoxes = {};
+                for (const [ti, cams] of Object.entries(sessionInfo.crop_boxes)) {
+                    mpCropBoxes[parseInt(ti)] = cams;
+                }
+            }
+
             // ── Show MediaPipe crop section in label/refine modes ──
             const mpCropSection = document.getElementById('mpCropSection');
             if (mpCropSection) {
@@ -501,6 +511,9 @@ const labeler = (() => {
                 } catch (e) {
                     console.log('No MediaPipe prelabels available');
                 }
+
+                // Compute per-trial mediapipe availability for Run vs Re-run button text
+                _computeMpHasMediapipe();
 
                 try {
                     const dlcData = await API.get(`/api/labeling/sessions/${sessionId}/dlc_predictions`);
@@ -724,6 +737,7 @@ const labeler = (() => {
         if (frame < 0 || frame >= totalFrames) return;
         currentFrame = frame;
         distAutoScroll = true; // frame navigation re-enables auto-scroll
+        _updateMpButtonText();
 
         // Prefer video element for accurate frame display.
         // OpenCV's cap.set(POS_FRAMES, N) is unreliable for many H.264 videos —
@@ -1435,17 +1449,113 @@ const labeler = (() => {
             x1: Math.round(x1), y1: Math.round(y1),
             x2: Math.round(x2), y2: Math.round(y2),
         };
+        // Mark this camera as manually adjusted
+        mpCropAdjusted[currentSide] = true;
+        _updateMpCamStatus();
+    }
+
+    // ── Helper: get current trial index from currentFrame ──
+    function _getCurrentTrialIdx() {
+        for (let i = 0; i < trials.length; i++) {
+            if (currentFrame >= trials[i].start_frame && currentFrame <= trials[i].end_frame) {
+                return i;
+            }
+        }
+        return 0;
+    }
+
+    // ── Compute per-trial mediapipe availability ──
+    function _computeMpHasMediapipe() {
+        mpHasMediapipe = {};
+        if (!mpLabels) return;
+        // Check if any camera has landmark data for each trial's frame range
+        for (let ti = 0; ti < trials.length; ti++) {
+            const start = trials[ti].start_frame;
+            const end = trials[ti].end_frame;
+            let hasData = false;
+            for (const cam of cameraNames) {
+                const key = cam + '_landmarks';
+                if (mpLabels[key]) {
+                    // Check if any frame in this trial has non-null data
+                    for (let f = start; f <= end && !hasData; f++) {
+                        if (mpLabels[key][f]) hasData = true;
+                    }
+                }
+                if (hasData) break;
+            }
+            mpHasMediapipe[ti] = hasData;
+        }
+    }
+
+    // ── Update Run/Re-run button text based on current trial ──
+    function _updateMpButtonText() {
+        const ti = _getCurrentTrialIdx();
+        const hasLabels = mpHasMediapipe[ti];
+        const runBtn = document.getElementById('mpRunBtn');
+        const rerunBtn = document.getElementById('mpRerunBtn');
+        if (runBtn) runBtn.textContent = hasLabels ? 'Re-run MediaPipe' : 'Run MediaPipe';
+        if (rerunBtn) rerunBtn.textContent = hasLabels
+            ? 'Re-run MediaPipe (this trial)' : 'Run MediaPipe (this trial)';
+    }
+
+    // ── Update per-camera adjustment status display ──
+    function _updateMpCamStatus() {
+        const el = document.getElementById('mpCamStatus');
+        if (!el) return;
+        const parts = cameraNames.map(cam => {
+            const adj = mpCropAdjusted[cam];
+            return `${cam}: ${adj ? 'adjusted \u2713' : 'default'}`;
+        });
+        el.textContent = parts.join(' | ');
+    }
+
+    // ── Default crop box: 10% inset from edges (visible on screen) ──
+    function _defaultCropBox() {
+        return {
+            x1: Math.round(imgW * 0.1),
+            y1: Math.round(imgH * 0.1),
+            x2: Math.round(imgW * 0.9),
+            y2: Math.round(imgH * 0.9),
+        };
+    }
+
+    // ── Primary action: user clicks "Run MediaPipe" / "Re-run MediaPipe" ──
+    function startMpFlow() {
+        const ti = _getCurrentTrialIdx();
+        const editSection = document.getElementById('mpEditSection');
+        const runBtn = document.getElementById('mpRunBtn');
+        if (editSection) editSection.style.display = 'block';
+        if (runBtn) runBtn.style.display = 'none';
+
+        // Initialize crop boxes for both cameras
+        mpCropAdjusted = {};
+        for (const cam of cameraNames) {
+            const saved = mpCropBoxes[ti] && mpCropBoxes[ti][cam];
+            if (saved) {
+                mpCropAdjusted[cam] = true;  // DB-saved counts as adjusted
+            } else {
+                mpCropAdjusted[cam] = false;
+            }
+        }
+
+        // Auto-check the edit checkbox and enter crop mode
+        const toggle = document.getElementById('mpCropToggle');
+        if (toggle) toggle.checked = true;
+        toggleMpCrop(true);
+        _updateMpCamStatus();
     }
 
     function toggleMpCrop(enabled) {
         mpCropMode = enabled;
         const actionsEl = document.getElementById('mpCropActions');
+        const rerunBtn = document.getElementById('mpRerunBtn');
         if (enabled) {
-            // Initialize edit box from saved or full frame
-            mpCropEditBox = mpCropBoxes[currentSide]
-                ? { ...mpCropBoxes[currentSide] }
-                : { x1: 0, y1: 0, x2: imgW, y2: imgH };
+            const ti = _getCurrentTrialIdx();
+            // Initialize edit box from saved (DB) or default (10% inset)
+            const saved = mpCropBoxes[ti] && mpCropBoxes[ti][currentSide];
+            mpCropEditBox = saved ? { ...saved } : _defaultCropBox();
             if (actionsEl) actionsEl.style.display = 'flex';
+            if (rerunBtn) rerunBtn.style.display = 'none';
             // Lock zoom so frame navigation doesn't shift the view
             hasUserZoom = true;
         } else {
@@ -1453,23 +1563,76 @@ const labeler = (() => {
             mpCropDragHandle = null;
             mpCropDragStart = null;
             if (actionsEl) actionsEl.style.display = 'none';
+            // Show rerun button when unchecking
+            if (rerunBtn) rerunBtn.style.display = 'block';
+            _updateMpButtonText();
         }
         render();
     }
 
-    function saveMpCrop() {
+    async function saveMpCrop() {
+        const ti = _getCurrentTrialIdx();
+        const statusEl = document.getElementById('mpRerunStatus');
+
+        // Save current edit box for current camera before processing
         if (mpCropEditBox) {
-            mpCropBoxes[currentSide] = { ...mpCropEditBox };
+            mpCropAdjusted[currentSide] = true;
+            if (!mpCropBoxes[ti]) mpCropBoxes[ti] = {};
+            mpCropBoxes[ti][currentSide] = { ...mpCropEditBox };
         }
+
+        // Check adjustment status
+        const adjustedCams = cameraNames.filter(c => mpCropAdjusted[c]);
+        const unadjustedCams = cameraNames.filter(c => !mpCropAdjusted[c]);
+
+        // If neither camera adjusted, just uncheck and show rerun
+        if (adjustedCams.length === 0) {
+            mpCropMode = false;
+            mpCropEditBox = null;
+            const toggle = document.getElementById('mpCropToggle');
+            if (toggle) toggle.checked = false;
+            const actionsEl = document.getElementById('mpCropActions');
+            if (actionsEl) actionsEl.style.display = 'none';
+            const rerunBtn = document.getElementById('mpRerunBtn');
+            if (rerunBtn) rerunBtn.style.display = 'block';
+            _updateMpButtonText();
+            render();
+            return;
+        }
+
+        // If only some cameras adjusted, set unadjusted ones to full frame
+        if (unadjustedCams.length > 0) {
+            if (!mpCropBoxes[ti]) mpCropBoxes[ti] = {};
+            for (const cam of unadjustedCams) {
+                mpCropBoxes[ti][cam] = { x1: 0, y1: 0, x2: imgW, y2: imgH };
+            }
+            if (statusEl) {
+                statusEl.textContent = `${unadjustedCams.join(', ')} not adjusted — set to full frame.`;
+            }
+        }
+
+        // Save to database
+        const boxes = mpCropBoxes[ti] || {};
+        try {
+            await API.post(`/api/labeling/sessions/${sessionId}/crop-boxes`, {
+                trial_idx: ti,
+                boxes: boxes,
+                apply_to_all: true,
+            });
+        } catch (err) {
+            if (statusEl) statusEl.textContent = 'Error saving crop boxes: ' + (err.message || err);
+        }
+
+        // Exit edit mode, show rerun button
         mpCropMode = false;
         mpCropEditBox = null;
         const toggle = document.getElementById('mpCropToggle');
         if (toggle) toggle.checked = false;
         const actionsEl = document.getElementById('mpCropActions');
         if (actionsEl) actionsEl.style.display = 'none';
-        // Show rerun button
         const rerunBtn = document.getElementById('mpRerunBtn');
-        if (rerunBtn && mpCropBoxes[currentSide]) rerunBtn.style.display = 'block';
+        if (rerunBtn) rerunBtn.style.display = 'block';
+        _updateMpButtonText();
         render();
     }
 
@@ -1482,32 +1645,35 @@ const labeler = (() => {
         if (toggle) toggle.checked = false;
         const actionsEl = document.getElementById('mpCropActions');
         if (actionsEl) actionsEl.style.display = 'none';
+        // Hide edit section, show run button again
+        const editSection = document.getElementById('mpEditSection');
+        if (editSection) editSection.style.display = 'none';
+        const runBtn = document.getElementById('mpRunBtn');
+        if (runBtn) runBtn.style.display = 'block';
+        _updateMpButtonText();
         render();
     }
 
     async function rerunMediapipe() {
-        const crop = mpCropBoxes[currentSide];
-        if (!crop) return;
+        const ti = _getCurrentTrialIdx();
 
-        // Find which trial the current frame belongs to
-        let trialIdx = 0;
-        for (let i = 0; i < trials.length; i++) {
-            if (currentFrame >= trials[i].start_frame && currentFrame <= trials[i].end_frame) {
-                trialIdx = i;
-                break;
-            }
+        // Gather crops for ALL cameras
+        const crops = {};
+        for (const cam of cameraNames) {
+            const saved = mpCropBoxes[ti] && mpCropBoxes[ti][cam];
+            crops[cam] = saved || { x1: 0, y1: 0, x2: imgW, y2: imgH };
         }
 
         const statusEl = document.getElementById('mpRerunStatus');
         const rerunBtn = document.getElementById('mpRerunBtn');
-        if (statusEl) statusEl.textContent = 'Re-running MediaPipe…';
+        const runLabel = mpHasMediapipe[ti] ? 'Re-running' : 'Running';
+        if (statusEl) statusEl.textContent = `${runLabel} MediaPipe…`;
         if (rerunBtn) rerunBtn.disabled = true;
 
         try {
             const result = await API.post(`/api/labeling/sessions/${sessionId}/rerun-mediapipe`, {
-                trial_idx: trialIdx,
-                side: currentSide,
-                crop: crop,
+                trial_idx: ti,
+                crops: crops,
             });
 
             const jobId = result.job_id;
@@ -1519,21 +1685,12 @@ const labeler = (() => {
                 const data = JSON.parse(event.data);
                 if (data.status === 'running') {
                     const pct = data.progress_pct ? Math.round(data.progress_pct) : 0;
-                    if (statusEl) statusEl.textContent = `Re-running MediaPipe… ${pct}%`;
+                    if (statusEl) statusEl.textContent = `${runLabel} MediaPipe… ${pct}%`;
                 } else if (data.status === 'completed') {
                     evtSource.close();
-                    if (statusEl) statusEl.textContent = 'Done! Reloading labels…';
-                    // Reload mediapipe data
-                    const mpResp = await API.get(`/api/labeling/sessions/${sessionId}/mediapipe`);
-                    mpLabels = (mpResp && Object.keys(mpResp).length) ? mpResp : null;
-                    if (mpLabels && mpLabels.distances) {
-                        distances = mpLabels.distances;
-                    }
-                    render();
-                    renderTimeline();
-                    renderDistanceTrace();
-                    if (statusEl) statusEl.textContent = 'MediaPipe updated successfully.';
-                    if (rerunBtn) rerunBtn.disabled = false;
+                    if (statusEl) statusEl.textContent = 'Done! Reloading page…';
+                    // Full page reload so distance trace renders cleanly
+                    window.location.reload();
                 } else if (data.status === 'failed') {
                     evtSource.close();
                     if (statusEl) statusEl.textContent = 'Error: ' + (data.error_msg || 'unknown');
@@ -2707,10 +2864,13 @@ const labeler = (() => {
         }
 
         // --- Per-camera bounding box handling on camera switch ---
+        const ti = _getCurrentTrialIdx();
         if (mpCropMode) {
             // Save current edit box for the old camera before switching
             if (mpCropEditBox) {
-                mpCropBoxes[currentSide] = { ...mpCropEditBox };
+                if (!mpCropBoxes[ti]) mpCropBoxes[ti] = {};
+                mpCropBoxes[ti][currentSide] = { ...mpCropEditBox };
+                mpCropAdjusted[currentSide] = true;
             }
         }
 
@@ -2718,18 +2878,12 @@ const labeler = (() => {
         document.getElementById('sideToggle').textContent = currentSide;
 
         if (mpCropMode) {
-            // Load saved box for new camera, or initialize to full frame
-            mpCropEditBox = mpCropBoxes[currentSide]
-                ? { ...mpCropBoxes[currentSide] }
-                : { x1: 0, y1: 0, x2: imgW, y2: imgH };
+            // Load saved box for new camera, or use 10% inset default
+            const saved = mpCropBoxes[ti] && mpCropBoxes[ti][currentSide];
+            mpCropEditBox = saved ? { ...saved } : _defaultCropBox();
             mpCropDragHandle = null;
             mpCropDragStart = null;
-        }
-
-        // Update rerun button visibility for new camera
-        const rerunBtn = document.getElementById('mpRerunBtn');
-        if (rerunBtn) {
-            rerunBtn.style.display = mpCropBoxes[currentSide] ? 'block' : 'none';
+            _updateMpCamStatus();
         }
 
         goToFrame(currentFrame);
@@ -4770,7 +4924,7 @@ const labeler = (() => {
         // Video export
         getExportContext,
         // MediaPipe crop box
-        toggleMpCrop, saveMpCrop, cancelMpCrop, rerunMediapipe,
+        startMpFlow, toggleMpCrop, saveMpCrop, cancelMpCrop, rerunMediapipe,
     };
 })();
 

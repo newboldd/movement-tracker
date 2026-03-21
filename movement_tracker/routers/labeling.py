@@ -166,6 +166,21 @@ def get_session_info(session_id: int) -> dict:
         if dlc_path.exists():
             committed_frame_count = _count_labeled_frames(dlc_path)
 
+    # Load saved crop boxes for this subject
+    crop_boxes = {}
+    with get_db_ctx() as db2:
+        rows = db2.execute(
+            "SELECT trial_idx, camera_name, x1, y1, x2, y2 FROM mp_crop_boxes WHERE subject_id = ?",
+            (subj["id"],),
+        ).fetchall()
+    for r in rows:
+        ti = r["trial_idx"]
+        if ti not in crop_boxes:
+            crop_boxes[ti] = {}
+        crop_boxes[ti][r["camera_name"]] = {
+            "x1": r["x1"], "y1": r["y1"], "x2": r["x2"], "y2": r["y2"],
+        }
+
     return {
         "session": session,
         "subject": subj,
@@ -176,6 +191,7 @@ def get_session_info(session_id: int) -> dict:
         "camera_mode": subj.get("camera_mode") or settings.default_camera_mode,
         "committed_frame_count": committed_frame_count,
         "event_types": settings.event_types,
+        "crop_boxes": crop_boxes,
     }
 
 
@@ -1504,14 +1520,96 @@ def save_corrections_only(session_id: int) -> dict:
     return save_corrections_to_csv(subject_name=subj["name"], session_labels=labels)
 
 
+@router.get("/sessions/{session_id}/crop-boxes")
+def get_crop_boxes(session_id: int, trial_idx: int = Query(...)) -> dict:
+    """Return saved crop boxes for subject + trial."""
+    with get_db_ctx() as db:
+        session = db.execute(
+            "SELECT * FROM label_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not session:
+            raise HTTPException(404, "Session not found")
+        rows = db.execute(
+            "SELECT camera_name, x1, y1, x2, y2 FROM mp_crop_boxes WHERE subject_id = ? AND trial_idx = ?",
+            (session["subject_id"], trial_idx),
+        ).fetchall()
+    boxes = {}
+    for r in rows:
+        boxes[r["camera_name"]] = {"x1": r["x1"], "y1": r["y1"], "x2": r["x2"], "y2": r["y2"]}
+    return {"boxes": boxes}
+
+
+@router.post("/sessions/{session_id}/crop-boxes")
+def save_crop_boxes(session_id: int, body: dict = Body(...)) -> dict:
+    """Save crop boxes for a trial. Optionally apply to all other trials that lack saved boxes.
+
+    Body: { trial_idx: int, boxes: { cam: {x1,y1,x2,y2} }, apply_to_all: bool }
+    """
+    with get_db_ctx() as db:
+        session = db.execute(
+            "SELECT * FROM label_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not session:
+            raise HTTPException(404, "Session not found")
+        subject_id = session["subject_id"]
+
+    trial_idx = body.get("trial_idx", 0)
+    boxes = body.get("boxes", {})
+    apply_to_all = body.get("apply_to_all", False)
+
+    if not boxes:
+        raise HTTPException(400, "boxes must be a non-empty dict")
+
+    applied_trials = [trial_idx]
+
+    with get_db_ctx() as db:
+        # Upsert boxes for the specified trial
+        for cam, coords in boxes.items():
+            db.execute(
+                """INSERT INTO mp_crop_boxes (subject_id, trial_idx, camera_name, x1, y1, x2, y2)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(subject_id, trial_idx, camera_name)
+                   DO UPDATE SET x1=excluded.x1, y1=excluded.y1, x2=excluded.x2, y2=excluded.y2,
+                                 updated_at=CURRENT_TIMESTAMP""",
+                (subject_id, trial_idx, cam, coords["x1"], coords["y1"], coords["x2"], coords["y2"]),
+            )
+
+        # Apply to other trials that don't have any saved boxes yet
+        if apply_to_all:
+            subj = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
+            camera_mode = subj.get("camera_mode") or "stereo"
+            trials = build_trial_map(subj["name"], camera_mode=camera_mode)
+            for ti in range(len(trials)):
+                if ti == trial_idx:
+                    continue
+                existing = db.execute(
+                    "SELECT COUNT(*) as cnt FROM mp_crop_boxes WHERE subject_id = ? AND trial_idx = ?",
+                    (subject_id, ti),
+                ).fetchone()
+                if existing["cnt"] == 0:
+                    for cam, coords in boxes.items():
+                        db.execute(
+                            """INSERT OR IGNORE INTO mp_crop_boxes
+                               (subject_id, trial_idx, camera_name, x1, y1, x2, y2)
+                               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                            (subject_id, ti, cam, coords["x1"], coords["y1"], coords["x2"], coords["y2"]),
+                        )
+                    applied_trials.append(ti)
+
+    return {"status": "ok", "applied_trials": applied_trials}
+
+
 @router.post("/sessions/{session_id}/rerun-mediapipe")
 def rerun_mediapipe(session_id: int, body: dict = Body(...)) -> dict:
-    """Re-run MediaPipe on a single trial with a bounding-box crop.
+    """Re-run MediaPipe on a trial with bounding-box crops for all cameras.
 
-    Request body: { trial_idx: int, side: str, crop: {x1, y1, x2, y2} }
+    Request body (new format):
+        { trial_idx: int, crops: { cam_name: {x1, y1, x2, y2}, ... } }
 
-    Creates a background job so the work appears in the dashboard and
-    processing page job queues.  Returns the job_id for SSE tracking.
+    Backward-compatible with old format:
+        { trial_idx: int, side: str, crop: {x1, y1, x2, y2} }
+
+    Runs each camera sequentially in one background job (0-50% cam1, 50-100% cam2).
     """
     import threading
     from ..services.jobs import registry
@@ -1527,10 +1625,15 @@ def rerun_mediapipe(session_id: int, body: dict = Body(...)) -> dict:
         ).fetchone()
 
     trial_idx = body.get("trial_idx", 0)
-    side = body.get("side", "")
-    crop = body.get("crop")
-    if not crop or not all(k in crop for k in ("x1", "y1", "x2", "y2")):
-        raise HTTPException(400, "crop must contain x1, y1, x2, y2")
+
+    # Accept new multi-camera format or old single-camera format
+    crops = body.get("crops")
+    if not crops:
+        side = body.get("side", "")
+        crop = body.get("crop")
+        if not crop or not all(k in crop for k in ("x1", "y1", "x2", "y2")):
+            raise HTTPException(400, "crops or crop must be provided")
+        crops = {side: crop}
 
     subject_name = subj["name"]
     subject_id = subj["id"]
@@ -1540,35 +1643,36 @@ def rerun_mediapipe(session_id: int, body: dict = Body(...)) -> dict:
         raise HTTPException(400, f"Invalid trial_idx {trial_idx}")
 
     trial = trials[trial_idx]
-
-    # Resolve video path — for multicam, find the specific camera file
-    video_path = trial["video_path"]
-    if camera_mode == "multicam" and side:
-        for cam in trial.get("cameras", []):
-            if cam["name"] == side:
-                video_path = cam["path"]
-                break
-
-    # Determine which npz camera key this side maps to.
-    # MediaPipe stores data under global camera names (OS/OD); for multicam
-    # subjects the side (e.g. ipad/iphone) must be mapped back.
     settings = get_settings()
     global_cams = settings.camera_names
-    if camera_mode == "multicam":
-        subject_cams = [c["name"] for c in trials[0].get("cameras", [])] if trials else []
-        try:
-            cam_idx = subject_cams.index(side)
-            camera_key = global_cams[cam_idx] if cam_idx < len(global_cams) else side
-        except ValueError:
-            camera_key = side
-    else:
-        camera_key = side if side in global_cams else (global_cams[0] if global_cams else "OS")
-
-    # is_full_frame: True when the video is a stereo side-by-side file
-    # (we need to split left/right halves before cropping)
     is_stereo_video = camera_mode == "stereo"
 
-    # ── Create a job record so it appears in dashboard / processing page ──
+    # Build list of (side, crop, video_path, camera_key) for each camera to process
+    cam_jobs = []
+    for side, crop in crops.items():
+        video_path = trial["video_path"]
+        if camera_mode == "multicam" and side:
+            for cam in trial.get("cameras", []):
+                if cam["name"] == side:
+                    video_path = cam["path"]
+                    break
+
+        if camera_mode == "multicam":
+            subject_cams = [c["name"] for c in trials[0].get("cameras", [])] if trials else []
+            try:
+                cam_idx = subject_cams.index(side)
+                camera_key = global_cams[cam_idx] if cam_idx < len(global_cams) else side
+            except ValueError:
+                camera_key = side
+        else:
+            camera_key = side if side in global_cams else (global_cams[0] if global_cams else "OS")
+
+        cam_jobs.append({
+            "side": side, "crop": crop, "video_path": video_path,
+            "camera_key": camera_key,
+        })
+
+    # ── Create a job record ──
     with get_db_ctx() as db:
         log_dir = settings.dlc_path / ".logs"
         log_dir.mkdir(exist_ok=True)
@@ -1586,6 +1690,7 @@ def rerun_mediapipe(session_id: int, body: dict = Body(...)) -> dict:
 
     job_id = job["id"]
     cancel_event = registry.register_cancel_event(job_id)
+    n_cams = len(cam_jobs)
 
     def _run():
         try:
@@ -1595,26 +1700,31 @@ def rerun_mediapipe(session_id: int, body: dict = Body(...)) -> dict:
                     (job_id,),
                 )
 
-            def progress_cb(pct):
-                if cancel_event.is_set():
-                    raise InterruptedError("Job cancelled")
-                with get_db_ctx() as db:
-                    db.execute(
-                        "UPDATE jobs SET progress_pct = ? WHERE id = ?",
-                        (pct, job_id),
-                    )
+            for ci, cj in enumerate(cam_jobs):
+                base_pct = ci * (100.0 / n_cams)
+                span = 100.0 / n_cams
 
-            run_mediapipe_cropped(
-                subject_name=subject_name,
-                video_path=video_path,
-                start_frame=trial["start_frame"],
-                frame_count=trial["frame_count"],
-                crop=crop,
-                camera_key=camera_key,
-                is_stereo_video=is_stereo_video,
-                stereo_side=side,
-                progress_callback=progress_cb,
-            )
+                def progress_cb(pct, _base=base_pct, _span=span):
+                    if cancel_event.is_set():
+                        raise InterruptedError("Job cancelled")
+                    overall = _base + (pct / 100.0) * _span
+                    with get_db_ctx() as db:
+                        db.execute(
+                            "UPDATE jobs SET progress_pct = ? WHERE id = ?",
+                            (overall, job_id),
+                        )
+
+                run_mediapipe_cropped(
+                    subject_name=subject_name,
+                    video_path=cj["video_path"],
+                    start_frame=trial["start_frame"],
+                    frame_count=trial["frame_count"],
+                    crop=cj["crop"],
+                    camera_key=cj["camera_key"],
+                    is_stereo_video=is_stereo_video,
+                    stereo_side=cj["side"],
+                    progress_callback=progress_cb,
+                )
 
             with get_db_ctx() as db:
                 db.execute(
@@ -1641,4 +1751,4 @@ def rerun_mediapipe(session_id: int, body: dict = Body(...)) -> dict:
 
     threading.Thread(target=_run, daemon=True).start()
 
-    return {"status": "ok", "job_id": job_id, "trial_idx": trial_idx, "side": side}
+    return {"status": "ok", "job_id": job_id, "trial_idx": trial_idx}
