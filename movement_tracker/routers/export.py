@@ -225,8 +225,15 @@ def encode_export(export_id: str, background_tasks: BackgroundTasks):
 
     output_path = os.path.join(tmp_dir, "export.mp4")
 
+    from ..services.ffmpeg import get_ffmpeg_path
+
+    try:
+        ffmpeg = get_ffmpeg_path()
+    except FileNotFoundError as e:
+        raise HTTPException(500, str(e))
+
     cmd = [
-        "ffmpeg", "-y",
+        ffmpeg, "-y",
         "-framerate", str(fps),
         "-i", os.path.join(tmp_dir, "frame_%06d.jpg"),
         # Pad to even dimensions (required by libx264 + yuv420p)
@@ -236,10 +243,7 @@ def encode_export(export_id: str, background_tasks: BackgroundTasks):
         output_path,
     ]
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    except FileNotFoundError:
-        raise HTTPException(500, "ffmpeg not found. Install FFmpeg and add to PATH.")
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
     if result.returncode != 0:
         # ffmpeg stderr starts with version/config info; the actual error is at the end

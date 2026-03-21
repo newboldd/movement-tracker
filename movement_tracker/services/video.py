@@ -30,8 +30,9 @@ def _compute_frame_offset(video_path: str, actual_count: int) -> int:
     """
     try:
         import subprocess
+        from .ffmpeg import get_ffprobe_path
         result = subprocess.run(
-            ['ffprobe', '-v', 'quiet', '-select_streams', 'v:0',
+            [get_ffprobe_path(), '-v', 'quiet', '-select_streams', 'v:0',
              '-show_entries', 'packet=pts_time', '-of', 'csv=p=0', video_path],
             capture_output=True, text=True, timeout=60,
         )

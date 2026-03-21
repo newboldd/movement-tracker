@@ -49,54 +49,37 @@ class ProcessSubjectRequest(BaseModel):
 
 # ── Probe ─────────────────────────────────────────────────────────────────
 
-def _ffprobe(video_path: str) -> dict:
-    """Get video metadata using ffprobe."""
-    try:
-        result = subprocess.run(
-            [
-                "ffprobe", "-v", "quiet",
-                "-print_format", "json",
-                "-show_format", "-show_streams",
-                video_path,
-            ],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"ffprobe failed: {result.stderr}")
-        return json.loads(result.stdout)
-    except FileNotFoundError:
-        raise HTTPException(500, "ffprobe not found. Install FFmpeg and add to PATH.")
-
-
 @router.get("/probe")
 def probe_video(path: str = Query(..., description="Path to video file")) -> dict:
-    """Get video metadata: duration, fps, resolution, stereo detection."""
+    """Get video metadata: duration, fps, resolution, stereo detection.
+
+    Uses OpenCV instead of ffprobe so no system-level FFmpeg install is needed
+    just for probing videos.
+    """
+    import cv2
+
     if not Path(path).exists():
         raise HTTPException(404, f"Video not found: {path}")
 
-    info = _ffprobe(path)
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise HTTPException(400, f"Cannot open video: {path}")
 
-    # Find video stream
-    video_stream = None
-    for stream in info.get("streams", []):
-        if stream.get("codec_type") == "video":
-            video_stream = stream
-            break
-
-    if not video_stream:
-        raise HTTPException(400, "No video stream found")
-
-    width = int(video_stream.get("width", 0))
-    height = int(video_stream.get("height", 0))
-    duration = float(info.get("format", {}).get("duration", 0))
-
-    # Parse FPS from r_frame_rate (e.g. "30/1")
-    fps_str = video_stream.get("r_frame_rate", "30/1")
     try:
-        num, den = fps_str.split("/")
-        fps = float(num) / float(den)
-    except (ValueError, ZeroDivisionError):
-        fps = 30.0
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = frame_count / fps if fps > 0 else 0
+
+        # Try to get codec FourCC
+        fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+        codec = "".join(chr((fourcc >> 8 * i) & 0xFF) for i in range(4)).strip() or "unknown"
+    finally:
+        cap.release()
+
+    if width == 0 or height == 0:
+        raise HTTPException(400, "No video stream found")
 
     # Stereo detection: aspect ratio ~2:1 suggests stereo
     aspect = width / height if height > 0 else 1
@@ -109,7 +92,7 @@ def probe_video(path: str = Query(..., description="Path to video file")) -> dic
         "duration": round(duration, 3),
         "fps": round(fps, 2),
         "is_stereo": is_stereo,
-        "codec": video_stream.get("codec_name", "unknown"),
+        "codec": codec,
         "size_mb": round(os.path.getsize(path) / (1024 * 1024), 1),
     }
 
@@ -148,8 +131,15 @@ def _ffmpeg_trim(source_path: str, start_time: float, end_time: float,
     duration = end_time - start_time
     duration_us = duration * 1_000_000
 
+    from ..services.ffmpeg import get_ffmpeg_path
+
+    try:
+        ffmpeg = get_ffmpeg_path()
+    except FileNotFoundError as e:
+        raise HTTPException(500, str(e))
+
     cmd = [
-        "ffmpeg", "-y",
+        ffmpeg, "-y",
         "-ss", f"{start_time:.3f}",
         "-i", source_path,
         "-t", f"{duration:.3f}",
@@ -161,21 +151,15 @@ def _ffmpeg_trim(source_path: str, start_time: float, end_time: float,
 
     if not progress_callback:
         # Simple blocking path
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-        except FileNotFoundError:
-            raise HTTPException(500, "ffmpeg not found. Install FFmpeg and add to PATH.")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if result.returncode != 0:
             raise RuntimeError(f"ffmpeg trim failed: {result.stderr[:500]}")
         return output_path
 
     # Stream stdout for progress parsing
-    try:
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        )
-    except FileNotFoundError:
-        raise HTTPException(500, "ffmpeg not found. Install FFmpeg and add to PATH.")
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
 
     for line in proc.stdout:
         m = _re.match(r"out_time_us=(\d+)", line.strip())
