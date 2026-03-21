@@ -66,13 +66,46 @@ where python >nul 2>nul && (
     )
 )
 
+:: 5. No Python found — try to auto-install via winget
 echo.
-echo ERROR: Python not found.
+echo Python not found. Attempting automatic install...
 echo.
-echo Options:
-echo   1. Install Anaconda: https://www.anaconda.com/download
-echo   2. Install Python 3.9-3.11: https://www.python.org/downloads/
-echo      (check "Add Python to PATH" during installation)
+where winget >nul 2>nul
+if errorlevel 1 (
+    echo ERROR: Python not found and winget is not available.
+    echo.
+    echo Please install Python manually:
+    echo   1. Download from https://www.python.org/downloads/
+    echo   2. Check "Add Python to PATH" during installation
+    echo   3. Re-run this script
+    echo.
+    pause
+    exit /b 1
+)
+
+echo Installing Python 3.11 via winget (this may take a minute^)...
+winget install Python.Python.3.11 --accept-package-agreements --accept-source-agreements
+if errorlevel 1 (
+    echo.
+    echo Automatic install failed. Please install Python manually:
+    echo   https://www.python.org/downloads/
+    echo.
+    pause
+    exit /b 1
+)
+
+:: Refresh PATH so we can find the newly installed python
+echo Refreshing PATH...
+set "PATH=%LOCALAPPDATA%\Programs\Python\Python311;%LOCALAPPDATA%\Programs\Python\Python311\Scripts;%PATH%"
+
+where python >nul 2>nul && (
+    set "PYTHON=python"
+    goto :found
+)
+
+echo.
+echo Python was installed but could not be found on PATH.
+echo Please close this window, open a new terminal, and run this script again.
 echo.
 pause
 exit /b 1
