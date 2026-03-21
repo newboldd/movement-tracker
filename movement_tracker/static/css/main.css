@@ -357,6 +357,10 @@ body {
     flex-shrink: 0;
 }
 
+.timeline-canvas {
+    outline: none;
+}
+
 .controls-bar {
     background: var(--bg-card);
     border-top: 1px solid var(--border);
@@ -371,7 +375,7 @@ body {
 .controls-bar .frame-display {
     font-family: 'Consolas', monospace;
     color: var(--blue);
-    min-width: 120px;
+    min-width: 180px;
 }
 
 .controls-bar .side-toggle {

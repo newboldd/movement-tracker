@@ -132,6 +132,9 @@ const labeler = (() => {
     let mpCropAdjusted = {};           // {cam: bool} whether user manually dragged each camera's box
     let mpHasMediapipe = {};           // {trialIdx: bool} whether mediapipe labels exist per trial
 
+    // Frame display mode: 'frame' | 'time' | 'both'
+    let frameDisplayMode = 'frame';
+
     // Deleted frame/side keys — sent to server on save so DB stays in sync
     const deletedKeys = new Set();
     // Dirty (modified since last save) keys — only these are sent to server
@@ -284,6 +287,15 @@ const labeler = (() => {
             });
         }
 
+        // Format speed: show fractions for slow speeds (1/100x, 1/50x, etc.)
+        function _formatSpeed(rate) {
+            if (rate < 1 && rate > 0) {
+                const denom = Math.round(1 / rate);
+                return `1/${denom}x`;
+            }
+            return `${rate}x`;
+        }
+
         // Playback speed slider
         const speedSlider = document.getElementById('playbackRate');
         const speedDisplay = document.getElementById('playbackRateDisplay');
@@ -292,7 +304,7 @@ const labeler = (() => {
             speedSlider.addEventListener('input', () => {
                 const index = parseInt(speedSlider.value);
                 playbackRate = SPEED_PRESETS[index];
-                speedDisplay.textContent = `${playbackRate}x`;
+                speedDisplay.textContent = _formatSpeed(playbackRate);
             });
             // Initialize slider to match current playbackRate
             const currentIndex = SPEED_PRESETS.indexOf(playbackRate);
@@ -300,7 +312,7 @@ const labeler = (() => {
                 speedSlider.value = currentIndex;
             }
             // Initialize display with current value
-            speedDisplay.textContent = `${playbackRate}x`;
+            speedDisplay.textContent = _formatSpeed(playbackRate);
         }
 
         // Threshold param inputs → re-render distance metric canvas on change
@@ -2893,7 +2905,7 @@ const labeler = (() => {
         playing = !playing;
         const btn = document.getElementById('playBtn');
         if (playing) {
-            btn.innerHTML = '&#9646;&#9646;';
+            btn.innerHTML = '\u23F8';
             // Slider value is an index into SPEED_PRESETS, not a direct rate value
             const sliderIndex = parseInt(document.getElementById('playbackRate').value);
             playbackRate = SPEED_PRESETS[sliderIndex] || 1;
@@ -3105,6 +3117,13 @@ const labeler = (() => {
         render();
     }
 
+    function cycleFrameDisplay() {
+        const modes = ['frame', 'time', 'both'];
+        const idx = modes.indexOf(frameDisplayMode);
+        frameDisplayMode = modes[(idx + 1) % modes.length];
+        render();
+    }
+
     // ── Keyboard shortcuts ────────────────────────────
     // Letter keys for deleting bodyparts (first two get D/F, rest use number keys)
     const DELETE_KEYS = { 'd': 0, 'f': 1 };
@@ -3244,8 +3263,19 @@ const labeler = (() => {
                 break;
             }
         }
-        document.getElementById('frameDisplay').textContent =
-            `Frame: ${localFrame} / ${trialFrameCount - 1}`;
+        // Update frame/time display based on display mode
+        const fps = trials.length > 0 ? (trials[0].fps || 30) : 30;
+        const timeSec = (localFrame / fps).toFixed(2);
+        const totalSec = ((trialFrameCount - 1) / fps).toFixed(2);
+        let displayText;
+        if (frameDisplayMode === 'frame') {
+            displayText = `Frame: ${localFrame} / ${trialFrameCount - 1}`;
+        } else if (frameDisplayMode === 'time') {
+            displayText = `${timeSec}s / ${totalSec}s`;
+        } else {
+            displayText = `${localFrame} / ${trialFrameCount - 1}  (${timeSec}s)`;
+        }
+        document.getElementById('frameDisplay').textContent = displayText;
         document.getElementById('trialDisplay').textContent = `Trial: ${trialName}`;
 
         // Show distance for current frame (unless in review mode)
@@ -3376,6 +3406,8 @@ const labeler = (() => {
         // Auto-zoom to labels/MP at the target frame
         autoZoomForFrame(frame, currentSide);
         goToFrame(frame);
+        // Return focus to main canvas so spacebar play/pause keeps working
+        canvas.focus();
     }
 
     function renderTimeline() {
@@ -4905,7 +4937,7 @@ const labeler = (() => {
         init,
         nextFrame, prevFrame, nextLabel, prevLabel,
         nextGap, prevGap, acceptMergedLabels,
-        toggleSide, togglePlay, resetZoom, cycleReviewMode,
+        toggleSide, togglePlay, resetZoom, cycleReviewMode, cycleFrameDisplay,
         saveLabels, commitSession, saveCorrectionsOnly,
         toggleV2Training,
         prevSubject, nextSubject,

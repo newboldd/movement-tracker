@@ -73,7 +73,7 @@
                 <h3 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">Navigation</h3>
                 <div style="display:flex;gap:4px;margin-bottom:8px;">
                     <button class="btn btn-sm" onclick="labeler.prevFrame()" title="Previous frame (A/Left)">&larr;</button>
-                    <button class="btn btn-sm" id="playBtn" onclick="labeler.togglePlay()" title="Play/Pause (Space)">&#9654;</button>
+                    <button class="btn btn-sm" id="playBtn" onclick="labeler.togglePlay()" title="Play/Pause (Space)" style="width:32px;text-align:center;">&#9654;</button>
                     <button class="btn btn-sm" onclick="labeler.nextFrame()" title="Next frame (S/Right)">&rarr;</button>
                 </div>
                 <div style="display:flex;gap:4px;margin-bottom:8px;">
@@ -205,7 +205,7 @@
 
             <!-- Controls bar -->
             <div class="controls-bar">
-                <span class="frame-display" id="frameDisplay">Frame: 0 / 0</span>
+                <span class="frame-display" id="frameDisplay" onclick="labeler.cycleFrameDisplay()" style="cursor:pointer;" title="Click to toggle: frame / time / both">Frame: 0 / 0</span>
                 <span id="trialDisplay" style="color:var(--text-muted);font-size:12px;">Trial: --</span>
                 <div style="flex:1;"></div>
                 <span id="labelInfo" style="font-size:12px;color:var(--text-muted);">Click to place keypoints</span>
@@ -237,7 +237,7 @@
 
     <script src="/static/js/nav.js"></script>
     <script src="/static/js/api.js?v=10"></script>
-    <script src="/static/js/labeler.js?v=39"></script>
+    <script src="/static/js/labeler.js?v=40"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {
