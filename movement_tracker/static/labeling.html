@@ -46,7 +46,6 @@
             <div id="modeSwitcher" style="display:flex;gap:4px;align-items:center;">
                 <span style="font-size:12px;color:var(--text-muted);margin-right:4px;">Mode:</span>
                 <button class="btn btn-sm" id="modeLabel" onclick="switchMode('initial')" title="Label mode">Label</button>
-                <button class="btn btn-sm" id="modeRefine" onclick="switchMode('refine')" title="Refine mode">Refine</button>
                 <button class="btn btn-sm" id="modeCorrect" onclick="switchMode('corrections')" title="Correct mode">Correct</button>
                 <button class="btn btn-sm" id="modeEvents" onclick="switchMode('events')" title="Events mode">Events</button>
             </div>
@@ -130,10 +129,12 @@
             <div style="margin-bottom: 16px;">
                 <h3 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">Actions</h3>
                 <button class="btn btn-sm btn-success" id="mainCommitBtn" onclick="labeler.commitSession()" style="width:100%;">Save &amp; Commit</button>
-                <!-- Refine mode replaces the above with two buttons -->
+                <!-- Corrections mode: save corrections + optional refine to DLC -->
                 <button class="btn btn-sm" id="saveCorrectionsBtn" onclick="labeler.saveCorrectionsOnly()" style="width:100%;margin-top:4px;display:none;">Save Corrections</button>
-                <button class="btn btn-sm btn-success" id="commitDlcBtn" onclick="labeler.commitSession()" style="width:100%;margin-top:4px;display:none;">Commit to DLC</button>
+                <button class="btn btn-sm" id="refineBtn" onclick="labeler.startRefineFlow()" style="width:100%;margin-top:4px;display:none;">Refine → DLC</button>
+                <div id="refineInfo" style="font-size:11px;color:var(--text-muted);margin-top:4px;display:none;"></div>
                 <button class="btn btn-sm" id="v2ToggleBtn" onclick="labeler.toggleV2Training()" style="width:100%;margin-top:4px;display:none;">Training: On ✓</button>
+                <button class="btn btn-sm btn-success" id="commitDlcBtn" onclick="labeler.commitSession()" style="width:100%;margin-top:4px;display:none;">Commit to DLC</button>
             </div>
 
             <!-- Events panel (visible in events mode only) -->
@@ -237,7 +238,7 @@
 
     <script src="/static/js/nav.js"></script>
     <script src="/static/js/api.js?v=10"></script>
-    <script src="/static/js/labeler.js?v=43"></script>
+    <script src="/static/js/labeler.js?v=44"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {
@@ -251,6 +252,8 @@
     <script>
         // ── Mode Switcher ────────────────────────────────────────────
         async function switchMode(sessionType) {
+            // Refine is now part of Corrections mode
+            if (sessionType === 'refine') sessionType = 'corrections';
             try {
                 // Get current subject from URL or page state
                 const subjectSelect = document.getElementById('subjectSelect');

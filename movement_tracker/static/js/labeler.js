@@ -413,14 +413,18 @@ const labeler = (() => {
             const mainCommitBtn = document.getElementById('mainCommitBtn');
             const saveCorrectionsBtn = document.getElementById('saveCorrectionsBtn');
             const commitDlcBtn = document.getElementById('commitDlcBtn');
+            const refineBtn = document.getElementById('refineBtn');
             if (isEvents || isFinal) {
                 if (mainCommitBtn) mainCommitBtn.style.display = 'none';
             } else if (isRefine) {
+                // Legacy refine sessions: show same UI as corrections with refine
                 if (mainCommitBtn) mainCommitBtn.style.display = 'none';
                 if (saveCorrectionsBtn) saveCorrectionsBtn.style.display = '';
-                if (commitDlcBtn) commitDlcBtn.style.display = '';
+                if (refineBtn) refineBtn.style.display = '';
             } else if (isCorrections) {
-                if (mainCommitBtn) mainCommitBtn.textContent = 'Save Corrections';
+                if (mainCommitBtn) mainCommitBtn.style.display = 'none';
+                if (saveCorrectionsBtn) saveCorrectionsBtn.style.display = '';
+                if (refineBtn) refineBtn.style.display = '';
             }
 
             // Update sidebar with dynamic shortcuts
@@ -2457,14 +2461,16 @@ const labeler = (() => {
         // Then flush any remaining dirty keys
         await saveLabels();
 
-        if (!isRefine && labels.size === 0) {
+        const isRefineCommit = (isRefine || isCorrections) && correctionFrames && correctionFrames.size > 0;
+
+        if (!isRefineCommit && labels.size === 0) {
             alert('No labels to commit.');
             return;
         }
 
         try {
             const commitBody = {};
-            if (isRefine) {
+            if (isRefineCommit) {
                 // v2_train_frames = correction frames the user has NOT excluded
                 commitBody.v2_train_frames = [...correctionFrames]
                     .filter(key => !v2Excludes.has(key))
@@ -2485,7 +2491,7 @@ const labeler = (() => {
     }
 
     async function saveCorrectionsOnly() {
-        if (!isRefine) return;
+        if (!isRefine && !isCorrections) return;
         if (savePromise) await savePromise;
         await saveLabels();
         if (labels.size === 0) {
@@ -2498,6 +2504,51 @@ const labeler = (() => {
         } catch (e) {
             alert('Save error: ' + e.message);
         }
+    }
+
+    // ── Refine Flow (within corrections mode) ──────────
+    async function startRefineFlow() {
+        if (!isCorrections && !isRefine) return;
+
+        // Save any pending corrections first
+        if (savePromise) await savePromise;
+        await saveLabels();
+
+        // Ensure all stages are loaded
+        if (availableStages.length === 0) {
+            try {
+                const resp = await API.get(`/api/labeling/sessions/${sessionId}/available_stages`);
+                availableStages = resp.stages || [];
+                stageFiles = resp.files || {};
+            } catch (e) { /* ignore */ }
+        }
+        await loadAllStages();
+
+        // Compute correction frames (where corrections differ from DLC by ≥3px)
+        computeCorrectionFrames();
+
+        const refineInfo = document.getElementById('refineInfo');
+        const v2Btn = document.getElementById('v2ToggleBtn');
+        const commitBtn = document.getElementById('commitDlcBtn');
+
+        if (correctionFrames.size === 0) {
+            if (refineInfo) {
+                refineInfo.style.display = '';
+                refineInfo.textContent = 'No correction frames found (corrections must differ from DLC by ≥3px).';
+            }
+            return;
+        }
+
+        if (refineInfo) {
+            refineInfo.style.display = '';
+            refineInfo.textContent = `${correctionFrames.size} correction frame(s) found for V2 training.`;
+        }
+        if (v2Btn) v2Btn.style.display = '';
+        if (commitBtn) commitBtn.style.display = '';
+
+        // Update V2 toggle label
+        updateV2TrainingBtn();
+        render();
     }
 
     // ── Navigation ────────────────────────────────────
@@ -4215,7 +4266,7 @@ const labeler = (() => {
 
     // ── V2 training toggle (refine mode) ─────────────
     function toggleV2Training() {
-        if (!isRefine) return;
+        if (!isRefine && !isCorrections) return;
         const key = `${currentFrame}_${currentSide}`;
         if (!correctionFrames.has(key)) return; // not a correction frame — nothing to toggle
         if (v2Excludes.has(key)) {
@@ -4231,7 +4282,7 @@ const labeler = (() => {
 
     function updateV2TrainingBtn() {
         const btn = document.getElementById('v2ToggleBtn');
-        if (!btn || !isRefine) return;
+        if (!btn || (!isRefine && !isCorrections)) return;
         const key = `${currentFrame}_${currentSide}`;
         if (!correctionFrames.has(key)) {
             btn.style.display = 'none';
@@ -5017,6 +5068,8 @@ const labeler = (() => {
         getExportContext,
         // MediaPipe crop box
         startMpFlow, toggleMpCrop, saveMpCrop, cancelMpCrop, rerunMediapipe,
+        // Refine flow (within corrections mode)
+        startRefineFlow,
     };
 })();
 

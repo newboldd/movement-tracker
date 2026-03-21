@@ -696,13 +696,17 @@ def commit_session(
         ).fetchall()
 
     is_refine = session["session_type"] == "refine"
-
-    if not labels and not is_refine:
-        raise HTTPException(400, "No labels to commit")
     is_corrections = session["session_type"] == "corrections"
 
-    if is_corrections:
-        # Corrections: write DLC-format CSVs to corrections/ directory
+    # Corrections with v2_train_frames = refine flow (merge into corrections mode)
+    has_v2_frames = req is not None and req.v2_train_frames
+    is_refine_commit = is_refine or (is_corrections and has_v2_frames)
+
+    if not labels and not is_refine_commit:
+        raise HTTPException(400, "No labels to commit")
+
+    if is_corrections and not has_v2_frames:
+        # Pure corrections: write DLC-format CSVs to corrections/ directory
         result = save_corrections_to_csv(
             subject_name=subj["name"],
             session_labels=labels,
@@ -718,7 +722,7 @@ def commit_session(
             )
         return result
 
-    if is_refine:
+    if is_refine_commit:
         # Build training labels from corrections stage data for the requested frames.
         # The frontend sends the frames (corrections CSV != DLC CSV) that are NOT excluded.
         import json as _json
@@ -796,10 +800,11 @@ def commit_session(
             "UPDATE label_sessions SET status = 'committed', committed_at = CURRENT_TIMESTAMP WHERE id = ?",
             (session_id,),
         )
-        if is_refine:
+        if is_refine_commit:
+            new_iteration = session["iteration"] if is_refine else subj["iteration"] + 1
             db.execute(
                 "UPDATE subjects SET iteration = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (session["iteration"], session["subject_id"]),
+                (new_iteration, session["subject_id"]),
             )
         else:
             db.execute(
