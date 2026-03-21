@@ -210,4 +210,14 @@ cd "$PROJECT_DIR"
 # Open browser after a short delay (background, non-fatal)
 (sleep 2 && open "http://localhost:$PORT" 2>/dev/null || xdg-open "http://localhost:$PORT" 2>/dev/null) &
 
-python -m uvicorn movement_tracker.app:app --host 127.0.0.1 --port "$PORT" --reload
+# Launch with restart loop (exit code 42 = restart after in-app update)
+while true; do
+    python -m uvicorn movement_tracker.app:app --host 127.0.0.1 --port "$PORT" --reload
+    exit_code=$?
+    if [ "$exit_code" -ne 42 ]; then
+        break
+    fi
+    echo ""
+    echo "Restarting after update..."
+    echo ""
+done

@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 
 from .config import get_settings
 from .db import init_db
-from .routers import subjects, labeling, pipeline, jobs, results, settings, filebrowser, video_tools, batch, remote_jobs, mano, export, camera_setups
+from .routers import subjects, labeling, pipeline, jobs, results, settings, filebrowser, video_tools, batch, remote_jobs, mano, export, camera_setups, updater
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -51,6 +51,7 @@ app.include_router(remote_jobs.router)
 app.include_router(mano.router)  # API endpoints used by videos.js (page removed)
 app.include_router(export.router)
 app.include_router(camera_setups.router)
+app.include_router(updater.router)
 
 # Mount static files
 STATIC_DIR = Path(__file__).parent / "static"

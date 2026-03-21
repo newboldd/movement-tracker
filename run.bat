@@ -211,6 +211,14 @@ echo.
 :: Open browser after a short delay (background, non-blocking)
 start "" cmd /c "timeout /t 2 /nobreak >nul & start http://localhost:8080"
 
+:: ── Launch with restart loop (exit code 42 = restart after update) ──
+:launch
 %PYTHON% -m uvicorn movement_tracker.app:app --host 127.0.0.1 --port 8080
+if %errorlevel%==42 (
+    echo.
+    echo Restarting after update...
+    echo.
+    goto :launch
+)
 
 pause

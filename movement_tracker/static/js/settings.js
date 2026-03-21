@@ -290,5 +290,104 @@ async function testRemoteConnection() {
     }
 }
 
+// ── Updates ────────────────────────────────────────────────────
+
+// Show current version on load
+(async function initUpdateVersion() {
+    try {
+        const resp = await fetch('/api/update/check');
+        if (resp.ok) {
+            const data = await resp.json();
+            const versionEl = document.getElementById('updateVersion');
+            if (versionEl) {
+                versionEl.textContent = `Version: ${data.current_short}`;
+            }
+        }
+    } catch (e) {
+        // Silently fail — version display is non-critical
+    }
+})();
+
+async function checkForUpdates() {
+    const statusEl = document.getElementById('updateStatus');
+    const checkBtn = document.getElementById('updateCheckBtn');
+    const applyBtn = document.getElementById('updateApplyBtn');
+    const versionEl = document.getElementById('updateVersion');
+
+    checkBtn.disabled = true;
+    checkBtn.textContent = 'Checking...';
+    statusEl.textContent = '';
+    applyBtn.style.display = 'none';
+
+    try {
+        const resp = await fetch('/api/update/check');
+        if (!resp.ok) throw new Error('Failed to check for updates');
+        const data = await resp.json();
+
+        versionEl.textContent = `Version: ${data.current_short}`;
+
+        if (data.update_available) {
+            statusEl.innerHTML = `<span style="color:var(--blue);">Update available: <b>${data.latest_short}</b> — ${data.latest_message}</span>`;
+            applyBtn.style.display = '';
+        } else if (data.first_install) {
+            statusEl.innerHTML = `<span style="color:var(--text-muted);">Latest: ${data.latest_short}. Click "Update Now" to sync.</span>`;
+            applyBtn.style.display = '';
+        } else {
+            statusEl.innerHTML = `<span style="color:var(--green);">Up to date (${data.current_short})</span>`;
+        }
+    } catch (e) {
+        statusEl.innerHTML = `<span style="color:var(--red);">Error: ${e.message}</span>`;
+    } finally {
+        checkBtn.disabled = false;
+        checkBtn.textContent = 'Check for Updates';
+    }
+}
+
+async function applyUpdate() {
+    const statusEl = document.getElementById('updateStatus');
+    const applyBtn = document.getElementById('updateApplyBtn');
+    const checkBtn = document.getElementById('updateCheckBtn');
+
+    if (!confirm('Update Movement Tracker? The app will restart automatically.')) return;
+
+    applyBtn.disabled = true;
+    applyBtn.textContent = 'Updating...';
+    checkBtn.disabled = true;
+    statusEl.textContent = 'Downloading and applying update...';
+
+    try {
+        const resp = await fetch('/api/update/apply', { method: 'POST' });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.detail || 'Update failed');
+        }
+
+        statusEl.innerHTML = '<span style="color:var(--blue);">Update applied! Restarting server...</span>';
+        applyBtn.style.display = 'none';
+
+        // Poll until server is back up, then reload
+        setTimeout(async () => {
+            for (let i = 0; i < 30; i++) {
+                try {
+                    const ping = await fetch('/api/settings/status', { signal: AbortSignal.timeout(2000) });
+                    if (ping.ok) {
+                        window.location.reload();
+                        return;
+                    }
+                } catch (e) {
+                    // Server still restarting
+                }
+                await new Promise(r => setTimeout(r, 2000));
+            }
+            statusEl.innerHTML = '<span style="color:var(--red);">Server did not restart. Please restart manually.</span>';
+        }, 3000);
+    } catch (e) {
+        statusEl.innerHTML = `<span style="color:var(--red);">Error: ${e.message}</span>`;
+        applyBtn.disabled = false;
+        applyBtn.textContent = 'Update Now';
+        checkBtn.disabled = false;
+    }
+}
+
 // Load on page ready
 loadSettings();
