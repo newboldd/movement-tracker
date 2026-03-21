@@ -3757,6 +3757,11 @@ const labeler = (() => {
     function setupDistanceTrace() {
         distCanvas.addEventListener('mousedown', onDistTraceMouseDown);
         distCanvas.addEventListener('wheel', onDistTraceWheel, { passive: false });
+        distCanvas.addEventListener('mousemove', (e) => {
+            if (distDragging) return;  // already in a drag
+            const marker = _findNearestEventMarker(e.clientX);
+            distCanvas.style.cursor = marker ? 'ew-resize' : 'pointer';
+        });
 
         const container = distCanvas.parentElement;
         const ro = new ResizeObserver(() => renderDistanceTrace());
@@ -3798,9 +3803,87 @@ const labeler = (() => {
             totalFrames - 1));
     }
 
+    /** Find the closest visible event marker near a click position. Returns {type, frame, dist} or null. */
+    function _findNearestEventMarker(clientX) {
+        if (!isEvents) return null;
+        const rect = distCanvas.getBoundingClientRect();
+        const clickX = clientX - rect.left;
+        const padL = 40, padR = 8;
+        const plotW = rect.width - padL - padR;
+        const effectiveViewFrames = distViewFrames > 0 ? distViewFrames : totalFrames;
+        const fToX = (f) => padL + ((f - distViewStart) / effectiveViewFrames) * plotW;
+        const LENIENCY_PX = 10;
+        let best = null;
+
+        EVENT_TYPES.forEach(etype => {
+            if (!eventVisibility[etype]) return;
+            eventMarkers[etype].forEach(f => {
+                if (f < distViewStart || f >= distViewStart + effectiveViewFrames) return;
+                const markerX = fToX(f);
+                const dx = Math.abs(clickX - markerX);
+                if (dx < LENIENCY_PX && (!best || dx < best.dist)) {
+                    best = { type: etype, frame: f, dist: dx };
+                }
+            });
+        });
+        return best;
+    }
+
     function onDistTraceMouseDown(e) {
         if (!distances || totalFrames === 0) return;
         e.preventDefault();
+
+        // In events mode, check if mousedown is on an event marker → start drag
+        const hitMarker = _findNearestEventMarker(e.clientX);
+        if (hitMarker) {
+            // ── Event marker drag mode ──
+            const dragType = hitMarker.type;
+            const dragOrigFrame = hitMarker.frame;
+            let dragCurrentFrame = dragOrigFrame;
+            const undoSnapshot = JSON.parse(JSON.stringify(eventMarkers));
+            distCanvas.style.cursor = 'ew-resize';
+
+            // Navigate to the event immediately
+            goToFrame(dragOrigFrame);
+
+            const onDragMove = (ev) => {
+                const newFrame = distXToFrame(ev.clientX);
+                if (newFrame === dragCurrentFrame) return;
+
+                // Move the marker: remove old position, insert new
+                const frames = eventMarkers[dragType];
+                const idx = frames.indexOf(dragCurrentFrame);
+                if (idx !== -1) frames.splice(idx, 1);
+                if (!frames.includes(newFrame)) {
+                    frames.push(newFrame);
+                    frames.sort((a, b) => a - b);
+                }
+                dragCurrentFrame = newFrame;
+                currentFrame = newFrame;
+                updateFrameDisplay();
+                renderDistanceTrace();
+                render();
+            };
+
+            const onDragUp = () => {
+                distCanvas.style.cursor = 'pointer';
+                window.removeEventListener('mousemove', onDragMove);
+                window.removeEventListener('mouseup', onDragUp);
+
+                if (dragCurrentFrame !== dragOrigFrame) {
+                    // Push undo with the pre-drag snapshot
+                    pushEventUndo(undoSnapshot);
+                    updateEventCounts();
+                }
+                goToFrame(dragCurrentFrame);
+            };
+
+            window.addEventListener('mousemove', onDragMove);
+            window.addEventListener('mouseup', onDragUp);
+            return;
+        }
+
+        // ── Normal view-panning drag mode ──
         distDragging = true;
         distDragStartX = e.clientX;
         distDragStartView = distViewStart;
@@ -3826,35 +3909,9 @@ const labeler = (() => {
             window.removeEventListener('mousemove', onMove);
             window.removeEventListener('mouseup', onUp);
             if (!moved) {
-                // Click — check for nearby event markers first (leniency)
-                const rawFrame = distXToFrame(ev.clientX);
-                let targetFrame = rawFrame;
-
-                if (isEvents) {
-                    // Find closest visible event marker within leniency radius (8 px)
-                    const rect = distCanvas.getBoundingClientRect();
-                    const clickX = ev.clientX - rect.left;
-                    const padL = 40, padR = 8;
-                    const plotW = rect.width - padL - padR;
-                    const effectiveViewFrames = distViewFrames > 0 ? distViewFrames : totalFrames;
-                    const fToX = (f) => padL + ((f - distViewStart) / effectiveViewFrames) * plotW;
-                    const LENIENCY_PX = 10;
-                    let bestDist = LENIENCY_PX + 1;
-
-                    EVENT_TYPES.forEach(etype => {
-                        if (!eventVisibility[etype]) return;
-                        eventMarkers[etype].forEach(f => {
-                            if (f < distViewStart || f >= distViewStart + effectiveViewFrames) return;
-                            const markerX = fToX(f);
-                            const dx = Math.abs(clickX - markerX);
-                            if (dx < bestDist) {
-                                bestDist = dx;
-                                targetFrame = f;
-                            }
-                        });
-                    });
-                }
-
+                // Click — snap to nearest event marker if close
+                const marker = _findNearestEventMarker(ev.clientX);
+                const targetFrame = marker ? marker.frame : distXToFrame(ev.clientX);
                 autoZoomForFrame(targetFrame, currentSide);
                 goToFrame(targetFrame);
             }
