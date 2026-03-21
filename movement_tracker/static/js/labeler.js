@@ -3012,17 +3012,21 @@ const labeler = (() => {
         };
     }
 
-    function videoDrawLoop() {
+    function videoDrawLoop(now, metadata) {
         if (!videoPlaying || !playing) return;
 
         const trial = trials[currentTrialIdx];
         if (!trial) return;
 
-        // Calculate current global frame from video time.
-        // When using requestVideoFrameCallback, this fires only after a new
-        // frame is actually painted, so labels stay perfectly in sync.
+        // Use the actual presented media time when available (from
+        // requestVideoFrameCallback metadata), otherwise fall back to
+        // videoEl.currentTime.  This ensures labels never draw ahead of
+        // the video frame that is actually on screen.
+        const mediaTime = (metadata && metadata.mediaTime != null)
+            ? metadata.mediaTime
+            : videoEl.currentTime;
         const frameOffset = trial.frame_offset || 0;
-        const localFrame = Math.floor(videoEl.currentTime * trial.fps) + frameOffset;
+        const localFrame = Math.floor(mediaTime * trial.fps) + frameOffset;
         currentFrame = trial.start_frame + Math.min(localFrame, trial.frame_count - 1);
 
         // Draw video frame to canvas (cropped to correct camera half)
