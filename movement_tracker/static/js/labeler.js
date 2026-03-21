@@ -252,6 +252,9 @@ const labeler = (() => {
     }
 
     // ── Init ──────────────────────────────────────────
+    // Detect whether this is the MediaPipe page or the DLC page
+    const isMediaPipePage = window.location.pathname === '/mediapipe';
+
     function init() {
         const params = new URLSearchParams(window.location.search);
         sessionId = parseInt(params.get('session'));
@@ -447,10 +450,26 @@ const labeler = (() => {
                 }
             }
 
-            // ── Show MediaPipe crop section in label/refine modes ──
+            // ── Page-specific UI: MediaPipe page vs DLC page ──
             const mpCropSection = document.getElementById('mpCropSection');
-            if (mpCropSection) {
-                mpCropSection.style.display = (!isEvents && !isFinal && !isCorrections) ? 'block' : 'none';
+            const modeSwitcher = document.getElementById('modeSwitcher');
+            const actionsSection = mainCommitBtn ? mainCommitBtn.parentElement : null;
+
+            if (isMediaPipePage) {
+                // MediaPipe page: show MP controls, hide DLC-specific UI
+                if (mpCropSection) mpCropSection.style.display = 'block';
+                if (modeSwitcher) modeSwitcher.style.display = 'none';
+                if (actionsSection) actionsSection.style.display = 'none';
+                // Update session type label
+                const typeLabel = document.getElementById('sessionTypeLabel');
+                if (typeLabel) typeLabel.textContent = 'MediaPipe:';
+                // Set active nav link
+                document.querySelectorAll('nav a').forEach(a => {
+                    a.classList.toggle('active', a.getAttribute('href') === '/mediapipe-select');
+                });
+            } else {
+                // DLC page: hide MP controls, show DLC UI
+                if (mpCropSection) mpCropSection.style.display = 'none';
             }
 
             // All tabs are always visible regardless of subject stage
@@ -4232,9 +4251,10 @@ const labeler = (() => {
             if (resultsLink) resultsLink.href = `/results?subject=${subjectId}&from=labeling`;
             sessionStorage.setItem('dlc_lastSubjectId', String(subjectId));
             const session = await API.post(`/api/labeling/${subjectId}/sessions`, {
-                session_type: currentSessionType(),
+                session_type: isMediaPipePage ? 'initial' : currentSessionType(),
             });
-            window.location.href = `/labeling?session=${session.id}`;
+            const basePath = isMediaPipePage ? '/mediapipe' : '/labeling';
+            window.location.href = `${basePath}?session=${session.id}`;
         } catch (e) {
             alert('Could not switch subject: ' + e.message);
             // Reset dropdown to current

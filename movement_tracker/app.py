@@ -28,7 +28,7 @@ class NoCacheMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
         if request.url.path.startswith("/static") or request.url.path in (
-            "/", "/labeling", "/results", "/settings", "/onboarding", "/remote", "/videos", "/calibration", "/tutorials", "/tutorial"
+            "/", "/labeling", "/mediapipe", "/results", "/settings", "/onboarding", "/remote", "/videos", "/calibration", "/tutorials", "/tutorial"
         ):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return response
@@ -468,6 +468,12 @@ def labeling_page():
     return FileResponse(str(STATIC_DIR / "labeling.html"))
 
 
+@app.get("/mediapipe")
+def mediapipe_page():
+    """Serve the MediaPipe page (same labeling UI, different mode)."""
+    return FileResponse(str(STATIC_DIR / "labeling.html"))
+
+
 @app.get("/labeling-select")
 def labeling_select_page(subject: Optional[int] = None, mode: Optional[str] = None):
     """Smart redirect to labeling page.
@@ -592,6 +598,52 @@ def labeling_select_page(subject: Optional[int] = None, mode: Optional[str] = No
         except Exception:
             pass
 
+        return RedirectResponse(url="/", status_code=302)
+
+
+@app.get("/mediapipe-select")
+def mediapipe_select_page(subject: Optional[int] = None):
+    """Smart redirect to MediaPipe page. Always uses 'initial' session type."""
+    from fastapi.responses import RedirectResponse
+    from .db import get_db_ctx
+
+    def _get_or_create_mp_session(db, sid: int) -> Optional[int]:
+        existing = db.execute(
+            """SELECT ls.id FROM label_sessions ls
+               WHERE ls.subject_id = ? AND ls.session_type = 'initial' AND ls.status = 'active'
+               ORDER BY ls.id DESC LIMIT 1""",
+            (sid,),
+        ).fetchone()
+        if existing:
+            return existing["id"]
+        db.execute(
+            "INSERT INTO label_sessions (subject_id, session_type) VALUES (?, 'initial')",
+            (sid,),
+        )
+        db.commit()
+        row = db.execute(
+            "SELECT id FROM label_sessions WHERE subject_id = ? ORDER BY created_at DESC LIMIT 1",
+            (sid,),
+        ).fetchone()
+        return row["id"] if row else None
+
+    with get_db_ctx() as db:
+        if subject is not None:
+            row = db.execute("SELECT * FROM subjects WHERE id = ?", (subject,)).fetchone()
+            if not row:
+                return RedirectResponse(url="/", status_code=302)
+            sid = _get_or_create_mp_session(db, subject)
+            if sid:
+                return RedirectResponse(url=f"/mediapipe?session={sid}", status_code=302)
+            return RedirectResponse(url="/", status_code=302)
+
+        # No subject — find most recent or first subject
+        first = db.execute("SELECT * FROM subjects ORDER BY id LIMIT 1").fetchone()
+        if not first:
+            return RedirectResponse(url="/", status_code=302)
+        sid = _get_or_create_mp_session(db, first["id"])
+        if sid:
+            return RedirectResponse(url=f"/mediapipe?session={sid}", status_code=302)
         return RedirectResponse(url="/", status_code=302)
 
 
