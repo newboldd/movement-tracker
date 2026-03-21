@@ -86,10 +86,8 @@ function switchTab(tab) {
     document.getElementById('nextSubjectBtn').disabled = isGroup;
 
     // Load data for the active tab
-    if (tab === 'distances' && currentSubjectId) {
+    if ((tab === 'distances' || tab === 'movements') && currentSubjectId) {
         loadDistances(currentSubjectId);
-    } else if (tab === 'movements' && currentSubjectId) {
-        loadMovements(currentSubjectId);
     } else if (tab === 'group') {
         loadGroup();
     }
@@ -1084,10 +1082,9 @@ document.getElementById('subjectSelect').addEventListener('change', (e) => {
     cachedSequenceAssignments = null;
     updateNavLinks();
 
-    if (currentTab === 'distances') {
+    if (currentTab === 'distances' || currentTab === 'movements') {
+        currentTab = 'distances';
         loadDistances(currentSubjectId);
-    } else if (currentTab === 'movements') {
-        loadMovements(currentSubjectId);
     }
 });
 

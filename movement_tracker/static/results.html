@@ -22,7 +22,6 @@
             <div id="tabSwitcher" style="display:flex;gap:4px;align-items:center;">
                 <span style="font-size:12px;color:var(--text-muted);margin-right:4px;">Tab:</span>
                 <button class="btn btn-sm active" data-tab="distances">Distances</button>
-                <button class="btn btn-sm" data-tab="movements">Movements</button>
                 <button class="btn btn-sm" data-tab="group">Group Comparison</button>
             </div>
         </div>
@@ -82,33 +81,11 @@
             <div id="distMovementPlots" class="results-plot-grid"></div>
         </div>
 
-        <!-- Movements Tab -->
-        <div id="tabMovements" class="results-tab">
-            <div class="results-controls" id="movementControls">
-                <label><input type="checkbox" data-param="amplitude" checked> Amplitude</label>
-                <label><input type="checkbox" data-param="imi" checked> IMI</label>
-                <label><input type="checkbox" data-param="peak_open_vel" checked> Peak Opening Vel.</label>
-                <label><input type="checkbox" data-param="peak_close_vel" checked> Peak Closing Vel.</label>
-                <label><input type="checkbox" data-param="rel_amplitude" checked> Relative Amplitude</label>
-                <label><input type="checkbox" data-param="power" checked> Power (Vel x Amp)</label>
-                <label><input type="checkbox" data-param="mean_open_vel"> Mean Opening Vel.</label>
-                <label><input type="checkbox" data-param="mean_close_vel"> Mean Closing Vel.</label>
-                <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
-                <label style="display:flex;align-items:center;gap:4px;">
-                    Sequence:
-                    <select id="sequenceMode"
-                        style="padding:3px 8px;background:#f0f0f0;border:1px solid #ccc;
-                               border-radius:4px;color:#444;font-size:12px;">
-                        <option value="none">None</option>
-                        <option value="linear_full">Linear (full)</option>
-                        <option value="linear_first10">Linear (first 10)</option>
-                        <option value="linear_multi">Linear (multi-seq)</option>
-                        <option value="exp_full">Exponential (full)</option>
-                        <option value="exp_first10">Exponential (first 10)</option>
-                        <option value="exp_multi" selected>Exponential (multi-seq)</option>
-                    </select>
-                </label>
-                <span id="seqInfo" style="font-size:11px;color:#666;"></span>
+        <!-- Movements Tab (hidden, kept for JS compatibility) -->
+        <div id="tabMovements" class="results-tab" style="display:none!important;">
+            <div id="movementControls" style="display:none;">
+                <select id="sequenceMode"><option value="none">None</option></select>
+                <span id="seqInfo"></span>
             </div>
             <div id="movementEventBanner"></div>
             <div id="movementPlots" class="results-plot-grid">
@@ -131,6 +108,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=5"></script>
+    <script src="/static/js/results.js?v=6"></script>
 </body>
 </html>
