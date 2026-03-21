@@ -71,6 +71,15 @@ if errorlevel 1 (
     )
 )
 
+:: ── Sample data ──────────────────────────────────────────────────
+if not exist "sample_data\Con01_R1.mp4" (
+    echo Downloading sample video...
+    %PYTHON% scripts\download_sample.py
+)
+
+:: ── Ensure default directories exist ────────────────────────────
+if not exist "dlc" mkdir dlc
+
 :: ── Launch ──────────────────────────────────────────────────────
 echo.
 echo Starting Movement Tracker...
