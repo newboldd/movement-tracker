@@ -243,6 +243,7 @@ def _build_movement_params(
             power = round(peak_open_vel * amplitude, 2)
 
         movements.append({
+            "peak_frame": pk,
             "peak_time": peak_time,
             "imi": imi,
             "amplitude": amplitude,

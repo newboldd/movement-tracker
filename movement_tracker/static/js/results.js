@@ -232,6 +232,40 @@ function renderAllDistancePlots() {
         velRange = [yRange.vel_min - vPad, yRange.vel_max + vPad];
     }
 
+    // Build per-trial overlay data from movements
+    const overlayAmplitude = document.getElementById('overlayAmplitude').checked;
+    const overlayPeakOpenVel = document.getElementById('overlayPeakOpenVel').checked;
+    const overlayPeakCloseVel = document.getElementById('overlayPeakCloseVel').checked;
+    const showSequences = document.getElementById('overlaySequences').checked;
+
+    // Compute sequence assignments if needed
+    let seqAssignments = null;
+    if (showSequences && cachedMovements && cachedMovements.movements && cachedMovements.movements.length > 0) {
+        if (!cachedSequenceAssignments) {
+            cachedSequenceAssignments = computeSequenceAssignments(cachedMovements);
+        }
+        seqAssignments = cachedSequenceAssignments;
+        const r2El = document.getElementById('overlayR2');
+        if (r2El && seqAssignments.totalSeqs > 0) {
+            r2El.textContent = `R\u00b2 = ${seqAssignments.totalR2.toFixed(3)}`;
+        } else if (r2El) {
+            r2El.textContent = '';
+        }
+    } else {
+        const r2El = document.getElementById('overlayR2');
+        if (r2El) r2El.textContent = '';
+    }
+
+    // Group movements by trial
+    const movByTrial = {};
+    if (cachedMovements && cachedMovements.movements) {
+        cachedMovements.movements.forEach((m, mi) => {
+            const ti = m.trial_idx;
+            if (!movByTrial[ti]) movByTrial[ti] = [];
+            movByTrial[ti].push({ ...m, _idx: mi });
+        });
+    }
+
     data.trials.forEach((trial, idx) => {
         // Wrapper for each trial (enables horizontal scrolling)
         const wrapper = document.createElement('div');
@@ -262,12 +296,97 @@ function renderAllDistancePlots() {
         distDiv.style.width = plotWidth + 'px';
         velDiv.style.width = plotWidth + 'px';
 
-        renderDistancePlot(distDiv.id, trial, distRange, plotWidth);
-        renderVelocityPlot(velDiv.id, trial, velRange, plotWidth);
+        const trialStart = data.trials.slice(0, idx).reduce((acc, t) => acc + (t.distances ? t.distances.length : 0), 0);
+        const trialMovs = movByTrial[idx] || [];
+
+        // Build overlay traces for distance plot (amplitude scatter on y2)
+        const distOverlays = [];
+        const distShapes = [];
+        if (overlayAmplitude && trialMovs.length > 0) {
+            const ampTimes = [], ampVals = [];
+            trialMovs.forEach(m => {
+                if (m.amplitude != null && m.peak_frame != null) {
+                    const localFrame = m.peak_frame - trialStart;
+                    ampTimes.push(+(localFrame / fps).toFixed(3));
+                    ampVals.push(m.amplitude);
+                }
+            });
+            if (ampTimes.length > 0) {
+                distOverlays.push({
+                    x: ampTimes, y: ampVals,
+                    type: 'scatter', mode: 'markers',
+                    marker: { color: '#FF9800', size: 6, symbol: 'diamond' },
+                    name: 'Amplitude', yaxis: 'y2',
+                    hovertemplate: '%{x:.2f}s<br>Amp: %{y:.1f} mm<extra></extra>',
+                });
+            }
+        }
+
+        // Sequence shading
+        if (showSequences && seqAssignments && seqAssignments.byTrial[idx]) {
+            const seqs = seqAssignments.byTrial[idx].sequences || [];
+            seqs.forEach((seq, si) => {
+                // seq has start/end indices within the trial's movement list
+                const startMov = trialMovs[seq.start];
+                const endMov = trialMovs[seq.end];
+                if (startMov && endMov && startMov.peak_frame != null && endMov.peak_frame != null) {
+                    const x0 = (startMov.peak_frame - trialStart) / fps;
+                    const x1 = (endMov.peak_frame - trialStart) / fps;
+                    distShapes.push({
+                        type: 'rect', xref: 'x', yref: 'paper',
+                        x0, x1, y0: 0, y1: 1,
+                        fillcolor: 'rgba(156, 39, 176, 0.08)',
+                        line: { color: 'rgba(156, 39, 176, 0.3)', width: 1 },
+                    });
+                }
+            });
+        }
+
+        // Build overlay traces for velocity plot
+        const velOverlays = [];
+        if (overlayPeakOpenVel && trialMovs.length > 0) {
+            const ts = [], vs = [];
+            trialMovs.forEach(m => {
+                if (m.peak_open_vel != null && m.peak_frame != null) {
+                    ts.push(+((m.peak_frame - trialStart) / fps).toFixed(3));
+                    vs.push(m.peak_open_vel);
+                }
+            });
+            if (ts.length > 0) {
+                velOverlays.push({
+                    x: ts, y: vs,
+                    type: 'scatter', mode: 'markers',
+                    marker: { color: '#2196F3', size: 6, symbol: 'triangle-up' },
+                    name: 'Peak Open Vel', yaxis: 'y2',
+                    hovertemplate: '%{x:.2f}s<br>%{y:.1f} mm/s<extra></extra>',
+                });
+            }
+        }
+        if (overlayPeakCloseVel && trialMovs.length > 0) {
+            const ts = [], vs = [];
+            trialMovs.forEach(m => {
+                if (m.peak_close_vel != null && m.peak_frame != null) {
+                    ts.push(+((m.peak_frame - trialStart) / fps).toFixed(3));
+                    vs.push(m.peak_close_vel);
+                }
+            });
+            if (ts.length > 0) {
+                velOverlays.push({
+                    x: ts, y: vs,
+                    type: 'scatter', mode: 'markers',
+                    marker: { color: '#f44336', size: 6, symbol: 'triangle-down' },
+                    name: 'Peak Close Vel', yaxis: 'y2',
+                    hovertemplate: '%{x:.2f}s<br>%{y:.1f} mm/s<extra></extra>',
+                });
+            }
+        }
+
+        renderDistancePlot(distDiv.id, trial, distRange, plotWidth, distOverlays, distShapes);
+        renderVelocityPlot(velDiv.id, trial, velRange, plotWidth, velOverlays, distShapes);
     });
 }
 
-function renderDistancePlot(divId, trial, yRange, width) {
+function renderDistancePlot(divId, trial, yRange, width, overlayTraces, shapes) {
     const fps = trial.fps || 60;
     const n = trial.distances.length;
     const times = Array.from({ length: n }, (_, i) => +(i / fps).toFixed(3));
@@ -282,9 +401,12 @@ function renderDistancePlot(divId, trial, yRange, width) {
         hovertemplate: '%{x:.2f}s<br>%{y:.1f} mm<extra></extra>',
     };
 
+    const traces = [distTrace, ...(overlayTraces || [])];
+    const hasY2 = traces.some(t => t.yaxis === 'y2');
+
     const layout = {
         title: { text: trial.name, font: { size: 13, color: '#666' } },
-        margin: { t: 30, b: 5, l: 55, r: 20 },
+        margin: { t: 30, b: 5, l: 55, r: hasY2 ? 55 : 20 },
         xaxis: { showticklabels: false, color: '#666', gridcolor: '#eee' },
         yaxis: {
             title: { text: 'Distance (mm)', font: { size: 11, color: '#2196F3' } },
@@ -294,20 +416,30 @@ function renderDistancePlot(divId, trial, yRange, width) {
         },
         plot_bgcolor: '#fff',
         paper_bgcolor: '#fff',
-        showlegend: false,
+        showlegend: hasY2,
+        legend: { x: 1, xanchor: 'right', y: 1, font: { size: 10 } },
         hovermode: 'x unified',
         width: width,
+        shapes: shapes || [],
     };
+
+    if (hasY2) {
+        layout.yaxis2 = {
+            title: { text: 'Amplitude (mm)', font: { size: 11, color: '#FF9800' } },
+            overlaying: 'y', side: 'right',
+            color: '#FF9800', showgrid: false,
+        };
+    }
 
     if (yRange) layout.yaxis.range = yRange;
 
-    Plotly.newPlot(divId, [distTrace], layout, {
+    Plotly.newPlot(divId, traces, layout, {
         responsive: false,
         displayModeBar: false,
     });
 }
 
-function renderVelocityPlot(divId, trial, yRange, width) {
+function renderVelocityPlot(divId, trial, yRange, width, overlayTraces, shapes) {
     const fps = trial.fps || 60;
     const n = trial.velocities.length;
     const times = Array.from({ length: n }, (_, i) => +(i / fps).toFixed(3));
@@ -322,8 +454,11 @@ function renderVelocityPlot(divId, trial, yRange, width) {
         hovertemplate: '%{x:.2f}s<br>%{y:.1f} mm/s<extra></extra>',
     };
 
+    const traces = [velTrace, ...(overlayTraces || [])];
+    const hasY2 = traces.some(t => t.yaxis === 'y2');
+
     const layout = {
-        margin: { t: 5, b: 35, l: 55, r: 20 },
+        margin: { t: 5, b: 35, l: 55, r: hasY2 ? 55 : 20 },
         xaxis: { title: { text: 'Time (s)', font: { size: 11 } }, color: '#666', gridcolor: '#eee' },
         yaxis: {
             title: { text: 'Velocity (mm/s)', font: { size: 11, color: '#4CAF50' } },
@@ -334,14 +469,24 @@ function renderVelocityPlot(divId, trial, yRange, width) {
         },
         plot_bgcolor: '#fff',
         paper_bgcolor: '#fff',
-        showlegend: false,
+        showlegend: hasY2,
+        legend: { x: 1, xanchor: 'right', y: 1, font: { size: 10 } },
         hovermode: 'x unified',
         width: width,
+        shapes: shapes || [],
     };
+
+    if (hasY2) {
+        layout.yaxis2 = {
+            title: { text: 'Peak Velocity (mm/s)', font: { size: 11, color: '#666' } },
+            overlaying: 'y', side: 'right',
+            color: '#666', showgrid: false,
+        };
+    }
 
     if (yRange) layout.yaxis.range = yRange;
 
-    Plotly.newPlot(divId, [velTrace], layout, {
+    Plotly.newPlot(divId, traces, layout, {
         responsive: false,
         displayModeBar: false,
     });
@@ -1114,6 +1259,13 @@ document.querySelectorAll('#distMovementControls input[data-dparam]').forEach(cb
 document.getElementById('distSequenceMode').addEventListener('change', () => {
     cachedSequenceAssignments = null;
     if (cachedMovements) renderDistMovementPlots();
+});
+
+// Overlay controls: re-render distance/velocity plots
+['overlayAmplitude', 'overlayPeakOpenVel', 'overlayPeakCloseVel', 'overlaySequences'].forEach(id => {
+    document.getElementById(id).addEventListener('change', () => {
+        if (cachedTraces) renderAllDistancePlots();
+    });
 });
 
 // Distance controls: re-render on y-axis changes

@@ -21,7 +21,7 @@
             <!-- Tab Switcher -->
             <div id="tabSwitcher" style="display:flex;gap:4px;align-items:center;">
                 <span style="font-size:12px;color:var(--text-muted);margin-right:4px;">Tab:</span>
-                <button class="btn btn-sm active" data-tab="distances">Distances</button>
+                <button class="btn btn-sm active" data-tab="distances">Individual</button>
                 <button class="btn btn-sm" data-tab="group">Group Comparison</button>
             </div>
         </div>
@@ -41,11 +41,17 @@
         <!-- Distances Tab -->
         <div id="tabDistances" class="results-tab active">
             <div class="distance-controls" id="distanceControls">
-                <label><input type="checkbox" id="lockYAxis" checked> Lock Y-axis across trials</label>
+                <label><input type="checkbox" id="lockYAxis" checked> Lock Y-axis</label>
                 <span id="yAxisInputs">
                     <label style="margin:0;">Min: <input type="number" id="yAxisMin" step="1" placeholder="auto"></label>
                     <label style="margin:0;">Max: <input type="number" id="yAxisMax" step="1" placeholder="auto"></label>
                 </span>
+                <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
+                <label><input type="checkbox" id="overlayAmplitude"> Amplitude</label>
+                <label><input type="checkbox" id="overlayPeakOpenVel"> Peak Open Vel</label>
+                <label><input type="checkbox" id="overlayPeakCloseVel"> Peak Close Vel</label>
+                <label><input type="checkbox" id="overlaySequences"> Sequences</label>
+                <span id="overlayR2" style="font-size:11px;color:#666;font-weight:600;"></span>
             </div>
             <div id="distancePlots">
                 <div class="results-no-data">Select a subject to view distance traces</div>
@@ -109,6 +115,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=6"></script>
+    <script src="/static/js/results.js?v=7"></script>
 </body>
 </html>
