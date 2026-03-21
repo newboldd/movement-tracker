@@ -71,53 +71,75 @@ echo.
 echo Python not found. Attempting automatic install...
 echo.
 
-:: Try winget first
 set "INSTALL_OK=0"
+
+:: 5a. Try winget
 where winget >nul 2>nul && (
     echo Trying winget...
     winget install Python.Python.3.11 --accept-package-agreements --accept-source-agreements 2>nul && set "INSTALL_OK=1"
 )
+if "!INSTALL_OK!"=="1" (
+    set "PATH=%LOCALAPPDATA%\Programs\Python\Python311;%LOCALAPPDATA%\Programs\Python\Python311\Scripts;!PATH!"
+    if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" (
+        set "PYTHON=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
+        goto :found
+    )
+)
 
-:: If winget failed or unavailable, download installer directly via PowerShell
-if "!INSTALL_OK!"=="0" (
-    echo Downloading Python installer...
-    set "PY_INSTALLER=%TEMP%\python-3.11-installer.exe"
-    powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe' -OutFile '!PY_INSTALLER!' }" 2>nul
-    if exist "!PY_INSTALLER!" (
-        echo Installing Python 3.11 (this may take a minute^)...
-        "!PY_INSTALLER!" /quiet InstallAllUsers=0 PrependPath=1 Include_launcher=1
-        if errorlevel 1 (
-            echo.
-            echo Automatic install failed. Your IT policy may block software installs.
-            echo Please ask IT to install Python 3.11 or Anaconda, then re-run this script.
-            echo.
-            del "!PY_INSTALLER!" 2>nul
-            pause
-            exit /b 1
-        )
-        del "!PY_INSTALLER!" 2>nul
-    ) else (
+:: 5b. Try exe installer (silent, no admin)
+echo Downloading Python installer...
+set "PY_INSTALLER=%TEMP%\python-3.11-installer.exe"
+powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe' -OutFile '!PY_INSTALLER!' }" 2>nul
+if exist "!PY_INSTALLER!" (
+    echo Installing Python 3.11...
+    "!PY_INSTALLER!" /quiet InstallAllUsers=0 PrependPath=1 Include_launcher=1 2>nul
+    del "!PY_INSTALLER!" 2>nul
+    if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" (
+        set "PYTHON=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
+        goto :found
+    )
+)
+
+:: 5c. Portable Python — download zip, extract locally (no install, no admin)
+echo Standard install blocked. Setting up portable Python...
+set "PORTABLE_DIR=%~dp0.python"
+set "PY_ZIP=%TEMP%\python-3.11-embed.zip"
+set "GET_PIP=%TEMP%\get-pip.py"
+
+if not exist "!PORTABLE_DIR!\python.exe" (
+    echo Downloading portable Python 3.11...
+    powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip' -OutFile '!PY_ZIP!' }" 2>nul
+    if not exist "!PY_ZIP!" (
         echo.
-        echo Could not download Python installer.
-        echo Please install Python manually from https://www.python.org/downloads/
+        echo Could not download Python. Check your internet connection.
         echo.
         pause
         exit /b 1
     )
+
+    echo Extracting...
+    mkdir "!PORTABLE_DIR!" 2>nul
+    powershell -Command "Expand-Archive -Path '!PY_ZIP!' -DestinationPath '!PORTABLE_DIR!' -Force" 2>nul
+    del "!PY_ZIP!" 2>nul
+
+    :: Enable pip in embeddable Python (uncomment 'import site' in python311._pth)
+    powershell -Command "(Get-Content '!PORTABLE_DIR!\python311._pth') -replace '^#import site','import site' | Set-Content '!PORTABLE_DIR!\python311._pth'" 2>nul
+
+    :: Install pip
+    echo Installing pip...
+    powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile '!GET_PIP!' }" 2>nul
+    "!PORTABLE_DIR!\python.exe" "!GET_PIP!" --no-warn-script-location 2>nul
+    del "!GET_PIP!" 2>nul
 )
 
-:: Refresh PATH to find newly installed python
-set "PATH=%LOCALAPPDATA%\Programs\Python\Python311;%LOCALAPPDATA%\Programs\Python\Python311\Scripts;%PATH%"
-
-:: Check the specific install path first (avoids Store alias)
-if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" (
-    set "PYTHON=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
+if exist "!PORTABLE_DIR!\python.exe" (
+    set "PYTHON=!PORTABLE_DIR!\python.exe"
     goto :found
 )
 
 echo.
-echo Python was installed but could not be found.
-echo Please close this window, open a new terminal, and run this script again.
+echo All automatic install methods failed.
+echo Please ask IT to install Python 3.11 or Anaconda, then re-run this script.
 echo.
 pause
 exit /b 1

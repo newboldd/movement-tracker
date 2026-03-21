@@ -24,3 +24,4 @@ scratch/
 
 # Claude conversation history
 .claude/
+.python/
