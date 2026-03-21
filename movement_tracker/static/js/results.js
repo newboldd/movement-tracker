@@ -316,7 +316,7 @@ function renderAllDistancePlots() {
                     x: ampTimes, y: ampVals,
                     type: 'scatter', mode: 'markers',
                     marker: { color: '#FF9800', size: 6, symbol: 'diamond' },
-                    name: 'Amplitude', yaxis: 'y2',
+                    name: 'Amplitude',
                     hovertemplate: '%{x:.2f}s<br>Amp: %{y:.1f} mm<extra></extra>',
                 });
             }
@@ -357,7 +357,7 @@ function renderAllDistancePlots() {
                     x: ts, y: vs,
                     type: 'scatter', mode: 'markers',
                     marker: { color: '#2196F3', size: 6, symbol: 'triangle-up' },
-                    name: 'Peak Open Vel', yaxis: 'y2',
+                    name: 'Peak Open Vel',
                     hovertemplate: '%{x:.2f}s<br>%{y:.1f} mm/s<extra></extra>',
                 });
             }
@@ -375,7 +375,7 @@ function renderAllDistancePlots() {
                     x: ts, y: vs,
                     type: 'scatter', mode: 'markers',
                     marker: { color: '#f44336', size: 6, symbol: 'triangle-down' },
-                    name: 'Peak Close Vel', yaxis: 'y2',
+                    name: 'Peak Close Vel',
                     hovertemplate: '%{x:.2f}s<br>%{y:.1f} mm/s<extra></extra>',
                 });
             }
@@ -402,11 +402,11 @@ function renderDistancePlot(divId, trial, yRange, width, overlayTraces, shapes) 
     };
 
     const traces = [distTrace, ...(overlayTraces || [])];
-    const hasY2 = traces.some(t => t.yaxis === 'y2');
+    const hasOverlays = (overlayTraces || []).length > 0;
 
     const layout = {
         title: { text: trial.name, font: { size: 13, color: '#666' } },
-        margin: { t: 30, b: 5, l: 55, r: hasY2 ? 55 : 20 },
+        margin: { t: 30, b: 5, l: 55, r: 20 },
         xaxis: { showticklabels: false, color: '#666', gridcolor: '#eee' },
         yaxis: {
             title: { text: 'Distance (mm)', font: { size: 11, color: '#2196F3' } },
@@ -416,20 +416,12 @@ function renderDistancePlot(divId, trial, yRange, width, overlayTraces, shapes) 
         },
         plot_bgcolor: '#fff',
         paper_bgcolor: '#fff',
-        showlegend: hasY2,
+        showlegend: hasOverlays,
         legend: { x: 1, xanchor: 'right', y: 1, font: { size: 10 } },
         hovermode: 'x unified',
         width: width,
         shapes: shapes || [],
     };
-
-    if (hasY2) {
-        layout.yaxis2 = {
-            title: { text: 'Amplitude (mm)', font: { size: 11, color: '#FF9800' } },
-            overlaying: 'y', side: 'right',
-            color: '#FF9800', showgrid: false,
-        };
-    }
 
     if (yRange) layout.yaxis.range = yRange;
 
@@ -455,10 +447,10 @@ function renderVelocityPlot(divId, trial, yRange, width, overlayTraces, shapes) 
     };
 
     const traces = [velTrace, ...(overlayTraces || [])];
-    const hasY2 = traces.some(t => t.yaxis === 'y2');
+    const hasOverlays = (overlayTraces || []).length > 0;
 
     const layout = {
-        margin: { t: 5, b: 35, l: 55, r: hasY2 ? 55 : 20 },
+        margin: { t: 5, b: 35, l: 55, r: 20 },
         xaxis: { title: { text: 'Time (s)', font: { size: 11 } }, color: '#666', gridcolor: '#eee' },
         yaxis: {
             title: { text: 'Velocity (mm/s)', font: { size: 11, color: '#4CAF50' } },
@@ -469,20 +461,12 @@ function renderVelocityPlot(divId, trial, yRange, width, overlayTraces, shapes) 
         },
         plot_bgcolor: '#fff',
         paper_bgcolor: '#fff',
-        showlegend: hasY2,
+        showlegend: hasOverlays,
         legend: { x: 1, xanchor: 'right', y: 1, font: { size: 10 } },
         hovermode: 'x unified',
         width: width,
         shapes: shapes || [],
     };
-
-    if (hasY2) {
-        layout.yaxis2 = {
-            title: { text: 'Peak Velocity (mm/s)', font: { size: 11, color: '#666' } },
-            overlaying: 'y', side: 'right',
-            color: '#666', showgrid: false,
-        };
-    }
 
     if (yRange) layout.yaxis.range = yRange;
 
