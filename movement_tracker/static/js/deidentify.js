@@ -1111,9 +1111,15 @@ const deid = (() => {
         const cf = currentFrame;
         const sideLabel = _sideLabel();
 
-        if (win === 0 || Object.keys(handLandmarksBulk).length === 0) {
-            // No smoothing — just use current frame
-            handLandmarks = handLandmarksBulk[String(cf)] || [];
+        if (Object.keys(handLandmarksBulk).length === 0) {
+            handLandmarks = [];
+            return;
+        }
+
+        if (win === 0) {
+            // No smoothing — use raw data for current frame (copy to avoid mutation)
+            const raw = handLandmarksBulk[String(cf)];
+            handLandmarks = raw ? raw.map(lm => ({ ...lm })) : [];
             return;
         }
 
