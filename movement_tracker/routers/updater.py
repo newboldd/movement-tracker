@@ -150,7 +150,13 @@ def apply_update() -> dict:
                 shutil.copy2(src, dst)
                 copied += 1
 
-        # 5. Write new VERSION
+        # 5. Restore execute permissions on shell scripts
+        for script in ["setup.sh", "Movement Tracker.command"]:
+            script_path = os.path.join(project_root, script)
+            if os.path.exists(script_path):
+                os.chmod(script_path, 0o755)
+
+        # 6. Write new VERSION
         VERSION_FILE.write_text(latest_sha + "\n")
 
         logger.info(f"Update applied: {copied} files copied, {skipped} preserved. SHA: {latest_sha[:7]}")
