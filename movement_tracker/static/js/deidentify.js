@@ -423,26 +423,16 @@ const deid = (() => {
         // Dilated by drawing with thick rounded lines + filled
         const pinkyMCP = landmarks.find(l => l.type === 'hand' && l.joint === 17);
         const thumbCMC = landmarks.find(l => l.type === 'hand' && l.joint === 1);
-        // Use pose wrists (15=left, 16=right) to determine which arm side,
-        // then pick the matching elbow (13=left, 14=right)
-        const poseWrists = landmarks.filter(l => l.type === 'pose' && (l.joint === 15 || l.joint === 16));
+        // Pick elbow closest to the hand wrist (direct distance comparison)
         const handWrist = landmarks.find(l => l.type === 'hand' && l.joint === 0);
+        const elbows = landmarks.filter(l => l.type === 'pose' && (l.joint === 13 || l.joint === 14));
         let elbow = null;
-        if (handWrist && poseWrists.length > 0) {
-            // Find which pose wrist is closest to the hand wrist
-            let closestPoseWrist = poseWrists[0];
-            if (poseWrists.length === 2) {
-                const d0 = Math.hypot(poseWrists[0].x - handWrist.x, poseWrists[0].y - handWrist.y);
-                const d1 = Math.hypot(poseWrists[1].x - handWrist.x, poseWrists[1].y - handWrist.y);
-                closestPoseWrist = d0 < d1 ? poseWrists[0] : poseWrists[1];
-            }
-            // Pose wrist 15 → left elbow 13, pose wrist 16 → right elbow 14
-            const elbowJoint = closestPoseWrist.joint === 15 ? 13 : 14;
-            elbow = landmarks.find(l => l.type === 'pose' && l.joint === elbowJoint);
-        }
-        // Fallback: just grab any elbow
-        if (!elbow) {
-            elbow = landmarks.find(l => l.type === 'pose' && (l.joint === 13 || l.joint === 14));
+        if (handWrist && elbows.length >= 2) {
+            const d0 = Math.hypot(elbows[0].x - handWrist.x, elbows[0].y - handWrist.y);
+            const d1 = Math.hypot(elbows[1].x - handWrist.x, elbows[1].y - handWrist.y);
+            elbow = d0 < d1 ? elbows[0] : elbows[1];
+        } else if (elbows.length === 1) {
+            elbow = elbows[0];
         }
 
         if (pinkyMCP && thumbCMC && elbow) {
