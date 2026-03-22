@@ -303,6 +303,7 @@ const deid = (() => {
         currentFrame = frameNum;
         let url = `/api/deidentify/${subjectId}/frame?trial_idx=${currentTrialIdx}&frame_num=${frameNum}&side=${encodeURIComponent(currentSide)}`;
         if (viewMode === 'deidentified') url += '&blurred=true';
+        else if (viewMode === 'preview') url += '&preview=true';
 
         try {
             const img = new Image();

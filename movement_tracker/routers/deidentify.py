@@ -91,8 +91,13 @@ def get_frame(
     frame_num: int = Query(...),
     side: str = Query("full"),
     blurred: bool = Query(False),
+    preview: bool = Query(False),
 ) -> Response:
-    """Serve a single JPEG frame. Use blurred=true for the deidentified version."""
+    """Serve a single JPEG frame.
+
+    blurred=true: serve from pre-rendered deidentified video
+    preview=true: apply blur live using the same render pipeline (slower but exact match)
+    """
     with get_db_ctx() as db:
         subj = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
         if not subj:
@@ -143,8 +148,133 @@ def get_frame(
     if not ret:
         raise HTTPException(400, f"Cannot read frame {frame_num}")
 
+    # Preview mode: apply blur using the same pipeline as the full render
+    if preview:
+        from ..services.deidentify import _build_blur_mask, _build_hand_mask_from_landmarks, _apply_blur_with_mask
+        import numpy as np
+
+        half_w = fw // 2 if is_stereo else fw
+
+        # Load blur specs for this trial
+        with get_db_ctx() as db:
+            specs = db.execute(
+                "SELECT * FROM blur_specs WHERE subject_id = ? AND trial_idx = ?",
+                (subject_id, trial_idx),
+            ).fetchall()
+            face_rows = db.execute(
+                "SELECT frame_num, x1, y1, x2, y2, side FROM face_detections WHERE subject_id = ? AND trial_idx = ?",
+                (subject_id, trial_idx),
+            ).fetchall()
+            hs_row = db.execute(
+                "SELECT * FROM blur_hand_settings WHERE subject_id = ? AND trial_idx = ?",
+                (subject_id, trial_idx),
+            ).fetchone()
+
+        active_specs = [dict(s) for s in specs
+                        if s["frame_start"] <= frame_num <= s["frame_end"]]
+
+        # Build face detection lookup
+        face_by_frame = {}
+        for fd in face_rows:
+            fn = fd["frame_num"]
+            if fn not in face_by_frame:
+                face_by_frame[fn] = []
+            face_by_frame[fn].append(dict(fd))
+
+        # Load hand settings
+        import json as _json
+        hand_mask_radius = 10
+        hand_smooth = 10
+        forearm_radius_val = 10
+        forearm_extent_val = 0.7
+        hand_smooth2_val = 0
+        hand_segments = []
+        if hs_row:
+            hand_mask_radius = hs_row.get("hand_mask_radius", 10) or 10
+            hand_smooth = hs_row.get("hand_smooth", 10) or 10
+            seg_json = hs_row.get("segments_json", "[]")
+            try:
+                hand_segments = _json.loads(seg_json) if isinstance(seg_json, str) else (seg_json or [])
+            except (ValueError, TypeError):
+                hand_segments = []
+
+        # Check if hand protection is active for this frame
+        hand_active = False
+        active_radius = hand_mask_radius
+        active_smooth = hand_smooth
+        for seg in hand_segments:
+            if seg.get("start", 0) <= frame_num <= seg.get("end", 0):
+                hand_active = True
+                active_radius = seg.get("radius", hand_mask_radius)
+                active_smooth = seg.get("smooth", hand_smooth)
+                break
+
+        # Load hand landmarks from npz
+        hand_lm_data = {}
+        npz_path = settings.dlc_path / subject_name / "mediapipe_prelabels.npz"
+        if npz_path.exists() and hand_active:
+            npz = np.load(str(npz_path))
+            os_lm = npz.get("OS_landmarks")
+            od_lm = npz.get("OD_landmarks")
+            if os_lm is not None and frame_num < os_lm.shape[0]:
+                for j in range(os_lm.shape[1]):
+                    x, y = os_lm[frame_num, j, 0], os_lm[frame_num, j, 1]
+                    if not np.isnan(x):
+                        if frame_num not in hand_lm_data:
+                            hand_lm_data[frame_num] = []
+                        hand_lm_data[frame_num].append({"x": float(x), "y": float(y), "side": "left", "type": "hand", "joint": j})
+            if od_lm is not None and frame_num < od_lm.shape[0]:
+                for j in range(od_lm.shape[1]):
+                    x, y = od_lm[frame_num, j, 0], od_lm[frame_num, j, 1]
+                    if not np.isnan(x):
+                        if frame_num not in hand_lm_data:
+                            hand_lm_data[frame_num] = []
+                        hand_lm_data[frame_num].append({"x": float(x), "y": float(y), "side": "right", "type": "hand", "joint": j})
+            # Also load pose landmarks
+            pose_path = settings.dlc_path / subject_name / "pose_prelabels.npz"
+            if pose_path.exists():
+                pose_npz = np.load(str(pose_path))
+                for cam_key, side_label in [("OS_landmarks", "left"), ("OD_landmarks", "right")]:
+                    plm = pose_npz.get(cam_key)
+                    if plm is not None and frame_num < plm.shape[0]:
+                        for j in range(plm.shape[1]):
+                            x, y = plm[frame_num, j, 0], plm[frame_num, j, 1]
+                            if not np.isnan(x):
+                                if frame_num not in hand_lm_data:
+                                    hand_lm_data[frame_num] = []
+                                hand_lm_data[frame_num].append({"x": float(x), "y": float(y), "side": side_label, "type": "pose", "joint": j})
+
+        if active_specs:
+            if is_stereo:
+                left = frame[:, :half_w, :].copy()
+                right = frame[:, half_w:, :].copy()
+                left_specs = [s for s in active_specs if s.get("side", "left") == "left"]
+                right_specs = [s for s in active_specs if s.get("side", "right") == "right"]
+                left_mask = _build_blur_mask(left_specs, half_w, fh, frame_num, face_by_frame, "left")
+                right_mask = _build_blur_mask(right_specs, fw - half_w, fh, frame_num, face_by_frame, "right")
+                hand_mask_l = np.zeros((fh, half_w), dtype=bool)
+                hand_mask_r = np.zeros((fh, fw - half_w), dtype=bool)
+                if hand_active and frame_num in hand_lm_data:
+                    lms_l = [lm for lm in hand_lm_data[frame_num] if lm["side"] == "left"]
+                    lms_r = [lm for lm in hand_lm_data[frame_num] if lm["side"] == "right"]
+                    hand_mask_l = _build_hand_mask_from_landmarks(lms_l, half_w, fh, active_radius, active_smooth,
+                                                                  forearm_radius_val, forearm_extent_val, hand_smooth2_val)
+                    hand_mask_r = _build_hand_mask_from_landmarks(lms_r, fw - half_w, fh, active_radius, active_smooth,
+                                                                  forearm_radius_val, forearm_extent_val, hand_smooth2_val)
+                left = _apply_blur_with_mask(left, left_mask, hand_mask_l)
+                right = _apply_blur_with_mask(right, right_mask, hand_mask_r)
+                frame = np.concatenate([left, right], axis=1)
+            else:
+                blur_mask = _build_blur_mask(active_specs, fw, fh, frame_num, face_by_frame, "full")
+                hand_mask = np.zeros((fh, fw), dtype=bool)
+                if hand_active and frame_num in hand_lm_data:
+                    hand_mask = _build_hand_mask_from_landmarks(
+                        hand_lm_data[frame_num], fw, fh, active_radius, active_smooth,
+                        forearm_radius_val, forearm_extent_val, hand_smooth2_val)
+                frame = _apply_blur_with_mask(frame, blur_mask, hand_mask)
+
     # Stereo: crop to left or right half based on camera name
-    if is_stereo and side != "full":
+    if is_stereo and side != "full" and not blurred:
         half_w = fw // 2
         if len(cam_names) >= 2 and side == cam_names[1]:
             frame = frame[:, half_w:, :]
