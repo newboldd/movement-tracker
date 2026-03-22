@@ -224,10 +224,7 @@ const deid = (() => {
             b.classList.toggle('active', i === idx);
         });
 
-        const slider = document.getElementById('frameSlider');
-        slider.min = trialMeta.start_frame;
-        slider.max = trialMeta.end_frame;
-        slider.value = currentFrame;
+        // (frame slider removed — timeline handles navigation)
 
         // Load saved blur specs
         try {
@@ -292,8 +289,7 @@ const deid = (() => {
 
         if (!hasUserZoom) fitImage();
 
-        // Update slider + display
-        document.getElementById('frameSlider').value = frameNum;
+        // Update display
         const localFrame = frameNum - (trialMeta ? trialMeta.start_frame : 0);
         document.getElementById('frameDisplay').textContent =
             `Frame: ${localFrame} / ${totalFrames - 1}`;
@@ -681,7 +677,6 @@ const deid = (() => {
                     currentImage = img;
                     imgW = img.width;
                     imgH = img.height;
-                    document.getElementById('frameSlider').value = currentFrame;
                     const localFrame = currentFrame - trialMeta.start_frame;
                     document.getElementById('frameDisplay').textContent =
                         `Frame: ${localFrame} / ${totalFrames - 1}`;
@@ -1292,19 +1287,18 @@ const deid = (() => {
         const L = _tlLayout();
         if (!L) return;
 
-        // Check if clicking a spot bar
+        // Always seek to clicked frame
+        const frame = Math.max(L.start, Math.min(L.end, _tlXToFrame(mx, L)));
+        seekFrame(frame);
+
+        // Also select spot if clicking on one
         const hit = _tlHitTest(e);
         if (hit && hit.type === 'spot') {
             selectedSpotId = hit.spot.id;
             renderSpotList();
             updateSpotControls();
             renderTimeline();
-            return;
         }
-
-        // Click empty area → seek to frame
-        const frame = Math.max(L.start, Math.min(L.end, _tlXToFrame(mx, L)));
-        seekFrame(frame);
     }
 
     // ── Public API ──
