@@ -869,6 +869,28 @@ def run_mediapipe_cropped(
     conf_key = "confidence_OS" if camera_key == "OS" else "confidence_OD"
     total_frames = data[lm_key].shape[0]
 
+    # Expand arrays if video has more frames than npz
+    max_needed = start_frame + frame_offset + n_frames
+    if max_needed > total_frames:
+        new_total = max_needed
+        for key in ("OS_landmarks", "OD_landmarks"):
+            old = data[key]
+            expanded = np.full((new_total, old.shape[1], old.shape[2]), np.nan)
+            expanded[:old.shape[0]] = old
+            data[key] = expanded
+        for key in ("confidence_OS", "confidence_OD"):
+            old = data[key]
+            expanded = np.full(new_total, np.nan)
+            expanded[:old.shape[0]] = old
+            data[key] = expanded
+        old_dist = data["distances"]
+        new_dist = np.full(new_total, np.nan)
+        new_dist[:old_dist.shape[0]] = old_dist
+        data["distances"] = new_dist
+        data["total_frames"] = np.array(new_total)
+        total_frames = new_total
+        logger.info(f"Expanded npz arrays from {old.shape[0]} to {new_total} frames")
+
     # Overwrite the trial's frame range with new detections
     for local_frame in range(n_frames):
         global_frame = start_frame + frame_offset + local_frame
