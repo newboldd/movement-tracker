@@ -619,11 +619,21 @@ def render_deidentified(subject_id: int) -> dict:
                 # Find the source video (original, not deidentified)
                 source_path = trial["video_path"]
 
+                # Load face detections for this trial
+                with get_db_ctx() as db:
+                    face_rows = db.execute(
+                        "SELECT frame_num, x1, y1, x2, y2, side FROM face_detections WHERE subject_id = ? AND trial_idx = ?",
+                        (subject_id, trial_i),
+                    ).fetchall()
+                face_dets = [dict(r) for r in face_rows]
+
                 render_with_blur_specs(
                     input_path=source_path,
                     output_path=output_path,
                     blur_specs=specs_by_trial.get(trial_i, []),
                     hand_settings=hand_by_trial.get(trial_i),
+                    face_detections=face_dets,
+                    subject_name=subject_name,
                     start_frame=trial["start_frame"],
                     frame_count=trial["frame_count"],
                     progress_callback=progress_cb,

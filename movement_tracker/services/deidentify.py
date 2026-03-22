@@ -551,48 +551,80 @@ def detect_hands_single_frame(video_path: str, frame_num: int,
 def render_with_blur_specs(input_path: str, output_path: str,
                            blur_specs: list[dict],
                            hand_settings: dict | None = None,
+                           face_detections: list[dict] | None = None,
+                           subject_name: str | None = None,
                            start_frame: int = 0,
                            frame_count: int | None = None,
                            progress_callback=None) -> dict:
-    """Render a video with explicit blur specifications.
+    """Render a video with blur specs matching the frontend preview.
 
-    Args:
-        input_path: Source video path
-        output_path: Output video path
-        blur_specs: List of {x, y, radius, frame_start, frame_end, side}
-            Coordinates are in pixels (not normalized)
-        hand_settings: {enabled: bool, mask_radius: int} or None
-        start_frame: First frame to process
-        frame_count: Number of frames (None = all from start)
-        progress_callback: Optional callable(pct: float)
-
-    Returns:
-        dict with stats: n_frames, is_stereo
+    Face-type spots track face detection centroids per frame.
+    Blur regions are ellipses (width x height) with offset from centroid.
+    Hand protection uses stored MediaPipe landmarks from npz, not live detection.
     """
-    import mediapipe as mp_lib
-
     cap = cv2.VideoCapture(input_path)
     reported = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
     full_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    if full_w == 0 or h == 0:
+    fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if full_w == 0 or fh == 0:
         cap.release()
         raise RuntimeError(f"Cannot read video: {input_path}")
 
-    is_stereo = (full_w / h) > 1.7
+    is_stereo = (full_w / fh) > 1.7
     half_w = full_w // 2 if is_stereo else full_w
     total = frame_count if frame_count else (reported - start_frame)
 
-    use_hands = hand_settings and hand_settings.get("enabled", False)
-    hand_mask_radius = hand_settings.get("mask_radius", 30) if hand_settings else 30
+    # Index face detections by frame_num for fast lookup
+    face_by_frame = {}
+    for fd in (face_detections or []):
+        fn = fd["frame_num"]
+        if fn not in face_by_frame:
+            face_by_frame[fn] = []
+        face_by_frame[fn].append(fd)
 
-    hands = None
-    if use_hands:
-        hands = mp_lib.solutions.hands.Hands(
-            static_image_mode=False, max_num_hands=2,
-            min_detection_confidence=0.3, min_tracking_confidence=0.3,
-        )
+    # Load hand landmarks from npz for hand protection
+    hand_lm_data = None  # {frame: [{x, y, side}]}
+    hand_segments = []
+    hand_mask_radius = 10
+    hand_smooth = 10
+    if hand_settings:
+        import json as _json
+        hand_mask_radius = hand_settings.get("hand_mask_radius") or hand_settings.get("mask_radius") or 10
+        hand_smooth = hand_settings.get("hand_smooth", 10)
+        seg_json = hand_settings.get("segments_json", "[]")
+        try:
+            hand_segments = _json.loads(seg_json) if isinstance(seg_json, str) else seg_json
+        except (ValueError, TypeError):
+            hand_segments = []
+
+        # Load from npz if subject_name provided
+        if subject_name and hand_segments:
+            from ..config import get_settings
+            settings = get_settings()
+            npz_path = settings.dlc_path / subject_name / "mediapipe_prelabels.npz"
+            if npz_path.exists():
+                import numpy as np2
+                npz = np2.load(str(npz_path))
+                os_lm = npz.get("OS_landmarks")
+                od_lm = npz.get("OD_landmarks")
+                hand_lm_data = {}
+                if os_lm is not None:
+                    for f in range(os_lm.shape[0]):
+                        if f not in hand_lm_data:
+                            hand_lm_data[f] = []
+                        for j in range(os_lm.shape[1]):
+                            x, y = os_lm[f, j, 0], os_lm[f, j, 1]
+                            if not np.isnan(x):
+                                hand_lm_data[f].append({"x": float(x), "y": float(y), "side": "left"})
+                if od_lm is not None:
+                    for f in range(od_lm.shape[0]):
+                        if f not in hand_lm_data:
+                            hand_lm_data[f] = []
+                        for j in range(od_lm.shape[1]):
+                            x, y = od_lm[f, j, 0], od_lm[f, j, 1]
+                            if not np.isnan(x):
+                                hand_lm_data[f].append({"x": float(x), "y": float(y), "side": "right"})
 
     if start_frame > 0:
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
@@ -601,7 +633,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
     writer = None
     for codec in (["avc1", "mp4v"] if sys.platform == "darwin" else ["mp4v"]):
         fourcc = cv2.VideoWriter_fourcc(*codec)
-        writer = cv2.VideoWriter(output_path, fourcc, fps, (full_w, h))
+        writer = cv2.VideoWriter(output_path, fourcc, fps, (full_w, fh))
         if writer.isOpened():
             break
         writer.release()
@@ -623,6 +655,15 @@ def render_with_blur_specs(input_path: str, output_path: str,
                         if s["frame_start"] <= global_frame <= s["frame_end"]]
 
         if active_specs:
+            # Check if hand protection is active for this frame
+            hand_active = False
+            active_radius = hand_mask_radius
+            for seg in hand_segments:
+                if seg.get("start", 0) <= global_frame <= seg.get("end", 0):
+                    hand_active = True
+                    active_radius = seg.get("radius", hand_mask_radius)
+                    break
+
             if is_stereo:
                 left = frame[:, :half_w, :].copy()
                 right = frame[:, half_w:, :].copy()
@@ -630,35 +671,31 @@ def render_with_blur_specs(input_path: str, output_path: str,
                 left_specs = [s for s in active_specs if s.get("side", "left") == "left"]
                 right_specs = [s for s in active_specs if s.get("side", "right") == "right"]
 
-                # Build face boxes from specs
-                left_boxes = _specs_to_boxes(left_specs, half_w, h)
-                right_boxes = _specs_to_boxes(right_specs, full_w - half_w, h)
+                # Build elliptical blur masks
+                left_mask = _build_blur_mask(left_specs, half_w, fh, global_frame, face_by_frame, "left")
+                right_mask = _build_blur_mask(right_specs, full_w - half_w, fh, global_frame, face_by_frame, "right")
 
-                # Hand protection
-                hand_mask_l = np.zeros((h, half_w), dtype=bool)
-                hand_mask_r = np.zeros((h, full_w - half_w), dtype=bool)
-                if use_hands and hands:
-                    rgb_l = cv2.cvtColor(left, cv2.COLOR_BGR2RGB)
-                    rgb_r = cv2.cvtColor(right, cv2.COLOR_BGR2RGB)
-                    hand_mask_l = _build_hand_mask_with_radius(
-                        left.shape, hands.process(rgb_l), hand_mask_radius)
-                    hand_mask_r = _build_hand_mask_with_radius(
-                        right.shape, hands.process(rgb_r), hand_mask_radius)
+                # Build hand protection masks
+                hand_mask_l = np.zeros((fh, half_w), dtype=bool)
+                hand_mask_r = np.zeros((fh, full_w - half_w), dtype=bool)
+                if hand_active and hand_lm_data and global_frame in hand_lm_data:
+                    lms_l = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "left"]
+                    lms_r = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "right"]
+                    hand_mask_l = _build_hand_mask_from_landmarks(lms_l, half_w, fh, active_radius, hand_smooth)
+                    hand_mask_r = _build_hand_mask_from_landmarks(lms_r, full_w - half_w, fh, active_radius, hand_smooth)
 
-                left = _apply_face_blur(left, left_boxes, hand_mask_l)
-                right = _apply_face_blur(right, right_boxes, hand_mask_r)
+                left = _apply_blur_with_mask(left, left_mask, hand_mask_l)
+                right = _apply_blur_with_mask(right, right_mask, hand_mask_r)
                 frame = np.concatenate([left, right], axis=1)
             else:
-                full_specs = [s for s in active_specs]
-                boxes = _specs_to_boxes(full_specs, full_w, h)
+                blur_mask = _build_blur_mask(active_specs, full_w, fh, global_frame, face_by_frame, "full")
 
-                hand_mask = np.zeros((h, full_w), dtype=bool)
-                if use_hands and hands:
-                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    hand_mask = _build_hand_mask_with_radius(
-                        frame.shape, hands.process(rgb), hand_mask_radius)
+                hand_mask = np.zeros((fh, full_w), dtype=bool)
+                if hand_active and hand_lm_data and global_frame in hand_lm_data:
+                    hand_mask = _build_hand_mask_from_landmarks(
+                        hand_lm_data[global_frame], full_w, fh, active_radius, hand_smooth)
 
-                frame = _apply_face_blur(frame, boxes, hand_mask)
+                frame = _apply_blur_with_mask(frame, blur_mask, hand_mask)
 
         writer.write(frame)
 
@@ -667,50 +704,111 @@ def render_with_blur_specs(input_path: str, output_path: str,
 
     cap.release()
     writer.release()
-    if hands:
-        hands.close()
     if progress_callback:
         progress_callback(100)
 
     return {"n_frames": total, "is_stereo": is_stereo}
 
 
-def _specs_to_boxes(specs: list[dict], w: int, h: int) -> list[tuple]:
-    """Convert blur specs (center + radius) to bounding box tuples."""
-    boxes = []
-    for s in specs:
-        cx, cy, r = s["x"], s["y"], s["radius"]
-        x1 = max(0, int(cx - r))
-        y1 = max(0, int(cy - r))
-        x2 = min(w, int(cx + r))
-        y2 = min(h, int(cy + r))
-        if x2 > x1 and y2 > y1:
-            boxes.append((x1, y1, x2, y2))
-    return boxes
+def _get_face_centroid(face_by_frame: dict, global_frame: int, side: str,
+                       ref_x: float, ref_y: float) -> tuple | None:
+    """Find the face detection closest to (ref_x, ref_y) for this frame and side."""
+    faces = face_by_frame.get(global_frame, [])
+    best = None
+    best_dist = float("inf")
+    for f in faces:
+        if f.get("side", "full") != side:
+            continue
+        cx = (f["x1"] + f["x2"]) / 2
+        cy = (f["y1"] + f["y2"]) / 2
+        dist = (cx - ref_x) ** 2 + (cy - ref_y) ** 2
+        if dist < best_dist:
+            best_dist = dist
+            best = (cx, cy)
+    return best
 
 
-def _build_hand_mask_with_radius(shape, hand_results, radius: int):
-    """Build hand exclusion mask with configurable dilation radius."""
-    h, w = shape[:2]
+def _build_blur_mask(specs: list[dict], w: int, h: int,
+                     global_frame: int, face_by_frame: dict,
+                     side: str) -> np.ndarray:
+    """Build blur mask with ellipses, tracking face centroids for face spots."""
     mask = np.zeros((h, w), dtype=np.uint8)
 
-    if not hand_results or not hand_results.multi_hand_landmarks:
+    for s in specs:
+        # Determine center position
+        cx, cy = float(s["x"]), float(s["y"])
+        ox = float(s.get("offset_x") or 0)
+        oy = float(s.get("offset_y") or 0)
+
+        if s.get("spot_type") == "face":
+            # Track face detection centroid for this frame
+            centroid = _get_face_centroid(face_by_frame, global_frame, side, cx, cy)
+            if centroid:
+                cx, cy = centroid[0] + ox, centroid[1] + oy
+            else:
+                cx, cy = cx + ox, cy + oy
+
+        # Use width/height if available, otherwise fall back to radius
+        bw = float(s.get("width") or s.get("radius") or 50)
+        bh = float(s.get("height") or s.get("radius") or 50)
+
+        # Draw filled ellipse
+        center = (int(cx), int(cy))
+        axes = (int(bw), int(bh))
+        if axes[0] > 0 and axes[1] > 0:
+            cv2.ellipse(mask, center, axes, 0, 0, 360, 255, -1)
+
+    return mask
+
+
+def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
+                                     radius: int, smooth: int = 0) -> np.ndarray:
+    """Build hand protection mask from stored landmarks (matching frontend behavior)."""
+    mask = np.zeros((h, w), dtype=np.uint8)
+
+    if not landmarks:
         return mask > 0
 
-    for hand_lm in hand_results.multi_hand_landmarks:
-        pts = np.array(
-            [(int(lm.x * w), int(lm.y * h)) for lm in hand_lm.landmark],
-            dtype=np.float32,
-        )
-        valid = pts[~np.isnan(pts[:, 0])]
-        if len(valid) < 3:
-            continue
-        hull = cv2.convexHull(valid.astype(np.float32))
-        cv2.fillConvexPoly(mask, hull.astype(np.int32), 255)
+    # Draw circles at each landmark position
+    for lm in landmarks:
+        x, y = int(lm["x"]), int(lm["y"])
+        if 0 <= x < w and 0 <= y < h:
+            cv2.circle(mask, (x, y), radius, 255, -1)
 
-    if radius > 0:
-        k = 2 * radius + 1
+    # Apply morphological close (dilate + erode) for smooth parameter
+    if smooth > 0:
+        k = 2 * smooth + 1
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
         mask = cv2.dilate(mask, kernel)
+        mask = cv2.erode(mask, kernel)
 
     return mask > 0
+
+
+def _apply_blur_with_mask(frame_half, blur_mask, hand_mask):
+    """Apply Gaussian blur to blur_mask regions, excluding hand_mask."""
+    if blur_mask.max() == 0:
+        return frame_half
+
+    h, w = frame_half.shape[:2]
+
+    # Subtract hand protection from blur mask
+    final_mask = blur_mask.copy()
+    if hand_mask is not None and hand_mask.any():
+        final_mask[hand_mask] = 0
+
+    if final_mask.max() == 0:
+        return frame_half
+
+    # Feather the mask edges
+    mask_f = cv2.GaussianBlur(
+        final_mask.astype(np.float32) / 255.0,
+        (FEATHER_KERNEL, FEATHER_KERNEL), 5)
+
+    blurred = cv2.GaussianBlur(frame_half, (BLUR_KERNEL_SIZE, BLUR_KERNEL_SIZE), BLUR_SIGMA)
+
+    mask_3ch = mask_f[:, :, np.newaxis]
+    result = (frame_half.astype(np.float32) * (1 - mask_3ch) +
+              blurred.astype(np.float32) * mask_3ch).astype(np.uint8)
+
+    return result
