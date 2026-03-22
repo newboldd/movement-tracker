@@ -287,13 +287,18 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
                 confidence_OS[global_frame] = os_conf[local_frame, os_idx]
                 confidence_OD[global_frame] = od_conf[local_frame, od_idx]
 
-    # Compute 3D distances if calibration is available
+    # Compute distances: prefer 3D triangulated if calibration available,
+    # otherwise fall back to 2D pixel distance from OS camera
     distances = np.full(total_frames, np.nan)
     calib = get_calibration_for_subject(subject_name)
     if calib is not None:
         distances = _compute_distances(OS_landmarks, OD_landmarks, calib)
         valid_dist = np.sum(~np.isnan(distances))
         logger.info(f"Computed 3D distances for {valid_dist}/{total_frames} frames")
+    else:
+        distances = _compute_2d_distances(OS_landmarks)
+        valid_dist = np.sum(~np.isnan(distances))
+        logger.info(f"Computed 2D pixel distances for {valid_dist}/{total_frames} frames (no calibration)")
 
     # Save to npz
     dlc_path = settings.dlc_path / subject_name
@@ -349,6 +354,23 @@ def _compute_distances(OS_landmarks, OD_landmarks, calib):
         if not np.any(np.isnan(pts_3d)):
             distances[i] = float(np.linalg.norm(pts_3d[0] - pts_3d[1]))
 
+    return distances
+
+
+def _compute_2d_distances(landmarks):
+    """Compute 2D pixel distance between thumb tip and index tip.
+
+    Used as a fallback when no stereo calibration is available.
+    The values are in pixel units (not mm) but still useful for
+    visualization and relative comparisons.
+    """
+    n = len(landmarks)
+    distances = np.full(n, np.nan)
+    for i in range(n):
+        thumb = landmarks[i, THUMB_TIP]
+        index = landmarks[i, INDEX_TIP]
+        if not np.isnan(thumb[0]) and not np.isnan(index[0]):
+            distances[i] = float(np.linalg.norm(thumb - index))
     return distances
 
 
@@ -497,28 +519,31 @@ def get_mediapipe_for_session(subject_name: str) -> dict | None:
     OS_lm = data["OS_landmarks"]
     OD_lm = data["OD_landmarks"]
 
-    # Recompute distances if they're all NaN but calibration is available
+    # Recompute distances if they're all NaN
     if np.all(np.isnan(data["distances"])):
         calib = get_calibration_for_subject(subject_name)
         if calib is not None:
-            logger.info(f"Recomputing distances for {subject_name} (calibration now available)")
+            logger.info(f"Recomputing 3D distances for {subject_name} (calibration now available)")
             distances = _compute_distances(OS_lm, OD_lm, calib)
-            valid = np.sum(~np.isnan(distances))
-            if valid > 0:
-                data["distances"] = distances
-                # Update the npz file so we don't recompute every time
-                settings = get_settings()
-                npz_path = str(settings.dlc_path / subject_name / "mediapipe_prelabels.npz")
-                np.savez(
-                    npz_path,
-                    OS_landmarks=OS_lm,
-                    OD_landmarks=OD_lm,
-                    confidence_OS=data["confidence_OS"],
-                    confidence_OD=data["confidence_OD"],
-                    distances=distances,
-                    total_frames=data["total_frames"],
-                )
-                logger.info(f"Updated distances in {npz_path}: {valid}/{len(distances)} frames")
+        else:
+            logger.info(f"Computing 2D pixel distances for {subject_name} (no calibration)")
+            distances = _compute_2d_distances(OS_lm)
+        valid = np.sum(~np.isnan(distances))
+        if valid > 0:
+            data["distances"] = distances
+            # Update the npz file so we don't recompute every time
+            settings = get_settings()
+            npz_path = str(settings.dlc_path / subject_name / "mediapipe_prelabels.npz")
+            np.savez(
+                npz_path,
+                OS_landmarks=OS_lm,
+                OD_landmarks=OD_lm,
+                confidence_OS=data["confidence_OS"],
+                confidence_OD=data["confidence_OD"],
+                distances=distances,
+                total_frames=data["total_frames"],
+            )
+            logger.info(f"Updated distances in {npz_path}: {valid}/{len(distances)} frames")
 
     settings = get_settings()
     cam_names = settings.camera_names
@@ -800,10 +825,12 @@ def run_mediapipe_cropped(
             data[lm_key][global_frame] = tracks[local_frame, track_idx]
             data[conf_key][global_frame] = conf[local_frame, track_idx]
 
-    # Recompute distances if calibration is available
+    # Recompute distances: prefer 3D if calibration available, else 2D pixel
     calib = get_calibration_for_subject(subject_name)
     if calib is not None:
         data["distances"] = _compute_distances(data["OS_landmarks"], data["OD_landmarks"], calib)
+    else:
+        data["distances"] = _compute_2d_distances(data["OS_landmarks"])
 
     # Save updated npz
     npz_path.parent.mkdir(parents=True, exist_ok=True)
