@@ -675,9 +675,10 @@ const deid = (() => {
             const shrinkR = activeProtectRadius * scale - 2;
             if (shrinkR > 0) {
                 if (activeSmooth > 0) {
-                    // Rebuild mask at slightly smaller radius
+                    // Rebuild mask at slightly smaller radius (shrink forearm too)
+                    const shrinkForearm = Math.max(0, forearmRadius * scale - 2);
                     ic.drawImage(_buildHandMask(
-                        visibleLandmarks, shrinkR, forearmRadius * scale, activeSmooth * scale, cw, ch
+                        visibleLandmarks, shrinkR, shrinkForearm, activeSmooth * scale, cw, ch
                     ), 0, 0);
                 } else {
                     ic.fillStyle = '#fff';
