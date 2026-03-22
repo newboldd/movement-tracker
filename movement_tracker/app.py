@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 
 from .config import get_settings
 from .db import init_db
-from .routers import subjects, labeling, pipeline, jobs, results, settings, filebrowser, video_tools, batch, remote_jobs, mano, export, camera_setups, updater
+from .routers import subjects, labeling, pipeline, jobs, results, settings, filebrowser, video_tools, batch, remote_jobs, mano, export, camera_setups, updater, deidentify
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ class NoCacheMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
         if request.url.path.startswith("/static") or request.url.path in (
-            "/", "/labeling", "/mediapipe", "/results", "/settings", "/onboarding", "/remote", "/videos", "/calibration", "/tutorials", "/tutorial"
+            "/", "/labeling", "/mediapipe", "/deidentify", "/results", "/settings", "/onboarding", "/remote", "/videos", "/calibration", "/tutorials", "/tutorial"
         ):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return response
@@ -52,6 +52,7 @@ app.include_router(mano.router)  # API endpoints used by videos.js (page removed
 app.include_router(export.router)
 app.include_router(camera_setups.router)
 app.include_router(updater.router)
+app.include_router(deidentify.router)
 
 # Mount static files
 STATIC_DIR = Path(__file__).parent / "static"
@@ -472,6 +473,12 @@ def labeling_page():
 def mediapipe_page():
     """Serve the MediaPipe page (same labeling UI, different mode)."""
     return FileResponse(str(STATIC_DIR / "labeling.html"))
+
+
+@app.get("/deidentify")
+def deidentify_page():
+    """Serve the interactive deidentify/blur page."""
+    return FileResponse(str(STATIC_DIR / "deidentify.html"))
 
 
 @app.get("/labeling-select")

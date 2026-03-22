@@ -380,3 +380,337 @@ def deidentify_video(input_path: str, output_path: str,
 
     logger.info(f"Deidentify complete: {n_frames} frames, face rate={stats['face_det_rate']:.1%}")
     return stats
+
+
+# ── Interactive deidentify: face detection + spec-based render ──────────
+
+def detect_faces_in_video(video_path: str, start_frame: int = 0,
+                          frame_count: int | None = None,
+                          progress_callback=None) -> dict:
+    """Run face detection on a video segment and return per-frame bounding boxes.
+
+    Returns dict with:
+        faces: list of {frame: int, faces: [{x1, y1, x2, y2, confidence}]}
+        is_stereo: bool
+        frame_width: int (half-width for stereo)
+        frame_height: int
+    """
+    import mediapipe as mp_lib
+
+    cap = cv2.VideoCapture(video_path)
+    reported = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    full_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if full_w == 0 or h == 0:
+        cap.release()
+        raise RuntimeError(f"Cannot read video: {video_path}")
+
+    is_stereo = (full_w / h) > 1.7
+    half_w = full_w // 2 if is_stereo else full_w
+    total = frame_count if frame_count else (reported - start_frame)
+
+    face_det = mp_lib.solutions.face_detection.FaceDetection(
+        model_selection=FACE_MODEL_SELECTION,
+        min_detection_confidence=FACE_CONF_THRESHOLD,
+    )
+
+    if start_frame > 0:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+    raw_L, raw_R, raw_mono = [], [], []
+    for i in range(total):
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame = np.ascontiguousarray(frame, dtype=np.uint8)
+
+        if is_stereo:
+            left = frame[:, :half_w, :]
+            right = frame[:, half_w:, :]
+            rgb_l = cv2.cvtColor(left, cv2.COLOR_BGR2RGB)
+            rgb_r = cv2.cvtColor(right, cv2.COLOR_BGR2RGB)
+            raw_L.append(_detect_faces_in_half(rgb_l, face_det, half_w, h))
+            raw_R.append(_detect_faces_in_half(rgb_r, face_det, full_w - half_w, h))
+        else:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            raw_mono.append(_detect_faces_in_half(rgb, face_det, full_w, h))
+
+        if progress_callback and i % 10 == 0:
+            progress_callback(i / total * 100)
+
+    face_det.close()
+    cap.release()
+
+    n = len(raw_L) if is_stereo else len(raw_mono)
+
+    # Temporal smoothing
+    if is_stereo:
+        smoothed_L = _smooth_face_detections(raw_L, n, half_w, h)
+        smoothed_R = _smooth_face_detections(raw_R, n, full_w - half_w, h)
+    else:
+        smoothed = _smooth_face_detections(raw_mono, n, full_w, h)
+
+    # Build response
+    faces_per_frame = []
+    for i in range(n):
+        entry = {"frame": start_frame + i, "faces": []}
+        if is_stereo:
+            for (x1, y1, x2, y2) in smoothed_L[i]:
+                entry["faces"].append({
+                    "x1": x1, "y1": y1, "x2": x2, "y2": y2, "side": "left",
+                })
+            for (x1, y1, x2, y2) in smoothed_R[i]:
+                entry["faces"].append({
+                    "x1": x1, "y1": y1, "x2": x2, "y2": y2, "side": "right",
+                })
+        else:
+            for (x1, y1, x2, y2) in smoothed[i]:
+                entry["faces"].append({
+                    "x1": x1, "y1": y1, "x2": x2, "y2": y2, "side": "full",
+                })
+        faces_per_frame.append(entry)
+
+    if progress_callback:
+        progress_callback(100)
+
+    return {
+        "faces": faces_per_frame,
+        "is_stereo": is_stereo,
+        "frame_width": half_w,
+        "frame_height": h,
+        "n_frames": n,
+    }
+
+
+def detect_hands_single_frame(video_path: str, frame_num: int,
+                              is_stereo: bool = False) -> dict:
+    """Run MediaPipe Hands on a single frame, return landmark positions.
+
+    Returns dict with landmarks: [{x, y, side}] for each detected hand point.
+    """
+    import mediapipe as mp_lib
+
+    cap = cv2.VideoCapture(video_path)
+    full_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    half_w = full_w // 2 if is_stereo else full_w
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+    ret, frame = cap.read()
+    cap.release()
+
+    if not ret:
+        return {"landmarks": [], "hands": []}
+
+    frame = np.ascontiguousarray(frame, dtype=np.uint8)
+    hands_det = mp_lib.solutions.hands.Hands(
+        static_image_mode=True, max_num_hands=4,
+        min_detection_confidence=0.3,
+    )
+
+    all_landmarks = []
+    all_hands = []
+
+    if is_stereo:
+        for side_name, half_frame, w in [
+            ("left", frame[:, :half_w, :], half_w),
+            ("right", frame[:, half_w:, :], full_w - half_w),
+        ]:
+            rgb = cv2.cvtColor(half_frame, cv2.COLOR_BGR2RGB)
+            res = hands_det.process(rgb)
+            if res.multi_hand_landmarks:
+                for hand_lm in res.multi_hand_landmarks:
+                    hand_pts = []
+                    for lm in hand_lm.landmark:
+                        hand_pts.append({
+                            "x": round(lm.x * w, 1),
+                            "y": round(lm.y * h, 1),
+                            "side": side_name,
+                        })
+                    all_hands.append(hand_pts)
+                    all_landmarks.extend(hand_pts)
+    else:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        res = hands_det.process(rgb)
+        if res.multi_hand_landmarks:
+            for hand_lm in res.multi_hand_landmarks:
+                hand_pts = []
+                for lm in hand_lm.landmark:
+                    hand_pts.append({
+                        "x": round(lm.x * full_w, 1),
+                        "y": round(lm.y * h, 1),
+                        "side": "full",
+                    })
+                all_hands.append(hand_pts)
+                all_landmarks.extend(hand_pts)
+
+    hands_det.close()
+    return {"landmarks": all_landmarks, "hands": all_hands}
+
+
+def render_with_blur_specs(input_path: str, output_path: str,
+                           blur_specs: list[dict],
+                           hand_settings: dict | None = None,
+                           start_frame: int = 0,
+                           frame_count: int | None = None,
+                           progress_callback=None) -> dict:
+    """Render a video with explicit blur specifications.
+
+    Args:
+        input_path: Source video path
+        output_path: Output video path
+        blur_specs: List of {x, y, radius, frame_start, frame_end, side}
+            Coordinates are in pixels (not normalized)
+        hand_settings: {enabled: bool, mask_radius: int} or None
+        start_frame: First frame to process
+        frame_count: Number of frames (None = all from start)
+        progress_callback: Optional callable(pct: float)
+
+    Returns:
+        dict with stats: n_frames, is_stereo
+    """
+    import mediapipe as mp_lib
+
+    cap = cv2.VideoCapture(input_path)
+    reported = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    full_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if full_w == 0 or h == 0:
+        cap.release()
+        raise RuntimeError(f"Cannot read video: {input_path}")
+
+    is_stereo = (full_w / h) > 1.7
+    half_w = full_w // 2 if is_stereo else full_w
+    total = frame_count if frame_count else (reported - start_frame)
+
+    use_hands = hand_settings and hand_settings.get("enabled", False)
+    hand_mask_radius = hand_settings.get("mask_radius", 30) if hand_settings else 30
+
+    hands = None
+    if use_hands:
+        hands = mp_lib.solutions.hands.Hands(
+            static_image_mode=False, max_num_hands=2,
+            min_detection_confidence=0.3, min_tracking_confidence=0.3,
+        )
+
+    if start_frame > 0:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+    import sys
+    writer = None
+    for codec in (["avc1", "mp4v"] if sys.platform == "darwin" else ["mp4v"]):
+        fourcc = cv2.VideoWriter_fourcc(*codec)
+        writer = cv2.VideoWriter(output_path, fourcc, fps, (full_w, h))
+        if writer.isOpened():
+            break
+        writer.release()
+        writer = None
+    if writer is None:
+        cap.release()
+        raise RuntimeError(f"cv2.VideoWriter failed: {output_path}")
+
+    for i in range(total):
+        global_frame = start_frame + i
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        frame = np.ascontiguousarray(frame, dtype=np.uint8)
+
+        # Collect active blur specs for this frame
+        active_specs = [s for s in blur_specs
+                        if s["frame_start"] <= global_frame <= s["frame_end"]]
+
+        if active_specs:
+            if is_stereo:
+                left = frame[:, :half_w, :].copy()
+                right = frame[:, half_w:, :].copy()
+
+                left_specs = [s for s in active_specs if s.get("side", "left") == "left"]
+                right_specs = [s for s in active_specs if s.get("side", "right") == "right"]
+
+                # Build face boxes from specs
+                left_boxes = _specs_to_boxes(left_specs, half_w, h)
+                right_boxes = _specs_to_boxes(right_specs, full_w - half_w, h)
+
+                # Hand protection
+                hand_mask_l = np.zeros((h, half_w), dtype=bool)
+                hand_mask_r = np.zeros((h, full_w - half_w), dtype=bool)
+                if use_hands and hands:
+                    rgb_l = cv2.cvtColor(left, cv2.COLOR_BGR2RGB)
+                    rgb_r = cv2.cvtColor(right, cv2.COLOR_BGR2RGB)
+                    hand_mask_l = _build_hand_mask_with_radius(
+                        left.shape, hands.process(rgb_l), hand_mask_radius)
+                    hand_mask_r = _build_hand_mask_with_radius(
+                        right.shape, hands.process(rgb_r), hand_mask_radius)
+
+                left = _apply_face_blur(left, left_boxes, hand_mask_l)
+                right = _apply_face_blur(right, right_boxes, hand_mask_r)
+                frame = np.concatenate([left, right], axis=1)
+            else:
+                full_specs = [s for s in active_specs]
+                boxes = _specs_to_boxes(full_specs, full_w, h)
+
+                hand_mask = np.zeros((h, full_w), dtype=bool)
+                if use_hands and hands:
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    hand_mask = _build_hand_mask_with_radius(
+                        frame.shape, hands.process(rgb), hand_mask_radius)
+
+                frame = _apply_face_blur(frame, boxes, hand_mask)
+
+        writer.write(frame)
+
+        if progress_callback and i % 10 == 0:
+            progress_callback(i / total * 100)
+
+    cap.release()
+    writer.release()
+    if hands:
+        hands.close()
+    if progress_callback:
+        progress_callback(100)
+
+    return {"n_frames": total, "is_stereo": is_stereo}
+
+
+def _specs_to_boxes(specs: list[dict], w: int, h: int) -> list[tuple]:
+    """Convert blur specs (center + radius) to bounding box tuples."""
+    boxes = []
+    for s in specs:
+        cx, cy, r = s["x"], s["y"], s["radius"]
+        x1 = max(0, int(cx - r))
+        y1 = max(0, int(cy - r))
+        x2 = min(w, int(cx + r))
+        y2 = min(h, int(cy + r))
+        if x2 > x1 and y2 > y1:
+            boxes.append((x1, y1, x2, y2))
+    return boxes
+
+
+def _build_hand_mask_with_radius(shape, hand_results, radius: int):
+    """Build hand exclusion mask with configurable dilation radius."""
+    h, w = shape[:2]
+    mask = np.zeros((h, w), dtype=np.uint8)
+
+    if not hand_results or not hand_results.multi_hand_landmarks:
+        return mask > 0
+
+    for hand_lm in hand_results.multi_hand_landmarks:
+        pts = np.array(
+            [(int(lm.x * w), int(lm.y * h)) for lm in hand_lm.landmark],
+            dtype=np.float32,
+        )
+        valid = pts[~np.isnan(pts[:, 0])]
+        if len(valid) < 3:
+            continue
+        hull = cv2.convexHull(valid.astype(np.float32))
+        cv2.fillConvexPoly(mask, hull.astype(np.int32), 255)
+
+    if radius > 0:
+        k = 2 * radius + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        mask = cv2.dilate(mask, kernel)
+
+    return mask > 0

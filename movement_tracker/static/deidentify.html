@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Movement Tracker</title>
+    <link rel="stylesheet" href="/static/css/main.css?v=8">
+    <style>
+        body { overflow: hidden; }
+
+        .deid-outer {
+            display: flex;
+            flex-direction: column;
+            height: calc(100vh - 49px);
+            overflow: hidden;
+        }
+
+        /* ── Top bar ── */
+        .deid-topbar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 7px 14px;
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+            flex-wrap: wrap;
+        }
+        .deid-topbar select {
+            padding: 4px 8px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            color: var(--text);
+            font-size: 13px;
+        }
+        #trialBtns { display: flex; gap: 4px; flex-wrap: wrap; }
+        .trial-btn {
+            padding: 3px 10px; border-radius: 4px;
+            border: 1px solid var(--border); background: var(--bg);
+            color: var(--text-muted); cursor: pointer; font-size: 12px;
+            font-family: inherit; transition: all 0.15s;
+        }
+        .trial-btn:hover { border-color: var(--blue); color: var(--text); }
+        .trial-btn.active { background: var(--blue); border-color: var(--blue); color: #fff; }
+
+        /* ── Main layout: canvas + sidebar ── */
+        .deid-main {
+            flex: 1; display: flex; min-height: 0; overflow: hidden;
+        }
+        .deid-viewport {
+            flex: 1; position: relative; min-height: 0;
+            background: #111; overflow: hidden;
+        }
+        .deid-viewport canvas {
+            display: block; width: 100%; height: 100%;
+        }
+
+        /* ── Right sidebar ── */
+        .deid-sidebar {
+            width: 260px; flex-shrink: 0;
+            background: var(--bg-card); border-left: 1px solid var(--border);
+            overflow-y: auto; padding: 12px;
+        }
+        .deid-sidebar h3 {
+            font-size: 13px; color: var(--text-muted); margin: 0 0 8px;
+        }
+        .deid-sidebar .section { margin-bottom: 16px; }
+
+        .spot-item {
+            display: flex; align-items: center; gap: 6px;
+            padding: 4px 6px; border-radius: 4px; font-size: 11px;
+            margin-bottom: 4px; background: var(--bg);
+            border: 1px solid var(--border);
+        }
+        .spot-item.selected { border-color: var(--blue); background: rgba(33,150,243,0.08); }
+        .spot-item .spot-label { flex: 1; }
+        .spot-item .spot-delete {
+            cursor: pointer; color: var(--text-muted); font-size: 14px;
+        }
+        .spot-item .spot-delete:hover { color: var(--danger); }
+
+        .slider-row {
+            display: flex; align-items: center; gap: 6px;
+            font-size: 11px; margin-bottom: 4px;
+        }
+        .slider-row input[type=range] { flex: 1; }
+        .slider-row label { min-width: 60px; color: var(--text-muted); }
+        .slider-row .val { min-width: 30px; text-align: right; }
+
+        .frame-range {
+            display: flex; gap: 4px; align-items: center; font-size: 11px;
+            margin-top: 2px;
+        }
+        .frame-range input {
+            width: 55px; padding: 2px 4px; font-size: 11px;
+            background: var(--bg); border: 1px solid var(--border);
+            border-radius: 3px; color: var(--text);
+        }
+
+        /* ── Bottom controls ── */
+        .deid-controls {
+            flex-shrink: 0; background: var(--bg-card);
+            border-top: 1px solid var(--border);
+            padding: 8px 14px 10px;
+        }
+        .controls-row {
+            display: flex; align-items: center; gap: 10px;
+        }
+        #frameSlider { flex: 1; }
+        .frame-display { font-size: 12px; color: var(--text-muted); min-width: 120px; }
+        .play-btn {
+            width: 32px; height: 32px; border-radius: 50%;
+            border: 1px solid var(--border); background: var(--bg);
+            color: var(--text); font-size: 16px; cursor: pointer;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .play-btn:hover { border-color: var(--blue); }
+
+        #statusMsg {
+            font-size: 11px; color: var(--text-muted); margin-top: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1><a href="/">Movement Tracker</a></h1>
+        <nav>
+            <a href="/">Dashboard</a>
+            <a href="/videos">Videos</a>
+            <a href="/mediapipe-select">MediaPipe</a>
+            <a href="/deidentify" class="active">Deidentify</a>
+            <a href="/labeling-select">DLC</a>
+            <a href="/results">Results</a>
+            <a href="/remote">Processing</a>
+            <a href="/settings">Settings</a>
+        </nav>
+    </div>
+
+    <div class="deid-outer">
+        <!-- Top bar: subject + trial selection -->
+        <div class="deid-topbar">
+            <label style="font-size:12px;color:var(--text-muted);">Subject</label>
+            <select id="subjectSelect"></select>
+            <div id="trialBtns"></div>
+            <span id="statusMsg"></span>
+        </div>
+
+        <div class="deid-main">
+            <!-- Canvas viewport -->
+            <div class="deid-viewport">
+                <canvas id="canvas"></canvas>
+            </div>
+
+            <!-- Right sidebar -->
+            <div class="deid-sidebar">
+                <!-- Face Detection -->
+                <div class="section">
+                    <h3>Face Detection</h3>
+                    <button class="btn btn-sm" id="detectFacesBtn" onclick="deid.detectFaces()" style="width:100%;">
+                        Detect Faces
+                    </button>
+                    <div id="faceDetStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
+                </div>
+
+                <!-- Blur Spots -->
+                <div class="section">
+                    <h3>Blur Spots</h3>
+                    <div id="spotList"></div>
+                    <div style="display:flex;gap:4px;margin-top:6px;">
+                        <button class="btn btn-sm" id="addCustomBtn" onclick="deid.toggleAddCustom()" style="flex:1;">
+                            + Custom Spot
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Selected Spot Controls -->
+                <div class="section" id="spotControls" style="display:none;">
+                    <h3>Selected Spot</h3>
+                    <div class="slider-row">
+                        <label>Radius</label>
+                        <input type="range" id="radiusSlider" min="5" max="200" value="40"
+                               oninput="deid.updateSpotRadius(this.value)">
+                        <span class="val" id="radiusVal">40</span>
+                    </div>
+                    <div class="frame-range">
+                        <span>Frames:</span>
+                        <input type="number" id="frameStartInput" onchange="deid.updateSpotFrameRange()">
+                        <span>to</span>
+                        <input type="number" id="frameEndInput" onchange="deid.updateSpotFrameRange()">
+                    </div>
+                </div>
+
+                <!-- Hand Overlap Tool -->
+                <div class="section">
+                    <h3>Hand Overlap</h3>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
+                        <input type="checkbox" id="handOverlayToggle" onchange="deid.toggleHandOverlay(this.checked)">
+                        Show hand landmarks
+                    </label>
+                    <div class="slider-row" style="margin-top:6px;">
+                        <label>Mask size</label>
+                        <input type="range" id="handRadiusSlider" min="5" max="80" value="30"
+                               oninput="deid.updateHandRadius(this.value)">
+                        <span class="val" id="handRadiusVal">30</span>
+                    </div>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-top:4px;">
+                        <input type="checkbox" id="handMaskEnabled" checked onchange="deid.updateHandSettings()">
+                        Protect hands from blur
+                    </label>
+                </div>
+
+                <!-- Render -->
+                <div class="section">
+                    <h3>Render</h3>
+                    <button class="btn btn-sm btn-success" id="renderBtn" onclick="deid.renderAll()" style="width:100%;">
+                        Render All Trials
+                    </button>
+                    <div id="renderStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Bottom controls: frame slider, play/pause -->
+        <div class="deid-controls">
+            <div class="controls-row">
+                <button class="play-btn" id="playBtn" onclick="deid.togglePlay()">&#9654;</button>
+                <input type="range" id="frameSlider" min="0" max="0" value="0"
+                       oninput="deid.seekFrame(parseInt(this.value))">
+                <span class="frame-display" id="frameDisplay">Frame: 0 / 0</span>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/nav.js"></script>
+    <script src="/static/js/deidentify.js?v=1"></script>
+</body>
+</html>

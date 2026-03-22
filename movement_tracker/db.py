@@ -137,6 +137,29 @@ CREATE TABLE IF NOT EXISTS mp_crop_boxes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_mp_crop_boxes ON mp_crop_boxes(subject_id, trial_idx);
+
+CREATE TABLE IF NOT EXISTS blur_specs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_id INTEGER NOT NULL REFERENCES subjects(id),
+    trial_idx INTEGER NOT NULL,
+    spot_type TEXT NOT NULL DEFAULT 'face',
+    x REAL NOT NULL,
+    y REAL NOT NULL,
+    radius REAL NOT NULL,
+    frame_start INTEGER NOT NULL,
+    frame_end INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_blur_specs ON blur_specs(subject_id, trial_idx);
+
+CREATE TABLE IF NOT EXISTS blur_hand_settings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_id INTEGER NOT NULL REFERENCES subjects(id),
+    trial_idx INTEGER NOT NULL,
+    hand_mask_enabled INTEGER NOT NULL DEFAULT 1,
+    hand_mask_radius INTEGER NOT NULL DEFAULT 30,
+    UNIQUE(subject_id, trial_idx)
+);
 """
 
 
@@ -372,6 +395,41 @@ def _migrate_add_camera_setups(conn):
         logger.info("Created camera_setups table")
 
 
+def _migrate_add_blur_specs(conn):
+    """Create blur_specs and blur_hand_settings tables if missing."""
+    tables = [r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()]
+    if "blur_specs" not in tables:
+        conn.execute("""
+            CREATE TABLE blur_specs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject_id INTEGER NOT NULL REFERENCES subjects(id),
+                trial_idx INTEGER NOT NULL,
+                spot_type TEXT NOT NULL DEFAULT 'face',
+                x REAL NOT NULL,
+                y REAL NOT NULL,
+                radius REAL NOT NULL,
+                frame_start INTEGER NOT NULL,
+                frame_end INTEGER NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_blur_specs ON blur_specs(subject_id, trial_idx)")
+        logger.info("Created blur_specs table")
+    if "blur_hand_settings" not in tables:
+        conn.execute("""
+            CREATE TABLE blur_hand_settings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject_id INTEGER NOT NULL REFERENCES subjects(id),
+                trial_idx INTEGER NOT NULL,
+                hand_mask_enabled INTEGER NOT NULL DEFAULT 1,
+                hand_mask_radius INTEGER NOT NULL DEFAULT 30,
+                UNIQUE(subject_id, trial_idx)
+            )
+        """)
+        logger.info("Created blur_hand_settings table")
+
+
 def _migrate_add_mp_crop_boxes(conn):
     """Create mp_crop_boxes table if missing."""
     tables = [r["name"] for r in conn.execute(
@@ -441,6 +499,9 @@ def init_db():
     conn.commit()
 
     _migrate_add_mp_crop_boxes(conn)
+    conn.commit()
+
+    _migrate_add_blur_specs(conn)
     conn.commit()
 
     conn.executescript(SCHEMA)

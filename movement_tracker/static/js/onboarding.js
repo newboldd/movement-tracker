@@ -957,8 +957,7 @@ const onboard = (() => {
 
             if (editMode) {
                 const btn = document.getElementById('processBtn');
-                const blur = document.getElementById('blurFaces');
-                if (btn) btn.textContent = blur && blur.checked ? 'Trim, Blur & Save' : 'Trim & Save';
+                if (btn) btn.textContent = 'Trim & Save';
             }
 
             // Render review with per-segment has-faces checkboxes
@@ -1024,14 +1023,9 @@ const onboard = (() => {
     }
 
     function updateProcessButton() {
-        const blur = document.getElementById('blurFaces');
         const btn = document.getElementById('processBtn');
-        if (blur && btn) {
-            if (editMode) {
-                btn.textContent = blur.checked ? 'Trim, Blur & Save' : 'Trim & Save';
-            } else {
-                btn.textContent = blur.checked ? 'Trim, Blur Faces & Create Subject' : 'Trim & Create Subject';
-            }
+        if (btn) {
+            btn.textContent = editMode ? 'Trim & Save' : 'Trim & Create Subject';
         }
     }
 
@@ -1045,8 +1039,6 @@ const onboard = (() => {
         msgEl.textContent = 'Starting...';
 
         try {
-            const blurFaces = document.getElementById('blurFaces').checked;
-
             // Build no_face_trials from segmentHasFaces
             const noFaceTrials = [];
             const seen = new Set();
@@ -1061,7 +1053,7 @@ const onboard = (() => {
 
             const result = await API.post('/api/video-tools/process-subject', {
                 subject_name: subjectName,
-                blur_faces: blurFaces,
+                blur_faces: false,
                 camera_mode: cameraMode,
                 camera_name: selectedCameraSetup ? selectedCameraSetup.name : null,
                 diagnosis: subjectGroup,
@@ -1319,9 +1311,6 @@ const onboard = (() => {
     // ── Checkbox listener & init ─────────────────────────────
 
     document.addEventListener('DOMContentLoaded', async () => {
-        const blur = document.getElementById('blurFaces');
-        if (blur) blur.addEventListener('change', updateProcessButton);
-
         // Populate subject group dropdown from settings
         try {
             const cfg = await API.get('/api/settings');

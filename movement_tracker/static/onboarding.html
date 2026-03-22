@@ -142,6 +142,7 @@
         <nav>            <a href="/">Dashboard</a>
             <a href="/videos">Videos</a>
             <a href="/mediapipe-select">MediaPipe</a>
+            <a href="/deidentify">Deidentify</a>
             <a href="/labeling-select">DLC</a>
             <a href="/results">Results</a>
 
@@ -363,15 +364,9 @@
                 <h3>Review & Process</h3>
             </div>
             <div id="reviewSegments"></div>
-            <div style="margin-top:12px;">
-                <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:12px;">
-                    <input type="checkbox" id="blurFaces" checked>
-                    <span>Blur faces (de-identify)</span>
-                </label>
-            </div>
-            <div style="display:flex;gap:8px;">
+            <div style="display:flex;gap:8px;margin-top:12px;">
                 <button class="btn btn-primary" id="processBtn" onclick="onboard.startProcessing()">
-                    Trim, Blur Faces & Create Subject
+                    Trim & Create Subject
                 </button>
                 <button class="btn" onclick="window.location.href='/'">Cancel</button>
             </div>
