@@ -131,6 +131,7 @@ const labeler = (() => {
     let mpCropDragStart = null;        // {mx, my, box: {...}} at drag start
     let mpCropAdjusted = {};           // {cam: bool} whether user manually dragged each camera's box
     let mpHasMediapipe = {};           // {trialIdx: bool} whether mediapipe labels exist per trial
+    let mpRunVisible = { current: true };  // {current: bool, 1: bool, 2: bool, ...} toggle visibility
 
     // Frame display mode: 'frame' | 'time' | 'both'
     let frameDisplayMode = 'frame';
@@ -467,9 +468,7 @@ const labeler = (() => {
                 document.querySelectorAll('nav a').forEach(a => {
                     a.classList.toggle('active', a.getAttribute('href') === '/mediapipe-select');
                 });
-                // Shrink video, enlarge distance trace for comparison
-                const canvasContainer = document.getElementById('canvasContainer');
-                if (canvasContainer) canvasContainer.style.maxHeight = '45vh';
+                // Slightly enlarge distance trace for comparison
                 const distContainer = document.getElementById('distanceTraceContainer');
                 if (distContainer) distContainer.style.height = '180px';
             } else {
@@ -3925,9 +3924,26 @@ const labeler = (() => {
         return best;
     }
 
+    let _distLegendAreas = [];  // populated by renderDistanceTrace legend drawing
+
     function onDistTraceMouseDown(e) {
         if (!distances || totalFrames === 0) return;
         e.preventDefault();
+
+        // Check if click is on a legend toggle entry
+        if (_distLegendAreas.length > 0) {
+            const rect = distCanvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
+            for (const area of _distLegendAreas) {
+                if (mx >= area.x && mx <= area.x + area.w && my >= area.y && my <= area.y + area.h) {
+                    // Toggle visibility
+                    mpRunVisible[area.key] = mpRunVisible[area.key] === false ? true : false;
+                    renderDistanceTrace();
+                    return;
+                }
+            }
+        }
 
         // In events mode, check if mousedown is on an event marker → start drag
         const hitMarker = _findNearestEventMarker(e.clientX);
@@ -4099,16 +4115,17 @@ const labeler = (() => {
             }
         }
 
-        // Draw run history lines (semi-transparent, behind current)
+        // Draw run history lines (toggleable, behind current)
         const historyColors = [
-            'rgba(255, 140, 0, 0.35)',   // orange
-            'rgba(0, 200, 100, 0.35)',    // green
-            'rgba(200, 80, 200, 0.35)',   // purple
-            'rgba(255, 80, 80, 0.35)',    // red
-            'rgba(100, 200, 255, 0.35)',  // cyan
+            'rgba(255, 140, 0, 0.6)',    // orange
+            'rgba(0, 200, 100, 0.6)',    // green
+            'rgba(200, 80, 200, 0.6)',   // purple
+            'rgba(255, 80, 80, 0.6)',    // red
+            'rgba(100, 200, 255, 0.6)',  // cyan
         ];
         if (mpLabels && mpLabels.run_history) {
             mpLabels.run_history.forEach((run, ri) => {
+                if (mpRunVisible[run.run] === false) return;
                 const runDist = run.distances;
                 if (!runDist) return;
                 distCtx.beginPath();
@@ -4122,32 +4139,34 @@ const labeler = (() => {
                     else distCtx.lineTo(x, y);
                 }
                 distCtx.strokeStyle = historyColors[ri % historyColors.length];
-                distCtx.lineWidth = 1;
+                distCtx.lineWidth = 1.5;
                 distCtx.stroke();
             });
         }
 
-        // Draw current distance line
-        distCtx.beginPath();
-        let started = false;
-        for (let f = Math.max(0, vStart - 1); f < vEnd + 1 && f < distances.length; f++) {
-            const d = distances[f];
-            if (d === null || d === undefined) {
-                started = false;
-                continue;
+        // Draw current distance line (toggleable)
+        if (mpRunVisible.current !== false) {
+            distCtx.beginPath();
+            let started = false;
+            for (let f = Math.max(0, vStart - 1); f < vEnd + 1 && f < distances.length; f++) {
+                const d = distances[f];
+                if (d === null || d === undefined) {
+                    started = false;
+                    continue;
+                }
+                const x = fToX(f);
+                const y = dToY(d);
+                if (!started) {
+                    distCtx.moveTo(x, y);
+                    started = true;
+                } else {
+                    distCtx.lineTo(x, y);
+                }
             }
-            const x = fToX(f);
-            const y = dToY(d);
-            if (!started) {
-                distCtx.moveTo(x, y);
-                started = true;
-            } else {
-                distCtx.lineTo(x, y);
-            }
+            distCtx.strokeStyle = 'rgba(74, 158, 255, 0.9)';
+            distCtx.lineWidth = 1.5;
+            distCtx.stroke();
         }
-        distCtx.strokeStyle = 'rgba(74, 158, 255, 0.7)';
-        distCtx.lineWidth = 1.5;
-        distCtx.stroke();
 
         // Green dots/circles for correction frames (refine mode only)
         if (isRefine) {
@@ -4259,7 +4278,7 @@ const labeler = (() => {
         distCtx.stroke();
 
         // Show value at current frame on primary trace
-        if (distances) {
+        if (distances && mpRunVisible.current !== false) {
             const curD = distances[currentFrame];
             if (curD !== null && curD !== undefined) {
                 const y = dToY(curD);
@@ -4270,26 +4289,34 @@ const labeler = (() => {
             }
         }
 
-        // Run history legend (top-right corner)
+        // Run history legend (top-right, clickable toggles)
         if (mpLabels && mpLabels.run_history && mpLabels.run_history.length > 0) {
             const legendX = w - padR - 90;
             let legendY = padT + 4;
-            distCtx.font = '9px sans-serif';
+            distCtx.font = '10px sans-serif';
             distCtx.textAlign = 'left';
-            // Current run
-            distCtx.fillStyle = 'rgba(74, 158, 255, 0.9)';
+            // Store legend hit areas for click handling
+            _distLegendAreas = [];
+
+            // Current run entry
+            const curVisible = mpRunVisible.current !== false;
+            distCtx.fillStyle = curVisible ? 'rgba(74, 158, 255, 0.9)' : 'rgba(74, 158, 255, 0.2)';
             distCtx.fillRect(legendX, legendY - 4, 12, 2);
-            distCtx.fillStyle = '#ccc';
+            distCtx.fillStyle = curVisible ? '#ccc' : '#555';
             distCtx.fillText('Current', legendX + 16, legendY);
-            legendY += 12;
-            // History runs
+            _distLegendAreas.push({ key: 'current', x: legendX - 4, y: legendY - 10, w: 90, h: 14 });
+            legendY += 14;
+
+            // History run entries
             mpLabels.run_history.forEach((run, ri) => {
+                const vis = mpRunVisible[run.run] !== false;
                 const color = historyColors[ri % historyColors.length];
-                distCtx.fillStyle = color;
+                distCtx.fillStyle = vis ? color : color.replace(/[\d.]+\)$/, '0.15)');
                 distCtx.fillRect(legendX, legendY - 4, 12, 2);
-                distCtx.fillStyle = '#888';
+                distCtx.fillStyle = vis ? '#aaa' : '#555';
                 distCtx.fillText(`Run ${run.run}`, legendX + 16, legendY);
-                legendY += 12;
+                _distLegendAreas.push({ key: run.run, x: legendX - 4, y: legendY - 10, w: 90, h: 14 });
+                legendY += 14;
             });
         }
 
