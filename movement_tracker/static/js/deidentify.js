@@ -473,10 +473,13 @@ const deid = (() => {
                 sy: offsetY + p.y * scale,
             }));
 
+            // pts[0]=pinkyMCP, pts[1]=interpElbow, pts[2]=thumbCMC
             const sCtx = smoothed.getContext('2d');
             sCtx.fillStyle = '#fff';
+            sCtx.strokeStyle = '#fff';
+            sCtx.lineCap = 'round';
 
-            // Filled triangle
+            // Filled triangle (base shape, no dilation)
             sCtx.beginPath();
             sCtx.moveTo(pts[0].sx, pts[0].sy);
             sCtx.lineTo(pts[1].sx, pts[1].sy);
@@ -484,19 +487,24 @@ const deid = (() => {
             sCtx.closePath();
             sCtx.fill();
 
-            // Thick rounded stroke to dilate the triangle
+            // Palm side (thumbCMC → elbow): dilate by circle radius
+            if (radiusPx > 0) {
+                sCtx.lineWidth = radiusPx * 2;
+                sCtx.beginPath();
+                sCtx.moveTo(pts[2].sx, pts[2].sy);
+                sCtx.lineTo(pts[1].sx, pts[1].sy);
+                sCtx.stroke();
+            }
+
+            // Dorsal side (pinkyMCP → elbow): dilate by forearm slider
             if (forearmPx > 0) {
                 sCtx.lineWidth = forearmPx * 2;
-                sCtx.lineJoin = 'round';
-                sCtx.lineCap = 'round';
-                sCtx.strokeStyle = '#fff';
                 sCtx.beginPath();
                 sCtx.moveTo(pts[0].sx, pts[0].sy);
                 sCtx.lineTo(pts[1].sx, pts[1].sy);
-                sCtx.lineTo(pts[2].sx, pts[2].sy);
-                sCtx.closePath();
                 sCtx.stroke();
             }
+            // pinkyMCP → thumbCMC edge: no extra dilation (just the filled triangle)
         }
 
         return smoothed;
