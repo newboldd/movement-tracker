@@ -610,7 +610,10 @@ const deid = (() => {
             const activeSegment = _getActiveHandSegment();
             if (activeSegment) {
                 const radiusPx = (activeSegment.radius || handMaskRadius) * scale;
-                const handMask = _buildHandMask(landmarks, cw, ch, radiusPx);
+                const faPx = forearmRadius * scale;
+                const smPx = (activeSegment.smooth != null ? activeSegment.smooth : handSmooth) * scale;
+                const sm2Px = handSmooth2 * scale;
+                const handMask = _buildHandMask(landmarks, radiusPx, faPx, smPx, sm2Px, cw, ch);
 
                 // Subtract hand mask from blur using destination-out
                 bCtx.globalCompositeOperation = 'destination-out';
@@ -644,13 +647,30 @@ const deid = (() => {
         }
         ctx.setLineDash([]);
 
-        // Draw hand protection outline
+        // Draw hand protection outline (green border around protected area)
         if (landmarks.length > 0) {
             const activeSegment = _getActiveHandSegment();
             if (activeSegment) {
                 const radiusPx = (activeSegment.radius || handMaskRadius) * scale;
-                const handMask = _buildHandMask(landmarks, cw, ch, radiusPx);
-                _drawHandOutline(handMask, cw, ch);
+                const faPx = forearmRadius * scale;
+                const smPx = (activeSegment.smooth != null ? activeSegment.smooth : handSmooth) * scale;
+                const sm2Px = handSmooth2 * scale;
+                const handMask = _buildHandMask(landmarks, radiusPx, faPx, smPx, sm2Px, cw, ch);
+
+                // Extract outline by eroding inward
+                const shrinkR = Math.max(1, radiusPx - 2);
+                const shrinkFa = Math.max(1, faPx - 2);
+                const innerMask = _buildHandMask(landmarks, shrinkR, shrinkFa, smPx, sm2Px, cw, ch);
+                const outlineCanvas = document.createElement('canvas');
+                outlineCanvas.width = cw; outlineCanvas.height = ch;
+                const oCtx = outlineCanvas.getContext('2d');
+                oCtx.drawImage(handMask, 0, 0);
+                oCtx.globalCompositeOperation = 'destination-out';
+                oCtx.drawImage(innerMask, 0, 0);
+                oCtx.globalCompositeOperation = 'source-in';
+                oCtx.fillStyle = 'rgba(76,175,80,0.8)';
+                oCtx.fillRect(0, 0, cw, ch);
+                ctx.drawImage(outlineCanvas, 0, 0);
             }
         }
     }
