@@ -35,6 +35,7 @@ const deid = (() => {
     let handTemporalSmooth = 0; // temporal smoothing window (frames each direction)
     let handMaskRadius = 10;
     let forearmRadius = 10;  // dilation around forearm triangle (separate from circle radius)
+    let forearmExtent = 0.5; // 0=wrist, 1=elbow, >1=past elbow
     let handSmooth = 10;  // morphological close: dilate then erode
     let handMaskEnabled = true;
 
@@ -436,8 +437,14 @@ const deid = (() => {
             elbow = elbows[0];
         }
 
-        if (pinkyMCP && thumbCMC && elbow) {
-            const pts = [pinkyMCP, elbow, thumbCMC].map(p => ({
+        if (pinkyMCP && thumbCMC && elbow && handWrist) {
+            // Interpolate elbow point: 0=wrist, 1=elbow, >1=past elbow
+            const t = forearmExtent;
+            const interpElbow = {
+                x: handWrist.x + t * (elbow.x - handWrist.x),
+                y: handWrist.y + t * (elbow.y - handWrist.y),
+            };
+            const pts = [pinkyMCP, interpElbow, thumbCMC].map(p => ({
                 sx: offsetX + p.x * scale,
                 sy: offsetY + p.y * scale,
             }));
@@ -1284,6 +1291,12 @@ const deid = (() => {
         render();
     }
 
+    function updateForearmExtent(val) {
+        forearmExtent = parseFloat(val);
+        document.getElementById('handExtentVal').textContent = forearmExtent.toFixed(1);
+        render();
+    }
+
     function updateHandSmooth(val) {
         handSmooth = parseInt(val);
         document.getElementById('handSmoothVal').textContent = handSmooth;
@@ -1808,6 +1821,7 @@ const deid = (() => {
         updateHandRadius,
         deleteSelectedHandSeg,
         updateForearmRadius,
+        updateForearmExtent,
         updateHandSmooth,
         updateHandTemporalSmooth,
         goToMediapipe,
