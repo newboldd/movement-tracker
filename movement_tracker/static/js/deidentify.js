@@ -14,6 +14,12 @@ const deid = (() => {
     let playing = false;
     let playTimer = null;
 
+    // Camera
+    let cameraMode = 'stereo';
+    let cameraNames = ['OS', 'OD'];
+    let currentSide = 'OS';
+    let hasMediapipe = false;
+
     // Face detection results: [{frame, faces: [{x1,y1,x2,y2,side}]}]
     let faceDetections = [];
     // Active blur spots: [{id, spot_type, x, y, radius, frame_start, frame_end, side}]
@@ -33,6 +39,11 @@ const deid = (() => {
     let currentImage = null;
     let imgW = 0, imgH = 0;
     let scale = 1, offsetX = 0, offsetY = 0;
+    let hasUserZoom = false;
+
+    // Pan state
+    let panning = false;
+    let panStart = null;
 
     // Debounce save timer
     let saveTimer = null;
@@ -64,15 +75,24 @@ const deid = (() => {
         // Canvas events
         canvas.addEventListener('click', onCanvasClick);
         canvas.addEventListener('wheel', onWheel, { passive: false });
+        canvas.addEventListener('mousedown', onMouseDown);
+        canvas.addEventListener('mousemove', onMouseMove);
+        canvas.addEventListener('mouseup', onMouseUp);
+        canvas.addEventListener('mouseleave', onMouseUp);
 
         // Keyboard
         document.addEventListener('keydown', onKeyDown);
 
         // Resize
-        window.addEventListener('resize', () => { fitImage(); render(); });
+        window.addEventListener('resize', () => { if (!hasUserZoom) fitImage(); render(); });
 
-        // Auto-select if only one subject
-        if (subjects.length === 1) {
+        // Auto-select subject from URL param or if only one
+        const params = new URLSearchParams(window.location.search);
+        const urlSubject = params.get('subject');
+        if (urlSubject) {
+            sel.value = urlSubject;
+            loadSubject(parseInt(urlSubject));
+        } else if (subjects.length === 1) {
             sel.value = subjects[0].id;
             loadSubject(subjects[0].id);
         }
@@ -90,10 +110,35 @@ const deid = (() => {
             const data = await API.get(`/api/deidentify/${sid}/trials`);
             subjectName = data.subject.name;
             trials = data.trials;
+            cameraMode = data.subject.camera_mode || 'stereo';
+            hasMediapipe = data.has_mediapipe || false;
+
+            // Set camera names
+            if (cameraMode === 'single') {
+                cameraNames = [data.camera_names ? data.camera_names[0] : 'OS'];
+                currentSide = cameraNames[0];
+            } else if (cameraMode === 'multicam' && trials.length > 0
+                       && trials[0].cameras && trials[0].cameras.length > 0) {
+                cameraNames = trials[0].cameras.map(c => c.name);
+                currentSide = cameraNames[0];
+            } else {
+                cameraNames = data.camera_names || ['OS', 'OD'];
+                currentSide = cameraNames[0];
+            }
         } catch (e) {
             document.getElementById('statusMsg').textContent = 'Error loading subject: ' + e.message;
             return;
         }
+
+        // Update side toggle button
+        const sideBtn = document.getElementById('sideToggle');
+        if (sideBtn) {
+            sideBtn.style.display = (cameraMode === 'single') ? 'none' : '';
+            sideBtn.textContent = currentSide;
+        }
+
+        // Update hand section availability
+        _updateHandSection();
 
         // Build trial buttons
         const btns = document.getElementById('trialBtns');
@@ -107,6 +152,30 @@ const deid = (() => {
         });
 
         if (trials.length > 0) selectTrial(0);
+    }
+
+    // ── Update hand overlay section availability ──
+    function _updateHandSection() {
+        const handSection = document.getElementById('handSection');
+        if (!handSection) return;
+
+        if (!hasMediapipe) {
+            handSection.style.opacity = '0.5';
+            handSection.style.pointerEvents = 'none';
+            const mpBtn = document.getElementById('goMediapipeBtn');
+            if (mpBtn) mpBtn.style.display = 'block';
+        } else {
+            handSection.style.opacity = '';
+            handSection.style.pointerEvents = '';
+            const mpBtn = document.getElementById('goMediapipeBtn');
+            if (mpBtn) mpBtn.style.display = 'none';
+        }
+
+        // Update button text
+        const mpBtn = document.getElementById('goMediapipeBtn');
+        if (mpBtn) {
+            mpBtn.textContent = hasMediapipe ? 'Re-run MediaPipe' : 'Run MediaPipe';
+        }
     }
 
     // ── Select trial ──
@@ -148,6 +217,10 @@ const deid = (() => {
             document.getElementById('handRadiusVal').textContent = handMaskRadius;
         } catch (e) {}
 
+        // Reset zoom for new trial
+        hasUserZoom = false;
+        scale = 1; offsetX = 0; offsetY = 0;
+
         await loadFrame(currentFrame);
         renderSpotList();
     }
@@ -155,7 +228,7 @@ const deid = (() => {
     // ── Frame loading ──
     async function loadFrame(frameNum) {
         currentFrame = frameNum;
-        const url = `/api/deidentify/${subjectId}/frame?trial_idx=${currentTrialIdx}&frame_num=${frameNum}&side=full`;
+        const url = `/api/deidentify/${subjectId}/frame?trial_idx=${currentTrialIdx}&frame_num=${frameNum}&side=${encodeURIComponent(currentSide)}`;
 
         try {
             const img = new Image();
@@ -172,7 +245,7 @@ const deid = (() => {
             return;
         }
 
-        if (scale === 1 && offsetX === 0 && offsetY === 0) fitImage();
+        if (!hasUserZoom) fitImage();
 
         // Update slider + display
         document.getElementById('frameSlider').value = frameNum;
@@ -181,7 +254,7 @@ const deid = (() => {
             `Frame: ${localFrame} / ${totalFrames - 1}`;
 
         // Load hand landmarks if overlay enabled
-        if (handOverlayEnabled) {
+        if (handOverlayEnabled && hasMediapipe) {
             try {
                 const res = await API.post(`/api/deidentify/${subjectId}/detect-hands`, {
                     trial_idx: currentTrialIdx, frame_num: frameNum,
@@ -204,6 +277,34 @@ const deid = (() => {
         scale = Math.min(cw / imgW, ch / imgH);
         offsetX = (cw - imgW * scale) / 2;
         offsetY = (ch - imgH * scale) / 2;
+    }
+
+    function resetZoom() {
+        hasUserZoom = false;
+        fitImage();
+        render();
+    }
+
+    // ── Camera toggle ──
+    function toggleSide() {
+        if (cameraMode === 'single') return;
+        const idx = cameraNames.indexOf(currentSide);
+        const newIdx = (idx + 1) % cameraNames.length;
+        currentSide = cameraNames[newIdx];
+
+        const btn = document.getElementById('sideToggle');
+        if (btn) btn.textContent = currentSide;
+
+        loadFrame(currentFrame);
+    }
+
+    // ── Go to MediaPipe page for this subject ──
+    function goToMediapipe() {
+        if (!subjectId) return;
+        // Preserve current frame and zoom state via session storage
+        sessionStorage.setItem('deid_returnFrame', currentFrame);
+        sessionStorage.setItem('deid_returnSubject', subjectId);
+        window.location.href = `/mediapipe-select?subject=${subjectId}`;
     }
 
     // ── Render ──
@@ -273,7 +374,6 @@ const deid = (() => {
                 ctx.strokeStyle = 'rgba(76,175,80,0.3)';
                 ctx.lineWidth = 1;
                 ctx.setLineDash([4, 4]);
-                // Show convex hull area approximation
                 for (const lm of handLandmarks) {
                     const sx = offsetX + lm.x * scale;
                     const sy = offsetY + lm.y * scale;
@@ -291,7 +391,6 @@ const deid = (() => {
             ctx.strokeStyle = 'rgba(255,152,0,0.6)';
             ctx.lineWidth = 1;
             ctx.setLineDash([4, 4]);
-            // Show a hint circle at center
             ctx.beginPath();
             ctx.arc(cw / 2, ch / 2, 30, 0, Math.PI * 2);
             ctx.stroke();
@@ -301,6 +400,9 @@ const deid = (() => {
 
     // ── Canvas click ──
     function onCanvasClick(e) {
+        // Don't handle clicks after a pan drag
+        if (panning) return;
+
         const rect = canvas.getBoundingClientRect();
         const cx = e.clientX - rect.left;
         const cy = e.clientY - rect.top;
@@ -318,7 +420,6 @@ const deid = (() => {
             if (entry && entry.faces) {
                 for (const f of entry.faces) {
                     if (ix >= f.x1 && ix <= f.x2 && iy >= f.y1 && iy <= f.y2) {
-                        // Create a blur spot from this face
                         const spot = {
                             id: nextSpotId++,
                             spot_type: 'face',
@@ -398,7 +499,52 @@ const deid = (() => {
         offsetX = mx - (mx - offsetX) * (newScale / scale);
         offsetY = my - (my - offsetY) * (newScale / scale);
         scale = newScale;
+        hasUserZoom = true;
         render();
+    }
+
+    // ── Pan (right-click drag or middle-click drag) ──
+    function onMouseDown(e) {
+        // Right-click or middle-click for pan
+        if (e.button === 1 || e.button === 2) {
+            e.preventDefault();
+            panning = true;
+            panStart = { x: e.clientX, y: e.clientY, ox: offsetX, oy: offsetY };
+            canvas.style.cursor = 'grabbing';
+            return;
+        }
+        // Left-click pan when zoomed in (hold and drag)
+        if (e.button === 0 && hasUserZoom && !addingCustom) {
+            panning = true;
+            panStart = { x: e.clientX, y: e.clientY, ox: offsetX, oy: offsetY };
+            canvas.style.cursor = 'grabbing';
+        }
+    }
+
+    function onMouseMove(e) {
+        if (!panning || !panStart) return;
+        offsetX = panStart.ox + (e.clientX - panStart.x);
+        offsetY = panStart.oy + (e.clientY - panStart.y);
+        render();
+    }
+
+    function onMouseUp(e) {
+        if (panning) {
+            canvas.style.cursor = '';
+            // If mouse barely moved, don't suppress click
+            if (panStart) {
+                const dx = Math.abs(e.clientX - panStart.x);
+                const dy = Math.abs(e.clientY - panStart.y);
+                if (dx < 3 && dy < 3) {
+                    panning = false;
+                    panStart = null;
+                    return; // allow click to fire
+                }
+            }
+            // Suppress click after real pan drag
+            setTimeout(() => { panning = false; }, 50);
+            panStart = null;
+        }
     }
 
     // ── Keyboard ──
@@ -414,6 +560,10 @@ const deid = (() => {
         } else if (e.key === ' ') {
             e.preventDefault();
             togglePlay();
+        } else if (e.key === 'e') {
+            toggleSide();
+        } else if (e.key === 'r') {
+            resetZoom();
         } else if (e.key === 'Delete' || e.key === 'Backspace') {
             if (selectedSpotId !== null) {
                 deleteSpot(selectedSpotId);
@@ -489,7 +639,7 @@ const deid = (() => {
         list.innerHTML = blurSpots.map(s => `
             <div class="spot-item ${s.id === selectedSpotId ? 'selected' : ''}"
                  onclick="deid.selectSpot(${s.id})">
-                <span class="spot-label">${s.spot_type === 'face' ? '👤' : '⊕'}
+                <span class="spot-label">${s.spot_type === 'face' ? '\u{1F464}' : '\u2295'}
                     r=${s.radius} [${s.frame_start}-${s.frame_end}]</span>
                 <span class="spot-delete" onclick="event.stopPropagation(); deid.deleteSpot(${s.id})">×</span>
             </div>
@@ -560,7 +710,7 @@ const deid = (() => {
     // ── Hand overlay ──
     async function toggleHandOverlay(enabled) {
         handOverlayEnabled = enabled;
-        if (enabled && subjectId) {
+        if (enabled && subjectId && hasMediapipe) {
             try {
                 const res = await API.post(`/api/deidentify/${subjectId}/detect-hands`, {
                     trial_idx: currentTrialIdx, frame_num: currentFrame,
@@ -666,6 +816,8 @@ const deid = (() => {
     return {
         detectFaces,
         togglePlay,
+        toggleSide,
+        resetZoom,
         seekFrame,
         toggleAddCustom,
         selectSpot,
@@ -675,6 +827,7 @@ const deid = (() => {
         toggleHandOverlay,
         updateHandRadius,
         updateHandSettings,
+        goToMediapipe,
         renderAll,
     };
 })();

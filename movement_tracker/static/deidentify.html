@@ -142,7 +142,9 @@
         <div class="deid-topbar">
             <label style="font-size:12px;color:var(--text-muted);">Subject</label>
             <select id="subjectSelect"></select>
+            <button class="btn btn-sm" id="sideToggle" tabindex="-1" onclick="deid.toggleSide()" title="Toggle camera (E)" style="min-width:40px;">OS</button>
             <div id="trialBtns"></div>
+            <button class="btn btn-sm" tabindex="-1" onclick="deid.resetZoom()" title="Reset zoom (R)" style="font-size:11px;">Reset</button>
             <span id="statusMsg"></span>
         </div>
 
@@ -192,7 +194,7 @@
                 </div>
 
                 <!-- Hand Overlap Tool -->
-                <div class="section">
+                <div class="section" id="handSection">
                     <h3>Hand Overlap</h3>
                     <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
                         <input type="checkbox" id="handOverlayToggle" onchange="deid.toggleHandOverlay(this.checked)">
@@ -208,6 +210,8 @@
                         <input type="checkbox" id="handMaskEnabled" checked onchange="deid.updateHandSettings()">
                         Protect hands from blur
                     </label>
+                    <button class="btn btn-sm" id="goMediapipeBtn" onclick="deid.goToMediapipe()"
+                            style="width:100%;margin-top:6px;display:none;">Run MediaPipe</button>
                 </div>
 
                 <!-- Render -->

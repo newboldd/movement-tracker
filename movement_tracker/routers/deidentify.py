@@ -31,6 +31,11 @@ def get_trials(subject_id: int) -> dict:
     camera_mode = subj.get("camera_mode") or "stereo"
     trials = build_trial_map(subj["name"], camera_mode=camera_mode)
 
+    # Check for mediapipe prelabels
+    settings = get_settings()
+    npz_path = settings.dlc_path / subj["name"] / "mediapipe_prelabels.npz"
+    has_mediapipe = npz_path.exists()
+
     trial_list = []
     for i, t in enumerate(trials):
         # Check if video is stereo
@@ -40,7 +45,7 @@ def get_trials(subject_id: int) -> dict:
         cap.release()
         is_stereo = (fw / fh) > 1.7 if fh > 0 else False
 
-        trial_list.append({
+        entry = {
             "trial_idx": i,
             "trial_name": t["trial_name"],
             "video_path": t["video_path"],
@@ -51,9 +56,19 @@ def get_trials(subject_id: int) -> dict:
             "is_stereo": is_stereo,
             "frame_width": fw // 2 if is_stereo else fw,
             "frame_height": fh,
-        })
+        }
+        # Include camera info for multicam trials
+        cameras = t.get("cameras", [])
+        if len(cameras) > 1:
+            entry["cameras"] = [{"name": c["name"], "idx": c["idx"]} for c in cameras]
+        trial_list.append(entry)
 
-    return {"subject": subj, "trials": trial_list}
+    return {
+        "subject": subj,
+        "trials": trial_list,
+        "has_mediapipe": has_mediapipe,
+        "camera_names": settings.camera_names,
+    }
 
 
 # ── Frame serving ─────────────────────────────────────────────────────────
@@ -77,10 +92,21 @@ def get_frame(
         raise HTTPException(400, f"Invalid trial_idx {trial_idx}")
 
     trial = trials[trial_idx]
-    cap = cv2.VideoCapture(trial["video_path"])
+    settings = get_settings()
+    cam_names = settings.camera_names
+
+    # Multicam: resolve to the specific camera file
+    video_path = trial["video_path"]
+    if camera_mode == "multicam" and side != "full":
+        for cam in trial.get("cameras", []):
+            if cam["name"] == side:
+                video_path = cam["path"]
+                break
+
+    cap = cv2.VideoCapture(video_path)
     fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    is_stereo = (fw / fh) > 1.7 if fh > 0 else False
+    is_stereo = camera_mode == "stereo" and ((fw / fh) > 1.7 if fh > 0 else False)
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
     ret, frame = cap.read()
@@ -89,13 +115,13 @@ def get_frame(
     if not ret:
         raise HTTPException(400, f"Cannot read frame {frame_num}")
 
-    if is_stereo:
+    # Stereo: crop to left or right half based on camera name
+    if is_stereo and side != "full":
         half_w = fw // 2
-        if side == "left":
-            frame = frame[:, :half_w, :]
-        elif side == "right":
+        if len(cam_names) >= 2 and side == cam_names[1]:
             frame = frame[:, half_w:, :]
-        # else "full" — return entire stereo frame
+        else:
+            frame = frame[:, :half_w, :]
 
     _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
     return Response(content=jpeg.tobytes(), media_type="image/jpeg")
