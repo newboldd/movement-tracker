@@ -445,6 +445,8 @@ const deid = (() => {
         );
         const handProtectActive = activeSeg && visibleLandmarks.length > 0;
         const activeProtectRadius = activeSeg ? (activeSeg.radius || handMaskRadius) : handMaskRadius;
+        // Effective radius for protection = base radius + smooth (smooth fills gaps)
+        const effectiveProtectRadius = activeProtectRadius + handSmooth;
 
         // Draw ALL blur spots on one offscreen canvas, then subtract hand protection
         const hasVisibleSpots = blurSpots.some(s => {
@@ -486,7 +488,7 @@ const deid = (() => {
 
             // Subtract hand protection from ALL blur fills
             if (handProtectActive) {
-                const hr = (activeProtectRadius + handSmooth) * scale;
+                const hr = effectiveProtectRadius * scale;
 
                 off.globalCompositeOperation = 'destination-out';
                 off.fillStyle = 'rgba(0,0,0,1)';
@@ -541,9 +543,9 @@ const deid = (() => {
             }
         }
 
-        // Draw hand protection union outline (smoothed, no fill)
+        // Draw hand protection union outline (no fill)
         if (handProtectActive) {
-            const hr = (activeProtectRadius + handSmooth) * scale;
+            const hr = effectiveProtectRadius * scale;
 
             const hOff = document.createElement('canvas');
             hOff.width = cw;
@@ -1043,13 +1045,19 @@ const deid = (() => {
     function updateHandRadius(val) {
         handMaskRadius = parseInt(val);
         document.getElementById('handRadiusVal').textContent = handMaskRadius;
-        // Update the selected segment's radius if one is selected
+        // Update ALL segments if none selected, or just the selected one
         if (selectedHandSegId) {
             const seg = handProtectSegments.find(s => s.id === selectedHandSegId);
             if (seg) seg.radius = handMaskRadius;
+        } else {
+            // Apply to all segments
+            for (const seg of handProtectSegments) {
+                seg.radius = handMaskRadius;
+            }
         }
         saveHandSettings();
         render();
+        renderTimeline();
     }
 
     function updateHandSmooth(val) {
