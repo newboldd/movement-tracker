@@ -1011,7 +1011,7 @@ def run_pose_prelabels(subject_name: str, progress_callback=None) -> Path:
 
     pose_det = mp_lib.solutions.pose.Pose(
         static_image_mode=False,
-        model_complexity=1,
+        model_complexity=2,
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5,
     )
