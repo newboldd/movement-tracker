@@ -454,7 +454,12 @@ def sync_from_filesystem() -> dict:
                     placeholders = ",".join("?" * len(session_ids))
                     db.execute(f"DELETE FROM frame_labels WHERE session_id IN ({placeholders})", session_ids)
                 db.execute("DELETE FROM label_sessions WHERE subject_id = ?", (row["id"],))
+                db.execute("DELETE FROM segments WHERE subject_id = ?", (row["id"],))
                 db.execute("DELETE FROM jobs WHERE subject_id = ?", (row["id"],))
+                db.execute("DELETE FROM subject_events WHERE subject_id = ?", (row["id"],))
+                db.execute("DELETE FROM mp_crop_boxes WHERE subject_id = ?", (row["id"],))
+                db.execute("DELETE FROM blur_specs WHERE subject_id = ?", (row["id"],))
+                db.execute("DELETE FROM blur_hand_settings WHERE subject_id = ?", (row["id"],))
                 db.execute("DELETE FROM subjects WHERE id = ?", (row["id"],))
                 removed += 1
 
