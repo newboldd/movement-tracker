@@ -467,6 +467,11 @@ const labeler = (() => {
                 document.querySelectorAll('nav a').forEach(a => {
                     a.classList.toggle('active', a.getAttribute('href') === '/mediapipe-select');
                 });
+                // Shrink video, enlarge distance trace for comparison
+                const canvasContainer = document.getElementById('canvasContainer');
+                if (canvasContainer) canvasContainer.style.maxHeight = '45vh';
+                const distContainer = document.getElementById('distanceTraceContainer');
+                if (distContainer) distContainer.style.height = '180px';
             } else {
                 // DLC page: hide MP controls, show DLC UI
                 if (mpCropSection) mpCropSection.style.display = 'none';
@@ -536,6 +541,14 @@ const labeler = (() => {
 
                 // Compute per-trial mediapipe availability for Run vs Re-run button text
                 _computeMpHasMediapipe();
+
+                // Show "Clear history" button if run history exists (MediaPipe page only)
+                const clearHistBtn = document.getElementById('mpClearHistoryBtn');
+                if (clearHistBtn) {
+                    clearHistBtn.style.display =
+                        (isMediaPipePage && mpLabels && mpLabels.run_history && mpLabels.run_history.length > 0)
+                        ? 'block' : 'none';
+                }
 
                 try {
                     const dlcData = await API.get(`/api/labeling/sessions/${sessionId}/dlc_predictions`);
@@ -1731,6 +1744,19 @@ const labeler = (() => {
         } catch (err) {
             if (statusEl) statusEl.textContent = 'Error: ' + (err.message || err);
             if (rerunBtn) rerunBtn.disabled = false;
+        }
+    }
+
+    async function clearMpHistory() {
+        try {
+            await API.post(`/api/labeling/sessions/${sessionId}/clear-mediapipe-history`);
+            if (mpLabels) delete mpLabels.run_history;
+            const btn = document.getElementById('mpClearHistoryBtn');
+            if (btn) btn.style.display = 'none';
+            renderDistanceTrace();
+        } catch (err) {
+            const statusEl = document.getElementById('mpRerunStatus');
+            if (statusEl) statusEl.textContent = 'Error clearing history: ' + (err.message || err);
         }
     }
 
@@ -4073,7 +4099,35 @@ const labeler = (() => {
             }
         }
 
-        // Draw single distance line
+        // Draw run history lines (semi-transparent, behind current)
+        const historyColors = [
+            'rgba(255, 140, 0, 0.35)',   // orange
+            'rgba(0, 200, 100, 0.35)',    // green
+            'rgba(200, 80, 200, 0.35)',   // purple
+            'rgba(255, 80, 80, 0.35)',    // red
+            'rgba(100, 200, 255, 0.35)',  // cyan
+        ];
+        if (mpLabels && mpLabels.run_history) {
+            mpLabels.run_history.forEach((run, ri) => {
+                const runDist = run.distances;
+                if (!runDist) return;
+                distCtx.beginPath();
+                let s = false;
+                for (let f = Math.max(0, vStart - 1); f < vEnd + 1 && f < runDist.length; f++) {
+                    const d = runDist[f];
+                    if (d === null || d === undefined) { s = false; continue; }
+                    const x = fToX(f);
+                    const y = dToY(d);
+                    if (!s) { distCtx.moveTo(x, y); s = true; }
+                    else distCtx.lineTo(x, y);
+                }
+                distCtx.strokeStyle = historyColors[ri % historyColors.length];
+                distCtx.lineWidth = 1;
+                distCtx.stroke();
+            });
+        }
+
+        // Draw current distance line
         distCtx.beginPath();
         let started = false;
         for (let f = Math.max(0, vStart - 1); f < vEnd + 1 && f < distances.length; f++) {
@@ -4214,6 +4268,29 @@ const labeler = (() => {
                 distCtx.fillStyle = '#ff4444';
                 distCtx.fill();
             }
+        }
+
+        // Run history legend (top-right corner)
+        if (mpLabels && mpLabels.run_history && mpLabels.run_history.length > 0) {
+            const legendX = w - padR - 90;
+            let legendY = padT + 4;
+            distCtx.font = '9px sans-serif';
+            distCtx.textAlign = 'left';
+            // Current run
+            distCtx.fillStyle = 'rgba(74, 158, 255, 0.9)';
+            distCtx.fillRect(legendX, legendY - 4, 12, 2);
+            distCtx.fillStyle = '#ccc';
+            distCtx.fillText('Current', legendX + 16, legendY);
+            legendY += 12;
+            // History runs
+            mpLabels.run_history.forEach((run, ri) => {
+                const color = historyColors[ri % historyColors.length];
+                distCtx.fillStyle = color;
+                distCtx.fillRect(legendX, legendY - 4, 12, 2);
+                distCtx.fillStyle = '#888';
+                distCtx.fillText(`Run ${run.run}`, legendX + 16, legendY);
+                legendY += 12;
+            });
         }
 
         // Scrollbar
@@ -5087,7 +5164,7 @@ const labeler = (() => {
         // Video export
         getExportContext,
         // MediaPipe crop box
-        startMpFlow, toggleMpCrop, saveMpCrop, cancelMpCrop, rerunMediapipe,
+        startMpFlow, toggleMpCrop, saveMpCrop, cancelMpCrop, rerunMediapipe, clearMpHistory,
         // Refine flow (within corrections mode)
         startRefineFlow,
     };

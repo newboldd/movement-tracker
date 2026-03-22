@@ -578,6 +578,25 @@ def get_mediapipe_for_session(subject_name: str) -> dict | None:
         }
 
     response["distances"] = _dist_to_list(data["distances"])
+
+    # Include run history for comparison
+    run_history = []
+    run_keys = sorted(
+        (int(k.split("_")[-1]), k) for k in data if k.startswith("distances_run_")
+    )
+    for run_num, key in run_keys:
+        entry = {"run": run_num, "distances": _dist_to_list(data[key])}
+        crop_key = f"crop_run_{run_num}"
+        if crop_key in data:
+            try:
+                import json as _json
+                entry["crop"] = _json.loads(str(data[crop_key]))
+            except (ValueError, TypeError):
+                pass
+        run_history.append(entry)
+    if run_history:
+        response["run_history"] = run_history
+
     return response
 
 
@@ -814,6 +833,29 @@ def run_mediapipe_cropped(
             "total_frames": np.array(total),
         }
 
+    # ── Save current distances as run history before overwriting ──
+    MAX_RUN_HISTORY = 5
+    old_distances = data.get("distances")
+    if old_distances is not None and not np.all(np.isnan(old_distances)):
+        # Find next run number
+        existing_runs = sorted(
+            int(k.split("_")[-1]) for k in data if k.startswith("distances_run_")
+        )
+        next_run = (existing_runs[-1] + 1) if existing_runs else 1
+        data[f"distances_run_{next_run}"] = old_distances.copy()
+        # Store crop info for this run
+        import json as _json
+        data[f"crop_run_{next_run}"] = np.array(_json.dumps(crop))
+
+        # Drop oldest runs if exceeding cap
+        all_runs = sorted(
+            int(k.split("_")[-1]) for k in data if k.startswith("distances_run_")
+        )
+        while len(all_runs) > MAX_RUN_HISTORY:
+            oldest = all_runs.pop(0)
+            data.pop(f"distances_run_{oldest}", None)
+            data.pop(f"crop_run_{oldest}", None)
+
     lm_key = "OS_landmarks" if camera_key == "OS" else "OD_landmarks"
     conf_key = "confidence_OS" if camera_key == "OS" else "confidence_OD"
     total_frames = data[lm_key].shape[0]
@@ -832,17 +874,21 @@ def run_mediapipe_cropped(
     else:
         data["distances"] = _compute_2d_distances(data["OS_landmarks"])
 
-    # Save updated npz
+    # Save updated npz (including run history keys)
     npz_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(
-        str(npz_path),
-        OS_landmarks=data["OS_landmarks"],
-        OD_landmarks=data["OD_landmarks"],
-        confidence_OS=data["confidence_OS"],
-        confidence_OD=data["confidence_OD"],
-        distances=data["distances"],
-        total_frames=data.get("total_frames", total_frames),
-    )
+    save_data = {
+        "OS_landmarks": data["OS_landmarks"],
+        "OD_landmarks": data["OD_landmarks"],
+        "confidence_OS": data["confidence_OS"],
+        "confidence_OD": data["confidence_OD"],
+        "distances": data["distances"],
+        "total_frames": data.get("total_frames", total_frames),
+    }
+    # Include run history keys
+    for k, v in data.items():
+        if k.startswith("distances_run_") or k.startswith("crop_run_"):
+            save_data[k] = v
+    np.savez(str(npz_path), **save_data)
 
     valid_new = np.sum(~np.isnan(tracks[:, track_idx, 0, 0]))
     logger.info(

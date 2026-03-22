@@ -340,9 +340,38 @@ def get_mediapipe(session_id: int) -> dict:
                     remapped[subject_cams[i]] = data[gcam]
             if "distances" in data:
                 remapped["distances"] = data["distances"]
+            if "run_history" in data:
+                remapped["run_history"] = data["run_history"]
             return remapped
 
     return data
+
+
+@router.post("/sessions/{session_id}/clear-mediapipe-history")
+def clear_mediapipe_history(session_id: int) -> dict:
+    """Remove run history from the mediapipe npz, keeping only current data."""
+    with get_db_ctx() as db:
+        session = db.execute(
+            "SELECT * FROM label_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not session:
+            raise HTTPException(404, "Session not found")
+        subj = db.execute(
+            "SELECT * FROM subjects WHERE id = ?", (session["subject_id"],)
+        ).fetchone()
+
+    import numpy as np
+    settings = get_settings()
+    npz_path = settings.dlc_path / subj["name"] / "mediapipe_prelabels.npz"
+    if not npz_path.exists():
+        return {"status": "ok", "cleared": 0}
+
+    data = dict(np.load(str(npz_path)))
+    history_keys = [k for k in data if k.startswith("distances_run_") or k.startswith("crop_run_")]
+    for k in history_keys:
+        del data[k]
+    np.savez(str(npz_path), **data)
+    return {"status": "ok", "cleared": len(history_keys)}
 
 
 @router.get("/sessions/{session_id}/dlc_predictions")
