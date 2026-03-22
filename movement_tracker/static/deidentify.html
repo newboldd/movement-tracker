@@ -232,10 +232,9 @@
                                oninput="deid.updateHandRadius(this.value)">
                         <span class="val" id="handRadiusVal">30</span>
                     </div>
-                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-top:4px;">
-                        <input type="checkbox" id="handMaskEnabled" onchange="deid.updateHandSettings()">
-                        Protect hands from blur
-                    </label>
+                    <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">
+                        Use the green bar on the timeline to control which frames have hand protection.
+                    </div>
                     <button class="btn btn-sm" id="goMediapipeBtn" onclick="deid.goToMediapipe()"
                             style="width:100%;margin-top:6px;">Run MediaPipe</button>
                 </div>
@@ -274,6 +273,6 @@
 
     <script src="/static/js/api.js"></script>
     <script src="/static/js/nav.js"></script>
-    <script src="/static/js/deidentify.js?v=6"></script>
+    <script src="/static/js/deidentify.js?v=7"></script>
 </body>
 </html>

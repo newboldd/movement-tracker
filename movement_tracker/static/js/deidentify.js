@@ -180,9 +180,9 @@ const deid = (() => {
         const handSection = document.getElementById('handSection');
         if (!handSection) return;
 
-        // Grey out checkboxes if no MP labels, but keep MP button always active
-        const checkboxes = handSection.querySelectorAll('input[type=checkbox], input[type=range]');
-        checkboxes.forEach(el => { el.disabled = !hasMediapipe; });
+        // Grey out controls if no MP labels, but keep MP button always active
+        const inputs = handSection.querySelectorAll('input[type=checkbox], input[type=range]');
+        inputs.forEach(el => { el.disabled = !hasMediapipe; });
         if (!hasMediapipe) {
             handSection.classList.add('hand-disabled');
         } else {
@@ -237,11 +237,10 @@ const deid = (() => {
         // Load hand settings
         try {
             const hs = await API.get(`/api/deidentify/${subjectId}/hand-settings?trial_idx=${idx}`);
-            handMaskEnabled = hs.enabled;
+            handMaskEnabled = true; // always enabled, controlled by timeline range
             handMaskRadius = hs.mask_radius;
             handProtectStart = hs.frame_start != null ? hs.frame_start : trialMeta.start_frame;
             handProtectEnd = hs.frame_end != null ? hs.frame_end : trialMeta.end_frame;
-            document.getElementById('handMaskEnabled').checked = handMaskEnabled;
             document.getElementById('handRadiusSlider').value = handMaskRadius;
             document.getElementById('handRadiusVal').textContent = handMaskRadius;
         } catch (e) {
@@ -294,8 +293,10 @@ const deid = (() => {
         document.getElementById('frameDisplay').textContent =
             `Frame: ${localFrame} / ${totalFrames - 1}`;
 
-        // Load hand landmarks if overlay enabled
-        if (handOverlayEnabled && hasMediapipe) {
+        // Load hand landmarks if overlay enabled or protection active for this frame
+        const needHands = hasMediapipe && (handOverlayEnabled
+            || (handMaskEnabled && frameNum >= handProtectStart && frameNum <= handProtectEnd));
+        if (needHands) {
             try {
                 const res = await API.post(`/api/deidentify/${subjectId}/detect-hands`, {
                     trial_idx: currentTrialIdx, frame_num: frameNum,
@@ -426,12 +427,12 @@ const deid = (() => {
             }
         }
 
-        // Compute hand protection circles (used for subtraction and display)
+        // Compute hand protection state (controlled by timeline range, not checkbox)
         const curSideLabel = _sideLabel();
         const visibleLandmarks = handLandmarks.filter(lm =>
             (lm.side || 'full') === curSideLabel || (lm.side || 'full') === 'full'
         );
-        const handProtectActive = handMaskEnabled && handOverlayEnabled
+        const handProtectActive = handMaskEnabled
             && visibleLandmarks.length > 0
             && currentFrame >= handProtectStart && currentFrame <= handProtectEnd;
 
@@ -498,7 +499,7 @@ const deid = (() => {
             ctx.stroke();
         }
 
-        // Draw hand landmarks (green dots)
+        // Draw hand landmarks (green dots) — controlled by "Show hand landmarks" checkbox
         if (handOverlayEnabled && visibleLandmarks.length > 0) {
             ctx.fillStyle = 'rgba(76,175,80,0.7)';
             for (const lm of visibleLandmarks) {
@@ -508,54 +509,52 @@ const deid = (() => {
                 ctx.arc(sx, sy, 3, 0, Math.PI * 2);
                 ctx.fill();
             }
+        }
 
-            // Draw merged hand protection region with clean union outline
-            if (handMaskEnabled) {
-                const hr = handMaskRadius * scale;
-                // Offscreen canvas to build the union shape
-                const hOff = document.createElement('canvas');
-                hOff.width = cw;
-                hOff.height = ch;
-                const hCtx = hOff.getContext('2d');
+        // Draw hand protection outline — controlled by timeline range (not checkbox)
+        if (handProtectActive) {
+            const hr = handMaskRadius * scale;
+            // Offscreen canvas to build the union outline
+            const hOff = document.createElement('canvas');
+            hOff.width = cw;
+            hOff.height = ch;
+            const hCtx = hOff.getContext('2d');
 
-                // Fill all circles as a solid white shape
-                hCtx.fillStyle = '#fff';
-                for (const lm of visibleLandmarks) {
-                    const lx = offsetX + lm.x * scale;
-                    const ly = offsetY + lm.y * scale;
-                    hCtx.beginPath();
-                    hCtx.arc(lx, ly, hr, 0, Math.PI * 2);
-                    hCtx.fill();
-                }
+            // Fill all circles as solid white (natural union)
+            hCtx.fillStyle = '#fff';
+            for (const lm of visibleLandmarks) {
+                const lx = offsetX + lm.x * scale;
+                const ly = offsetY + lm.y * scale;
+                hCtx.beginPath();
+                hCtx.arc(lx, ly, hr, 0, Math.PI * 2);
+                hCtx.fill();
+            }
 
-                // Shrink the shape inward to extract the outline:
-                // erase interior, leaving just the border pixels
-                hCtx.globalCompositeOperation = 'destination-out';
-                for (const lm of visibleLandmarks) {
-                    const lx = offsetX + lm.x * scale;
-                    const ly = offsetY + lm.y * scale;
-                    hCtx.beginPath();
-                    hCtx.arc(lx, ly, hr - 2, 0, Math.PI * 2);
-                    hCtx.fill();
-                }
+            // Erase interior to leave 2px border ring
+            hCtx.globalCompositeOperation = 'destination-out';
+            for (const lm of visibleLandmarks) {
+                const lx = offsetX + lm.x * scale;
+                const ly = offsetY + lm.y * scale;
+                hCtx.beginPath();
+                hCtx.arc(lx, ly, hr - 2, 0, Math.PI * 2);
+                hCtx.fill();
+            }
 
-                // Tint the remaining outline green
-                hCtx.globalCompositeOperation = 'source-in';
-                hCtx.fillStyle = 'rgba(76,175,80,0.8)';
-                hCtx.fillRect(0, 0, cw, ch);
+            // Tint green
+            hCtx.globalCompositeOperation = 'source-in';
+            hCtx.fillStyle = 'rgba(76,175,80,0.8)';
+            hCtx.fillRect(0, 0, cw, ch);
 
-                // Composite onto main canvas
-                ctx.drawImage(hOff, 0, 0);
+            ctx.drawImage(hOff, 0, 0);
 
-                // Also draw a subtle fill on the main canvas
-                ctx.fillStyle = 'rgba(76,175,80,0.06)';
-                for (const lm of visibleLandmarks) {
-                    const lx = offsetX + lm.x * scale;
-                    const ly = offsetY + lm.y * scale;
-                    ctx.beginPath();
-                    ctx.arc(lx, ly, hr, 0, Math.PI * 2);
-                    ctx.fill();
-                }
+            // Subtle fill
+            ctx.fillStyle = 'rgba(76,175,80,0.06)';
+            for (const lm of visibleLandmarks) {
+                const lx = offsetX + lm.x * scale;
+                const ly = offsetY + lm.y * scale;
+                ctx.beginPath();
+                ctx.arc(lx, ly, hr, 0, Math.PI * 2);
+                ctx.fill();
             }
         }
 
@@ -1031,7 +1030,7 @@ const deid = (() => {
     }
 
     async function updateHandSettings() {
-        handMaskEnabled = document.getElementById('handMaskEnabled').checked;
+        // handMaskEnabled is always true — protection range controlled by timeline
         if (!subjectId || currentTrialIdx < 0) return;
         try {
             await API.put(`/api/deidentify/${subjectId}/hand-settings`, {
