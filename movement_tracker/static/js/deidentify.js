@@ -490,7 +490,13 @@ const deid = (() => {
             const handCount = visibleLandmarks.filter(l => l.type !== 'pose').length;
             const poseCount = visibleLandmarks.filter(l => l.type === 'pose').length;
             const allSides = [...new Set(handLandmarks.map(l => l.side))];
+            const poseVis = visibleLandmarks.filter(l => l.type === 'pose');
+            const handVis = visibleLandmarks.filter(l => l.type !== 'pose');
+            const poseXs = poseVis.map(l => l.x);
+            const handXs = handVis.map(l => l.x);
             console.debug(`[deid] camera=${currentSide} sideLabel=${curSideLabel} total=${handLandmarks.length} visible=${visibleLandmarks.length} (hand=${handCount} pose=${poseCount}) allSides=[${allSides}]`);
+            if (poseVis.length > 0) console.debug(`[deid]   pose x: [${Math.min(...poseXs).toFixed(0)}-${Math.max(...poseXs).toFixed(0)}] first=(${poseVis[0].x.toFixed(0)},${poseVis[0].y.toFixed(0)}) side=${poseVis[0].side}`);
+            if (handVis.length > 0) console.debug(`[deid]   hand x: [${Math.min(...handXs).toFixed(0)}-${Math.max(...handXs).toFixed(0)}] first=(${handVis[0].x.toFixed(0)},${handVis[0].y.toFixed(0)}) side=${handVis[0].side}`);
         }
         const activeSeg = handProtectSegments.find(s =>
             currentFrame >= s.start && currentFrame <= s.end
