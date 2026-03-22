@@ -32,6 +32,7 @@ const deid = (() => {
     let handOverlayEnabled = false;
     let handLandmarks = [];   // [{x, y, side}]
     let handMaskRadius = 30;
+    let handSmooth = 15;  // morphological close: dilate then erode
     let handMaskEnabled = true;
 
     // Canvas
@@ -483,17 +484,47 @@ const deid = (() => {
                 off.fill();
             }
 
-            // Subtract hand protection circles from ALL blur fills at once
+            // Subtract hand protection from ALL blur fills using morphological close
             if (handProtectActive) {
-                off.globalCompositeOperation = 'destination-out';
                 const hr = activeProtectRadius * scale;
+                const sm = handSmooth * scale;
+
+                // Build smoothed hand mask on a temp canvas
+                const maskCanvas = document.createElement('canvas');
+                maskCanvas.width = cw;
+                maskCanvas.height = ch;
+                const mask = maskCanvas.getContext('2d');
+
+                // Step 1: Dilate — draw circles at r + smooth
+                mask.fillStyle = '#fff';
                 for (const lm of visibleLandmarks) {
-                    const lx = offsetX + lm.x * scale;
-                    const ly = offsetY + lm.y * scale;
-                    off.beginPath();
-                    off.arc(lx, ly, hr, 0, Math.PI * 2);
-                    off.fill();
+                    mask.beginPath();
+                    mask.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr + sm, 0, Math.PI * 2);
+                    mask.fill();
                 }
+
+                // Step 2: Erode — keep only pixels also covered by r circles
+                if (sm > 0) {
+                    const erodeCanvas = document.createElement('canvas');
+                    erodeCanvas.width = cw;
+                    erodeCanvas.height = ch;
+                    const erode = erodeCanvas.getContext('2d');
+                    erode.fillStyle = '#fff';
+                    for (const lm of visibleLandmarks) {
+                        erode.beginPath();
+                        erode.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr, 0, Math.PI * 2);
+                        erode.fill();
+                    }
+                    // Intersect: keep only pixels in both dilated and original
+                    mask.globalCompositeOperation = 'destination-in';
+                    mask.drawImage(erodeCanvas, 0, 0);
+                    mask.globalCompositeOperation = 'source-over';
+                }
+
+                // Use the smoothed mask to erase blur fill
+                off.globalCompositeOperation = 'destination-out';
+                off.drawImage(maskCanvas, 0, 0);
+                off.globalCompositeOperation = 'source-over';
             }
 
             // Composite result onto main canvas
@@ -539,30 +570,74 @@ const deid = (() => {
             }
         }
 
-        // Draw hand protection union outline (no fill, just outline)
+        // Draw hand protection union outline (smoothed, no fill)
         if (handProtectActive) {
             const hr = activeProtectRadius * scale;
-            const hOff = document.createElement('canvas');
-            hOff.width = cw;
-            hOff.height = ch;
-            const hCtx = hOff.getContext('2d');
+            const sm = handSmooth * scale;
 
-            hCtx.fillStyle = '#fff';
+            // Build smoothed shape (same dilate+erode as blur subtraction)
+            const shapeCanvas = document.createElement('canvas');
+            shapeCanvas.width = cw;
+            shapeCanvas.height = ch;
+            const sc = shapeCanvas.getContext('2d');
+
+            sc.fillStyle = '#fff';
             for (const lm of visibleLandmarks) {
-                hCtx.beginPath();
-                hCtx.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr, 0, Math.PI * 2);
-                hCtx.fill();
+                sc.beginPath();
+                sc.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr + sm, 0, Math.PI * 2);
+                sc.fill();
             }
-            hCtx.globalCompositeOperation = 'destination-out';
+            if (sm > 0) {
+                const erCanvas = document.createElement('canvas');
+                erCanvas.width = cw;
+                erCanvas.height = ch;
+                const er = erCanvas.getContext('2d');
+                er.fillStyle = '#fff';
+                for (const lm of visibleLandmarks) {
+                    er.beginPath();
+                    er.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr, 0, Math.PI * 2);
+                    er.fill();
+                }
+                sc.globalCompositeOperation = 'destination-in';
+                sc.drawImage(erCanvas, 0, 0);
+                sc.globalCompositeOperation = 'source-over';
+            }
+
+            // Extract outline: erode inward by 2px
+            sc.globalCompositeOperation = 'destination-out';
+            const innerCanvas = document.createElement('canvas');
+            innerCanvas.width = cw;
+            innerCanvas.height = ch;
+            const ic = innerCanvas.getContext('2d');
+            ic.fillStyle = '#fff';
             for (const lm of visibleLandmarks) {
-                hCtx.beginPath();
-                hCtx.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr - 2, 0, Math.PI * 2);
-                hCtx.fill();
+                ic.beginPath();
+                ic.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr + sm - 2, 0, Math.PI * 2);
+                ic.fill();
             }
-            hCtx.globalCompositeOperation = 'source-in';
-            hCtx.fillStyle = 'rgba(76,175,80,0.8)';
-            hCtx.fillRect(0, 0, cw, ch);
-            ctx.drawImage(hOff, 0, 0);
+            if (sm > 0) {
+                const er2 = document.createElement('canvas');
+                er2.width = cw;
+                er2.height = ch;
+                const er2c = er2.getContext('2d');
+                er2c.fillStyle = '#fff';
+                for (const lm of visibleLandmarks) {
+                    er2c.beginPath();
+                    er2c.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr - 2, 0, Math.PI * 2);
+                    er2c.fill();
+                }
+                ic.globalCompositeOperation = 'destination-in';
+                ic.drawImage(er2, 0, 0);
+            }
+            sc.drawImage(innerCanvas, 0, 0);
+            sc.globalCompositeOperation = 'source-over';
+
+            // Tint green
+            sc.globalCompositeOperation = 'source-in';
+            sc.fillStyle = 'rgba(76,175,80,0.8)';
+            sc.fillRect(0, 0, cw, ch);
+
+            ctx.drawImage(shapeCanvas, 0, 0);
         }
 
         // "Adding custom" cursor indicator
@@ -1040,6 +1115,12 @@ const deid = (() => {
             if (seg) seg.radius = handMaskRadius;
         }
         saveHandSettings();
+        render();
+    }
+
+    function updateHandSmooth(val) {
+        handSmooth = parseInt(val);
+        document.getElementById('handSmoothVal').textContent = handSmooth;
         render();
     }
 
@@ -1540,6 +1621,7 @@ const deid = (() => {
         toggleHandOverlay,
         updateHandRadius,
         deleteSelectedHandSeg,
+        updateHandSmooth,
         goToMediapipe,
         renderAll,
     };
