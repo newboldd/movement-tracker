@@ -60,6 +60,28 @@ def _has_blur_complete(dlc_path: Path, row: dict) -> bool:
     return _all_no_face(row)
 
 
+def _delete_subject_deps(db, subject_id: int):
+    """Delete all dependent records for a subject. Safe if tables don't exist."""
+    # Delete frame_labels via label_sessions
+    session_ids = [r["id"] for r in db.execute(
+        "SELECT id FROM label_sessions WHERE subject_id = ?", (subject_id,)
+    ).fetchall()]
+    if session_ids:
+        placeholders = ",".join("?" * len(session_ids))
+        db.execute(f"DELETE FROM frame_labels WHERE session_id IN ({placeholders})", session_ids)
+    db.execute("DELETE FROM label_sessions WHERE subject_id = ?", (subject_id,))
+    db.execute("DELETE FROM segments WHERE subject_id = ?", (subject_id,))
+    db.execute("DELETE FROM jobs WHERE subject_id = ?", (subject_id,))
+    # Optional tables that may not exist in all schema versions
+    for table in ("subject_events", "mp_crop_boxes", "blur_specs",
+                  "blur_hand_settings", "hand_protection_segments",
+                  "face_detections"):
+        try:
+            db.execute(f"DELETE FROM {table} WHERE subject_id = ?", (subject_id,))
+        except Exception:
+            pass
+
+
 def _subject_row_to_response(row: dict) -> dict:
     """Convert a DB row to SubjectResponse fields."""
     dlc_path = _resolve_dlc_path(row.get("dlc_dir"))
@@ -293,15 +315,7 @@ def delete_subject(subject_id: int) -> dict:
                     deleted_files.append(str(vf))
 
         # Full purge from DB
-        session_ids = [r["id"] for r in db.execute(
-            "SELECT id FROM label_sessions WHERE subject_id = ?", (subject_id,)
-        ).fetchall()]
-        if session_ids:
-            placeholders = ",".join("?" * len(session_ids))
-            db.execute(f"DELETE FROM frame_labels WHERE session_id IN ({placeholders})", session_ids)
-        db.execute("DELETE FROM label_sessions WHERE subject_id = ?", (subject_id,))
-        db.execute("DELETE FROM segments WHERE subject_id = ?", (subject_id,))
-        db.execute("DELETE FROM jobs WHERE subject_id = ?", (subject_id,))
+        _delete_subject_deps(db, subject_id)
         db.execute("DELETE FROM subjects WHERE id = ?", (subject_id,))
 
         return {
@@ -446,21 +460,7 @@ def sync_from_filesystem() -> dict:
             trial_vids = _find_videos(row["name"])
             deident_vids = _find_deidentified_videos(row["name"])
             if not trial_vids and not deident_vids:
-                # Full purge
-                session_ids = [r["id"] for r in db.execute(
-                    "SELECT id FROM label_sessions WHERE subject_id = ?", (row["id"],)
-                ).fetchall()]
-                if session_ids:
-                    placeholders = ",".join("?" * len(session_ids))
-                    db.execute(f"DELETE FROM frame_labels WHERE session_id IN ({placeholders})", session_ids)
-                db.execute("DELETE FROM label_sessions WHERE subject_id = ?", (row["id"],))
-                db.execute("DELETE FROM segments WHERE subject_id = ?", (row["id"],))
-                db.execute("DELETE FROM jobs WHERE subject_id = ?", (row["id"],))
-                db.execute("DELETE FROM subject_events WHERE subject_id = ?", (row["id"],))
-                db.execute("DELETE FROM mp_crop_boxes WHERE subject_id = ?", (row["id"],))
-                db.execute("DELETE FROM blur_specs WHERE subject_id = ?", (row["id"],))
-                db.execute("DELETE FROM blur_hand_settings WHERE subject_id = ?", (row["id"],))
-                db.execute("DELETE FROM face_detections WHERE subject_id = ?", (row["id"],))
+                _delete_subject_deps(db, row["id"])
                 db.execute("DELETE FROM subjects WHERE id = ?", (row["id"],))
                 removed += 1
 
