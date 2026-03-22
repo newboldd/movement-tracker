@@ -316,6 +316,21 @@ const deid = (() => {
         window.location.href = `/mediapipe-select?subject=${subjectId}`;
     }
 
+    // ── Side label mapping (stereo: left/right ↔ camera names) ──
+    function _sideLabel() {
+        // Map currentSide camera name to the detection side label
+        if (cameraMode !== 'stereo') return 'full';
+        if (cameraNames.length >= 2 && currentSide === cameraNames[1]) return 'right';
+        return 'left';
+    }
+
+    function _facesForCurrentSide(entry) {
+        if (!entry || !entry.faces) return [];
+        if (cameraMode === 'single') return entry.faces;
+        const label = _sideLabel();
+        return entry.faces.filter(f => (f.side || 'full') === label || (f.side || 'full') === 'full');
+    }
+
     // ── Render ──
     function render() {
         if (!ctx || !canvas) return;
@@ -328,15 +343,15 @@ const deid = (() => {
         // Draw video frame
         ctx.drawImage(currentImage, offsetX, offsetY, imgW * scale, imgH * scale);
 
-        // Draw face detections (blue dashed rectangles)
+        // Draw face detections (blue dashed rectangles) — filtered by current side
         const localFrame = currentFrame - (trialMeta ? trialMeta.start_frame : 0);
         if (faceDetections.length > localFrame) {
-            const entry = faceDetections[localFrame];
-            if (entry && entry.faces) {
+            const faces = _facesForCurrentSide(faceDetections[localFrame]);
+            if (faces.length > 0) {
                 ctx.setLineDash([6, 4]);
                 ctx.strokeStyle = 'rgba(33,150,243,0.8)';
                 ctx.lineWidth = 2;
-                for (const f of entry.faces) {
+                for (const f of faces) {
                     const sx = offsetX + f.x1 * scale;
                     const sy = offsetY + f.y1 * scale;
                     const sw = (f.x2 - f.x1) * scale;
@@ -347,9 +362,12 @@ const deid = (() => {
             }
         }
 
-        // Draw blur spots (red semi-transparent circles)
+        // Draw blur spots (red semi-transparent circles) — filtered by current side
+        const curSideLabel = _sideLabel();
         for (const spot of blurSpots) {
             if (currentFrame < spot.frame_start || currentFrame > spot.frame_end) continue;
+            const spotSide = spot.side || 'full';
+            if (spotSide !== 'full' && spotSide !== curSideLabel) continue;
             const sx = offsetX + spot.x * scale;
             const sy = offsetY + spot.y * scale;
             const sr = spot.radius * scale;
@@ -367,10 +385,14 @@ const deid = (() => {
             ctx.stroke();
         }
 
-        // Draw hand landmarks (green dots)
-        if (handOverlayEnabled && handLandmarks.length > 0) {
+        // Draw hand landmarks (green dots) — filtered by current side
+        const sideLabel = _sideLabel();
+        const visibleLandmarks = handLandmarks.filter(lm =>
+            (lm.side || 'full') === sideLabel || (lm.side || 'full') === 'full'
+        );
+        if (handOverlayEnabled && visibleLandmarks.length > 0) {
             ctx.fillStyle = 'rgba(76,175,80,0.7)';
-            for (const lm of handLandmarks) {
+            for (const lm of visibleLandmarks) {
                 const sx = offsetX + lm.x * scale;
                 const sy = offsetY + lm.y * scale;
                 ctx.beginPath();
@@ -383,7 +405,7 @@ const deid = (() => {
                 ctx.strokeStyle = 'rgba(76,175,80,0.3)';
                 ctx.lineWidth = 1;
                 ctx.setLineDash([4, 4]);
-                for (const lm of handLandmarks) {
+                for (const lm of visibleLandmarks) {
                     const sx = offsetX + lm.x * scale;
                     const sy = offsetY + lm.y * scale;
                     ctx.beginPath();
@@ -628,11 +650,80 @@ const deid = (() => {
             faceDetections = result.faces || [];
             const nFaces = faceDetections.filter(f => f.faces.length > 0).length;
             status.textContent = `Found faces in ${nFaces}/${faceDetections.length} frames`;
+
+            // Auto-create blur spots from unique face clusters
+            _autoCreateFaceSpots();
+            renderSpotList();
+            scheduleSave();
             render();
         } catch (e) {
             status.textContent = 'Error: ' + e.message;
         }
         btn.disabled = false;
+    }
+
+    // ── Auto-create blur spots from face detections ──
+    function _autoCreateFaceSpots() {
+        if (!faceDetections.length || !trialMeta) return;
+
+        // Find the most common face position per side (cluster by center)
+        const clusters = {}; // key: side → [{cx, cy, w, h, count, firstFrame, lastFrame}]
+
+        for (const entry of faceDetections) {
+            for (const f of entry.faces) {
+                const side = f.side || 'full';
+                if (!clusters[side]) clusters[side] = [];
+
+                const cx = (f.x1 + f.x2) / 2;
+                const cy = (f.y1 + f.y2) / 2;
+                const w = f.x2 - f.x1;
+                const h = f.y2 - f.y1;
+
+                // Find nearest existing cluster
+                let matched = false;
+                for (const c of clusters[side]) {
+                    const dist = Math.sqrt((cx - c.cx) ** 2 + (cy - c.cy) ** 2);
+                    if (dist < Math.max(w, h) * 1.5) {
+                        // Update running average
+                        c.cx = (c.cx * c.count + cx) / (c.count + 1);
+                        c.cy = (c.cy * c.count + cy) / (c.count + 1);
+                        c.w = Math.max(c.w, w);
+                        c.h = Math.max(c.h, h);
+                        c.count++;
+                        c.firstFrame = Math.min(c.firstFrame, entry.frame);
+                        c.lastFrame = Math.max(c.lastFrame, entry.frame);
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched) {
+                    clusters[side].push({
+                        cx, cy, w, h, count: 1,
+                        firstFrame: entry.frame, lastFrame: entry.frame,
+                    });
+                }
+            }
+        }
+
+        // Remove existing auto-generated face spots for this trial
+        blurSpots = blurSpots.filter(s => s.spot_type !== 'face');
+
+        // Create a blur spot for each significant cluster
+        for (const [side, clusterList] of Object.entries(clusters)) {
+            for (const c of clusterList) {
+                if (c.count < 3) continue; // Skip noise (< 3 frames)
+                blurSpots.push({
+                    id: nextSpotId++,
+                    spot_type: 'face',
+                    x: Math.round(c.cx),
+                    y: Math.round(c.cy),
+                    radius: Math.round(Math.max(c.w, c.h) / 2 * 1.2), // 20% larger than face
+                    frame_start: c.firstFrame,
+                    frame_end: c.lastFrame,
+                    side: side,
+                });
+            }
+        }
     }
 
     // ── Spot management ──
