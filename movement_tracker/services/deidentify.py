@@ -306,8 +306,12 @@ def deidentify_video(input_path: str, output_path: str,
     # Reopen video instead of seeking (seeking can be inaccurate with H.264)
     cap.release()
     cap = cv2.VideoCapture(input_path)
+    # Remove existing output file — macOS AVFoundation refuses to overwrite
+    import os, sys
+    if os.path.exists(output_path):
+        os.remove(output_path)
+
     # Try avc1 (H.264 via VideoToolbox) on macOS, fall back to mp4v
-    import sys
     writer = None
     for codec in (["avc1", "mp4v"] if sys.platform == "darwin" else ["mp4v"]):
         fourcc = cv2.VideoWriter_fourcc(*codec)
@@ -629,7 +633,11 @@ def render_with_blur_specs(input_path: str, output_path: str,
     if start_frame > 0:
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
-    import sys
+    # Remove existing output file — macOS AVFoundation refuses to overwrite
+    import os, sys
+    if os.path.exists(output_path):
+        os.remove(output_path)
+
     writer = None
     for codec in (["avc1", "mp4v"] if sys.platform == "darwin" else ["mp4v"]):
         fourcc = cv2.VideoWriter_fourcc(*codec)
