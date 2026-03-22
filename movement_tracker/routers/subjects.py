@@ -460,8 +460,11 @@ def sync_from_filesystem() -> dict:
             trial_vids = _find_videos(row["name"])
             deident_vids = _find_deidentified_videos(row["name"])
             if not trial_vids and not deident_vids:
-                _delete_subject_deps(db, row["id"])
-                db.execute("DELETE FROM subjects WHERE id = ?", (row["id"],))
-                removed += 1
+                try:
+                    _delete_subject_deps(db, row["id"])
+                    db.execute("DELETE FROM subjects WHERE id = ?", (row["id"],))
+                    removed += 1
+                except Exception as e:
+                    logger.warning(f"Could not remove stale subject {row['name']}: {e}")
 
     return {"created": created, "updated": updated, "removed": removed, "total": len(discovered)}
