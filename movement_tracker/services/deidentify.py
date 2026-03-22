@@ -759,12 +759,13 @@ def _build_blur_mask(specs: list[dict], w: int, h: int,
                 cx, cy = cx + ox, cy + oy
 
         # Use width/height if available, otherwise fall back to radius
+        # width/height are full dimensions; cv2.ellipse needs semi-axes (half)
         bw = float(s.get("width") or s.get("radius") or 50)
         bh = float(s.get("height") or s.get("radius") or 50)
 
-        # Draw filled ellipse
+        # Draw filled ellipse (axes = semi-axes = half of full dimensions)
         center = (int(cx), int(cy))
-        axes = (int(bw), int(bh))
+        axes = (int(bw / 2), int(bh / 2))
         if axes[0] > 0 and axes[1] > 0:
             cv2.ellipse(mask, center, axes, 0, 0, 360, 255, -1)
 
