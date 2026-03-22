@@ -112,13 +112,13 @@ def get_frame(
     video_path = trial["video_path"]
 
     if blurred:
-        # Look for deidentified version
+        # Look for deidentified version (matches render output naming)
         deident_dir = Path(str(settings.video_path)) / "deidentified"
         cam = trial.get("camera_name")
         if cam:
-            deident_name = f"{subject_name}_{trial['trial_name']}_{cam}.mp4"
+            deident_name = f"{trial['trial_name']}_{cam}.mp4"
         else:
-            deident_name = f"{subject_name}_{trial['trial_name']}.mp4"
+            deident_name = f"{trial['trial_name']}.mp4"
         deident_path = deident_dir / deident_name
         if deident_path.exists():
             video_path = str(deident_path)
