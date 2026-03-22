@@ -581,11 +581,23 @@ const deid = (() => {
             for (const lm of visibleLandmarks) {
                 const sx = offsetX + lm.x * scale;
                 const sy = offsetY + lm.y * scale;
-                ctx.fillStyle = lm.type === 'pose'
-                    ? 'rgba(255,152,0,0.7)' : 'rgba(76,175,80,0.7)';
-                ctx.beginPath();
-                ctx.arc(sx, sy, lm.type === 'pose' ? 4 : 3, 0, Math.PI * 2);
-                ctx.fill();
+                if (lm.type === 'pose') {
+                    // Pose: orange diamond shape to distinguish from hand circles
+                    ctx.fillStyle = 'rgba(255,152,0,0.8)';
+                    ctx.beginPath();
+                    ctx.moveTo(sx, sy - 5);
+                    ctx.lineTo(sx + 5, sy);
+                    ctx.lineTo(sx, sy + 5);
+                    ctx.lineTo(sx - 5, sy);
+                    ctx.closePath();
+                    ctx.fill();
+                } else {
+                    // Hand: green circle
+                    ctx.fillStyle = 'rgba(76,175,80,0.7)';
+                    ctx.beginPath();
+                    ctx.arc(sx, sy, 3, 0, Math.PI * 2);
+                    ctx.fill();
+                }
             }
         }
 
