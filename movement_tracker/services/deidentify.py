@@ -592,10 +592,16 @@ def render_with_blur_specs(input_path: str, output_path: str,
     hand_segments = []
     hand_mask_radius = 10
     hand_smooth = 10
+    forearm_radius = 10
+    forearm_extent = 0.7
+    hand_smooth2 = 0
     if hand_settings:
         import json as _json
         hand_mask_radius = hand_settings.get("hand_mask_radius") or hand_settings.get("mask_radius") or 10
         hand_smooth = hand_settings.get("hand_smooth", 10)
+        forearm_radius = hand_settings.get("forearm_radius", 10)
+        forearm_extent = hand_settings.get("forearm_extent", 0.7)
+        hand_smooth2 = hand_settings.get("hand_smooth2", 0)
         seg_json = hand_settings.get("segments_json", "[]")
         try:
             hand_segments = _json.loads(seg_json) if isinstance(seg_json, str) else seg_json
@@ -620,7 +626,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
                         for j in range(os_lm.shape[1]):
                             x, y = os_lm[f, j, 0], os_lm[f, j, 1]
                             if not np.isnan(x):
-                                hand_lm_data[f].append({"x": float(x), "y": float(y), "side": "left"})
+                                hand_lm_data[f].append({"x": float(x), "y": float(y), "side": "left", "type": "hand", "joint": j})
                 if od_lm is not None:
                     for f in range(od_lm.shape[0]):
                         if f not in hand_lm_data:
@@ -628,7 +634,30 @@ def render_with_blur_specs(input_path: str, output_path: str,
                         for j in range(od_lm.shape[1]):
                             x, y = od_lm[f, j, 0], od_lm[f, j, 1]
                             if not np.isnan(x):
-                                hand_lm_data[f].append({"x": float(x), "y": float(y), "side": "right"})
+                                hand_lm_data[f].append({"x": float(x), "y": float(y), "side": "right", "type": "hand", "joint": j})
+
+                # Also load pose landmarks for forearm triangle (elbow)
+                pose_path = settings.dlc_path / subject_name / "pose_prelabels.npz"
+                if pose_path.exists():
+                    pose_npz = np2.load(str(pose_path))
+                    pose_os = pose_npz.get("OS_landmarks")
+                    pose_od = pose_npz.get("OD_landmarks")
+                    if pose_os is not None:
+                        for f in range(pose_os.shape[0]):
+                            if f not in hand_lm_data:
+                                hand_lm_data[f] = []
+                            for j in range(pose_os.shape[1]):
+                                x, y = pose_os[f, j, 0], pose_os[f, j, 1]
+                                if not np.isnan(x):
+                                    hand_lm_data[f].append({"x": float(x), "y": float(y), "side": "left", "type": "pose", "joint": j})
+                    if pose_od is not None:
+                        for f in range(pose_od.shape[0]):
+                            if f not in hand_lm_data:
+                                hand_lm_data[f] = []
+                            for j in range(pose_od.shape[1]):
+                                x, y = pose_od[f, j, 0], pose_od[f, j, 1]
+                                if not np.isnan(x):
+                                    hand_lm_data[f].append({"x": float(x), "y": float(y), "side": "right", "type": "pose", "joint": j})
 
     if start_frame > 0:
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
@@ -691,8 +720,10 @@ def render_with_blur_specs(input_path: str, output_path: str,
                 if hand_active and hand_lm_data and global_frame in hand_lm_data:
                     lms_l = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "left"]
                     lms_r = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "right"]
-                    hand_mask_l = _build_hand_mask_from_landmarks(lms_l, half_w, fh, active_radius, active_smooth)
-                    hand_mask_r = _build_hand_mask_from_landmarks(lms_r, full_w - half_w, fh, active_radius, active_smooth)
+                    hand_mask_l = _build_hand_mask_from_landmarks(lms_l, half_w, fh, active_radius, active_smooth,
+                                                                  forearm_radius, forearm_extent, hand_smooth2)
+                    hand_mask_r = _build_hand_mask_from_landmarks(lms_r, full_w - half_w, fh, active_radius, active_smooth,
+                                                                  forearm_radius, forearm_extent, hand_smooth2)
 
                 left = _apply_blur_with_mask(left, left_mask, hand_mask_l)
                 right = _apply_blur_with_mask(right, right_mask, hand_mask_r)
@@ -703,7 +734,8 @@ def render_with_blur_specs(input_path: str, output_path: str,
                 hand_mask = np.zeros((fh, full_w), dtype=bool)
                 if hand_active and hand_lm_data and global_frame in hand_lm_data:
                     hand_mask = _build_hand_mask_from_landmarks(
-                        hand_lm_data[global_frame], full_w, fh, active_radius, active_smooth)
+                        hand_lm_data[global_frame], full_w, fh, active_radius, active_smooth,
+                        forearm_radius, forearm_extent, hand_smooth2)
 
                 frame = _apply_blur_with_mask(frame, blur_mask, hand_mask)
 
@@ -773,25 +805,82 @@ def _build_blur_mask(specs: list[dict], w: int, h: int,
 
 
 def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
-                                     radius: int, smooth: int = 0) -> np.ndarray:
-    """Build hand protection mask from stored landmarks (matching frontend behavior)."""
+                                     radius: int, smooth: int = 0,
+                                     forearm_radius: int = 10,
+                                     forearm_extent: float = 0.7,
+                                     smooth2: int = 0) -> np.ndarray:
+    """Build hand protection mask from stored landmarks (matching frontend behavior).
+
+    Draws circles at hand keypoints, applies morphological close (smooth),
+    then adds a forearm triangle (pinky MCP → elbow → thumb CMC) and
+    applies a second smooth step.
+    """
     mask = np.zeros((h, w), dtype=np.uint8)
 
     if not landmarks:
         return mask > 0
 
-    # Draw circles at each landmark position
-    for lm in landmarks:
+    hand_lms = [lm for lm in landmarks if lm.get("type") != "pose"]
+    pose_lms = [lm for lm in landmarks if lm.get("type") == "pose"]
+
+    # Draw circles at each hand landmark position (not pose)
+    for lm in hand_lms:
         x, y = int(lm["x"]), int(lm["y"])
         if 0 <= x < w and 0 <= y < h:
             cv2.circle(mask, (x, y), radius, 255, -1)
 
-    # Apply morphological close (dilate + erode) for smooth parameter
+    # Apply morphological close (dilate + erode) for smooth parameter — hand circles only
     if smooth > 0:
         k = 2 * smooth + 1
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
         mask = cv2.dilate(mask, kernel)
         mask = cv2.erode(mask, kernel)
+
+    # Add forearm triangle: pinky MCP (joint 17) → elbow → thumb CMC (joint 1)
+    pinky_mcp = next((lm for lm in hand_lms if lm.get("joint") == 17), None)
+    thumb_cmc = next((lm for lm in hand_lms if lm.get("joint") == 1), None)
+    hand_wrist = next((lm for lm in hand_lms if lm.get("joint") == 0), None)
+
+    # Pick the elbow closest to the hand centroid
+    elbows = [lm for lm in pose_lms if lm.get("joint") in (13, 14)]
+    elbow = None
+    if hand_wrist and elbows:
+        # Use centroid of hand landmarks to pick the right arm's elbow
+        hand_xs = [lm["x"] for lm in hand_lms]
+        hand_ys = [lm["y"] for lm in hand_lms]
+        cx = sum(hand_xs) / len(hand_xs)
+        cy = sum(hand_ys) / len(hand_ys)
+        elbow = min(elbows, key=lambda e: (e["x"] - cx)**2 + (e["y"] - cy)**2)
+
+    if pinky_mcp and thumb_cmc and elbow and hand_wrist:
+        # Apply forearm extent: interpolate elbow toward wrist
+        wx, wy = hand_wrist["x"], hand_wrist["y"]
+        ex, ey = elbow["x"], elbow["y"]
+        ext_x = wx + forearm_extent * (ex - wx)
+        ext_y = wy + forearm_extent * (ey - wy)
+
+        pts = np.array([
+            [int(pinky_mcp["x"]), int(pinky_mcp["y"])],
+            [int(ext_x), int(ext_y)],
+            [int(thumb_cmc["x"]), int(thumb_cmc["y"])],
+        ], dtype=np.int32)
+
+        # Filled triangle
+        cv2.fillPoly(mask, [pts], 255)
+
+        # Dilate palmar edge (thumb CMC → elbow) by radius
+        cv2.line(mask, (int(thumb_cmc["x"]), int(thumb_cmc["y"])),
+                 (int(ext_x), int(ext_y)), 255, radius * 2)
+        # Dilate dorsal edge (pinky MCP → elbow) by forearm_radius
+        cv2.line(mask, (int(pinky_mcp["x"]), int(pinky_mcp["y"])),
+                 (int(ext_x), int(ext_y)), 255, forearm_radius * 2)
+
+    # Apply second morphological close after adding forearm
+    if smooth2 > 0:
+        k2 = 2 * smooth2 + 1
+        kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k2, k2))
+        mask = cv2.dilate(mask, kernel2)
+        mask = cv2.erode(mask, kernel2)
 
     return mask > 0
 

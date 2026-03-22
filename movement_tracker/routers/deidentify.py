@@ -554,13 +554,7 @@ def render_deidentified(subject_id: int) -> dict:
     # Group hand settings by trial
     hand_by_trial = {}
     for hs in all_hand_settings:
-        hand_by_trial[hs["trial_idx"]] = {
-            "enabled": bool(hs["hand_mask_enabled"]),
-            "mask_radius": hs["hand_mask_radius"],
-            "hand_mask_radius": hs["hand_mask_radius"],
-            "hand_smooth": hs.get("hand_smooth", 10),
-            "segments_json": hs.get("segments_json", "[]"),
-        }
+        hand_by_trial[hs["trial_idx"]] = dict(hs)  # pass all columns through
 
     settings = get_settings()
 
