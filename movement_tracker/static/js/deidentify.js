@@ -1185,6 +1185,7 @@ const deid = (() => {
                         x: Math.round((sumX / count) * 10) / 10,
                         y: Math.round((sumY / count) * 10) / 10,
                         side: side,
+                        type: refPts[i].type || 'hand',
                     });
                 }
             }
