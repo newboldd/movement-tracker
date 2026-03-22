@@ -465,7 +465,7 @@ def load_mediapipe_prelabels(subject_name: str) -> dict | None:
 
             logger.info(f"{subject_name}: Applied frame offset {frame_offset} to MediaPipe data")
 
-        return {
+        result = {
             "OS_landmarks": OS_lm,
             "OD_landmarks": OD_lm,
             "confidence_OS": conf_OS,
@@ -473,6 +473,11 @@ def load_mediapipe_prelabels(subject_name: str) -> dict | None:
             "distances": dist if dist is not None else data.get("distances"),
             "total_frames": int(data["total_frames"]),
         }
+        # Preserve run history keys
+        for k in data.files if hasattr(data, 'files') else data:
+            if k.startswith("distances_run_") or k.startswith("crop_run_"):
+                result[k] = data[k]
+        return result
     else:
         # Old format: only thumb + index tip stored
         n = int(data["total_frames"])
@@ -534,15 +539,19 @@ def get_mediapipe_for_session(subject_name: str) -> dict | None:
             # Update the npz file so we don't recompute every time
             settings = get_settings()
             npz_path = str(settings.dlc_path / subject_name / "mediapipe_prelabels.npz")
-            np.savez(
-                npz_path,
-                OS_landmarks=OS_lm,
-                OD_landmarks=OD_lm,
-                confidence_OS=data["confidence_OS"],
-                confidence_OD=data["confidence_OD"],
-                distances=distances,
-                total_frames=data["total_frames"],
-            )
+            save_data = {
+                "OS_landmarks": OS_lm,
+                "OD_landmarks": OD_lm,
+                "confidence_OS": data["confidence_OS"],
+                "confidence_OD": data["confidence_OD"],
+                "distances": distances,
+                "total_frames": data["total_frames"],
+            }
+            # Preserve run history keys
+            for k in data:
+                if k.startswith("distances_run_") or k.startswith("crop_run_"):
+                    save_data[k] = data[k]
+            np.savez(npz_path, **save_data)
             logger.info(f"Updated distances in {npz_path}: {valid}/{len(distances)} frames")
 
     settings = get_settings()
