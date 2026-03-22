@@ -224,8 +224,8 @@
         <!-- Bottom controls: frame slider, play/pause -->
         <div class="deid-controls">
             <div class="controls-row">
-                <button class="play-btn" id="playBtn" onclick="deid.togglePlay()">&#9654;</button>
-                <input type="range" id="frameSlider" min="0" max="0" value="0"
+                <button class="play-btn" id="playBtn" tabindex="-1" onclick="deid.togglePlay()">&#9654;</button>
+                <input type="range" id="frameSlider" tabindex="-1" min="0" max="0" value="0"
                        oninput="deid.seekFrame(parseInt(this.value))">
                 <span class="frame-display" id="frameDisplay">Frame: 0 / 0</span>
             </div>

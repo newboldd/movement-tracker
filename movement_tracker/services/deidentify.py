@@ -457,16 +457,16 @@ def detect_faces_in_video(video_path: str, start_frame: int = 0,
         if is_stereo:
             for (x1, y1, x2, y2) in smoothed_L[i]:
                 entry["faces"].append({
-                    "x1": x1, "y1": y1, "x2": x2, "y2": y2, "side": "left",
+                    "x1": int(x1), "y1": int(y1), "x2": int(x2), "y2": int(y2), "side": "left",
                 })
             for (x1, y1, x2, y2) in smoothed_R[i]:
                 entry["faces"].append({
-                    "x1": x1, "y1": y1, "x2": x2, "y2": y2, "side": "right",
+                    "x1": int(x1), "y1": int(y1), "x2": int(x2), "y2": int(y2), "side": "right",
                 })
         else:
             for (x1, y1, x2, y2) in smoothed[i]:
                 entry["faces"].append({
-                    "x1": x1, "y1": y1, "x2": x2, "y2": y2, "side": "full",
+                    "x1": int(x1), "y1": int(y1), "x2": int(x2), "y2": int(y2), "side": "full",
                 })
         faces_per_frame.append(entry)
 
@@ -475,10 +475,10 @@ def detect_faces_in_video(video_path: str, start_frame: int = 0,
 
     return {
         "faces": faces_per_frame,
-        "is_stereo": is_stereo,
-        "frame_width": half_w,
-        "frame_height": h,
-        "n_frames": n,
+        "is_stereo": bool(is_stereo),
+        "frame_width": int(half_w),
+        "frame_height": int(h),
+        "n_frames": int(n),
     }
 
 
