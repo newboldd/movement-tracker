@@ -243,6 +243,14 @@ const deid = (() => {
         try {
             const resp = await API.get(`/api/deidentify/${subjectId}/blur-specs?trial_idx=${idx}`);
             blurSpots = (resp.specs || []).map(s => ({ ...s, id: nextSpotId++ }));
+            // Warn about legacy face spots without proper side assignment
+            if (cameraMode === 'stereo') {
+                const legacy = blurSpots.filter(s => s.spot_type === 'face' && (!s.side || s.side === 'full'));
+                if (legacy.length > 0) {
+                    document.getElementById('faceDetStatus').textContent =
+                        'Re-run Detect Faces to assign blur spots to individual cameras.';
+                }
+            }
         } catch (e) {
             blurSpots = [];
         }
@@ -827,7 +835,7 @@ const deid = (() => {
                 offset_y: 0,
                 frame_start: Math.max(trialMeta.start_frame, currentFrame - 30),
                 frame_end: Math.min(trialMeta.end_frame, currentFrame + 30),
-                side: 'full',
+                side: _sideLabel(),
             };
             blurSpots.push(spot);
             selectedSpotId = spot.id;
