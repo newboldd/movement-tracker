@@ -296,6 +296,7 @@ def get_hand_landmarks_bulk(subject_id: int, trial_idx: int = Query(...)) -> dic
                             "y": round(float(os_lm[f, j, 1]), 1),
                             "side": "left" if is_stereo else "full",
                             "type": "hand",
+                            "joint": j,
                         })
             if not np.all(np.isnan(od_lm[f])):
                 for j in range(od_lm.shape[1]):
@@ -305,36 +306,38 @@ def get_hand_landmarks_bulk(subject_id: int, trial_idx: int = Query(...)) -> dic
                             "y": round(float(od_lm[f, j, 1]), 1),
                             "side": "right" if is_stereo else "full",
                             "type": "hand",
+                            "joint": j,
                         })
             if pts:
                 result[str(f)] = pts
 
-    # Pose landmarks: shoulders (11,12) and elbows (13,14) only.
-    # Wrists (15,16) and hand points (17-22) are excluded because the
-    # dedicated Hands model provides more accurate positions for those.
-    POSE_UPPER_BODY = [11, 12, 13, 14]
+    # Pose landmarks: elbows (13,14) only for forearm triangle.
+    # Shoulders excluded — not needed for hand protection.
+    POSE_ELBOWS = [13, 14]
     if pose_data:
         os_pose = pose_data["OS_pose"]
         od_pose = pose_data["OD_pose"]
         for f in range(start, min(end + 1, len(os_pose))):
             pts = result.get(str(f), [])
             if not np.all(np.isnan(os_pose[f])):
-                for j in POSE_UPPER_BODY:
+                for j in POSE_ELBOWS:
                     if j < os_pose.shape[1] and not np.isnan(os_pose[f, j, 0]):
                         pts.append({
                             "x": round(float(os_pose[f, j, 0]), 1),
                             "y": round(float(os_pose[f, j, 1]), 1),
                             "side": "left" if is_stereo else "full",
                             "type": "pose",
+                            "joint": j,
                         })
             if not np.all(np.isnan(od_pose[f])):
-                for j in POSE_UPPER_BODY:
+                for j in POSE_ELBOWS:
                     if j < od_pose.shape[1] and not np.isnan(od_pose[f, j, 0]):
                         pts.append({
                             "x": round(float(od_pose[f, j, 0]), 1),
                             "y": round(float(od_pose[f, j, 1]), 1),
                             "side": "right" if is_stereo else "full",
                             "type": "pose",
+                            "joint": j,
                         })
             if pts:
                 result[str(f)] = pts

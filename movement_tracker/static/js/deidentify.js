@@ -406,15 +406,51 @@ const deid = (() => {
 
     // ── Build smoothed hand protection mask (morphological close approx) ──
     function _buildHandMask(landmarks, radiusPx, smoothPx, w, h) {
-        // Step 1: Draw circles at base radius
+        // Step 1: Draw circles at base radius + forearm triangle
         const c1 = document.createElement('canvas');
         c1.width = w; c1.height = h;
         const ctx1 = c1.getContext('2d');
         ctx1.fillStyle = '#fff';
+
+        // Draw circles for all hand landmarks
         for (const lm of landmarks) {
             ctx1.beginPath();
             ctx1.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, radiusPx, 0, Math.PI * 2);
             ctx1.fill();
+        }
+
+        // Draw forearm triangle: pinky MCP (joint 17) → elbow → thumb CMC (joint 1)
+        // Dilated by drawing with thick rounded lines + filled
+        const pinkyMCP = landmarks.find(l => l.type === 'hand' && l.joint === 17);
+        const thumbCMC = landmarks.find(l => l.type === 'hand' && l.joint === 1);
+        // Elbow: pose joint 14 (right) or 13 (left) — pick whichever is present
+        const elbow = landmarks.find(l => l.type === 'pose' && (l.joint === 13 || l.joint === 14));
+
+        if (pinkyMCP && thumbCMC && elbow) {
+            const pts = [pinkyMCP, elbow, thumbCMC].map(p => ({
+                sx: offsetX + p.x * scale,
+                sy: offsetY + p.y * scale,
+            }));
+
+            // Filled triangle
+            ctx1.beginPath();
+            ctx1.moveTo(pts[0].sx, pts[0].sy);
+            ctx1.lineTo(pts[1].sx, pts[1].sy);
+            ctx1.lineTo(pts[2].sx, pts[2].sy);
+            ctx1.closePath();
+            ctx1.fill();
+
+            // Thick rounded stroke to dilate the triangle by radiusPx
+            ctx1.lineWidth = radiusPx * 2;
+            ctx1.lineJoin = 'round';
+            ctx1.lineCap = 'round';
+            ctx1.strokeStyle = '#fff';
+            ctx1.beginPath();
+            ctx1.moveTo(pts[0].sx, pts[0].sy);
+            ctx1.lineTo(pts[1].sx, pts[1].sy);
+            ctx1.lineTo(pts[2].sx, pts[2].sy);
+            ctx1.closePath();
+            ctx1.stroke();
         }
 
         if (smoothPx <= 0) return c1;
@@ -1198,6 +1234,7 @@ const deid = (() => {
                         y: Math.round((sumY / count) * 10) / 10,
                         side: side,
                         type: refPts[i].type || 'hand',
+                        joint: refPts[i].joint,
                     });
                 }
             }
