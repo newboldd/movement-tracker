@@ -314,10 +314,14 @@ def save_blur_specs(subject_id: int, body: dict = Body(...)) -> dict:
         for s in specs:
             db.execute(
                 """INSERT INTO blur_specs
-                   (subject_id, trial_idx, spot_type, x, y, radius, frame_start, frame_end)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (subject_id, trial_idx, spot_type, x, y, radius, width, height,
+                    offset_x, offset_y, frame_start, frame_end)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (subject_id, trial_idx, s.get("spot_type", "face"),
-                 s["x"], s["y"], s["radius"], s["frame_start"], s["frame_end"]),
+                 s["x"], s["y"], s["radius"],
+                 s.get("width"), s.get("height"),
+                 s.get("offset_x", 0), s.get("offset_y", 0),
+                 s["frame_start"], s["frame_end"]),
             )
 
     return {"status": "ok", "count": len(specs)}

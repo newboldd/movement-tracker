@@ -364,6 +364,37 @@ const deid = (() => {
         return entry.faces.filter(f => (f.side || 'full') === label || (f.side || 'full') === 'full');
     }
 
+    // ── Get face spot position for current frame (tracks detection centroid) ──
+    function _getSpotPosition(spot) {
+        // For face spots: track the nearest face detection centroid + offset
+        if (spot.spot_type === 'face' && faceDetections.length > 0) {
+            const localFrame = currentFrame - (trialMeta ? trialMeta.start_frame : 0);
+            if (localFrame >= 0 && localFrame < faceDetections.length) {
+                const faces = _facesForCurrentSide(faceDetections[localFrame]);
+                if (faces.length > 0) {
+                    // Find closest face to spot's reference position
+                    let bestFace = faces[0];
+                    let bestDist = Infinity;
+                    for (const f of faces) {
+                        const cx = (f.x1 + f.x2) / 2;
+                        const cy = (f.y1 + f.y2) / 2;
+                        const d = Math.sqrt((cx - spot.x) ** 2 + (cy - spot.y) ** 2);
+                        if (d < bestDist) {
+                            bestDist = d;
+                            bestFace = f;
+                        }
+                    }
+                    return {
+                        x: (bestFace.x1 + bestFace.x2) / 2 + (spot.offset_x || 0),
+                        y: (bestFace.y1 + bestFace.y2) / 2 + (spot.offset_y || 0),
+                    };
+                }
+            }
+        }
+        // Fallback: static position + offset
+        return { x: spot.x + (spot.offset_x || 0), y: spot.y + (spot.offset_y || 0) };
+    }
+
     // ── Render ──
     function render() {
         if (!ctx || !canvas) return;
@@ -401,26 +432,33 @@ const deid = (() => {
             if (currentFrame < spot.frame_start || currentFrame > spot.frame_end) continue;
             const spotSide = spot.side || 'full';
             if (spotSide !== 'full' && spotSide !== curSideLabel) continue;
-            const sx = offsetX + spot.x * scale;
-            const sy = offsetY + spot.y * scale;
-            const sr = spot.radius * scale;
+
+            // Get position (face spots track detection centroids)
+            const pos = _getSpotPosition(spot);
+            const sx = offsetX + pos.x * scale;
+            const sy = offsetY + pos.y * scale;
+
             const isFace = spot.spot_type === 'face';
             const isSelected = spot.id === selectedSpotId;
 
+            // Use width/height if set, otherwise fall back to radius for both
+            const sw = (spot.width || spot.radius * 2) * scale / 2;
+            const sh = (spot.height || spot.radius * 2) * scale / 2;
+
             // Blue for face spots (matches detection boxes), red for custom
-            const r = isFace ? 33 : 244;
-            const g = isFace ? 150 : 67;
-            const b = isFace ? 243 : 54;
+            const cr = isFace ? 33 : 244;
+            const cg = isFace ? 150 : 67;
+            const cb = isFace ? 243 : 54;
 
             ctx.beginPath();
-            ctx.arc(sx, sy, sr, 0, Math.PI * 2);
+            ctx.ellipse(sx, sy, sw, sh, 0, 0, Math.PI * 2);
             ctx.fillStyle = isSelected
-                ? `rgba(${r},${g},${b},0.35)`
-                : `rgba(${r},${g},${b},0.2)`;
+                ? `rgba(${cr},${cg},${cb},0.35)`
+                : `rgba(${cr},${cg},${cb},0.2)`;
             ctx.fill();
             ctx.strokeStyle = isSelected
-                ? `rgba(${r},${g},${b},0.9)`
-                : `rgba(${r},${g},${b},0.5)`;
+                ? `rgba(${cr},${cg},${cb},0.9)`
+                : `rgba(${cr},${cg},${cb},0.5)`;
             ctx.lineWidth = isSelected ? 2 : 1;
             ctx.stroke();
         }
@@ -491,12 +529,18 @@ const deid = (() => {
             if (entry && entry.faces) {
                 for (const f of entry.faces) {
                     if (ix >= f.x1 && ix <= f.x2 && iy >= f.y1 && iy <= f.y2) {
+                        const fw = f.x2 - f.x1;
+                        const fh = f.y2 - f.y1;
                         const spot = {
                             id: nextSpotId++,
                             spot_type: 'face',
                             x: Math.round((f.x1 + f.x2) / 2),
                             y: Math.round((f.y1 + f.y2) / 2),
-                            radius: Math.round(Math.max(f.x2 - f.x1, f.y2 - f.y1) / 2),
+                            radius: Math.round(Math.max(fw, fh) / 2 * 1.2),
+                            width: Math.round(fw * 1.2),
+                            height: Math.round(fh * 1.2),
+                            offset_x: 0,
+                            offset_y: 0,
                             frame_start: trialMeta.start_frame,
                             frame_end: trialMeta.end_frame,
                             side: f.side || 'full',
@@ -535,6 +579,10 @@ const deid = (() => {
                 x: Math.round(ix),
                 y: Math.round(iy),
                 radius: 40,
+                width: 80,
+                height: 80,
+                offset_x: 0,
+                offset_y: 0,
                 frame_start: Math.max(trialMeta.start_frame, currentFrame - 30),
                 frame_end: Math.min(trialMeta.end_frame, currentFrame + 30),
                 side: 'full',
@@ -779,7 +827,11 @@ const deid = (() => {
                     spot_type: 'face',
                     x: Math.round(c.cx),
                     y: Math.round(c.cy),
-                    radius: Math.round(Math.max(c.w, c.h) / 2 * 1.2), // 20% larger than face
+                    radius: Math.round(Math.max(c.w, c.h) / 2 * 1.2),
+                    width: Math.round(c.w * 1.2),
+                    height: Math.round(c.h * 1.2),
+                    offset_x: 0,
+                    offset_y: 0,
                     frame_start: c.firstFrame,
                     frame_end: c.lastFrame,
                     side: side,
@@ -835,18 +887,35 @@ const deid = (() => {
             return;
         }
         if (controls) controls.style.display = 'block';
-        document.getElementById('radiusSlider').value = spot.radius;
-        document.getElementById('radiusVal').textContent = spot.radius;
+        const w = spot.width || spot.radius * 2;
+        const h = spot.height || spot.radius * 2;
+        document.getElementById('widthSlider').value = w;
+        document.getElementById('widthVal').textContent = Math.round(w);
+        document.getElementById('heightSlider').value = h;
+        document.getElementById('heightVal').textContent = Math.round(h);
+        document.getElementById('offsetXSlider').value = spot.offset_x || 0;
+        document.getElementById('offsetXVal').textContent = Math.round(spot.offset_x || 0);
+        document.getElementById('offsetYSlider').value = spot.offset_y || 0;
+        document.getElementById('offsetYVal').textContent = Math.round(spot.offset_y || 0);
         document.getElementById('frameStartInput').value = spot.frame_start;
         document.getElementById('frameEndInput').value = spot.frame_end;
     }
 
-    function updateSpotRadius(val) {
+    function updateSpotDim(dim, val) {
         val = parseInt(val);
-        document.getElementById('radiusVal').textContent = val;
+        const valEl = document.getElementById(
+            dim === 'width' ? 'widthVal' :
+            dim === 'height' ? 'heightVal' :
+            dim === 'offset_x' ? 'offsetXVal' : 'offsetYVal'
+        );
+        if (valEl) valEl.textContent = val;
         const spot = blurSpots.find(s => s.id === selectedSpotId);
         if (spot) {
-            spot.radius = val;
+            spot[dim] = val;
+            // Keep radius in sync as max(width, height) / 2 for backward compat
+            if (dim === 'width' || dim === 'height') {
+                spot.radius = Math.round(Math.max(spot.width || 0, spot.height || 0) / 2);
+            }
             scheduleSave();
             render();
         }
@@ -924,6 +993,10 @@ const deid = (() => {
             x: s.x,
             y: s.y,
             radius: s.radius,
+            width: s.width || null,
+            height: s.height || null,
+            offset_x: s.offset_x || 0,
+            offset_y: s.offset_y || 0,
             frame_start: s.frame_start,
             frame_end: s.frame_end,
         }));
@@ -1319,7 +1392,7 @@ const deid = (() => {
         toggleAddCustom,
         selectSpot,
         deleteSpot,
-        updateSpotRadius,
+        updateSpotDim,
         updateSpotFrameRange,
         toggleHandOverlay,
         updateHandRadius,

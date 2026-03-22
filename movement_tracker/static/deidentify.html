@@ -188,10 +188,28 @@
                 <div class="section" id="spotControls" style="display:none;">
                     <h3>Selected Spot</h3>
                     <div class="slider-row">
-                        <label>Radius</label>
-                        <input type="range" id="radiusSlider" min="5" max="200" value="40"
-                               oninput="deid.updateSpotRadius(this.value)">
-                        <span class="val" id="radiusVal">40</span>
+                        <label>Width</label>
+                        <input type="range" id="widthSlider" min="10" max="400" value="80"
+                               oninput="deid.updateSpotDim('width', this.value)">
+                        <span class="val" id="widthVal">80</span>
+                    </div>
+                    <div class="slider-row">
+                        <label>Height</label>
+                        <input type="range" id="heightSlider" min="10" max="400" value="80"
+                               oninput="deid.updateSpotDim('height', this.value)">
+                        <span class="val" id="heightVal">80</span>
+                    </div>
+                    <div class="slider-row">
+                        <label>Offset X</label>
+                        <input type="range" id="offsetXSlider" min="-200" max="200" value="0"
+                               oninput="deid.updateSpotDim('offset_x', this.value)">
+                        <span class="val" id="offsetXVal">0</span>
+                    </div>
+                    <div class="slider-row">
+                        <label>Offset Y</label>
+                        <input type="range" id="offsetYSlider" min="-200" max="200" value="0"
+                               oninput="deid.updateSpotDim('offset_y', this.value)">
+                        <span class="val" id="offsetYVal">0</span>
                     </div>
                     <div class="frame-range">
                         <span>Frames:</span>
@@ -256,6 +274,6 @@
 
     <script src="/static/js/api.js"></script>
     <script src="/static/js/nav.js"></script>
-    <script src="/static/js/deidentify.js?v=4"></script>
+    <script src="/static/js/deidentify.js?v=5"></script>
 </body>
 </html>
