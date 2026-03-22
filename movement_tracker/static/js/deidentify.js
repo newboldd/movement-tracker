@@ -47,13 +47,16 @@ const deid = (() => {
 
     // Timeline
     let tlCanvas, tlCtx;
-    let tlDragSpot = null;    // spot being dragged (blur spot object or 'hand')
-    let tlDragEdge = null;    // 'start', 'end', or 'move'
+    let tlDragSpot = null;    // spot being dragged (blur spot object, segment object, or 'newhand')
+    let tlDragEdge = null;    // 'start', 'end', 'move', or 'create'
     let tlDragStartX = null;  // mouse X at drag start
     let tlDragOrigRange = null; // {start, end} at drag start
+    let tlDragCreateFrame = null; // frame at start of hand segment creation drag
     let handCoverage = [];    // array of frame numbers with MP hand data
-    let handProtectStart = 0; // frame range for hand protection
-    let handProtectEnd = 0;
+    // Multiple hand protection segments: [{id, start, end, radius}]
+    let handProtectSegments = [];
+    let nextHandSegId = 1;
+    let selectedHandSegId = null;
 
     // Debounce save timer
     let saveTimer = null;
@@ -234,19 +237,23 @@ const deid = (() => {
             blurSpots = [];
         }
 
-        // Load hand settings
+        // Load hand protection segments
+        handProtectSegments = [];
+        selectedHandSegId = null;
         try {
             const hs = await API.get(`/api/deidentify/${subjectId}/hand-settings?trial_idx=${idx}`);
-            handMaskEnabled = true; // always enabled, controlled by timeline range
-            handMaskRadius = hs.mask_radius;
-            handProtectStart = hs.frame_start != null ? hs.frame_start : trialMeta.start_frame;
-            handProtectEnd = hs.frame_end != null ? hs.frame_end : trialMeta.end_frame;
+            handMaskRadius = hs.mask_radius || 30;
             document.getElementById('handRadiusSlider').value = handMaskRadius;
             document.getElementById('handRadiusVal').textContent = handMaskRadius;
-        } catch (e) {
-            handProtectStart = trialMeta.start_frame;
-            handProtectEnd = trialMeta.end_frame;
-        }
+            if (hs.segments && hs.segments.length > 0) {
+                handProtectSegments = hs.segments.map(s => ({
+                    id: nextHandSegId++,
+                    start: s.start,
+                    end: s.end,
+                    radius: s.radius || handMaskRadius,
+                }));
+            }
+        } catch (e) {}
 
         // Reset zoom for new trial
         hasUserZoom = false;
@@ -293,9 +300,9 @@ const deid = (() => {
         document.getElementById('frameDisplay').textContent =
             `Frame: ${localFrame} / ${totalFrames - 1}`;
 
-        // Load hand landmarks if overlay enabled or protection active for this frame
-        const needHands = hasMediapipe && (handOverlayEnabled
-            || (handMaskEnabled && frameNum >= handProtectStart && frameNum <= handProtectEnd));
+        // Load hand landmarks if overlay enabled or any protection segment covers this frame
+        const inProtectSeg = handProtectSegments.some(s => frameNum >= s.start && frameNum <= s.end);
+        const needHands = hasMediapipe && (handOverlayEnabled || inProtectSeg);
         if (needHands) {
             try {
                 const res = await API.post(`/api/deidentify/${subjectId}/detect-hands`, {
@@ -427,50 +434,59 @@ const deid = (() => {
             }
         }
 
-        // Compute hand protection state (controlled by timeline range, not checkbox)
+        // Find active hand protection segment for current frame
         const curSideLabel = _sideLabel();
         const visibleLandmarks = handLandmarks.filter(lm =>
             (lm.side || 'full') === curSideLabel || (lm.side || 'full') === 'full'
         );
-        const handProtectActive = handMaskEnabled
-            && visibleLandmarks.length > 0
-            && currentFrame >= handProtectStart && currentFrame <= handProtectEnd;
+        const activeSeg = handProtectSegments.find(s =>
+            currentFrame >= s.start && currentFrame <= s.end
+        );
+        const handProtectActive = activeSeg && visibleLandmarks.length > 0;
+        const activeProtectRadius = activeSeg ? (activeSeg.radius || handMaskRadius) : handMaskRadius;
 
-        // Draw blur spots with hand protection subtracted via offscreen canvas
-        for (const spot of blurSpots) {
-            if (currentFrame < spot.frame_start || currentFrame > spot.frame_end) continue;
-            const spotSide = spot.side || 'full';
-            if (spotSide !== 'full' && spotSide !== curSideLabel) continue;
+        // Draw ALL blur spots on one offscreen canvas, then subtract hand protection
+        const hasVisibleSpots = blurSpots.some(s => {
+            if (currentFrame < s.frame_start || currentFrame > s.frame_end) return false;
+            const ss = s.side || 'full';
+            return ss === 'full' || ss === curSideLabel;
+        });
 
-            const pos = _getSpotPosition(spot);
-            const sx = offsetX + pos.x * scale;
-            const sy = offsetY + pos.y * scale;
-            const isFace = spot.spot_type === 'face';
-            const isSelected = spot.id === selectedSpotId;
-            const sw = (spot.width || spot.radius * 2) * scale / 2;
-            const sh = (spot.height || spot.radius * 2) * scale / 2;
+        if (hasVisibleSpots) {
+            // Offscreen canvas for compositing blur fills with hand subtraction
+            const offCanvas = document.createElement('canvas');
+            offCanvas.width = cw;
+            offCanvas.height = ch;
+            const off = offCanvas.getContext('2d');
 
-            const cr = isFace ? 33 : 244;
-            const cg = isFace ? 150 : 67;
-            const cb = isFace ? 243 : 54;
-            const fillAlpha = isSelected ? 0.35 : 0.2;
+            for (const spot of blurSpots) {
+                if (currentFrame < spot.frame_start || currentFrame > spot.frame_end) continue;
+                const spotSide = spot.side || 'full';
+                if (spotSide !== 'full' && spotSide !== curSideLabel) continue;
 
-            if (handProtectActive) {
-                // Offscreen canvas: draw blur ellipse, then punch out hand circles
-                const offCanvas = document.createElement('canvas');
-                offCanvas.width = cw;
-                offCanvas.height = ch;
-                const off = offCanvas.getContext('2d');
+                const pos = _getSpotPosition(spot);
+                const sx = offsetX + pos.x * scale;
+                const sy = offsetY + pos.y * scale;
+                const isFace = spot.spot_type === 'face';
+                const isSelected = spot.id === selectedSpotId;
+                const sw = (spot.width || spot.radius * 2) * scale / 2;
+                const sh = (spot.height || spot.radius * 2) * scale / 2;
 
-                // Draw the blur ellipse fill
+                const cr = isFace ? 33 : 244;
+                const cg = isFace ? 150 : 67;
+                const cb = isFace ? 243 : 54;
+                const fillAlpha = isSelected ? 0.35 : 0.2;
+
                 off.fillStyle = `rgba(${cr},${cg},${cb},${fillAlpha})`;
                 off.beginPath();
                 off.ellipse(sx, sy, sw, sh, 0, 0, Math.PI * 2);
                 off.fill();
+            }
 
-                // Subtract hand protection circles
+            // Subtract hand protection circles from ALL blur fills at once
+            if (handProtectActive) {
                 off.globalCompositeOperation = 'destination-out';
-                const hr = handMaskRadius * scale;
+                const hr = activeProtectRadius * scale;
                 for (const lm of visibleLandmarks) {
                     const lx = offsetX + lm.x * scale;
                     const ly = offsetY + lm.y * scale;
@@ -478,28 +494,40 @@ const deid = (() => {
                     off.arc(lx, ly, hr, 0, Math.PI * 2);
                     off.fill();
                 }
-
-                // Composite result onto main canvas
-                ctx.drawImage(offCanvas, 0, 0);
-            } else {
-                // Simple fill (no hand subtraction)
-                ctx.beginPath();
-                ctx.ellipse(sx, sy, sw, sh, 0, 0, Math.PI * 2);
-                ctx.fillStyle = `rgba(${cr},${cg},${cb},${fillAlpha})`;
-                ctx.fill();
             }
 
-            // Always draw the outline
-            ctx.beginPath();
-            ctx.ellipse(sx, sy, sw, sh, 0, 0, Math.PI * 2);
-            ctx.strokeStyle = isSelected
-                ? `rgba(${cr},${cg},${cb},0.9)`
-                : `rgba(${cr},${cg},${cb},0.5)`;
-            ctx.lineWidth = isSelected ? 2 : 1;
-            ctx.stroke();
+            // Composite result onto main canvas
+            ctx.drawImage(offCanvas, 0, 0);
+
+            // Draw outlines on main canvas (not affected by subtraction)
+            for (const spot of blurSpots) {
+                if (currentFrame < spot.frame_start || currentFrame > spot.frame_end) continue;
+                const spotSide = spot.side || 'full';
+                if (spotSide !== 'full' && spotSide !== curSideLabel) continue;
+
+                const pos = _getSpotPosition(spot);
+                const sx = offsetX + pos.x * scale;
+                const sy = offsetY + pos.y * scale;
+                const isFace = spot.spot_type === 'face';
+                const isSelected = spot.id === selectedSpotId;
+                const sw = (spot.width || spot.radius * 2) * scale / 2;
+                const sh = (spot.height || spot.radius * 2) * scale / 2;
+
+                const cr = isFace ? 33 : 244;
+                const cg = isFace ? 150 : 67;
+                const cb = isFace ? 243 : 54;
+
+                ctx.beginPath();
+                ctx.ellipse(sx, sy, sw, sh, 0, 0, Math.PI * 2);
+                ctx.strokeStyle = isSelected
+                    ? `rgba(${cr},${cg},${cb},0.9)`
+                    : `rgba(${cr},${cg},${cb},0.5)`;
+                ctx.lineWidth = isSelected ? 2 : 1;
+                ctx.stroke();
+            }
         }
 
-        // Draw hand landmarks (green dots) — controlled by "Show hand landmarks" checkbox
+        // Draw hand landmarks (green dots) — controlled by checkbox
         if (handOverlayEnabled && visibleLandmarks.length > 0) {
             ctx.fillStyle = 'rgba(76,175,80,0.7)';
             for (const lm of visibleLandmarks) {
@@ -511,51 +539,30 @@ const deid = (() => {
             }
         }
 
-        // Draw hand protection outline — controlled by timeline range (not checkbox)
+        // Draw hand protection union outline (no fill, just outline)
         if (handProtectActive) {
-            const hr = handMaskRadius * scale;
-            // Offscreen canvas to build the union outline
+            const hr = activeProtectRadius * scale;
             const hOff = document.createElement('canvas');
             hOff.width = cw;
             hOff.height = ch;
             const hCtx = hOff.getContext('2d');
 
-            // Fill all circles as solid white (natural union)
             hCtx.fillStyle = '#fff';
             for (const lm of visibleLandmarks) {
-                const lx = offsetX + lm.x * scale;
-                const ly = offsetY + lm.y * scale;
                 hCtx.beginPath();
-                hCtx.arc(lx, ly, hr, 0, Math.PI * 2);
+                hCtx.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr, 0, Math.PI * 2);
                 hCtx.fill();
             }
-
-            // Erase interior to leave 2px border ring
             hCtx.globalCompositeOperation = 'destination-out';
             for (const lm of visibleLandmarks) {
-                const lx = offsetX + lm.x * scale;
-                const ly = offsetY + lm.y * scale;
                 hCtx.beginPath();
-                hCtx.arc(lx, ly, hr - 2, 0, Math.PI * 2);
+                hCtx.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr - 2, 0, Math.PI * 2);
                 hCtx.fill();
             }
-
-            // Tint green
             hCtx.globalCompositeOperation = 'source-in';
             hCtx.fillStyle = 'rgba(76,175,80,0.8)';
             hCtx.fillRect(0, 0, cw, ch);
-
             ctx.drawImage(hOff, 0, 0);
-
-            // Subtle fill
-            ctx.fillStyle = 'rgba(76,175,80,0.06)';
-            for (const lm of visibleLandmarks) {
-                const lx = offsetX + lm.x * scale;
-                const ly = offsetY + lm.y * scale;
-                ctx.beginPath();
-                ctx.arc(lx, ly, hr, 0, Math.PI * 2);
-                ctx.fill();
-            }
         }
 
         // "Adding custom" cursor indicator
@@ -748,7 +755,9 @@ const deid = (() => {
         } else if (e.key === 'r') {
             resetZoom();
         } else if (e.key === 'Delete' || e.key === 'Backspace') {
-            if (selectedSpotId !== null) {
+            if (selectedHandSegId !== null) {
+                deleteSelectedHandSeg();
+            } else if (selectedSpotId !== null) {
                 deleteSpot(selectedSpotId);
             }
         } else if (e.key === 'Escape') {
@@ -1025,22 +1034,36 @@ const deid = (() => {
     function updateHandRadius(val) {
         handMaskRadius = parseInt(val);
         document.getElementById('handRadiusVal').textContent = handMaskRadius;
-        updateHandSettings();
+        // Update the selected segment's radius if one is selected
+        if (selectedHandSegId) {
+            const seg = handProtectSegments.find(s => s.id === selectedHandSegId);
+            if (seg) seg.radius = handMaskRadius;
+        }
+        saveHandSettings();
         render();
     }
 
-    async function updateHandSettings() {
-        // handMaskEnabled is always true — protection range controlled by timeline
+    async function saveHandSettings() {
         if (!subjectId || currentTrialIdx < 0) return;
         try {
             await API.put(`/api/deidentify/${subjectId}/hand-settings`, {
                 trial_idx: currentTrialIdx,
-                enabled: handMaskEnabled,
+                enabled: true,
                 mask_radius: handMaskRadius,
-                frame_start: handProtectStart,
-                frame_end: handProtectEnd,
+                segments: handProtectSegments.map(s => ({
+                    start: s.start, end: s.end, radius: s.radius,
+                })),
             });
         } catch (e) {}
+        renderTimeline();
+    }
+
+    function deleteSelectedHandSeg() {
+        if (!selectedHandSegId) return;
+        handProtectSegments = handProtectSegments.filter(s => s.id !== selectedHandSegId);
+        selectedHandSegId = null;
+        saveHandSettings();
+        render();
         renderTimeline();
     }
 
@@ -1225,14 +1248,14 @@ const deid = (() => {
 
         y += faceRowH + gap;
 
-        // ── Hand row: green coverage + draggable protection range ──
+        // ── Hand row: green coverage + multiple draggable protection segments ──
         if (handCoverage.length > 0 || hasMediapipe) {
             tlCtx.fillStyle = 'rgba(150,150,150,0.5)';
             tlCtx.fillText('Hands', 2, y + 12);
 
             // Background coverage heatmap
             if (handCoverage.length > 0) {
-                tlCtx.fillStyle = 'rgba(76,175,80,0.2)';
+                tlCtx.fillStyle = 'rgba(76,175,80,0.15)';
                 const pw = Math.max(1, L.barW / L.range);
                 for (const f of handCoverage) {
                     const x = _frameToTlX(f, L);
@@ -1240,22 +1263,24 @@ const deid = (() => {
                 }
             }
 
-            // Protection active range bar (draggable)
-            if (handMaskEnabled) {
-                const hx1 = _frameToTlX(handProtectStart, L);
-                const hx2 = _frameToTlX(handProtectEnd, L);
+            // Protection segment bars (multiple, draggable)
+            for (const seg of handProtectSegments) {
+                const hx1 = _frameToTlX(seg.start, L);
+                const hx2 = _frameToTlX(seg.end, L);
                 const hw = Math.max(3, hx2 - hx1);
+                const isSel = seg.id === selectedHandSegId;
 
-                tlCtx.fillStyle = 'rgba(76,175,80,0.45)';
+                tlCtx.fillStyle = isSel ? 'rgba(76,175,80,0.55)' : 'rgba(76,175,80,0.35)';
                 tlCtx.fillRect(hx1, y + 2, hw, handRowH - 4);
-                tlCtx.strokeStyle = 'rgba(76,175,80,0.9)';
-                tlCtx.lineWidth = 1.5;
+                tlCtx.strokeStyle = isSel ? 'rgba(76,175,80,1.0)' : 'rgba(76,175,80,0.8)';
+                tlCtx.lineWidth = isSel ? 2 : 1;
                 tlCtx.strokeRect(hx1, y + 2, hw, handRowH - 4);
 
-                // Edge handles
-                tlCtx.fillStyle = 'rgba(76,175,80,1.0)';
-                tlCtx.fillRect(hx1 - 1, y + 2, 3, handRowH - 4);
-                tlCtx.fillRect(hx2 - 2, y + 2, 3, handRowH - 4);
+                if (isSel) {
+                    tlCtx.fillStyle = 'rgba(76,175,80,1.0)';
+                    tlCtx.fillRect(hx1 - 1, y + 2, 3, handRowH - 4);
+                    tlCtx.fillRect(hx2 - 2, y + 2, 3, handRowH - 4);
+                }
             }
 
             y += handRowH + gap;
@@ -1309,15 +1334,21 @@ const deid = (() => {
 
         y += faceRowH + gap;
 
-        // Hit test hand protection bar
-        if ((handCoverage.length > 0 || hasMediapipe) && handMaskEnabled) {
-            const hx1 = _frameToTlX(handProtectStart, L);
-            const hx2 = _frameToTlX(handProtectEnd, L);
+        // Hit test hand protection segments
+        if (handCoverage.length > 0 || hasMediapipe) {
+            for (const seg of handProtectSegments) {
+                const hx1 = _frameToTlX(seg.start, L);
+                const hx2 = _frameToTlX(seg.end, L);
 
+                if (my >= y + 2 && my <= y + handRowH - 2) {
+                    if (Math.abs(mx - hx1) < 6) return { type: 'hand', seg, edge: 'start' };
+                    if (Math.abs(mx - hx2) < 6) return { type: 'hand', seg, edge: 'end' };
+                    if (mx > hx1 + 4 && mx < hx2 - 4) return { type: 'hand', seg, edge: 'move' };
+                }
+            }
+            // If in hand row but not on a segment → create new
             if (my >= y + 2 && my <= y + handRowH - 2) {
-                if (Math.abs(mx - hx1) < 6) return { type: 'hand', edge: 'start' };
-                if (Math.abs(mx - hx2) < 6) return { type: 'hand', edge: 'end' };
-                if (mx > hx1 + 4 && mx < hx2 - 4) return { type: 'hand', edge: 'move' };
+                return { type: 'hand_empty', edge: 'create' };
             }
         }
 
@@ -1338,10 +1369,25 @@ const deid = (() => {
             renderSpotList();
             updateSpotControls();
         } else if (hit.type === 'hand') {
-            tlDragSpot = 'hand';
+            tlDragSpot = hit.seg;
             tlDragEdge = hit.edge;
             tlDragStartX = e.clientX;
-            tlDragOrigRange = { start: handProtectStart, end: handProtectEnd };
+            tlDragOrigRange = { start: hit.seg.start, end: hit.seg.end };
+            selectedHandSegId = hit.seg.id;
+            // Update radius slider to show this segment's radius
+            handMaskRadius = hit.seg.radius || handMaskRadius;
+            document.getElementById('handRadiusSlider').value = handMaskRadius;
+            document.getElementById('handRadiusVal').textContent = handMaskRadius;
+        } else if (hit.type === 'hand_empty') {
+            // Start creating a new segment by dragging
+            const L = _tlLayout();
+            if (!L) return;
+            const rect = tlCanvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            tlDragCreateFrame = _tlXToFrame(mx, L);
+            tlDragSpot = 'newhand';
+            tlDragEdge = 'create';
+            tlDragStartX = e.clientX;
         }
         renderTimeline();
     }
@@ -1353,24 +1399,44 @@ const deid = (() => {
             const dx = e.clientX - tlDragStartX;
             const dFrames = Math.round((dx / L.barW) * L.range);
 
-            if (tlDragSpot === 'hand') {
-                // Drag hand protection range
+            // Creating new hand segment by dragging
+            if (tlDragSpot === 'newhand') {
+                const L2 = _tlLayout();
+                if (!L2) return;
+                const rect = tlCanvas.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const endFrame = _tlXToFrame(mx, L2);
+                // Show preview by temporarily adding a segment
+                const existing = handProtectSegments.find(s => s.id === -1);
+                const s = Math.min(tlDragCreateFrame, endFrame);
+                const en = Math.max(tlDragCreateFrame, endFrame);
+                if (existing) {
+                    existing.start = s; existing.end = en;
+                } else {
+                    handProtectSegments.push({ id: -1, start: s, end: en, radius: handMaskRadius });
+                }
+                renderTimeline();
+                return;
+            }
+
+            // Drag existing hand segment
+            if (tlDragSpot && typeof tlDragSpot === 'object' && tlDragSpot.start !== undefined) {
                 if (tlDragEdge === 'start') {
-                    handProtectStart = Math.max(
+                    tlDragSpot.start = Math.max(
                         trialMeta.start_frame,
-                        Math.min(handProtectEnd - 1, tlDragOrigRange.start + dFrames)
+                        Math.min(tlDragSpot.end - 1, tlDragOrigRange.start + dFrames)
                     );
                 } else if (tlDragEdge === 'end') {
-                    handProtectEnd = Math.min(
+                    tlDragSpot.end = Math.min(
                         trialMeta.end_frame,
-                        Math.max(handProtectStart + 1, tlDragOrigRange.end + dFrames)
+                        Math.max(tlDragSpot.start + 1, tlDragOrigRange.end + dFrames)
                     );
                 } else if (tlDragEdge === 'move') {
                     const len = tlDragOrigRange.end - tlDragOrigRange.start;
                     let newStart = tlDragOrigRange.start + dFrames;
                     newStart = Math.max(trialMeta.start_frame, Math.min(trialMeta.end_frame - len, newStart));
-                    handProtectStart = newStart;
-                    handProtectEnd = newStart + len;
+                    tlDragSpot.start = newStart;
+                    tlDragSpot.end = newStart + len;
                 }
                 renderTimeline();
                 return;
@@ -1411,8 +1477,20 @@ const deid = (() => {
 
     function onTlMouseUp(e) {
         if (tlDragSpot) {
-            if (tlDragSpot === 'hand') {
-                updateHandSettings(); // saves frame range
+            if (tlDragSpot === 'newhand') {
+                // Finalize the new segment (replace the preview id=-1)
+                const preview = handProtectSegments.find(s => s.id === -1);
+                if (preview && preview.end > preview.start) {
+                    preview.id = nextHandSegId++;
+                    selectedHandSegId = preview.id;
+                } else {
+                    // Too small, remove it
+                    handProtectSegments = handProtectSegments.filter(s => s.id !== -1);
+                }
+                saveHandSettings();
+                render();
+            } else if (tlDragSpot && typeof tlDragSpot === 'object' && tlDragSpot.start !== undefined) {
+                saveHandSettings();
             } else {
                 scheduleSave();
             }
@@ -1420,6 +1498,7 @@ const deid = (() => {
             tlDragEdge = null;
             tlDragStartX = null;
             tlDragOrigRange = null;
+            tlDragCreateFrame = null;
         }
     }
 
@@ -1460,7 +1539,7 @@ const deid = (() => {
         updateSpotFrameRange,
         toggleHandOverlay,
         updateHandRadius,
-        updateHandSettings,
+        deleteSelectedHandSeg,
         goToMediapipe,
         renderAll,
     };

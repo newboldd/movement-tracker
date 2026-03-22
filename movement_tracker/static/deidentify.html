@@ -232,8 +232,13 @@
                                oninput="deid.updateHandRadius(this.value)">
                         <span class="val" id="handRadiusVal">30</span>
                     </div>
+                    <div style="display:flex;gap:4px;margin-top:6px;">
+                        <button class="btn btn-sm" onclick="deid.deleteSelectedHandSeg()" style="flex:1;font-size:11px;" title="Delete selected hand segment (Del)">
+                            Remove Segment
+                        </button>
+                    </div>
                     <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">
-                        Use the green bar on the timeline to control which frames have hand protection.
+                        Drag on the timeline hand row to create protection segments. Each segment can have its own radius.
                     </div>
                     <button class="btn btn-sm" id="goMediapipeBtn" onclick="deid.goToMediapipe()"
                             style="width:100%;margin-top:6px;">Run MediaPipe</button>
@@ -273,6 +278,6 @@
 
     <script src="/static/js/api.js"></script>
     <script src="/static/js/nav.js"></script>
-    <script src="/static/js/deidentify.js?v=7"></script>
+    <script src="/static/js/deidentify.js?v=8"></script>
 </body>
 </html>

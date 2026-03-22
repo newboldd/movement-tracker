@@ -332,44 +332,55 @@ def save_blur_specs(subject_id: int, body: dict = Body(...)) -> dict:
 @router.get("/{subject_id}/hand-settings")
 def get_hand_settings(subject_id: int, trial_idx: int = Query(0)) -> dict:
     """Get hand mask settings for a trial."""
+    import json as _json
     with get_db_ctx() as db:
         row = db.execute(
             "SELECT * FROM blur_hand_settings WHERE subject_id = ? AND trial_idx = ?",
             (subject_id, trial_idx),
         ).fetchone()
     if row:
+        segments = []
+        seg_json = row.get("segments_json")
+        if seg_json:
+            try:
+                segments = _json.loads(seg_json)
+            except (ValueError, TypeError):
+                pass
+        # Backward compat: if no segments but old frame_start/end exist, create one
+        if not segments and row.get("hand_frame_start") is not None:
+            segments = [{"start": row["hand_frame_start"], "end": row["hand_frame_end"],
+                         "radius": row["hand_mask_radius"]}]
         return {
             "enabled": bool(row["hand_mask_enabled"]),
             "mask_radius": row["hand_mask_radius"],
-            "frame_start": row.get("hand_frame_start"),
-            "frame_end": row.get("hand_frame_end"),
+            "segments": segments,
         }
-    return {"enabled": True, "mask_radius": 30, "frame_start": None, "frame_end": None}
+    return {"enabled": True, "mask_radius": 30, "segments": []}
 
 
 @router.put("/{subject_id}/hand-settings")
 def save_hand_settings(subject_id: int, body: dict = Body(...)) -> dict:
     """Save hand mask settings for a trial.
 
-    Body: { trial_idx: int, enabled: bool, mask_radius: int }
+    Body: { trial_idx: int, enabled: bool, mask_radius: int, segments: [{start, end, radius}] }
     """
+    import json as _json
     trial_idx = body.get("trial_idx", 0)
     enabled = 1 if body.get("enabled", True) else 0
     mask_radius = body.get("mask_radius", 30)
-    frame_start = body.get("frame_start")
-    frame_end = body.get("frame_end")
+    segments = body.get("segments", [])
+    segments_json = _json.dumps(segments) if segments else None
 
     with get_db_ctx() as db:
         db.execute(
             """INSERT INTO blur_hand_settings
-               (subject_id, trial_idx, hand_mask_enabled, hand_mask_radius, hand_frame_start, hand_frame_end)
-               VALUES (?, ?, ?, ?, ?, ?)
+               (subject_id, trial_idx, hand_mask_enabled, hand_mask_radius, segments_json)
+               VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(subject_id, trial_idx)
                DO UPDATE SET hand_mask_enabled=excluded.hand_mask_enabled,
                              hand_mask_radius=excluded.hand_mask_radius,
-                             hand_frame_start=excluded.hand_frame_start,
-                             hand_frame_end=excluded.hand_frame_end""",
-            (subject_id, trial_idx, enabled, mask_radius, frame_start, frame_end),
+                             segments_json=excluded.segments_json""",
+            (subject_id, trial_idx, enabled, mask_radius, segments_json),
         )
     return {"status": "ok"}
 
