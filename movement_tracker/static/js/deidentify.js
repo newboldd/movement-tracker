@@ -30,7 +30,9 @@ const deid = (() => {
 
     // Hand overlay
     let handOverlayEnabled = false;
-    let handLandmarks = [];   // [{x, y, side}]
+    let handLandmarks = [];   // [{x, y, side}] for current frame (after smoothing)
+    let handLandmarksBulk = {}; // {frameNum: [{x, y, side}]} all frames
+    let handTemporalSmooth = 3; // temporal smoothing window (frames each direction)
     let handMaskRadius = 30;
     let handSmooth = 15;  // morphological close: dilate then erode
     let handMaskEnabled = true;
@@ -209,6 +211,7 @@ const deid = (() => {
         totalFrames = trialMeta.frame_count;
         fps = trialMeta.fps || 30;
         handLandmarks = [];
+        handLandmarksBulk = {}; // clear bulk cache for new trial
 
         // Load saved face detections from DB
         try {
@@ -302,18 +305,14 @@ const deid = (() => {
         document.getElementById('frameDisplay').textContent =
             `Frame: ${localFrame} / ${totalFrames - 1}`;
 
-        // Load hand landmarks if overlay enabled or any protection segment covers this frame
+        // Load hand landmarks from bulk cache with temporal smoothing
         const inProtectSeg = handProtectSegments.some(s => frameNum >= s.start && frameNum <= s.end);
         const needHands = hasMediapipe && (handOverlayEnabled || inProtectSeg);
         if (needHands) {
-            try {
-                const res = await API.post(`/api/deidentify/${subjectId}/detect-hands`, {
-                    trial_idx: currentTrialIdx, frame_num: frameNum,
-                });
-                handLandmarks = res.landmarks || [];
-            } catch (e) {
-                handLandmarks = [];
-            }
+            await _loadBulkLandmarks();
+            _applyTemporalSmoothing();
+        } else {
+            handLandmarks = [];
         }
 
         render();
@@ -1086,17 +1085,111 @@ const deid = (() => {
     async function toggleHandOverlay(enabled) {
         handOverlayEnabled = enabled;
         if (enabled && subjectId && hasMediapipe) {
-            try {
-                const res = await API.post(`/api/deidentify/${subjectId}/detect-hands`, {
-                    trial_idx: currentTrialIdx, frame_num: currentFrame,
-                });
-                handLandmarks = res.landmarks || [];
-            } catch (e) {
-                handLandmarks = [];
-            }
+            await _loadBulkLandmarks();
+            _applyTemporalSmoothing();
         } else {
             handLandmarks = [];
         }
+        render();
+    }
+
+    async function _loadBulkLandmarks() {
+        if (Object.keys(handLandmarksBulk).length > 0) return; // already loaded
+        try {
+            const res = await API.get(
+                `/api/deidentify/${subjectId}/hand-landmarks-bulk?trial_idx=${currentTrialIdx}`
+            );
+            handLandmarksBulk = res.landmarks || {};
+        } catch (e) {
+            handLandmarksBulk = {};
+        }
+    }
+
+    function _applyTemporalSmoothing() {
+        // Average landmark positions across a window of frames
+        const win = handTemporalSmooth;
+        const cf = currentFrame;
+        const sideLabel = _sideLabel();
+
+        if (win === 0 || Object.keys(handLandmarksBulk).length === 0) {
+            // No smoothing — just use current frame
+            handLandmarks = handLandmarksBulk[String(cf)] || [];
+            return;
+        }
+
+        // Collect landmarks from nearby frames, grouped by side
+        const frameKeys = [];
+        for (let f = cf - win; f <= cf + win; f++) {
+            const key = String(f);
+            if (handLandmarksBulk[key]) frameKeys.push(key);
+        }
+
+        if (frameKeys.length === 0) {
+            handLandmarks = [];
+            return;
+        }
+
+        // Group by side, then average positions per keypoint index
+        const sides = {};
+        for (const key of frameKeys) {
+            for (const lm of handLandmarksBulk[key]) {
+                const s = lm.side || 'full';
+                if (!sides[s]) sides[s] = [];
+                sides[s].push(lm);
+            }
+        }
+
+        // For each side, average the keypoints across frames
+        // Landmarks come in groups of 21 (per hand), so we average by index
+        const result = [];
+        for (const [side, allPts] of Object.entries(sides)) {
+            // Count landmarks per frame to know how many hands/keypoints
+            const ptsPerFrame = {};
+            for (const key of frameKeys) {
+                const framePts = (handLandmarksBulk[key] || []).filter(
+                    lm => (lm.side || 'full') === side
+                );
+                ptsPerFrame[key] = framePts;
+            }
+
+            // Find the frame with the most points as reference
+            let refKey = frameKeys[0];
+            let maxPts = 0;
+            for (const key of frameKeys) {
+                const n = (ptsPerFrame[key] || []).length;
+                if (n > maxPts) { maxPts = n; refKey = key; }
+            }
+            if (maxPts === 0) continue;
+
+            // Average each keypoint position
+            const refPts = ptsPerFrame[refKey];
+            for (let i = 0; i < refPts.length; i++) {
+                let sumX = 0, sumY = 0, count = 0;
+                for (const key of frameKeys) {
+                    const pts = ptsPerFrame[key] || [];
+                    if (i < pts.length) {
+                        sumX += pts[i].x;
+                        sumY += pts[i].y;
+                        count++;
+                    }
+                }
+                if (count > 0) {
+                    result.push({
+                        x: Math.round((sumX / count) * 10) / 10,
+                        y: Math.round((sumY / count) * 10) / 10,
+                        side: side,
+                    });
+                }
+            }
+        }
+
+        handLandmarks = result;
+    }
+
+    function updateHandTemporalSmooth(val) {
+        handTemporalSmooth = parseInt(val);
+        document.getElementById('handTemporalVal').textContent = handTemporalSmooth;
+        _applyTemporalSmoothing();
         render();
     }
 
@@ -1642,6 +1735,7 @@ const deid = (() => {
         updateHandRadius,
         deleteSelectedHandSeg,
         updateHandSmooth,
+        updateHandTemporalSmooth,
         goToMediapipe,
         renderAll,
     };

@@ -238,6 +238,12 @@
                                oninput="deid.updateHandSmooth(this.value)">
                         <span class="val" id="handSmoothVal">15</span>
                     </div>
+                    <div class="slider-row">
+                        <label>Temporal</label>
+                        <input type="range" id="handTemporalSlider" min="0" max="15" value="3"
+                               oninput="deid.updateHandTemporalSmooth(this.value)">
+                        <span class="val" id="handTemporalVal">3</span>
+                    </div>
                     <div style="display:flex;gap:4px;margin-top:6px;">
                         <button class="btn btn-sm" onclick="deid.deleteSelectedHandSeg()" style="flex:1;font-size:11px;" title="Delete selected hand segment (Del)">
                             Remove Segment
@@ -284,6 +290,6 @@
 
     <script src="/static/js/api.js"></script>
     <script src="/static/js/nav.js"></script>
-    <script src="/static/js/deidentify.js?v=9"></script>
+    <script src="/static/js/deidentify.js?v=10"></script>
 </body>
 </html>

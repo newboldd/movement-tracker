@@ -247,6 +247,75 @@ def get_hand_coverage(subject_id: int, trial_idx: int = Query(...)) -> dict:
     return {"frames": frames_with_data}
 
 
+# ── Bulk hand landmarks (all frames from npz) ─────────────────────────────
+
+@router.get("/{subject_id}/hand-landmarks-bulk")
+def get_hand_landmarks_bulk(subject_id: int, trial_idx: int = Query(...)) -> dict:
+    """Return all hand landmarks for a trial from MediaPipe npz.
+
+    Returns {landmarks: {frame_num: [{x, y, side}]}} for frames with data.
+    Uses stored npz data (fast), not live detection.
+    """
+    import numpy as np
+    from ..services.mediapipe_prelabel import load_mediapipe_prelabels, THUMB_TIP, INDEX_TIP
+
+    with get_db_ctx() as db:
+        subj = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
+        if not subj:
+            raise HTTPException(404, "Subject not found")
+
+    data = load_mediapipe_prelabels(subj["name"])
+    if data is None:
+        return {"landmarks": {}}
+
+    camera_mode = subj.get("camera_mode") or "stereo"
+    trials = build_trial_map(subj["name"], camera_mode=camera_mode)
+    if trial_idx < 0 or trial_idx >= len(trials):
+        return {"landmarks": {}}
+
+    trial = trials[trial_idx]
+    start = trial["start_frame"]
+    end = trial["end_frame"]
+    is_stereo = camera_mode == "stereo"
+
+    os_lm = data["OS_landmarks"]
+    od_lm = data["OD_landmarks"]
+    settings = get_settings()
+
+    # Determine frame dimensions for coordinate conversion
+    cap = cv2.VideoCapture(trial["video_path"])
+    fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    half_w = fw // 2 if is_stereo else fw
+
+    result = {}
+    for f in range(start, min(end + 1, len(os_lm))):
+        pts = []
+        # OS landmarks (all 21 keypoints)
+        if not np.all(np.isnan(os_lm[f])):
+            for j in range(os_lm.shape[1]):
+                if not np.isnan(os_lm[f, j, 0]):
+                    pts.append({
+                        "x": round(float(os_lm[f, j, 0]), 1),
+                        "y": round(float(os_lm[f, j, 1]), 1),
+                        "side": "left" if is_stereo else "full",
+                    })
+        # OD landmarks
+        if not np.all(np.isnan(od_lm[f])):
+            for j in range(od_lm.shape[1]):
+                if not np.isnan(od_lm[f, j, 0]):
+                    pts.append({
+                        "x": round(float(od_lm[f, j, 0]), 1),
+                        "y": round(float(od_lm[f, j, 1]), 1),
+                        "side": "right" if is_stereo else "full",
+                    })
+        if pts:
+            result[str(f)] = pts
+
+    return {"landmarks": result}
+
+
 # ── Hand detection (single frame) ─────────────────────────────────────────
 
 @router.post("/{subject_id}/detect-hands")
