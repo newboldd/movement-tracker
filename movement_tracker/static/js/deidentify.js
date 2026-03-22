@@ -32,9 +32,9 @@ const deid = (() => {
     let handOverlayEnabled = false;
     let handLandmarks = [];   // [{x, y, side}] for current frame (after smoothing)
     let handLandmarksBulk = {}; // {frameNum: [{x, y, side}]} all frames
-    let handTemporalSmooth = 3; // temporal smoothing window (frames each direction)
-    let handMaskRadius = 30;
-    let handSmooth = 15;  // morphological close: dilate then erode
+    let handTemporalSmooth = 0; // temporal smoothing window (frames each direction)
+    let handMaskRadius = 10;
+    let handSmooth = 10;  // morphological close: dilate then erode
     let handMaskEnabled = true;
 
     // Canvas
@@ -485,6 +485,13 @@ const deid = (() => {
         const visibleLandmarks = handLandmarks.filter(lm =>
             (lm.side || 'full') === curSideLabel || (lm.side || 'full') === 'full'
         );
+        // Debug: log landmark filtering (remove after debugging)
+        if (handOverlayEnabled && handLandmarks.length > 0) {
+            const handCount = visibleLandmarks.filter(l => l.type !== 'pose').length;
+            const poseCount = visibleLandmarks.filter(l => l.type === 'pose').length;
+            const allSides = [...new Set(handLandmarks.map(l => l.side))];
+            console.debug(`[deid] camera=${currentSide} sideLabel=${curSideLabel} total=${handLandmarks.length} visible=${visibleLandmarks.length} (hand=${handCount} pose=${poseCount}) allSides=[${allSides}]`);
+        }
         const activeSeg = handProtectSegments.find(s =>
             currentFrame >= s.start && currentFrame <= s.end
         );

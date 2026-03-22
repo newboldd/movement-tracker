@@ -228,21 +228,21 @@
                     </label>
                     <div class="slider-row" style="margin-top:6px;">
                         <label>Mask size</label>
-                        <input type="range" id="handRadiusSlider" min="5" max="80" value="30"
+                        <input type="range" id="handRadiusSlider" min="5" max="80" value="10"
                                oninput="deid.updateHandRadius(this.value)">
-                        <span class="val" id="handRadiusVal">30</span>
+                        <span class="val" id="handRadiusVal">10</span>
                     </div>
                     <div class="slider-row">
                         <label>Smooth</label>
-                        <input type="range" id="handSmoothSlider" min="0" max="60" value="15"
+                        <input type="range" id="handSmoothSlider" min="0" max="60" value="10"
                                oninput="deid.updateHandSmooth(this.value)">
-                        <span class="val" id="handSmoothVal">15</span>
+                        <span class="val" id="handSmoothVal">10</span>
                     </div>
                     <div class="slider-row">
                         <label>Temporal</label>
-                        <input type="range" id="handTemporalSlider" min="0" max="15" value="3"
+                        <input type="range" id="handTemporalSlider" min="0" max="15" value="0"
                                oninput="deid.updateHandTemporalSmooth(this.value)">
-                        <span class="val" id="handTemporalVal">3</span>
+                        <span class="val" id="handTemporalVal">0</span>
                     </div>
                     <div style="display:flex;gap:4px;margin-top:6px;">
                         <button class="btn btn-sm" onclick="deid.deleteSelectedHandSeg()" style="flex:1;font-size:11px;" title="Delete selected hand segment (Del)">
