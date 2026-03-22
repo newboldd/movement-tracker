@@ -504,6 +504,9 @@ def init_db():
     _migrate_add_blur_specs(conn)
     conn.commit()
 
+    _migrate_add_face_detections(conn)
+    conn.commit()
+
     conn.executescript(SCHEMA)
     conn.commit()
     conn.close()

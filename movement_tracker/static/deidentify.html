@@ -44,7 +44,7 @@
         .trial-btn:hover { border-color: var(--blue); color: var(--text); }
         .trial-btn.active { background: var(--blue); border-color: var(--blue); color: #fff; }
 
-        /* ── Main layout: canvas + sidebar ── */
+        /* ── Main layout: sidebar (left) + canvas ── */
         .deid-main {
             flex: 1; display: flex; min-height: 0; overflow: hidden;
         }
@@ -56,11 +56,12 @@
             display: block; width: 100%; height: 100%;
         }
 
-        /* ── Right sidebar ── */
+        /* ── Left sidebar ── */
         .deid-sidebar {
             width: 260px; flex-shrink: 0;
-            background: var(--bg-card); border-left: 1px solid var(--border);
+            background: var(--bg-card); border-right: 1px solid var(--border);
             overflow-y: auto; padding: 12px;
+            order: -1;  /* left of canvas */
         }
         .deid-sidebar h3 {
             font-size: 13px; color: var(--text-muted); margin: 0 0 8px;
@@ -71,7 +72,7 @@
             display: flex; align-items: center; gap: 6px;
             padding: 4px 6px; border-radius: 4px; font-size: 11px;
             margin-bottom: 4px; background: var(--bg);
-            border: 1px solid var(--border);
+            border: 1px solid var(--border); cursor: pointer;
         }
         .spot-item.selected { border-color: var(--blue); background: rgba(33,150,243,0.08); }
         .spot-item .spot-label { flex: 1; }
@@ -120,6 +121,10 @@
         #statusMsg {
             font-size: 11px; color: var(--text-muted); margin-top: 4px;
         }
+
+        /* Greyed-out hand section */
+        .hand-disabled { opacity: 0.5; pointer-events: none; }
+        .hand-disabled .btn { pointer-events: auto; opacity: 1; }
     </style>
 </head>
 <body>
@@ -142,19 +147,12 @@
         <div class="deid-topbar">
             <label style="font-size:12px;color:var(--text-muted);">Subject</label>
             <select id="subjectSelect"></select>
-            <button class="btn btn-sm" id="sideToggle" tabindex="-1" onclick="deid.toggleSide()" title="Toggle camera (E)" style="min-width:40px;">OS</button>
             <div id="trialBtns"></div>
-            <button class="btn btn-sm" tabindex="-1" onclick="deid.resetZoom()" title="Reset zoom (R)" style="font-size:11px;">Reset</button>
             <span id="statusMsg"></span>
         </div>
 
         <div class="deid-main">
-            <!-- Canvas viewport -->
-            <div class="deid-viewport">
-                <canvas id="canvas"></canvas>
-            </div>
-
-            <!-- Right sidebar -->
+            <!-- Left sidebar -->
             <div class="deid-sidebar">
                 <!-- Face Detection -->
                 <div class="section">
@@ -207,11 +205,11 @@
                         <span class="val" id="handRadiusVal">30</span>
                     </div>
                     <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-top:4px;">
-                        <input type="checkbox" id="handMaskEnabled" checked onchange="deid.updateHandSettings()">
+                        <input type="checkbox" id="handMaskEnabled" onchange="deid.updateHandSettings()">
                         Protect hands from blur
                     </label>
                     <button class="btn btn-sm" id="goMediapipeBtn" onclick="deid.goToMediapipe()"
-                            style="width:100%;margin-top:6px;display:none;">Run MediaPipe</button>
+                            style="width:100%;margin-top:6px;">Run MediaPipe</button>
                 </div>
 
                 <!-- Render -->
@@ -223,21 +221,28 @@
                     <div id="renderStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
                 </div>
             </div>
+
+            <!-- Canvas viewport -->
+            <div class="deid-viewport">
+                <canvas id="canvas"></canvas>
+            </div>
         </div>
 
-        <!-- Bottom controls: frame slider, play/pause -->
+        <!-- Bottom controls: play/pause, camera toggle, frame slider -->
         <div class="deid-controls">
             <div class="controls-row">
                 <button class="play-btn" id="playBtn" tabindex="-1" onclick="deid.togglePlay()">&#9654;</button>
+                <button class="btn btn-sm" id="sideToggle" tabindex="-1" onclick="deid.toggleSide()" title="Toggle camera (E)" style="min-width:40px;">OS</button>
                 <input type="range" id="frameSlider" tabindex="-1" min="0" max="0" value="0"
                        oninput="deid.seekFrame(parseInt(this.value))">
                 <span class="frame-display" id="frameDisplay">Frame: 0 / 0</span>
+                <button class="btn btn-sm" tabindex="-1" onclick="deid.resetZoom()" title="Reset zoom (R)" style="font-size:11px;">Reset</button>
             </div>
         </div>
     </div>
 
     <script src="/static/js/api.js"></script>
     <script src="/static/js/nav.js"></script>
-    <script src="/static/js/deidentify.js?v=1"></script>
+    <script src="/static/js/deidentify.js?v=2"></script>
 </body>
 </html>

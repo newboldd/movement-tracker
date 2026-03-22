@@ -460,6 +460,7 @@ def sync_from_filesystem() -> dict:
                 db.execute("DELETE FROM mp_crop_boxes WHERE subject_id = ?", (row["id"],))
                 db.execute("DELETE FROM blur_specs WHERE subject_id = ?", (row["id"],))
                 db.execute("DELETE FROM blur_hand_settings WHERE subject_id = ?", (row["id"],))
+                db.execute("DELETE FROM face_detections WHERE subject_id = ?", (row["id"],))
                 db.execute("DELETE FROM subjects WHERE id = ?", (row["id"],))
                 removed += 1
 

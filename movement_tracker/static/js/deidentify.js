@@ -159,19 +159,16 @@ const deid = (() => {
         const handSection = document.getElementById('handSection');
         if (!handSection) return;
 
+        // Grey out checkboxes if no MP labels, but keep MP button always active
+        const checkboxes = handSection.querySelectorAll('input[type=checkbox], input[type=range]');
+        checkboxes.forEach(el => { el.disabled = !hasMediapipe; });
         if (!hasMediapipe) {
-            handSection.style.opacity = '0.5';
-            handSection.style.pointerEvents = 'none';
-            const mpBtn = document.getElementById('goMediapipeBtn');
-            if (mpBtn) mpBtn.style.display = 'block';
+            handSection.classList.add('hand-disabled');
         } else {
-            handSection.style.opacity = '';
-            handSection.style.pointerEvents = '';
-            const mpBtn = document.getElementById('goMediapipeBtn');
-            if (mpBtn) mpBtn.style.display = 'none';
+            handSection.classList.remove('hand-disabled');
         }
 
-        // Update button text
+        // Update button text — always visible
         const mpBtn = document.getElementById('goMediapipeBtn');
         if (mpBtn) {
             mpBtn.textContent = hasMediapipe ? 'Re-run MediaPipe' : 'Run MediaPipe';
@@ -186,8 +183,20 @@ const deid = (() => {
         currentFrame = trialMeta.start_frame;
         totalFrames = trialMeta.frame_count;
         fps = trialMeta.fps || 30;
-        faceDetections = [];
         handLandmarks = [];
+
+        // Load saved face detections from DB
+        try {
+            const fdResp = await API.get(`/api/deidentify/${subjectId}/face-detections?trial_idx=${idx}`);
+            faceDetections = fdResp.faces || [];
+            if (faceDetections.length > 0) {
+                const nFaces = faceDetections.filter(f => f.faces.length > 0).length;
+                document.getElementById('faceDetStatus').textContent =
+                    `Loaded ${nFaces} frames with faces (saved)`;
+            }
+        } catch (e) {
+            faceDetections = [];
+        }
 
         // Update UI
         document.querySelectorAll('.trial-btn').forEach((b, i) => {

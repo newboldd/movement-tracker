@@ -155,7 +155,57 @@ def detect_faces(subject_id: int, body: dict = Body(...)) -> dict:
         start_frame=trial["start_frame"],
         frame_count=trial["frame_count"],
     )
+
+    # Save detections to DB
+    faces_list = result.get("faces", [])
+    with get_db_ctx() as db:
+        db.execute(
+            "DELETE FROM face_detections WHERE subject_id = ? AND trial_idx = ?",
+            (subject_id, trial_idx),
+        )
+        for entry in faces_list:
+            frame_num = int(entry.get("frame", 0))
+            for f in entry.get("faces", []):
+                db.execute(
+                    """INSERT INTO face_detections
+                       (subject_id, trial_idx, frame_num, x1, y1, x2, y2, confidence)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (subject_id, trial_idx, frame_num,
+                     float(f["x1"]), float(f["y1"]), float(f["x2"]), float(f["y2"]),
+                     float(f.get("confidence", 1.0))),
+                )
+
     return result
+
+
+# ── Load saved face detections ────────────────────────────────────────────
+
+@router.get("/{subject_id}/face-detections")
+def get_face_detections(subject_id: int, trial_idx: int = Query(...)) -> dict:
+    """Get saved face detections from DB."""
+    with get_db_ctx() as db:
+        rows = db.execute(
+            "SELECT frame_num, x1, y1, x2, y2, confidence FROM face_detections "
+            "WHERE subject_id = ? AND trial_idx = ? ORDER BY frame_num",
+            (subject_id, trial_idx),
+        ).fetchall()
+
+    # Group by frame
+    by_frame = {}
+    for r in rows:
+        fn = r["frame_num"]
+        if fn not in by_frame:
+            by_frame[fn] = []
+        by_frame[fn].append({
+            "x1": r["x1"], "y1": r["y1"], "x2": r["x2"], "y2": r["y2"],
+            "confidence": r["confidence"],
+        })
+
+    faces = []
+    for fn in sorted(by_frame.keys()):
+        faces.append({"frame": fn, "faces": by_frame[fn]})
+
+    return {"faces": faces}
 
 
 # ── Hand detection (single frame) ─────────────────────────────────────────
