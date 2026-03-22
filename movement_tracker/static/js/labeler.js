@@ -434,13 +434,15 @@ const labeler = (() => {
             // Update sidebar with dynamic shortcuts
             updateShortcutsSidebar();
 
-            // ── Camera button: hide for single, update label for multicam ──
+            // ── Camera: hide switch button for single, update label ──
             const sideBtn = document.getElementById('sideToggle');
+            const camLabel = document.getElementById('cameraLabel');
             if (cameraMode === 'single') {
-                sideBtn.style.display = 'none';
+                if (sideBtn) sideBtn.style.display = 'none';
+                if (camLabel) camLabel.style.display = 'none';
             } else {
-                sideBtn.style.display = '';
-                sideBtn.textContent = currentSide;
+                if (sideBtn) sideBtn.style.display = '';
+                if (camLabel) { camLabel.style.display = ''; camLabel.textContent = currentSide; }
             }
 
             // ── Load saved crop boxes from session info ──
@@ -2958,7 +2960,8 @@ const labeler = (() => {
         }
 
         currentSide = activeCams[newIdx];
-        document.getElementById('sideToggle').textContent = currentSide;
+        const _camLabel = document.getElementById('cameraLabel');
+        if (_camLabel) _camLabel.textContent = currentSide;
 
         if (mpCropMode) {
             // Load saved box for new camera, or use 10% inset default

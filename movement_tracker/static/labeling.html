@@ -96,7 +96,8 @@
 
             <div style="margin-bottom: 16px;">
                 <h3 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">View</h3>
-                <button class="btn btn-sm" id="sideToggle" onclick="labeler.toggleSide()" title="Toggle camera (E)">OS</button>
+                <span id="cameraLabel" style="font-size:12px;font-weight:600;color:var(--text);min-width:24px;">OS</span>
+                <button class="btn btn-sm" id="sideToggle" onclick="labeler.toggleSide()" title="Toggle camera (E)">Switch</button>
                 <button class="btn btn-sm" onclick="labeler.resetZoom()" title="Reset zoom (Z)">Reset Zoom</button>
                 <div id="stageSelectorContainer" style="display:none;margin-top:8px;">
                     <label style="font-size:12px;color:var(--text-muted);">Label source</label>
@@ -237,7 +238,7 @@
 
     <script src="/static/js/nav.js"></script>
     <script src="/static/js/api.js?v=10"></script>
-    <script src="/static/js/labeler.js?v=48"></script>
+    <script src="/static/js/labeler.js?v=49"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

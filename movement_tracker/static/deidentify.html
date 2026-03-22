@@ -281,7 +281,8 @@
         <div class="deid-controls">
             <div class="controls-row">
                 <button class="play-btn" id="playBtn" tabindex="-1" onclick="deid.togglePlay()">&#9654;</button>
-                <button class="btn btn-sm" id="sideToggle" tabindex="-1" onclick="deid.toggleSide()" title="Toggle camera (E)" style="min-width:40px;">OS</button>
+                <span class="frame-display" id="cameraLabel" style="font-weight:600;min-width:30px;">OS</span>
+                <button class="btn btn-sm" tabindex="-1" onclick="deid.toggleSide()" title="Toggle camera (E)">Switch Camera</button>
                 <span class="frame-display" id="frameDisplay">Frame: 0 / 0</span>
                 <button class="btn btn-sm" tabindex="-1" onclick="deid.resetZoom()" title="Reset zoom (R)" style="font-size:11px;">Reset</button>
             </div>
@@ -290,6 +291,6 @@
 
     <script src="/static/js/api.js"></script>
     <script src="/static/js/nav.js"></script>
-    <script src="/static/js/deidentify.js?v=11"></script>
+    <script src="/static/js/deidentify.js?v=12"></script>
 </body>
 </html>

@@ -157,11 +157,11 @@ const deid = (() => {
             return;
         }
 
-        // Update side toggle button
-        const sideBtn = document.getElementById('sideToggle');
-        if (sideBtn) {
-            sideBtn.style.display = (cameraMode === 'single') ? 'none' : '';
-            sideBtn.textContent = currentSide;
+        // Update camera label
+        const camLabel = document.getElementById('cameraLabel');
+        if (camLabel) {
+            camLabel.style.display = (cameraMode === 'single') ? 'none' : '';
+            camLabel.textContent = currentSide;
         }
 
         // Update hand section availability
@@ -343,8 +343,8 @@ const deid = (() => {
         const newIdx = (idx + 1) % cameraNames.length;
         currentSide = cameraNames[newIdx];
 
-        const btn = document.getElementById('sideToggle');
-        if (btn) btn.textContent = currentSide;
+        const camLabel = document.getElementById('cameraLabel');
+        if (camLabel) camLabel.textContent = currentSide;
 
         loadFrame(currentFrame);
     }
