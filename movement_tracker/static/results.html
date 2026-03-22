@@ -47,7 +47,7 @@
                     <label style="margin:0;">Max: <input type="number" id="yAxisMax" step="1" placeholder="auto"></label>
                 </span>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
-                <label><input type="checkbox" id="overlayAmplitude"> Amplitude</label>
+                <label><input type="checkbox" id="overlayPeakDist"> Peak Distance</label>
                 <label><input type="checkbox" id="overlayPeakOpenVel"> Peak Open Vel</label>
                 <label><input type="checkbox" id="overlayPeakCloseVel"> Peak Close Vel</label>
                 <label><input type="checkbox" id="overlaySequences"> Sequences</label>
@@ -60,6 +60,7 @@
             <!-- Movement parameters (plotted below distance traces) -->
             <div class="results-controls" id="distMovementControls" style="margin-top:12px;display:none;">
                 <span style="font-weight:600;font-size:12px;margin-right:8px;">Movements:</span>
+                <label><input type="checkbox" data-dparam="peak_dist"> Peak Distance</label>
                 <label><input type="checkbox" data-dparam="amplitude" checked> Amplitude</label>
                 <label><input type="checkbox" data-dparam="imi" checked> IMI</label>
                 <label><input type="checkbox" data-dparam="peak_open_vel" checked> Peak Opening Vel.</label>
@@ -115,6 +116,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=8"></script>
+    <script src="/static/js/results.js?v=9"></script>
 </body>
 </html>

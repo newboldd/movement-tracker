@@ -11,6 +11,7 @@ let cachedGroup = null;
 let cachedSequenceAssignments = null; // { byTrial: { trialIdx: {sequences, seq_r2} }, totalSeqs, totalR2 }
 
 const PARAM_LABELS = {
+    peak_dist: 'Peak Distance (mm)',
     amplitude: 'Amplitude (mm)',
     imi: 'Inter-Movement Interval (s)',
     peak_open_vel: 'Peak Opening Velocity (mm/s)',
@@ -233,7 +234,7 @@ function renderAllDistancePlots() {
     }
 
     // Build per-trial overlay data from movements
-    const overlayAmplitude = document.getElementById('overlayAmplitude').checked;
+    const overlayPeakDist = document.getElementById('overlayPeakDist').checked;
     const overlayPeakOpenVel = document.getElementById('overlayPeakOpenVel').checked;
     const overlayPeakCloseVel = document.getElementById('overlayPeakCloseVel').checked;
     const showSequences = document.getElementById('overlaySequences').checked;
@@ -299,25 +300,25 @@ function renderAllDistancePlots() {
         const trialStart = data.trials.slice(0, idx).reduce((acc, t) => acc + (t.distances ? t.distances.length : 0), 0);
         const trialMovs = movByTrial[idx] || [];
 
-        // Build overlay traces for distance plot (amplitude scatter on y2)
+        // Build overlay traces for distance plot (peak distance markers on the curve)
         const distOverlays = [];
         const distShapes = [];
-        if (overlayAmplitude && trialMovs.length > 0) {
-            const ampTimes = [], ampVals = [];
+        if (overlayPeakDist && trialMovs.length > 0) {
+            const peakTimes = [], peakVals = [];
             trialMovs.forEach(m => {
-                if (m.amplitude != null && m.peak_frame != null) {
+                if (m.peak_dist != null && m.peak_frame != null) {
                     const localFrame = m.peak_frame - trialStart;
-                    ampTimes.push(+(localFrame / fps).toFixed(3));
-                    ampVals.push(m.amplitude);
+                    peakTimes.push(+(localFrame / fps).toFixed(3));
+                    peakVals.push(m.peak_dist);
                 }
             });
-            if (ampTimes.length > 0) {
+            if (peakTimes.length > 0) {
                 distOverlays.push({
-                    x: ampTimes, y: ampVals,
+                    x: peakTimes, y: peakVals,
                     type: 'scatter', mode: 'markers',
-                    marker: { color: '#FF9800', size: 6, symbol: 'diamond' },
-                    name: 'Amplitude',
-                    hovertemplate: '%{x:.2f}s<br>Amp: %{y:.1f} mm<extra></extra>',
+                    marker: { color: '#FF9800', size: 7, symbol: 'diamond' },
+                    name: 'Peak Distance',
+                    hovertemplate: '%{x:.2f}s<br>Peak: %{y:.1f} mm<extra></extra>',
                 });
             }
         }
@@ -1246,7 +1247,7 @@ document.getElementById('distSequenceMode').addEventListener('change', () => {
 });
 
 // Overlay controls: re-render distance/velocity plots
-['overlayAmplitude', 'overlayPeakOpenVel', 'overlayPeakCloseVel', 'overlaySequences'].forEach(id => {
+['overlayPeakDist', 'overlayPeakOpenVel', 'overlayPeakCloseVel', 'overlaySequences'].forEach(id => {
     document.getElementById(id).addEventListener('change', () => {
         if (cachedTraces) renderAllDistancePlots();
     });

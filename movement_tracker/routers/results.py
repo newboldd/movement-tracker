@@ -244,6 +244,7 @@ def _build_movement_params(
 
         movements.append({
             "peak_frame": pk,
+            "peak_dist": round(pk_dist, 2) if pk_dist is not None else None,
             "peak_time": peak_time,
             "imi": imi,
             "amplitude": amplitude,
