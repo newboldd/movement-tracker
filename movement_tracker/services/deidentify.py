@@ -666,10 +666,12 @@ def render_with_blur_specs(input_path: str, output_path: str,
             # Check if hand protection is active for this frame
             hand_active = False
             active_radius = hand_mask_radius
+            active_smooth = hand_smooth
             for seg in hand_segments:
                 if seg.get("start", 0) <= global_frame <= seg.get("end", 0):
                     hand_active = True
                     active_radius = seg.get("radius", hand_mask_radius)
+                    active_smooth = seg.get("smooth", hand_smooth)
                     break
 
             if is_stereo:
@@ -689,8 +691,8 @@ def render_with_blur_specs(input_path: str, output_path: str,
                 if hand_active and hand_lm_data and global_frame in hand_lm_data:
                     lms_l = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "left"]
                     lms_r = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "right"]
-                    hand_mask_l = _build_hand_mask_from_landmarks(lms_l, half_w, fh, active_radius, hand_smooth)
-                    hand_mask_r = _build_hand_mask_from_landmarks(lms_r, full_w - half_w, fh, active_radius, hand_smooth)
+                    hand_mask_l = _build_hand_mask_from_landmarks(lms_l, half_w, fh, active_radius, active_smooth)
+                    hand_mask_r = _build_hand_mask_from_landmarks(lms_r, full_w - half_w, fh, active_radius, active_smooth)
 
                 left = _apply_blur_with_mask(left, left_mask, hand_mask_l)
                 right = _apply_blur_with_mask(right, right_mask, hand_mask_r)
@@ -701,7 +703,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
                 hand_mask = np.zeros((fh, full_w), dtype=bool)
                 if hand_active and hand_lm_data and global_frame in hand_lm_data:
                     hand_mask = _build_hand_mask_from_landmarks(
-                        hand_lm_data[global_frame], full_w, fh, active_radius, hand_smooth)
+                        hand_lm_data[global_frame], full_w, fh, active_radius, active_smooth)
 
                 frame = _apply_blur_with_mask(frame, blur_mask, hand_mask)
 

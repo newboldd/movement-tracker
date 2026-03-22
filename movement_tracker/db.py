@@ -166,6 +166,7 @@ CREATE TABLE IF NOT EXISTS blur_hand_settings (
     hand_frame_start INTEGER,
     hand_frame_end INTEGER,
     segments_json TEXT,
+    hand_smooth INTEGER DEFAULT 10,
     UNIQUE(subject_id, trial_idx)
 );
 """
@@ -458,6 +459,9 @@ def _migrate_add_blur_specs(conn):
         if "segments_json" not in columns:
             conn.execute("ALTER TABLE blur_hand_settings ADD COLUMN segments_json TEXT")
             logger.info("Added segments_json column to blur_hand_settings")
+        if "hand_smooth" not in columns:
+            conn.execute("ALTER TABLE blur_hand_settings ADD COLUMN hand_smooth INTEGER DEFAULT 10")
+            logger.info("Added hand_smooth column to blur_hand_settings")
 
 
 def _migrate_add_mp_crop_boxes(conn):

@@ -1373,6 +1373,7 @@ const deid = (() => {
                 trial_idx: currentTrialIdx,
                 enabled: true,
                 mask_radius: handMaskRadius,
+                hand_smooth: handSmooth,
                 segments: handProtectSegments.map(s => ({
                     start: s.start, end: s.end, radius: s.radius,
                     smooth: s.smooth != null ? s.smooth : handSmooth,

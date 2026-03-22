@@ -480,9 +480,10 @@ def get_hand_settings(subject_id: int, trial_idx: int = Query(0)) -> dict:
         return {
             "enabled": bool(row["hand_mask_enabled"]),
             "mask_radius": row["hand_mask_radius"],
+            "hand_smooth": row.get("hand_smooth", 10),
             "segments": segments,
         }
-    return {"enabled": True, "mask_radius": 30, "segments": []}
+    return {"enabled": True, "mask_radius": 30, "hand_smooth": 10, "segments": []}
 
 
 @router.put("/{subject_id}/hand-settings")
@@ -495,19 +496,21 @@ def save_hand_settings(subject_id: int, body: dict = Body(...)) -> dict:
     trial_idx = body.get("trial_idx", 0)
     enabled = 1 if body.get("enabled", True) else 0
     mask_radius = body.get("mask_radius", 30)
+    hand_smooth = body.get("hand_smooth", 10)
     segments = body.get("segments", [])
     segments_json = _json.dumps(segments) if segments else None
 
     with get_db_ctx() as db:
         db.execute(
             """INSERT INTO blur_hand_settings
-               (subject_id, trial_idx, hand_mask_enabled, hand_mask_radius, segments_json)
-               VALUES (?, ?, ?, ?, ?)
+               (subject_id, trial_idx, hand_mask_enabled, hand_mask_radius, hand_smooth, segments_json)
+               VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(subject_id, trial_idx)
                DO UPDATE SET hand_mask_enabled=excluded.hand_mask_enabled,
                              hand_mask_radius=excluded.hand_mask_radius,
+                             hand_smooth=excluded.hand_smooth,
                              segments_json=excluded.segments_json""",
-            (subject_id, trial_idx, enabled, mask_radius, segments_json),
+            (subject_id, trial_idx, enabled, mask_radius, hand_smooth, segments_json),
         )
     return {"status": "ok"}
 
@@ -554,6 +557,9 @@ def render_deidentified(subject_id: int) -> dict:
         hand_by_trial[hs["trial_idx"]] = {
             "enabled": bool(hs["hand_mask_enabled"]),
             "mask_radius": hs["hand_mask_radius"],
+            "hand_mask_radius": hs["hand_mask_radius"],
+            "hand_smooth": hs.get("hand_smooth", 10),
+            "segments_json": hs.get("segments_json", "[]"),
         }
 
     settings = get_settings()
