@@ -404,6 +404,51 @@ const deid = (() => {
         return { x: spot.x + (spot.offset_x || 0), y: spot.y + (spot.offset_y || 0) };
     }
 
+    // ── Build smoothed hand protection mask (morphological close approx) ──
+    function _buildHandMask(landmarks, radiusPx, smoothPx, w, h) {
+        // Step 1: Draw circles at base radius
+        const c1 = document.createElement('canvas');
+        c1.width = w; c1.height = h;
+        const ctx1 = c1.getContext('2d');
+        ctx1.fillStyle = '#fff';
+        for (const lm of landmarks) {
+            ctx1.beginPath();
+            ctx1.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, radiusPx, 0, Math.PI * 2);
+            ctx1.fill();
+        }
+
+        if (smoothPx <= 0) return c1;
+
+        // Step 2: Blur the mask (dilate approximation)
+        const c2 = document.createElement('canvas');
+        c2.width = w; c2.height = h;
+        const ctx2 = c2.getContext('2d');
+        ctx2.filter = `blur(${smoothPx}px)`;
+        ctx2.drawImage(c1, 0, 0);
+        ctx2.filter = 'none';
+
+        // Step 3: Threshold — draw the blurred result multiple times with
+        // 'lighter' compositing to push alpha toward 1, simulating a threshold
+        const c3 = document.createElement('canvas');
+        c3.width = w; c3.height = h;
+        const ctx3 = c3.getContext('2d');
+        ctx3.globalCompositeOperation = 'source-over';
+        // Each pass roughly doubles the alpha; 8 passes: 0.5^8 ≈ 0 becomes visible
+        for (let i = 0; i < 8; i++) {
+            ctx3.drawImage(c2, 0, 0);
+        }
+
+        // Step 4: Make it a clean binary mask by thresholding via getImageData
+        const imgData = ctx3.getImageData(0, 0, w, h);
+        const d = imgData.data;
+        for (let i = 3; i < d.length; i += 4) {
+            d[i] = d[i] > 30 ? 255 : 0;  // threshold alpha
+        }
+        ctx3.putImageData(imgData, 0, 0);
+
+        return c3;
+    }
+
     // ── Render ──
     function render() {
         if (!ctx || !canvas) return;
@@ -445,8 +490,14 @@ const deid = (() => {
         );
         const handProtectActive = activeSeg && visibleLandmarks.length > 0;
         const activeProtectRadius = activeSeg ? (activeSeg.radius || handMaskRadius) : handMaskRadius;
-        // Effective radius for protection = base radius + smooth (smooth fills gaps)
-        const effectiveProtectRadius = activeProtectRadius + handSmooth;
+
+        // Build smoothed hand mask (morphological close via blur+threshold)
+        let handMaskCanvas = null;
+        if (handProtectActive) {
+            handMaskCanvas = _buildHandMask(
+                visibleLandmarks, activeProtectRadius * scale, handSmooth * scale, cw, ch
+            );
+        }
 
         // Draw ALL blur spots on one offscreen canvas, then subtract hand protection
         const hasVisibleSpots = blurSpots.some(s => {
@@ -486,17 +537,10 @@ const deid = (() => {
                 off.fill();
             }
 
-            // Subtract hand protection from ALL blur fills
-            if (handProtectActive) {
-                const hr = effectiveProtectRadius * scale;
-
+            // Subtract hand protection mask from ALL blur fills
+            if (handMaskCanvas) {
                 off.globalCompositeOperation = 'destination-out';
-                off.fillStyle = 'rgba(0,0,0,1)';
-                for (const lm of visibleLandmarks) {
-                    off.beginPath();
-                    off.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr, 0, Math.PI * 2);
-                    off.fill();
-                }
+                off.drawImage(handMaskCanvas, 0, 0);
                 off.globalCompositeOperation = 'source-over';
             }
 
@@ -543,29 +587,41 @@ const deid = (() => {
             }
         }
 
-        // Draw hand protection union outline (no fill)
-        if (handProtectActive) {
-            const hr = effectiveProtectRadius * scale;
-
+        // Draw hand protection outline from the smoothed mask
+        if (handMaskCanvas) {
+            // Extract outline: erode the mask inward by 2px
             const hOff = document.createElement('canvas');
             hOff.width = cw;
             hOff.height = ch;
             const hCtx = hOff.getContext('2d');
 
-            // Fill all circles
-            hCtx.fillStyle = '#fff';
-            for (const lm of visibleLandmarks) {
-                hCtx.beginPath();
-                hCtx.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr, 0, Math.PI * 2);
-                hCtx.fill();
-            }
+            // Draw the smoothed mask
+            hCtx.drawImage(handMaskCanvas, 0, 0);
 
-            // Erase interior to leave 2px border
-            hCtx.globalCompositeOperation = 'destination-out';
-            for (const lm of visibleLandmarks) {
-                hCtx.beginPath();
-                hCtx.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr - 2, 0, Math.PI * 2);
-                hCtx.fill();
+            // Erode inward by 2px: shrink the mask slightly and erase it
+            const innerCanvas = document.createElement('canvas');
+            innerCanvas.width = cw;
+            innerCanvas.height = ch;
+            const ic = innerCanvas.getContext('2d');
+            // Shrink by drawing at reduced radius
+            const shrinkR = activeProtectRadius * scale - 2;
+            if (shrinkR > 0) {
+                if (handSmooth > 0) {
+                    // Rebuild mask at slightly smaller radius
+                    ic.drawImage(_buildHandMask(
+                        visibleLandmarks, shrinkR, handSmooth * scale, cw, ch
+                    ), 0, 0);
+                } else {
+                    ic.fillStyle = '#fff';
+                    for (const lm of visibleLandmarks) {
+                        ic.beginPath();
+                        ic.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, shrinkR, 0, Math.PI * 2);
+                        ic.fill();
+                    }
+                }
+                hCtx.globalCompositeOperation = 'destination-out';
+                hCtx.drawImage(innerCanvas, 0, 0);
+                hCtx.globalCompositeOperation = 'source-over';
             }
 
             // Tint green
