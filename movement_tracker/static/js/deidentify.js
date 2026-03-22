@@ -34,6 +34,7 @@ const deid = (() => {
     let handLandmarksBulk = {}; // {frameNum: [{x, y, side}]} all frames
     let handTemporalSmooth = 0; // temporal smoothing window (frames each direction)
     let handMaskRadius = 10;
+    let forearmRadius = 10;  // dilation around forearm triangle (separate from circle radius)
     let handSmooth = 10;  // morphological close: dilate then erode
     let handMaskEnabled = true;
 
@@ -405,7 +406,7 @@ const deid = (() => {
     }
 
     // ── Build smoothed hand protection mask (morphological close approx) ──
-    function _buildHandMask(landmarks, radiusPx, smoothPx, w, h) {
+    function _buildHandMask(landmarks, radiusPx, forearmPx, smoothPx, w, h) {
         // Step 1: Draw circles at base radius + forearm triangle
         const c1 = document.createElement('canvas');
         c1.width = w; c1.height = h;
@@ -449,8 +450,8 @@ const deid = (() => {
             ctx1.closePath();
             ctx1.fill();
 
-            // Thick rounded stroke to dilate the triangle by radiusPx
-            ctx1.lineWidth = radiusPx * 2;
+            // Thick rounded stroke to dilate the triangle by forearmPx
+            ctx1.lineWidth = forearmPx * 2;
             ctx1.lineJoin = 'round';
             ctx1.lineCap = 'round';
             ctx1.strokeStyle = '#fff';
@@ -541,7 +542,7 @@ const deid = (() => {
         let handMaskCanvas = null;
         if (handProtectActive) {
             handMaskCanvas = _buildHandMask(
-                visibleLandmarks, activeProtectRadius * scale, activeSmooth * scale, cw, ch
+                visibleLandmarks, activeProtectRadius * scale, forearmRadius * scale, activeSmooth * scale, cw, ch
             );
         }
 
@@ -668,7 +669,7 @@ const deid = (() => {
                 if (activeSmooth > 0) {
                     // Rebuild mask at slightly smaller radius
                     ic.drawImage(_buildHandMask(
-                        visibleLandmarks, shrinkR, activeSmooth * scale, cw, ch
+                        visibleLandmarks, shrinkR, forearmRadius * scale, activeSmooth * scale, cw, ch
                     ), 0, 0);
                 } else {
                     ic.fillStyle = '#fff';
@@ -1277,6 +1278,12 @@ const deid = (() => {
         renderTimeline();
     }
 
+    function updateForearmRadius(val) {
+        forearmRadius = parseInt(val);
+        document.getElementById('handForearmVal').textContent = forearmRadius;
+        render();
+    }
+
     function updateHandSmooth(val) {
         handSmooth = parseInt(val);
         document.getElementById('handSmoothVal').textContent = handSmooth;
@@ -1800,6 +1807,7 @@ const deid = (() => {
         toggleHandOverlay,
         updateHandRadius,
         deleteSelectedHandSeg,
+        updateForearmRadius,
         updateHandSmooth,
         updateHandTemporalSmooth,
         goToMediapipe,

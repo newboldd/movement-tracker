@@ -233,6 +233,12 @@
                         <span class="val" id="handRadiusVal">10</span>
                     </div>
                     <div class="slider-row">
+                        <label>Forearm</label>
+                        <input type="range" id="handForearmSlider" min="0" max="80" value="10"
+                               oninput="deid.updateForearmRadius(this.value)">
+                        <span class="val" id="handForearmVal">10</span>
+                    </div>
+                    <div class="slider-row">
                         <label>Smooth</label>
                         <input type="range" id="handSmoothSlider" min="0" max="60" value="10"
                                oninput="deid.updateHandSmooth(this.value)">
