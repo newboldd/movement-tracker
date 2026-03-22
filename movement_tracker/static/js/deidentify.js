@@ -28,6 +28,9 @@ const deid = (() => {
     let selectedSpotId = null;
     let addingCustom = false;
 
+    // Preview mode (blurred video)
+    let previewMode = false;
+
     // Hand overlay
     let handOverlayEnabled = false;
     let handLandmarks = [];   // [{x, y, side}] for current frame (after smoothing)
@@ -276,6 +279,7 @@ const deid = (() => {
             } catch (e) {}
         }
 
+        _updatePreviewButton();
         await loadFrame(currentFrame);
         renderSpotList();
         renderTimeline();
@@ -284,7 +288,8 @@ const deid = (() => {
     // ── Frame loading ──
     async function loadFrame(frameNum) {
         currentFrame = frameNum;
-        const url = `/api/deidentify/${subjectId}/frame?trial_idx=${currentTrialIdx}&frame_num=${frameNum}&side=${encodeURIComponent(currentSide)}`;
+        let url = `/api/deidentify/${subjectId}/frame?trial_idx=${currentTrialIdx}&frame_num=${frameNum}&side=${encodeURIComponent(currentSide)}`;
+        if (previewMode) url += '&blurred=true';
 
         try {
             const img = new Image();
@@ -340,6 +345,24 @@ const deid = (() => {
     }
 
     // ── Camera toggle ──
+    function togglePreview() {
+        previewMode = !previewMode;
+        const btn = document.getElementById('previewToggle');
+        if (btn) {
+            btn.textContent = previewMode ? 'Show Original' : 'Preview Blur';
+            btn.style.background = previewMode ? 'var(--blue)' : '';
+            btn.style.color = previewMode ? '#fff' : '';
+        }
+        loadFrame(currentFrame);
+    }
+
+    function _updatePreviewButton() {
+        const btn = document.getElementById('previewToggle');
+        if (!btn || !trialMeta) return;
+        btn.style.display = trialMeta.has_blurred ? '' : 'none';
+        if (!trialMeta.has_blurred) previewMode = false;
+    }
+
     function toggleSide() {
         if (cameraMode === 'single') return;
         const idx = cameraNames.indexOf(currentSide);
@@ -521,6 +544,9 @@ const deid = (() => {
 
         // Draw video frame
         ctx.drawImage(currentImage, offsetX, offsetY, imgW * scale, imgH * scale);
+
+        // In preview mode, just show the blurred video — no overlays
+        if (previewMode) return;
 
         // Draw face detections (blue dashed rectangles) — filtered by current side
         const localFrame = currentFrame - (trialMeta ? trialMeta.start_frame : 0);
@@ -897,6 +923,8 @@ const deid = (() => {
             toggleSide();
         } else if (e.key === 'r') {
             resetZoom();
+        } else if (e.key === 'p') {
+            if (trialMeta && trialMeta.has_blurred) togglePreview();
         } else if (e.key === 'Delete' || e.key === 'Backspace') {
             if (selectedHandSegId !== null) {
                 deleteSelectedHandSeg();
@@ -1825,6 +1853,7 @@ const deid = (() => {
         detectFaces,
         togglePlay,
         toggleSide,
+        togglePreview,
         resetZoom,
         seekFrame,
         toggleAddCustom,

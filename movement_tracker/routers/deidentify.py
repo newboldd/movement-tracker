@@ -36,6 +36,8 @@ def get_trials(subject_id: int) -> dict:
     npz_path = settings.dlc_path / subj["name"] / "mediapipe_prelabels.npz"
     has_mediapipe = npz_path.exists()
 
+    deident_dir = Path(str(settings.video_path)) / "deidentified"
+
     trial_list = []
     for i, t in enumerate(trials):
         # Check if video is stereo
@@ -44,6 +46,14 @@ def get_trials(subject_id: int) -> dict:
         fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         cap.release()
         is_stereo = (fw / fh) > 1.7 if fh > 0 else False
+
+        # Check if deidentified version exists
+        cam = t.get("camera_name")
+        if cam:
+            deident_name = f"{subj['name']}_{t['trial_name']}_{cam}.mp4"
+        else:
+            deident_name = f"{subj['name']}_{t['trial_name']}.mp4"
+        has_blurred = (deident_dir / deident_name).exists()
 
         entry = {
             "trial_idx": i,
@@ -56,6 +66,7 @@ def get_trials(subject_id: int) -> dict:
             "is_stereo": is_stereo,
             "frame_width": fw // 2 if is_stereo else fw,
             "frame_height": fh,
+            "has_blurred": has_blurred,
         }
         # Include camera info for multicam trials
         cameras = t.get("cameras", [])
@@ -79,15 +90,17 @@ def get_frame(
     trial_idx: int = Query(...),
     frame_num: int = Query(...),
     side: str = Query("full"),
+    blurred: bool = Query(False),
 ) -> Response:
-    """Serve a single JPEG frame from the ORIGINAL (un-blurred) video."""
+    """Serve a single JPEG frame. Use blurred=true for the deidentified version."""
     with get_db_ctx() as db:
         subj = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
         if not subj:
             raise HTTPException(404, "Subject not found")
 
+    subject_name = subj["name"]
     camera_mode = subj.get("camera_mode") or "stereo"
-    trials = build_trial_map(subj["name"], camera_mode=camera_mode)
+    trials = build_trial_map(subject_name, camera_mode=camera_mode)
     if trial_idx < 0 or trial_idx >= len(trials):
         raise HTTPException(400, f"Invalid trial_idx {trial_idx}")
 
@@ -95,9 +108,24 @@ def get_frame(
     settings = get_settings()
     cam_names = settings.camera_names
 
-    # Multicam: resolve to the specific camera file
+    # Resolve video path
     video_path = trial["video_path"]
-    if camera_mode == "multicam" and side != "full":
+
+    if blurred:
+        # Look for deidentified version
+        deident_dir = Path(str(settings.video_path)) / "deidentified"
+        cam = trial.get("camera_name")
+        if cam:
+            deident_name = f"{subject_name}_{trial['trial_name']}_{cam}.mp4"
+        else:
+            deident_name = f"{subject_name}_{trial['trial_name']}.mp4"
+        deident_path = deident_dir / deident_name
+        if deident_path.exists():
+            video_path = str(deident_path)
+        else:
+            raise HTTPException(404, f"Deidentified video not found: {deident_name}")
+
+    if camera_mode == "multicam" and side != "full" and not blurred:
         for cam in trial.get("cameras", []):
             if cam["name"] == side:
                 video_path = cam["path"]
