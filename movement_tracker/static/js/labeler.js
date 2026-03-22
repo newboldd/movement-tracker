@@ -1553,53 +1553,29 @@ const labeler = (() => {
         };
     }
 
-    // ── Primary action: user clicks "Run MediaPipe" / "Re-run MediaPipe" ──
-    function startMpFlow() {
-        const ti = _getCurrentTrialIdx();
-        const editSection = document.getElementById('mpEditSection');
-        const runBtn = document.getElementById('mpRunBtn');
-        if (editSection) editSection.style.display = 'block';
-        if (runBtn) runBtn.style.display = 'none';
-
-        // Initialize crop boxes for both cameras
-        mpCropAdjusted = {};
-        for (const cam of cameraNames) {
-            const saved = mpCropBoxes[ti] && mpCropBoxes[ti][cam];
-            if (saved) {
-                mpCropAdjusted[cam] = true;  // DB-saved counts as adjusted
-            } else {
-                mpCropAdjusted[cam] = false;
-            }
-        }
-
-        // Auto-check the edit checkbox and enter crop mode
-        const toggle = document.getElementById('mpCropToggle');
-        if (toggle) toggle.checked = true;
-        toggleMpCrop(true);
-        _updateMpCamStatus();
-    }
-
     function toggleMpCrop(enabled) {
         mpCropMode = enabled;
         const actionsEl = document.getElementById('mpCropActions');
-        const rerunBtn = document.getElementById('mpRerunBtn');
         if (enabled) {
             const ti = _getCurrentTrialIdx();
+            // Initialize adjustment tracking for both cameras
+            mpCropAdjusted = {};
+            for (const cam of cameraNames) {
+                const saved = mpCropBoxes[ti] && mpCropBoxes[ti][cam];
+                mpCropAdjusted[cam] = !!saved;  // DB-saved counts as adjusted
+            }
             // Initialize edit box from saved (DB) or default (10% inset)
             const saved = mpCropBoxes[ti] && mpCropBoxes[ti][currentSide];
             mpCropEditBox = saved ? { ...saved } : _defaultCropBox();
             if (actionsEl) actionsEl.style.display = 'flex';
-            if (rerunBtn) rerunBtn.style.display = 'none';
             // Lock zoom so frame navigation doesn't shift the view
             hasUserZoom = true;
+            _updateMpCamStatus();
         } else {
             mpCropEditBox = null;
             mpCropDragHandle = null;
             mpCropDragStart = null;
             if (actionsEl) actionsEl.style.display = 'none';
-            // Show rerun button when unchecking
-            if (rerunBtn) rerunBtn.style.display = 'block';
-            _updateMpButtonText();
         }
         render();
     }
@@ -1619,18 +1595,9 @@ const labeler = (() => {
         const adjustedCams = cameraNames.filter(c => mpCropAdjusted[c]);
         const unadjustedCams = cameraNames.filter(c => !mpCropAdjusted[c]);
 
-        // If neither camera adjusted, just uncheck and show rerun
+        // If neither camera adjusted, just uncheck
         if (adjustedCams.length === 0) {
-            mpCropMode = false;
-            mpCropEditBox = null;
-            const toggle = document.getElementById('mpCropToggle');
-            if (toggle) toggle.checked = false;
-            const actionsEl = document.getElementById('mpCropActions');
-            if (actionsEl) actionsEl.style.display = 'none';
-            const rerunBtn = document.getElementById('mpRerunBtn');
-            if (rerunBtn) rerunBtn.style.display = 'block';
-            _updateMpButtonText();
-            render();
+            cancelMpCrop();
             return;
         }
 
@@ -1641,7 +1608,7 @@ const labeler = (() => {
                 mpCropBoxes[ti][cam] = { x1: 0, y1: 0, x2: imgW, y2: imgH };
             }
             if (statusEl) {
-                statusEl.textContent = `${unadjustedCams.join(', ')} not adjusted — set to full frame.`;
+                statusEl.textContent = `${unadjustedCams.join(', ')} not adjusted \u2014 set to full frame.`;
             }
         }
 
@@ -1657,35 +1624,15 @@ const labeler = (() => {
             if (statusEl) statusEl.textContent = 'Error saving crop boxes: ' + (err.message || err);
         }
 
-        // Exit edit mode, show rerun button
-        mpCropMode = false;
-        mpCropEditBox = null;
-        const toggle = document.getElementById('mpCropToggle');
-        if (toggle) toggle.checked = false;
-        const actionsEl = document.getElementById('mpCropActions');
-        if (actionsEl) actionsEl.style.display = 'none';
-        const rerunBtn = document.getElementById('mpRerunBtn');
-        if (rerunBtn) rerunBtn.style.display = 'block';
+        // Exit edit mode
+        cancelMpCrop();
         _updateMpButtonText();
-        render();
     }
 
     function cancelMpCrop() {
-        mpCropMode = false;
-        mpCropEditBox = null;
-        mpCropDragHandle = null;
-        mpCropDragStart = null;
         const toggle = document.getElementById('mpCropToggle');
         if (toggle) toggle.checked = false;
-        const actionsEl = document.getElementById('mpCropActions');
-        if (actionsEl) actionsEl.style.display = 'none';
-        // Hide edit section, show run button again
-        const editSection = document.getElementById('mpEditSection');
-        if (editSection) editSection.style.display = 'none';
-        const runBtn = document.getElementById('mpRunBtn');
-        if (runBtn) runBtn.style.display = 'block';
-        _updateMpButtonText();
-        render();
+        toggleMpCrop(false);
     }
 
     async function rerunMediapipe() {
@@ -5191,7 +5138,7 @@ const labeler = (() => {
         // Video export
         getExportContext,
         // MediaPipe crop box
-        startMpFlow, toggleMpCrop, saveMpCrop, cancelMpCrop, rerunMediapipe, clearMpHistory,
+        toggleMpCrop, saveMpCrop, cancelMpCrop, rerunMediapipe, clearMpHistory,
         // Refine flow (within corrections mode)
         startRefineFlow,
     };
