@@ -245,10 +245,16 @@
                         <span class="val" id="handExtentVal">0.5</span>
                     </div>
                     <div class="slider-row">
-                        <label>Smooth</label>
+                        <label>Hand smooth</label>
                         <input type="range" id="handSmoothSlider" min="0" max="60" value="10"
                                oninput="deid.updateHandSmooth(this.value)">
                         <span class="val" id="handSmoothVal">10</span>
+                    </div>
+                    <div class="slider-row">
+                        <label>Join smooth</label>
+                        <input type="range" id="handSmooth2Slider" min="0" max="60" value="5"
+                               oninput="deid.updateHandSmooth2(this.value)">
+                        <span class="val" id="handSmooth2Val">5</span>
                     </div>
                     <div class="slider-row">
                         <label>Temporal</label>

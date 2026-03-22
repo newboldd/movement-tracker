@@ -36,7 +36,8 @@ const deid = (() => {
     let handMaskRadius = 10;
     let forearmRadius = 10;  // dilation around forearm triangle (separate from circle radius)
     let forearmExtent = 0.5; // 0=wrist, 1=elbow, >1=past elbow
-    let handSmooth = 10;  // morphological close: dilate then erode
+    let handSmooth = 10;  // morphological close on hand circles
+    let handSmooth2 = 5;  // morphological close after joining forearm
     let handMaskEnabled = true;
 
     // Canvas
@@ -406,24 +407,49 @@ const deid = (() => {
         return { x: spot.x + (spot.offset_x || 0), y: spot.y + (spot.offset_y || 0) };
     }
 
-    // ── Build smoothed hand protection mask (morphological close approx) ──
-    function _buildHandMask(landmarks, radiusPx, forearmPx, smoothPx, w, h) {
-        // Step 1: Draw hand circles AND forearm triangle together
+    // ── Blur+threshold helper (morphological close approximation) ──
+    function _morphClose(srcCanvas, blurPx) {
+        if (blurPx <= 0) return srcCanvas;
+        const w = srcCanvas.width, h = srcCanvas.height;
+        const c2 = document.createElement('canvas');
+        c2.width = w; c2.height = h;
+        const ctx2 = c2.getContext('2d');
+        ctx2.filter = `blur(${blurPx}px)`;
+        ctx2.drawImage(srcCanvas, 0, 0);
+        ctx2.filter = 'none';
+
+        const c3 = document.createElement('canvas');
+        c3.width = w; c3.height = h;
+        const ctx3 = c3.getContext('2d');
+        for (let i = 0; i < 8; i++) ctx3.drawImage(c2, 0, 0);
+
+        const imgData = ctx3.getImageData(0, 0, w, h);
+        const dd = imgData.data;
+        for (let i = 3; i < dd.length; i += 4) {
+            dd[i] = dd[i] > 30 ? 255 : 0;
+        }
+        ctx3.putImageData(imgData, 0, 0);
+        return c3;
+    }
+
+    // ── Build smoothed hand protection mask ──
+    function _buildHandMask(landmarks, radiusPx, forearmPx, smoothPx, smooth2Px, w, h) {
+        // Step 1: Draw hand circles only
         const c1 = document.createElement('canvas');
         c1.width = w; c1.height = h;
         const ctx1 = c1.getContext('2d');
         ctx1.fillStyle = '#fff';
-        ctx1.strokeStyle = '#fff';
-        ctx1.lineCap = 'round';
 
-        // Draw circles for all hand landmarks
         for (const lm of landmarks) {
             ctx1.beginPath();
             ctx1.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, radiusPx, 0, Math.PI * 2);
             ctx1.fill();
         }
 
-        // Draw forearm triangle with per-edge dilation
+        // Step 2: First smooth — on hand circles only (fills finger gaps)
+        let handSmoothed = _morphClose(c1, smoothPx);
+
+        // Step 3: Add forearm triangle onto smoothed hand mask
         const pinkyMCP = landmarks.find(l => l.type === 'hand' && l.joint === 17);
         const thumbCMC = landmarks.find(l => l.type === 'hand' && l.joint === 1);
         const handWrist = landmarks.find(l => l.type === 'hand' && l.joint === 0);
@@ -443,64 +469,45 @@ const deid = (() => {
                 x: handWrist.x + t * (elbow.x - handWrist.x),
                 y: handWrist.y + t * (elbow.y - handWrist.y),
             };
-            // pts[0]=pinkyMCP, pts[1]=interpElbow, pts[2]=thumbCMC
             const pts = [pinkyMCP, interpElbow, thumbCMC].map(p => ({
                 sx: offsetX + p.x * scale,
                 sy: offsetY + p.y * scale,
             }));
 
+            const sCtx = handSmoothed.getContext('2d');
+            sCtx.fillStyle = '#fff';
+            sCtx.strokeStyle = '#fff';
+            sCtx.lineCap = 'round';
+
             // Filled triangle
-            ctx1.beginPath();
-            ctx1.moveTo(pts[0].sx, pts[0].sy);
-            ctx1.lineTo(pts[1].sx, pts[1].sy);
-            ctx1.lineTo(pts[2].sx, pts[2].sy);
-            ctx1.closePath();
-            ctx1.fill();
+            sCtx.beginPath();
+            sCtx.moveTo(pts[0].sx, pts[0].sy);
+            sCtx.lineTo(pts[1].sx, pts[1].sy);
+            sCtx.lineTo(pts[2].sx, pts[2].sy);
+            sCtx.closePath();
+            sCtx.fill();
 
             // Palm side (thumbCMC → elbow): dilate by circle radius
             if (radiusPx > 0) {
-                ctx1.lineWidth = radiusPx * 2;
-                ctx1.beginPath();
-                ctx1.moveTo(pts[2].sx, pts[2].sy);
-                ctx1.lineTo(pts[1].sx, pts[1].sy);
-                ctx1.stroke();
+                sCtx.lineWidth = radiusPx * 2;
+                sCtx.beginPath();
+                sCtx.moveTo(pts[2].sx, pts[2].sy);
+                sCtx.lineTo(pts[1].sx, pts[1].sy);
+                sCtx.stroke();
             }
 
             // Dorsal side (pinkyMCP → elbow): dilate by forearm slider
             if (forearmPx > 0) {
-                ctx1.lineWidth = forearmPx * 2;
-                ctx1.beginPath();
-                ctx1.moveTo(pts[0].sx, pts[0].sy);
-                ctx1.lineTo(pts[1].sx, pts[1].sy);
-                ctx1.stroke();
+                sCtx.lineWidth = forearmPx * 2;
+                sCtx.beginPath();
+                sCtx.moveTo(pts[0].sx, pts[0].sy);
+                sCtx.lineTo(pts[1].sx, pts[1].sy);
+                sCtx.stroke();
             }
-            // pinkyMCP → thumbCMC edge: no extra dilation
         }
 
-        // Step 2: Apply morphological close (blur+threshold) to the combined shape
-        if (smoothPx <= 0) return c1;
-
-        const c2 = document.createElement('canvas');
-        c2.width = w; c2.height = h;
-        const ctx2 = c2.getContext('2d');
-        ctx2.filter = `blur(${smoothPx}px)`;
-        ctx2.drawImage(c1, 0, 0);
-        ctx2.filter = 'none';
-
-        const c3 = document.createElement('canvas');
-        c3.width = w; c3.height = h;
-        const ctx3 = c3.getContext('2d');
-        for (let i = 0; i < 8; i++) {
-            ctx3.drawImage(c2, 0, 0);
-        }
-
-        const imgData = ctx3.getImageData(0, 0, w, h);
-        const dd = imgData.data;
-        for (let i = 3; i < dd.length; i += 4) {
-            dd[i] = dd[i] > 30 ? 255 : 0;
-        }
-        ctx3.putImageData(imgData, 0, 0);
-        return c3;
+        // Step 4: Second smooth — on combined hand+forearm (smooths the join)
+        return _morphClose(handSmoothed, smooth2Px);
     }
 
     // ── Render ──
@@ -550,7 +557,7 @@ const deid = (() => {
         let handMaskCanvas = null;
         if (handProtectActive) {
             handMaskCanvas = _buildHandMask(
-                visibleLandmarks, activeProtectRadius * scale, forearmRadius * scale, activeSmooth * scale, cw, ch
+                visibleLandmarks, activeProtectRadius * scale, forearmRadius * scale, activeSmooth * scale, handSmooth2 * scale, cw, ch
             );
         }
 
@@ -678,7 +685,7 @@ const deid = (() => {
                     // Rebuild mask at slightly smaller radius (shrink forearm too)
                     const shrinkForearm = Math.max(0, forearmRadius * scale - 2);
                     ic.drawImage(_buildHandMask(
-                        visibleLandmarks, shrinkR, shrinkForearm, activeSmooth * scale, cw, ch
+                        visibleLandmarks, shrinkR, shrinkForearm, activeSmooth * scale, Math.max(0, handSmooth2 * scale - 2), cw, ch
                     ), 0, 0);
                 } else {
                     ic.fillStyle = '#fff';
@@ -1315,6 +1322,12 @@ const deid = (() => {
         render();
     }
 
+    function updateHandSmooth2(val) {
+        handSmooth2 = parseInt(val);
+        document.getElementById('handSmooth2Val').textContent = handSmooth2;
+        render();
+    }
+
     async function saveHandSettings() {
         if (!subjectId || currentTrialIdx < 0) return;
         try {
@@ -1825,6 +1838,7 @@ const deid = (() => {
         updateForearmRadius,
         updateForearmExtent,
         updateHandSmooth,
+        updateHandSmooth2,
         updateHandTemporalSmooth,
         goToMediapipe,
         renderAll,
