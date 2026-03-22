@@ -509,20 +509,23 @@ const deid = (() => {
                 ctx.fill();
             }
 
-            // Draw hand protection radius circles (dashed outlines)
+            // Draw union outline of all hand protection circles
             if (handMaskEnabled) {
-                ctx.strokeStyle = 'rgba(76,175,80,0.3)';
-                ctx.lineWidth = 1;
-                ctx.setLineDash([4, 4]);
                 const hr = handMaskRadius * scale;
+                // Build union shape: single path with all circles
+                ctx.beginPath();
                 for (const lm of visibleLandmarks) {
-                    const sx = offsetX + lm.x * scale;
-                    const sy = offsetY + lm.y * scale;
-                    ctx.beginPath();
-                    ctx.arc(sx, sy, hr, 0, Math.PI * 2);
-                    ctx.stroke();
+                    const lx = offsetX + lm.x * scale;
+                    const ly = offsetY + lm.y * scale;
+                    ctx.moveTo(lx + hr, ly);
+                    ctx.arc(lx, ly, hr, 0, Math.PI * 2);
                 }
-                ctx.setLineDash([]);
+                // Fill with semi-transparent green, strong outline
+                ctx.fillStyle = 'rgba(76,175,80,0.08)';
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(76,175,80,0.7)';
+                ctx.lineWidth = 2;
+                ctx.stroke();
             }
         }
 
