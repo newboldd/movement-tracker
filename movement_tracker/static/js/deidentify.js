@@ -252,6 +252,7 @@ const deid = (() => {
                     start: s.start,
                     end: s.end,
                     radius: s.radius || handMaskRadius,
+                    smooth: s.smooth != null ? s.smooth : handSmooth,
                 }));
             }
         } catch (e) {}
@@ -490,12 +491,13 @@ const deid = (() => {
         );
         const handProtectActive = activeSeg && visibleLandmarks.length > 0;
         const activeProtectRadius = activeSeg ? (activeSeg.radius || handMaskRadius) : handMaskRadius;
+        const activeSmooth = activeSeg ? (activeSeg.smooth != null ? activeSeg.smooth : handSmooth) : handSmooth;
 
         // Build smoothed hand mask (morphological close via blur+threshold)
         let handMaskCanvas = null;
         if (handProtectActive) {
             handMaskCanvas = _buildHandMask(
-                visibleLandmarks, activeProtectRadius * scale, handSmooth * scale, cw, ch
+                visibleLandmarks, activeProtectRadius * scale, activeSmooth * scale, cw, ch
             );
         }
 
@@ -606,10 +608,10 @@ const deid = (() => {
             // Shrink by drawing at reduced radius
             const shrinkR = activeProtectRadius * scale - 2;
             if (shrinkR > 0) {
-                if (handSmooth > 0) {
+                if (activeSmooth > 0) {
                     // Rebuild mask at slightly smaller radius
                     ic.drawImage(_buildHandMask(
-                        visibleLandmarks, shrinkR, handSmooth * scale, cw, ch
+                        visibleLandmarks, shrinkR, activeSmooth * scale, cw, ch
                     ), 0, 0);
                 } else {
                     ic.fillStyle = '#fff';
@@ -1119,6 +1121,16 @@ const deid = (() => {
     function updateHandSmooth(val) {
         handSmooth = parseInt(val);
         document.getElementById('handSmoothVal').textContent = handSmooth;
+        // Update selected segment's smooth, or all if none selected
+        if (selectedHandSegId) {
+            const seg = handProtectSegments.find(s => s.id === selectedHandSegId);
+            if (seg) seg.smooth = handSmooth;
+        } else {
+            for (const seg of handProtectSegments) {
+                seg.smooth = handSmooth;
+            }
+        }
+        saveHandSettings();
         render();
     }
 
@@ -1131,6 +1143,7 @@ const deid = (() => {
                 mask_radius: handMaskRadius,
                 segments: handProtectSegments.map(s => ({
                     start: s.start, end: s.end, radius: s.radius,
+                    smooth: s.smooth != null ? s.smooth : handSmooth,
                 })),
             });
         } catch (e) {}
@@ -1462,10 +1475,13 @@ const deid = (() => {
             tlDragStartX = e.clientX;
             tlDragOrigRange = { start: hit.seg.start, end: hit.seg.end };
             selectedHandSegId = hit.seg.id;
-            // Update radius slider to show this segment's radius
+            // Update sliders to show this segment's values
             handMaskRadius = hit.seg.radius || handMaskRadius;
             document.getElementById('handRadiusSlider').value = handMaskRadius;
             document.getElementById('handRadiusVal').textContent = handMaskRadius;
+            handSmooth = hit.seg.smooth != null ? hit.seg.smooth : handSmooth;
+            document.getElementById('handSmoothSlider').value = handSmooth;
+            document.getElementById('handSmoothVal').textContent = handSmooth;
         } else if (hit.type === 'hand_empty') {
             // Start creating a new segment by dragging
             const L = _tlLayout();
@@ -1499,7 +1515,7 @@ const deid = (() => {
                 if (existing) {
                     existing.start = s; existing.end = en;
                 } else {
-                    handProtectSegments.push({ id: -1, start: s, end: en, radius: handMaskRadius });
+                    handProtectSegments.push({ id: -1, start: s, end: en, radius: handMaskRadius, smooth: handSmooth });
                 }
                 renderTimeline();
                 return;
