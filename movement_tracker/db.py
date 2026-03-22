@@ -158,6 +158,8 @@ CREATE TABLE IF NOT EXISTS blur_hand_settings (
     trial_idx INTEGER NOT NULL,
     hand_mask_enabled INTEGER NOT NULL DEFAULT 1,
     hand_mask_radius INTEGER NOT NULL DEFAULT 30,
+    hand_frame_start INTEGER,
+    hand_frame_end INTEGER,
     UNIQUE(subject_id, trial_idx)
 );
 """
@@ -428,6 +430,13 @@ def _migrate_add_blur_specs(conn):
             )
         """)
         logger.info("Created blur_hand_settings table")
+    else:
+        # Add frame range columns if missing
+        columns = _get_table_columns(conn, "blur_hand_settings")
+        if "hand_frame_start" not in columns:
+            conn.execute("ALTER TABLE blur_hand_settings ADD COLUMN hand_frame_start INTEGER")
+            conn.execute("ALTER TABLE blur_hand_settings ADD COLUMN hand_frame_end INTEGER")
+            logger.info("Added hand_frame_start/end columns to blur_hand_settings")
 
 
 def _migrate_add_mp_crop_boxes(conn):

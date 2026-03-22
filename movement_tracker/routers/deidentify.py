@@ -334,8 +334,13 @@ def get_hand_settings(subject_id: int, trial_idx: int = Query(0)) -> dict:
             (subject_id, trial_idx),
         ).fetchone()
     if row:
-        return {"enabled": bool(row["hand_mask_enabled"]), "mask_radius": row["hand_mask_radius"]}
-    return {"enabled": True, "mask_radius": 30}
+        return {
+            "enabled": bool(row["hand_mask_enabled"]),
+            "mask_radius": row["hand_mask_radius"],
+            "frame_start": row.get("hand_frame_start"),
+            "frame_end": row.get("hand_frame_end"),
+        }
+    return {"enabled": True, "mask_radius": 30, "frame_start": None, "frame_end": None}
 
 
 @router.put("/{subject_id}/hand-settings")
@@ -347,15 +352,20 @@ def save_hand_settings(subject_id: int, body: dict = Body(...)) -> dict:
     trial_idx = body.get("trial_idx", 0)
     enabled = 1 if body.get("enabled", True) else 0
     mask_radius = body.get("mask_radius", 30)
+    frame_start = body.get("frame_start")
+    frame_end = body.get("frame_end")
 
     with get_db_ctx() as db:
         db.execute(
-            """INSERT INTO blur_hand_settings (subject_id, trial_idx, hand_mask_enabled, hand_mask_radius)
-               VALUES (?, ?, ?, ?)
+            """INSERT INTO blur_hand_settings
+               (subject_id, trial_idx, hand_mask_enabled, hand_mask_radius, hand_frame_start, hand_frame_end)
+               VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(subject_id, trial_idx)
                DO UPDATE SET hand_mask_enabled=excluded.hand_mask_enabled,
-                             hand_mask_radius=excluded.hand_mask_radius""",
-            (subject_id, trial_idx, enabled, mask_radius),
+                             hand_mask_radius=excluded.hand_mask_radius,
+                             hand_frame_start=excluded.hand_frame_start,
+                             hand_frame_end=excluded.hand_frame_end""",
+            (subject_id, trial_idx, enabled, mask_radius, frame_start, frame_end),
         )
     return {"status": "ok"}
 

@@ -47,11 +47,13 @@ const deid = (() => {
 
     // Timeline
     let tlCanvas, tlCtx;
-    let tlDragSpot = null;    // spot being dragged
+    let tlDragSpot = null;    // spot being dragged (blur spot object or 'hand')
     let tlDragEdge = null;    // 'start', 'end', or 'move'
     let tlDragStartX = null;  // mouse X at drag start
     let tlDragOrigRange = null; // {start, end} at drag start
     let handCoverage = [];    // array of frame numbers with MP hand data
+    let handProtectStart = 0; // frame range for hand protection
+    let handProtectEnd = 0;
 
     // Debounce save timer
     let saveTimer = null;
@@ -240,10 +242,15 @@ const deid = (() => {
             const hs = await API.get(`/api/deidentify/${subjectId}/hand-settings?trial_idx=${idx}`);
             handMaskEnabled = hs.enabled;
             handMaskRadius = hs.mask_radius;
+            handProtectStart = hs.frame_start != null ? hs.frame_start : trialMeta.start_frame;
+            handProtectEnd = hs.frame_end != null ? hs.frame_end : trialMeta.end_frame;
             document.getElementById('handMaskEnabled').checked = handMaskEnabled;
             document.getElementById('handRadiusSlider').value = handMaskRadius;
             document.getElementById('handRadiusVal').textContent = handMaskRadius;
-        } catch (e) {}
+        } catch (e) {
+            handProtectStart = trialMeta.start_frame;
+            handProtectEnd = trialMeta.end_frame;
+        }
 
         // Reset zoom for new trial
         hasUserZoom = false;
@@ -895,8 +902,11 @@ const deid = (() => {
                 trial_idx: currentTrialIdx,
                 enabled: handMaskEnabled,
                 mask_radius: handMaskRadius,
+                frame_start: handProtectStart,
+                frame_end: handProtectEnd,
             });
         } catch (e) {}
+        renderTimeline();
     }
 
     // ── Save blur specs (debounced) ──
@@ -1013,78 +1023,104 @@ const deid = (() => {
 
         tlCtx.clearRect(0, 0, L.cw, L.ch);
 
-        const rowH = 18;
-        const rowGap = 2;
-        let y = 4;
-
-        // ── Row 1: Face detection density ──
-        tlCtx.fillStyle = 'rgba(150,150,150,0.5)';
-        tlCtx.font = '10px sans-serif';
-        tlCtx.fillText('Faces', 2, y + 12);
-
-        if (faceDetections.length > 0) {
-            for (let i = 0; i < faceDetections.length; i++) {
-                const entry = faceDetections[i];
-                if (!entry || !entry.faces || entry.faces.length === 0) continue;
-                const frame = entry.frame != null ? entry.frame : (trialMeta.start_frame + i);
-                const x = _frameToTlX(frame, L);
-                const alpha = Math.min(0.9, 0.3 + entry.faces.length * 0.2);
-                tlCtx.fillStyle = `rgba(33,150,243,${alpha})`;
-                tlCtx.fillRect(x, y, Math.max(1, L.barW / L.range), rowH);
-            }
-        }
-        y += rowH + rowGap;
-
-        // ── Row 2: Hand coverage ──
-        if (handCoverage.length > 0) {
-            tlCtx.fillStyle = 'rgba(150,150,150,0.5)';
-            tlCtx.fillText('Hands', 2, y + 12);
-            tlCtx.fillStyle = 'rgba(76,175,80,0.5)';
-            const pw = Math.max(1, L.barW / L.range);
-            for (const f of handCoverage) {
-                const x = _frameToTlX(f, L);
-                tlCtx.fillRect(x, y, pw, rowH);
-            }
-            y += rowH + rowGap;
-        }
-
-        // ── Row 3+: Blur spot ranges ──
         const sideLabel = _sideLabel();
         const visibleSpots = blurSpots.filter(s => {
             const ss = s.side || 'full';
             return ss === 'full' || ss === sideLabel;
         });
 
-        if (visibleSpots.length > 0) {
-            tlCtx.fillStyle = 'rgba(150,150,150,0.5)';
-            tlCtx.fillText('Blur', 2, y + 12);
+        const faceRowH = 35;
+        const handRowH = 25;
+        const gap = 3;
+        let y = 2;
 
+        // ── Face row: blue density heatmap + red blur spot bars overlaid ──
+        tlCtx.fillStyle = 'rgba(150,150,150,0.5)';
+        tlCtx.font = '10px sans-serif';
+        tlCtx.fillText('Faces', 2, y + 12);
+
+        // Background density heatmap
+        if (faceDetections.length > 0) {
+            const pw = Math.max(1, L.barW / L.range);
+            for (let i = 0; i < faceDetections.length; i++) {
+                const entry = faceDetections[i];
+                if (!entry || !entry.faces || entry.faces.length === 0) continue;
+                const frame = entry.frame != null ? entry.frame : (trialMeta.start_frame + i);
+                const x = _frameToTlX(frame, L);
+                const alpha = Math.min(0.7, 0.15 + entry.faces.length * 0.15);
+                tlCtx.fillStyle = `rgba(33,150,243,${alpha})`;
+                tlCtx.fillRect(x, y, pw, faceRowH);
+            }
+        }
+
+        // Overlaid blur spot bars (stacked within the face row)
+        if (visibleSpots.length > 0) {
+            const spotBarH = Math.min(12, (faceRowH - 4) / visibleSpots.length);
+            let spotY = y + 2;
             for (const spot of visibleSpots) {
                 const x1 = _frameToTlX(spot.frame_start, L);
                 const x2 = _frameToTlX(spot.frame_end, L);
                 const w = Math.max(3, x2 - x1);
-
                 const isSelected = spot.id === selectedSpotId;
+
                 tlCtx.fillStyle = isSelected
-                    ? 'rgba(244,67,54,0.6)'
-                    : 'rgba(244,67,54,0.3)';
-                tlCtx.fillRect(x1, y, w, rowH - 2);
+                    ? 'rgba(244,67,54,0.7)'
+                    : 'rgba(244,67,54,0.35)';
+                tlCtx.fillRect(x1, spotY, w, spotBarH - 1);
 
                 tlCtx.strokeStyle = isSelected
-                    ? 'rgba(244,67,54,0.9)'
-                    : 'rgba(244,67,54,0.5)';
-                tlCtx.lineWidth = isSelected ? 2 : 1;
-                tlCtx.strokeRect(x1, y, w, rowH - 2);
+                    ? 'rgba(244,67,54,1.0)'
+                    : 'rgba(244,67,54,0.6)';
+                tlCtx.lineWidth = isSelected ? 1.5 : 0.5;
+                tlCtx.strokeRect(x1, spotY, w, spotBarH - 1);
 
-                // Draw edge handles for selected spot
+                // Edge handles for selected
                 if (isSelected) {
-                    tlCtx.fillStyle = 'rgba(244,67,54,0.9)';
-                    tlCtx.fillRect(x1 - 2, y, 4, rowH - 2);
-                    tlCtx.fillRect(x2 - 2, y, 4, rowH - 2);
+                    tlCtx.fillStyle = 'rgba(244,67,54,1.0)';
+                    tlCtx.fillRect(x1 - 1, spotY, 3, spotBarH - 1);
+                    tlCtx.fillRect(x2 - 2, spotY, 3, spotBarH - 1);
                 }
 
-                y += rowH;
+                spotY += spotBarH;
             }
+        }
+
+        y += faceRowH + gap;
+
+        // ── Hand row: green coverage + draggable protection range ──
+        if (handCoverage.length > 0 || hasMediapipe) {
+            tlCtx.fillStyle = 'rgba(150,150,150,0.5)';
+            tlCtx.fillText('Hands', 2, y + 12);
+
+            // Background coverage heatmap
+            if (handCoverage.length > 0) {
+                tlCtx.fillStyle = 'rgba(76,175,80,0.2)';
+                const pw = Math.max(1, L.barW / L.range);
+                for (const f of handCoverage) {
+                    const x = _frameToTlX(f, L);
+                    tlCtx.fillRect(x, y, pw, handRowH);
+                }
+            }
+
+            // Protection active range bar (draggable)
+            if (handMaskEnabled) {
+                const hx1 = _frameToTlX(handProtectStart, L);
+                const hx2 = _frameToTlX(handProtectEnd, L);
+                const hw = Math.max(3, hx2 - hx1);
+
+                tlCtx.fillStyle = 'rgba(76,175,80,0.45)';
+                tlCtx.fillRect(hx1, y + 2, hw, handRowH - 4);
+                tlCtx.strokeStyle = 'rgba(76,175,80,0.9)';
+                tlCtx.lineWidth = 1.5;
+                tlCtx.strokeRect(hx1, y + 2, hw, handRowH - 4);
+
+                // Edge handles
+                tlCtx.fillStyle = 'rgba(76,175,80,1.0)';
+                tlCtx.fillRect(hx1 - 1, y + 2, 3, handRowH - 4);
+                tlCtx.fillRect(hx2 - 2, y + 2, 3, handRowH - 4);
+            }
+
+            y += handRowH + gap;
         }
 
         // ── Current frame indicator ──
@@ -1100,17 +1136,12 @@ const deid = (() => {
     // ── Timeline mouse handlers ──
 
     function _tlHitTest(e) {
-        // Returns { spot, edge } or null
+        // Returns { type: 'spot'|'hand', spot?, edge: 'start'|'end'|'move' } or null
         const rect = tlCanvas.getBoundingClientRect();
         const mx = e.clientX - rect.left;
         const my = e.clientY - rect.top;
         const L = _tlLayout();
         if (!L) return null;
-
-        // Compute blur spot row Y positions (same logic as renderTimeline)
-        const rowH = 18, rowGap = 2;
-        let y = 4 + rowH + rowGap; // skip face row
-        if (handCoverage.length > 0) y += rowH + rowGap; // skip hand row
 
         const sideLabel = _sideLabel();
         const visibleSpots = blurSpots.filter(s => {
@@ -1118,18 +1149,40 @@ const deid = (() => {
             return ss === 'full' || ss === sideLabel;
         });
 
-        for (const spot of visibleSpots) {
-            const x1 = _frameToTlX(spot.frame_start, L);
-            const x2 = _frameToTlX(spot.frame_end, L);
-            const spotY = y;
-            y += rowH;
+        const faceRowH = 35, handRowH = 25, gap = 3;
+        let y = 2;
 
-            if (my >= spotY && my <= spotY + rowH - 2) {
-                if (Math.abs(mx - x1) < 6) return { spot, edge: 'start' };
-                if (Math.abs(mx - x2) < 6) return { spot, edge: 'end' };
-                if (mx > x1 + 6 && mx < x2 - 6) return { spot, edge: 'move' };
+        // Hit test blur spot bars within face row
+        if (visibleSpots.length > 0) {
+            const spotBarH = Math.min(12, (faceRowH - 4) / visibleSpots.length);
+            let spotY = y + 2;
+            for (const spot of visibleSpots) {
+                const x1 = _frameToTlX(spot.frame_start, L);
+                const x2 = _frameToTlX(spot.frame_end, L);
+
+                if (my >= spotY && my <= spotY + spotBarH) {
+                    if (Math.abs(mx - x1) < 6) return { type: 'spot', spot, edge: 'start' };
+                    if (Math.abs(mx - x2) < 6) return { type: 'spot', spot, edge: 'end' };
+                    if (mx > x1 + 4 && mx < x2 - 4) return { type: 'spot', spot, edge: 'move' };
+                }
+                spotY += spotBarH;
             }
         }
+
+        y += faceRowH + gap;
+
+        // Hit test hand protection bar
+        if ((handCoverage.length > 0 || hasMediapipe) && handMaskEnabled) {
+            const hx1 = _frameToTlX(handProtectStart, L);
+            const hx2 = _frameToTlX(handProtectEnd, L);
+
+            if (my >= y + 2 && my <= y + handRowH - 2) {
+                if (Math.abs(mx - hx1) < 6) return { type: 'hand', edge: 'start' };
+                if (Math.abs(mx - hx2) < 6) return { type: 'hand', edge: 'end' };
+                if (mx > hx1 + 4 && mx < hx2 - 4) return { type: 'hand', edge: 'move' };
+            }
+        }
+
         return null;
     }
 
@@ -1137,15 +1190,21 @@ const deid = (() => {
         const hit = _tlHitTest(e);
         if (!hit) return;
         e.preventDefault();
-        tlDragSpot = hit.spot;
-        tlDragEdge = hit.edge;
-        tlDragStartX = e.clientX;
-        tlDragOrigRange = { start: hit.spot.frame_start, end: hit.spot.frame_end };
 
-        // Select this spot
-        selectedSpotId = hit.spot.id;
-        renderSpotList();
-        updateSpotControls();
+        if (hit.type === 'spot') {
+            tlDragSpot = hit.spot;
+            tlDragEdge = hit.edge;
+            tlDragStartX = e.clientX;
+            tlDragOrigRange = { start: hit.spot.frame_start, end: hit.spot.frame_end };
+            selectedSpotId = hit.spot.id;
+            renderSpotList();
+            updateSpotControls();
+        } else if (hit.type === 'hand') {
+            tlDragSpot = 'hand';
+            tlDragEdge = hit.edge;
+            tlDragStartX = e.clientX;
+            tlDragOrigRange = { start: handProtectStart, end: handProtectEnd };
+        }
         renderTimeline();
     }
 
@@ -1155,6 +1214,29 @@ const deid = (() => {
             if (!L) return;
             const dx = e.clientX - tlDragStartX;
             const dFrames = Math.round((dx / L.barW) * L.range);
+
+            if (tlDragSpot === 'hand') {
+                // Drag hand protection range
+                if (tlDragEdge === 'start') {
+                    handProtectStart = Math.max(
+                        trialMeta.start_frame,
+                        Math.min(handProtectEnd - 1, tlDragOrigRange.start + dFrames)
+                    );
+                } else if (tlDragEdge === 'end') {
+                    handProtectEnd = Math.min(
+                        trialMeta.end_frame,
+                        Math.max(handProtectStart + 1, tlDragOrigRange.end + dFrames)
+                    );
+                } else if (tlDragEdge === 'move') {
+                    const len = tlDragOrigRange.end - tlDragOrigRange.start;
+                    let newStart = tlDragOrigRange.start + dFrames;
+                    newStart = Math.max(trialMeta.start_frame, Math.min(trialMeta.end_frame - len, newStart));
+                    handProtectStart = newStart;
+                    handProtectEnd = newStart + len;
+                }
+                renderTimeline();
+                return;
+            }
 
             if (tlDragEdge === 'start') {
                 tlDragSpot.frame_start = Math.max(
@@ -1191,7 +1273,11 @@ const deid = (() => {
 
     function onTlMouseUp(e) {
         if (tlDragSpot) {
-            scheduleSave();
+            if (tlDragSpot === 'hand') {
+                updateHandSettings(); // saves frame range
+            } else {
+                scheduleSave();
+            }
             tlDragSpot = null;
             tlDragEdge = null;
             tlDragStartX = null;
@@ -1208,7 +1294,7 @@ const deid = (() => {
 
         // Check if clicking a spot bar
         const hit = _tlHitTest(e);
-        if (hit) {
+        if (hit && hit.type === 'spot') {
             selectedSpotId = hit.spot.id;
             renderSpotList();
             updateSpotControls();
