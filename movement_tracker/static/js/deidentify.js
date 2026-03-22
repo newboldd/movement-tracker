@@ -463,7 +463,9 @@ const deid = (() => {
         const ctx1 = c1.getContext('2d');
         ctx1.fillStyle = '#fff';
 
+        // Only draw circles for hand keypoints — pose (elbows) are used for forearm triangle only
         for (const lm of landmarks) {
+            if (lm.type === 'pose') continue;
             ctx1.beginPath();
             ctx1.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, radiusPx, 0, Math.PI * 2);
             ctx1.fill();
@@ -1400,6 +1402,7 @@ const deid = (() => {
             offset_y: s.offset_y || 0,
             frame_start: s.frame_start,
             frame_end: s.frame_end,
+            side: s.side || 'full',
         }));
         try {
             await API.put(`/api/deidentify/${subjectId}/blur-specs`, {
@@ -1438,6 +1441,9 @@ const deid = (() => {
                     btn.disabled = false;
                     if (data.status === 'completed') {
                         status.textContent = 'Render complete! Deidentified videos saved.';
+                        // Mark all trials as having blurred versions and show preview button
+                        trials.forEach(t => { t.has_blurred = true; });
+                        _updatePreviewButton();
                     } else if (data.status === 'failed') {
                         status.textContent = 'Render failed: ' + (data.error_msg || 'unknown');
                     } else {
