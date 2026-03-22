@@ -208,6 +208,45 @@ def get_face_detections(subject_id: int, trial_idx: int = Query(...)) -> dict:
     return {"faces": faces}
 
 
+# ── Hand coverage (which frames have MP data) ─────────────────────────────
+
+@router.get("/{subject_id}/hand-coverage")
+def get_hand_coverage(subject_id: int, trial_idx: int = Query(...)) -> dict:
+    """Return frame ranges where MediaPipe hand data exists."""
+    import numpy as np
+    from ..services.mediapipe_prelabel import load_mediapipe_prelabels
+
+    with get_db_ctx() as db:
+        subj = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
+        if not subj:
+            raise HTTPException(404, "Subject not found")
+
+    data = load_mediapipe_prelabels(subj["name"])
+    if data is None:
+        return {"frames": []}
+
+    camera_mode = subj.get("camera_mode") or "stereo"
+    trials = build_trial_map(subj["name"], camera_mode=camera_mode)
+    if trial_idx < 0 or trial_idx >= len(trials):
+        return {"frames": []}
+
+    trial = trials[trial_idx]
+    start = trial["start_frame"]
+    end = trial["end_frame"]
+
+    # Check which frames have non-NaN landmark data in either camera
+    os_lm = data["OS_landmarks"]
+    od_lm = data["OD_landmarks"]
+    frames_with_data = []
+    for f in range(start, min(end + 1, len(os_lm))):
+        has_os = not np.all(np.isnan(os_lm[f]))
+        has_od = not np.all(np.isnan(od_lm[f])) if f < len(od_lm) else False
+        if has_os or has_od:
+            frames_with_data.append(int(f))
+
+    return {"frames": frames_with_data}
+
+
 # ── Hand detection (single frame) ─────────────────────────────────────────
 
 @router.post("/{subject_id}/detect-hands")

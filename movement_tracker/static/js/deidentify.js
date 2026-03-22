@@ -45,6 +45,14 @@ const deid = (() => {
     let panning = false;
     let panStart = null;
 
+    // Timeline
+    let tlCanvas, tlCtx;
+    let tlDragSpot = null;    // spot being dragged
+    let tlDragEdge = null;    // 'start', 'end', or 'move'
+    let tlDragStartX = null;  // mouse X at drag start
+    let tlDragOrigRange = null; // {start, end} at drag start
+    let handCoverage = [];    // array of frame numbers with MP hand data
+
     // Debounce save timer
     let saveTimer = null;
 
@@ -80,11 +88,22 @@ const deid = (() => {
         canvas.addEventListener('mouseup', onMouseUp);
         canvas.addEventListener('mouseleave', onMouseUp);
 
+        // Timeline setup
+        tlCanvas = document.getElementById('timelineCanvas');
+        tlCtx = tlCanvas ? tlCanvas.getContext('2d') : null;
+        if (tlCanvas) {
+            setupTimeline();
+        }
+
         // Keyboard
         document.addEventListener('keydown', onKeyDown);
 
         // Resize
-        window.addEventListener('resize', () => { if (!hasUserZoom) fitImage(); render(); });
+        window.addEventListener('resize', () => {
+            if (!hasUserZoom) fitImage();
+            render();
+            renderTimeline();
+        });
 
         // Auto-select subject from URL param or if only one
         const params = new URLSearchParams(window.location.search);
@@ -230,8 +249,18 @@ const deid = (() => {
         hasUserZoom = false;
         scale = 1; offsetX = 0; offsetY = 0;
 
+        // Load hand coverage for timeline
+        handCoverage = [];
+        if (hasMediapipe) {
+            try {
+                const hc = await API.get(`/api/deidentify/${subjectId}/hand-coverage?trial_idx=${idx}`);
+                handCoverage = hc.frames || [];
+            } catch (e) {}
+        }
+
         await loadFrame(currentFrame);
         renderSpotList();
+        renderTimeline();
     }
 
     // ── Frame loading ──
@@ -275,6 +304,7 @@ const deid = (() => {
         }
 
         render();
+        renderTimeline();
     }
 
     function fitImage() {
@@ -616,23 +646,44 @@ const deid = (() => {
     }
 
     function togglePlay() {
+        const btn = document.getElementById('playBtn');
         if (playing) {
             // Stop
             playing = false;
             if (playTimer) { clearInterval(playTimer); playTimer = null; }
-            document.getElementById('playBtn').textContent = '\u25B6';
+            btn.innerHTML = '&#9654;';
         } else {
+            if (!trialMeta) return;
             // Start
             playing = true;
-            document.getElementById('playBtn').textContent = '\u23F8';
-            const interval = 1000 / fps;
+            btn.innerHTML = '&#9616;&#9616;';
+            let loading = false; // prevent overlapping loads
             playTimer = setInterval(() => {
-                if (currentFrame >= (trialMeta ? trialMeta.end_frame : 0)) {
+                if (!playing) return;
+                if (loading) return;
+                if (currentFrame >= trialMeta.end_frame) {
                     togglePlay();
                     return;
                 }
-                loadFrame(currentFrame + 1);
-            }, interval);
+                loading = true;
+                currentFrame++;
+                // Simple sync render: just update frame and draw
+                const url = `/api/deidentify/${subjectId}/frame?trial_idx=${currentTrialIdx}&frame_num=${currentFrame}&side=${encodeURIComponent(currentSide)}`;
+                const img = new Image();
+                img.onload = () => {
+                    currentImage = img;
+                    imgW = img.width;
+                    imgH = img.height;
+                    document.getElementById('frameSlider').value = currentFrame;
+                    const localFrame = currentFrame - trialMeta.start_frame;
+                    document.getElementById('frameDisplay').textContent =
+                        `Frame: ${localFrame} / ${totalFrames - 1}`;
+                    render();
+                    loading = false;
+                };
+                img.onerror = () => { loading = false; };
+                img.src = url;
+            }, 1000 / fps);
         }
     }
 
@@ -764,6 +815,7 @@ const deid = (() => {
         renderSpotList();
         scheduleSave();
         render();
+        renderTimeline();
     }
 
     function updateSpotControls() {
@@ -798,6 +850,7 @@ const deid = (() => {
         spot.frame_end = parseInt(document.getElementById('frameEndInput').value) || 0;
         scheduleSave();
         render();
+        renderTimeline();
     }
 
     // ── Custom spot toggle ──
@@ -910,6 +963,262 @@ const deid = (() => {
             status.textContent = 'Error: ' + e.message;
             btn.disabled = false;
         }
+    }
+
+    // ── Timeline ──────────────────────────────────────────────────────────
+
+    function setupTimeline() {
+        if (!tlCanvas) return;
+        const ro = new ResizeObserver(() => renderTimeline());
+        ro.observe(tlCanvas.parentElement);
+
+        tlCanvas.addEventListener('mousedown', onTlMouseDown);
+        tlCanvas.addEventListener('mousemove', onTlMouseMove);
+        tlCanvas.addEventListener('mouseup', onTlMouseUp);
+        tlCanvas.addEventListener('mouseleave', onTlMouseUp);
+        tlCanvas.addEventListener('click', onTlClick);
+    }
+
+    function _tlLayout() {
+        // Returns layout metrics for timeline rendering
+        if (!trialMeta || !tlCanvas) return null;
+        const cw = tlCanvas.width;
+        const ch = tlCanvas.height;
+        const margin = 4;
+        const labelW = 50; // left label area
+        const barX = labelW;
+        const barW = cw - labelW - margin;
+        const start = trialMeta.start_frame;
+        const end = trialMeta.end_frame;
+        const range = end - start || 1;
+        return { cw, ch, margin, labelW, barX, barW, start, end, range };
+    }
+
+    function _frameToTlX(frame, layout) {
+        return layout.barX + ((frame - layout.start) / layout.range) * layout.barW;
+    }
+
+    function _tlXToFrame(x, layout) {
+        return Math.round(layout.start + ((x - layout.barX) / layout.barW) * layout.range);
+    }
+
+    function renderTimeline() {
+        if (!tlCtx || !tlCanvas || !trialMeta) return;
+
+        const container = tlCanvas.parentElement;
+        tlCanvas.width = container.clientWidth;
+        tlCanvas.height = container.clientHeight;
+        const L = _tlLayout();
+        if (!L) return;
+
+        tlCtx.clearRect(0, 0, L.cw, L.ch);
+
+        const rowH = 18;
+        const rowGap = 2;
+        let y = 4;
+
+        // ── Row 1: Face detection density ──
+        tlCtx.fillStyle = 'rgba(150,150,150,0.5)';
+        tlCtx.font = '10px sans-serif';
+        tlCtx.fillText('Faces', 2, y + 12);
+
+        if (faceDetections.length > 0) {
+            for (let i = 0; i < faceDetections.length; i++) {
+                const entry = faceDetections[i];
+                if (!entry || !entry.faces || entry.faces.length === 0) continue;
+                const frame = entry.frame != null ? entry.frame : (trialMeta.start_frame + i);
+                const x = _frameToTlX(frame, L);
+                const alpha = Math.min(0.9, 0.3 + entry.faces.length * 0.2);
+                tlCtx.fillStyle = `rgba(33,150,243,${alpha})`;
+                tlCtx.fillRect(x, y, Math.max(1, L.barW / L.range), rowH);
+            }
+        }
+        y += rowH + rowGap;
+
+        // ── Row 2: Hand coverage ──
+        if (handCoverage.length > 0) {
+            tlCtx.fillStyle = 'rgba(150,150,150,0.5)';
+            tlCtx.fillText('Hands', 2, y + 12);
+            tlCtx.fillStyle = 'rgba(76,175,80,0.5)';
+            const pw = Math.max(1, L.barW / L.range);
+            for (const f of handCoverage) {
+                const x = _frameToTlX(f, L);
+                tlCtx.fillRect(x, y, pw, rowH);
+            }
+            y += rowH + rowGap;
+        }
+
+        // ── Row 3+: Blur spot ranges ──
+        const sideLabel = _sideLabel();
+        const visibleSpots = blurSpots.filter(s => {
+            const ss = s.side || 'full';
+            return ss === 'full' || ss === sideLabel;
+        });
+
+        if (visibleSpots.length > 0) {
+            tlCtx.fillStyle = 'rgba(150,150,150,0.5)';
+            tlCtx.fillText('Blur', 2, y + 12);
+
+            for (const spot of visibleSpots) {
+                const x1 = _frameToTlX(spot.frame_start, L);
+                const x2 = _frameToTlX(spot.frame_end, L);
+                const w = Math.max(3, x2 - x1);
+
+                const isSelected = spot.id === selectedSpotId;
+                tlCtx.fillStyle = isSelected
+                    ? 'rgba(244,67,54,0.6)'
+                    : 'rgba(244,67,54,0.3)';
+                tlCtx.fillRect(x1, y, w, rowH - 2);
+
+                tlCtx.strokeStyle = isSelected
+                    ? 'rgba(244,67,54,0.9)'
+                    : 'rgba(244,67,54,0.5)';
+                tlCtx.lineWidth = isSelected ? 2 : 1;
+                tlCtx.strokeRect(x1, y, w, rowH - 2);
+
+                // Draw edge handles for selected spot
+                if (isSelected) {
+                    tlCtx.fillStyle = 'rgba(244,67,54,0.9)';
+                    tlCtx.fillRect(x1 - 2, y, 4, rowH - 2);
+                    tlCtx.fillRect(x2 - 2, y, 4, rowH - 2);
+                }
+
+                y += rowH;
+            }
+        }
+
+        // ── Current frame indicator ──
+        const cfx = _frameToTlX(currentFrame, L);
+        tlCtx.strokeStyle = '#fff';
+        tlCtx.lineWidth = 1;
+        tlCtx.beginPath();
+        tlCtx.moveTo(cfx, 0);
+        tlCtx.lineTo(cfx, L.ch);
+        tlCtx.stroke();
+    }
+
+    // ── Timeline mouse handlers ──
+
+    function _tlHitTest(e) {
+        // Returns { spot, edge } or null
+        const rect = tlCanvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        const L = _tlLayout();
+        if (!L) return null;
+
+        // Compute blur spot row Y positions (same logic as renderTimeline)
+        const rowH = 18, rowGap = 2;
+        let y = 4 + rowH + rowGap; // skip face row
+        if (handCoverage.length > 0) y += rowH + rowGap; // skip hand row
+
+        const sideLabel = _sideLabel();
+        const visibleSpots = blurSpots.filter(s => {
+            const ss = s.side || 'full';
+            return ss === 'full' || ss === sideLabel;
+        });
+
+        for (const spot of visibleSpots) {
+            const x1 = _frameToTlX(spot.frame_start, L);
+            const x2 = _frameToTlX(spot.frame_end, L);
+            const spotY = y;
+            y += rowH;
+
+            if (my >= spotY && my <= spotY + rowH - 2) {
+                if (Math.abs(mx - x1) < 6) return { spot, edge: 'start' };
+                if (Math.abs(mx - x2) < 6) return { spot, edge: 'end' };
+                if (mx > x1 + 6 && mx < x2 - 6) return { spot, edge: 'move' };
+            }
+        }
+        return null;
+    }
+
+    function onTlMouseDown(e) {
+        const hit = _tlHitTest(e);
+        if (!hit) return;
+        e.preventDefault();
+        tlDragSpot = hit.spot;
+        tlDragEdge = hit.edge;
+        tlDragStartX = e.clientX;
+        tlDragOrigRange = { start: hit.spot.frame_start, end: hit.spot.frame_end };
+
+        // Select this spot
+        selectedSpotId = hit.spot.id;
+        renderSpotList();
+        updateSpotControls();
+        renderTimeline();
+    }
+
+    function onTlMouseMove(e) {
+        if (tlDragSpot && tlDragEdge) {
+            const L = _tlLayout();
+            if (!L) return;
+            const dx = e.clientX - tlDragStartX;
+            const dFrames = Math.round((dx / L.barW) * L.range);
+
+            if (tlDragEdge === 'start') {
+                tlDragSpot.frame_start = Math.max(
+                    trialMeta.start_frame,
+                    Math.min(tlDragSpot.frame_end - 1, tlDragOrigRange.start + dFrames)
+                );
+            } else if (tlDragEdge === 'end') {
+                tlDragSpot.frame_end = Math.min(
+                    trialMeta.end_frame,
+                    Math.max(tlDragSpot.frame_start + 1, tlDragOrigRange.end + dFrames)
+                );
+            } else if (tlDragEdge === 'move') {
+                const len = tlDragOrigRange.end - tlDragOrigRange.start;
+                let newStart = tlDragOrigRange.start + dFrames;
+                newStart = Math.max(trialMeta.start_frame, Math.min(trialMeta.end_frame - len, newStart));
+                tlDragSpot.frame_start = newStart;
+                tlDragSpot.frame_end = newStart + len;
+            }
+
+            updateSpotControls();
+            render();
+            renderTimeline();
+            return;
+        }
+
+        // Hover cursor
+        const hit = _tlHitTest(e);
+        if (hit) {
+            tlCanvas.style.cursor = hit.edge === 'move' ? 'grab' : 'ew-resize';
+        } else {
+            tlCanvas.style.cursor = 'pointer';
+        }
+    }
+
+    function onTlMouseUp(e) {
+        if (tlDragSpot) {
+            scheduleSave();
+            tlDragSpot = null;
+            tlDragEdge = null;
+            tlDragStartX = null;
+            tlDragOrigRange = null;
+        }
+    }
+
+    function onTlClick(e) {
+        if (tlDragSpot) return; // was a drag, not click
+        const rect = tlCanvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const L = _tlLayout();
+        if (!L) return;
+
+        // Check if clicking a spot bar
+        const hit = _tlHitTest(e);
+        if (hit) {
+            selectedSpotId = hit.spot.id;
+            renderSpotList();
+            updateSpotControls();
+            renderTimeline();
+            return;
+        }
+
+        // Click empty area → seek to frame
+        const frame = Math.max(L.start, Math.min(L.end, _tlXToFrame(mx, L)));
+        seekFrame(frame);
     }
 
     // ── Public API ──
