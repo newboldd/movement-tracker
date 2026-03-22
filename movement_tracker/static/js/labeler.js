@@ -1706,6 +1706,48 @@ const labeler = (() => {
         }
     }
 
+    async function runPose() {
+        const statusEl = document.getElementById('mpPoseStatus');
+        const btn = document.getElementById('mpRunPoseBtn');
+        if (statusEl) statusEl.textContent = 'Running Pose Detection...';
+        if (btn) btn.disabled = true;
+
+        try {
+            const result = await API.post(`/api/labeling/sessions/${sessionId}/run-pose`);
+            const jobId = result.job_id;
+            if (!jobId) throw new Error('No job_id returned');
+
+            const evtSource = new EventSource(`/api/jobs/${jobId}/stream`);
+            evtSource.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.status === 'running') {
+                    const pct = data.progress_pct ? Math.round(data.progress_pct) : 0;
+                    if (statusEl) statusEl.textContent = `Running Pose Detection... ${pct}%`;
+                } else if (data.status === 'completed') {
+                    evtSource.close();
+                    if (statusEl) statusEl.textContent = 'Pose detection complete.';
+                    if (btn) btn.disabled = false;
+                } else if (data.status === 'failed') {
+                    evtSource.close();
+                    if (statusEl) statusEl.textContent = 'Error: ' + (data.error_msg || 'unknown');
+                    if (btn) btn.disabled = false;
+                } else if (data.status === 'cancelled') {
+                    evtSource.close();
+                    if (statusEl) statusEl.textContent = 'Cancelled.';
+                    if (btn) btn.disabled = false;
+                }
+            };
+            evtSource.onerror = () => {
+                evtSource.close();
+                if (statusEl) statusEl.textContent = 'Connection lost.';
+                if (btn) btn.disabled = false;
+            };
+        } catch (err) {
+            if (statusEl) statusEl.textContent = 'Error: ' + (err.message || err);
+            if (btn) btn.disabled = false;
+        }
+    }
+
     function drawPoint(imgX, imgY, color, letter) {
         const sx = imgX * scale + offsetX;
         const sy = imgY * scale + offsetY;
@@ -5138,7 +5180,7 @@ const labeler = (() => {
         // Video export
         getExportContext,
         // MediaPipe crop box
-        toggleMpCrop, saveMpCrop, cancelMpCrop, rerunMediapipe, clearMpHistory,
+        toggleMpCrop, saveMpCrop, cancelMpCrop, rerunMediapipe, clearMpHistory, runPose,
         // Refine flow (within corrections mode)
         startRefineFlow,
     };

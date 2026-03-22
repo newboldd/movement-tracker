@@ -1786,3 +1786,92 @@ def rerun_mediapipe(session_id: int, body: dict = Body(...)) -> dict:
     threading.Thread(target=_run, daemon=True).start()
 
     return {"status": "ok", "job_id": job_id, "trial_idx": trial_idx}
+
+
+@router.post("/sessions/{session_id}/run-pose")
+def run_pose(session_id: int) -> dict:
+    """Run MediaPipe Pose on all videos for a subject.
+
+    Creates a background job. Results saved to pose_prelabels.npz.
+    """
+    import threading
+    from ..services.jobs import registry
+    from ..services.mediapipe_prelabel import run_pose_prelabels
+
+    with get_db_ctx() as db:
+        session = db.execute(
+            "SELECT * FROM label_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not session:
+            raise HTTPException(404, "Session not found")
+        subj = db.execute(
+            "SELECT * FROM subjects WHERE id = ?", (session["subject_id"],)
+        ).fetchone()
+
+    subject_name = subj["name"]
+    subject_id = subj["id"]
+    settings = get_settings()
+
+    with get_db_ctx() as db:
+        log_dir = settings.dlc_path / ".logs"
+        log_dir.mkdir(exist_ok=True)
+        log_path = str(log_dir / f"job_pose_{subject_id}.log")
+
+        db.execute(
+            """INSERT INTO jobs (subject_id, job_type, status, log_path)
+               VALUES (?, 'pose', 'pending', ?)""",
+            (subject_id, log_path),
+        )
+        job = db.execute(
+            "SELECT * FROM jobs WHERE subject_id = ? ORDER BY id DESC LIMIT 1",
+            (subject_id,),
+        ).fetchone()
+
+    job_id = job["id"]
+    cancel_event = registry.register_cancel_event(job_id)
+
+    def _run():
+        try:
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (job_id,),
+                )
+
+            def progress_cb(pct):
+                if cancel_event.is_set():
+                    raise InterruptedError("Job cancelled")
+                with get_db_ctx() as db:
+                    db.execute(
+                        "UPDATE jobs SET progress_pct = ? WHERE id = ?",
+                        (pct, job_id),
+                    )
+
+            run_pose_prelabels(subject_name, progress_callback=progress_cb)
+
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'completed', progress_pct = 100,
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (job_id,),
+                )
+        except InterruptedError:
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'cancelled',
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (job_id,),
+                )
+        except Exception as e:
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'failed', error_msg = ?,
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (str(e), job_id),
+                )
+        finally:
+            registry.unregister_cancel_event(job_id)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+    return {"status": "ok", "job_id": job_id}

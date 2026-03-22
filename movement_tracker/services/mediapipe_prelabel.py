@@ -966,3 +966,144 @@ def compute_optimal_crop(subject_name: str) -> dict:
         crops[cam] = (x1, x2, y1, y2)
 
     return crops
+
+
+# ── MediaPipe Pose prelabeling ────────────────────────────────────────────
+
+# Pose landmark indices (33 total)
+POSE_N_LANDMARKS = 33
+POSE_NAMES = [
+    'nose', 'left_eye_inner', 'left_eye', 'left_eye_outer',
+    'right_eye_inner', 'right_eye', 'right_eye_outer',
+    'left_ear', 'right_ear', 'mouth_left', 'mouth_right',
+    'left_shoulder', 'right_shoulder', 'left_elbow', 'right_elbow',
+    'left_wrist', 'right_wrist', 'left_pinky', 'right_pinky',
+    'left_index', 'right_index', 'left_thumb', 'right_thumb',
+    'left_hip', 'right_hip', 'left_knee', 'right_knee',
+    'left_ankle', 'right_ankle', 'left_heel', 'right_heel',
+    'left_foot_index', 'right_foot_index',
+]
+
+
+def run_pose_prelabels(subject_name: str, progress_callback=None) -> Path:
+    """Run MediaPipe Pose on all videos for a subject.
+
+    Stores results in dlc/{subject}/pose_prelabels.npz with arrays:
+        OS_pose: (total_frames, 33, 2)  — per-camera pose landmarks
+        OD_pose: (total_frames, 33, 2)
+        pose_confidence_OS: (total_frames, 33)
+        pose_confidence_OD: (total_frames, 33)
+    """
+    import mediapipe as mp_lib
+
+    settings = get_settings()
+    videos = get_subject_videos(subject_name)
+    if not videos:
+        raise ValueError(f"No videos found for subject {subject_name}")
+
+    trials = build_trial_map(subject_name)
+    total_frames = trials[-1]["end_frame"] + 1 if trials else 0
+
+    OS_pose = np.full((total_frames, POSE_N_LANDMARKS, 2), np.nan)
+    OD_pose = np.full((total_frames, POSE_N_LANDMARKS, 2), np.nan)
+    conf_OS = np.full((total_frames, POSE_N_LANDMARKS), np.nan)
+    conf_OD = np.full((total_frames, POSE_N_LANDMARKS), np.nan)
+
+    pose_det = mp_lib.solutions.pose.Pose(
+        static_image_mode=False,
+        model_complexity=1,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5,
+    )
+
+    processed = 0
+    for trial in trials:
+        video_path = trial["video_path"]
+        cap = cv2.VideoCapture(video_path)
+        fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        is_stereo = (fw / fh) > 1.7 if fh > 0 else False
+        half_w = fw // 2 if is_stereo else fw
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+        for local_frame in range(trial["frame_count"]):
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            global_frame = trial["start_frame"] + local_frame
+            if global_frame >= total_frames:
+                break
+
+            frame = np.ascontiguousarray(frame, dtype=np.uint8)
+
+            if is_stereo:
+                left = frame[:, :half_w, :]
+                right = frame[:, half_w:, :]
+
+                rgb_l = cv2.cvtColor(left, cv2.COLOR_BGR2RGB)
+                res_l = pose_det.process(rgb_l)
+                if res_l.pose_landmarks:
+                    for j, lm in enumerate(res_l.pose_landmarks.landmark):
+                        OS_pose[global_frame, j] = [lm.x * half_w, lm.y * fh]
+                        conf_OS[global_frame, j] = lm.visibility
+
+                rgb_r = cv2.cvtColor(right, cv2.COLOR_BGR2RGB)
+                res_r = pose_det.process(rgb_r)
+                if res_r.pose_landmarks:
+                    for j, lm in enumerate(res_r.pose_landmarks.landmark):
+                        OD_pose[global_frame, j] = [lm.x * (fw - half_w), lm.y * fh]
+                        conf_OD[global_frame, j] = lm.visibility
+            else:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                res = pose_det.process(rgb)
+                if res.pose_landmarks:
+                    for j, lm in enumerate(res.pose_landmarks.landmark):
+                        OS_pose[global_frame, j] = [lm.x * fw, lm.y * fh]
+                        conf_OS[global_frame, j] = lm.visibility
+
+            processed += 1
+            if progress_callback and processed % 10 == 0:
+                progress_callback(processed / total_frames * 100)
+
+        cap.release()
+
+    pose_det.close()
+
+    # Save
+    npz_path = settings.dlc_path / subject_name / "pose_prelabels.npz"
+    npz_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        str(npz_path),
+        OS_pose=OS_pose,
+        OD_pose=OD_pose,
+        pose_confidence_OS=conf_OS,
+        pose_confidence_OD=conf_OD,
+        total_frames=np.array(total_frames),
+    )
+
+    valid = np.sum(~np.isnan(OS_pose[:, 0, 0]))
+    logger.info(f"Pose prelabels saved: {npz_path} ({valid}/{total_frames} frames with data)")
+
+    if progress_callback:
+        progress_callback(100)
+
+    return npz_path
+
+
+def load_pose_prelabels(subject_name: str) -> dict | None:
+    """Load saved pose prelabels for a subject. Returns None if not available."""
+    settings = get_settings()
+    npz_path = settings.dlc_path / subject_name / "pose_prelabels.npz"
+    if not npz_path.exists():
+        return None
+
+    data = np.load(str(npz_path))
+    return {
+        "OS_pose": data["OS_pose"],
+        "OD_pose": data["OD_pose"],
+        "pose_confidence_OS": data["pose_confidence_OS"],
+        "pose_confidence_OD": data["pose_confidence_OD"],
+        "total_frames": int(data["total_frames"]),
+    }

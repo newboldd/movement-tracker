@@ -576,14 +576,15 @@ const deid = (() => {
             }
         }
 
-        // Draw hand landmarks (green dots) — controlled by checkbox
+        // Draw landmarks — green for hand, orange for pose
         if (handOverlayEnabled && visibleLandmarks.length > 0) {
-            ctx.fillStyle = 'rgba(76,175,80,0.7)';
             for (const lm of visibleLandmarks) {
                 const sx = offsetX + lm.x * scale;
                 const sy = offsetY + lm.y * scale;
+                ctx.fillStyle = lm.type === 'pose'
+                    ? 'rgba(255,152,0,0.7)' : 'rgba(76,175,80,0.7)';
                 ctx.beginPath();
-                ctx.arc(sx, sy, 3, 0, Math.PI * 2);
+                ctx.arc(sx, sy, lm.type === 'pose' ? 4 : 3, 0, Math.PI * 2);
                 ctx.fill();
             }
         }

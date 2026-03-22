@@ -257,63 +257,88 @@ def get_hand_landmarks_bulk(subject_id: int, trial_idx: int = Query(...)) -> dic
     Uses stored npz data (fast), not live detection.
     """
     import numpy as np
-    from ..services.mediapipe_prelabel import load_mediapipe_prelabels, THUMB_TIP, INDEX_TIP
+    from ..services.mediapipe_prelabel import load_mediapipe_prelabels, load_pose_prelabels
 
     with get_db_ctx() as db:
         subj = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
         if not subj:
             raise HTTPException(404, "Subject not found")
 
-    data = load_mediapipe_prelabels(subj["name"])
-    if data is None:
-        return {"landmarks": {}}
+    hand_data = load_mediapipe_prelabels(subj["name"])
+    pose_data = load_pose_prelabels(subj["name"])
+
+    if hand_data is None and pose_data is None:
+        return {"landmarks": {}, "has_pose": False}
 
     camera_mode = subj.get("camera_mode") or "stereo"
     trials = build_trial_map(subj["name"], camera_mode=camera_mode)
     if trial_idx < 0 or trial_idx >= len(trials):
-        return {"landmarks": {}}
+        return {"landmarks": {}, "has_pose": pose_data is not None}
 
     trial = trials[trial_idx]
     start = trial["start_frame"]
     end = trial["end_frame"]
     is_stereo = camera_mode == "stereo"
 
-    os_lm = data["OS_landmarks"]
-    od_lm = data["OD_landmarks"]
-    settings = get_settings()
-
-    # Determine frame dimensions for coordinate conversion
-    cap = cv2.VideoCapture(trial["video_path"])
-    fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    cap.release()
-    half_w = fw // 2 if is_stereo else fw
-
     result = {}
-    for f in range(start, min(end + 1, len(os_lm))):
-        pts = []
-        # OS landmarks (all 21 keypoints)
-        if not np.all(np.isnan(os_lm[f])):
-            for j in range(os_lm.shape[1]):
-                if not np.isnan(os_lm[f, j, 0]):
-                    pts.append({
-                        "x": round(float(os_lm[f, j, 0]), 1),
-                        "y": round(float(os_lm[f, j, 1]), 1),
-                        "side": "left" if is_stereo else "full",
-                    })
-        # OD landmarks
-        if not np.all(np.isnan(od_lm[f])):
-            for j in range(od_lm.shape[1]):
-                if not np.isnan(od_lm[f, j, 0]):
-                    pts.append({
-                        "x": round(float(od_lm[f, j, 0]), 1),
-                        "y": round(float(od_lm[f, j, 1]), 1),
-                        "side": "right" if is_stereo else "full",
-                    })
-        if pts:
-            result[str(f)] = pts
 
-    return {"landmarks": result}
+    # Hand landmarks (21 keypoints per hand)
+    if hand_data:
+        os_lm = hand_data["OS_landmarks"]
+        od_lm = hand_data["OD_landmarks"]
+        for f in range(start, min(end + 1, len(os_lm))):
+            pts = result.get(str(f), [])
+            if not np.all(np.isnan(os_lm[f])):
+                for j in range(os_lm.shape[1]):
+                    if not np.isnan(os_lm[f, j, 0]):
+                        pts.append({
+                            "x": round(float(os_lm[f, j, 0]), 1),
+                            "y": round(float(os_lm[f, j, 1]), 1),
+                            "side": "left" if is_stereo else "full",
+                            "type": "hand",
+                        })
+            if not np.all(np.isnan(od_lm[f])):
+                for j in range(od_lm.shape[1]):
+                    if not np.isnan(od_lm[f, j, 0]):
+                        pts.append({
+                            "x": round(float(od_lm[f, j, 0]), 1),
+                            "y": round(float(od_lm[f, j, 1]), 1),
+                            "side": "right" if is_stereo else "full",
+                            "type": "hand",
+                        })
+            if pts:
+                result[str(f)] = pts
+
+    # Pose landmarks (wrist, elbow, shoulder — indices 11-22 for upper body)
+    # These extend hand protection down the forearm
+    POSE_UPPER_BODY = list(range(11, 23))  # shoulders through thumbs
+    if pose_data:
+        os_pose = pose_data["OS_pose"]
+        od_pose = pose_data["OD_pose"]
+        for f in range(start, min(end + 1, len(os_pose))):
+            pts = result.get(str(f), [])
+            if not np.all(np.isnan(os_pose[f])):
+                for j in POSE_UPPER_BODY:
+                    if j < os_pose.shape[1] and not np.isnan(os_pose[f, j, 0]):
+                        pts.append({
+                            "x": round(float(os_pose[f, j, 0]), 1),
+                            "y": round(float(os_pose[f, j, 1]), 1),
+                            "side": "left" if is_stereo else "full",
+                            "type": "pose",
+                        })
+            if not np.all(np.isnan(od_pose[f])):
+                for j in POSE_UPPER_BODY:
+                    if j < od_pose.shape[1] and not np.isnan(od_pose[f, j, 0]):
+                        pts.append({
+                            "x": round(float(od_pose[f, j, 0]), 1),
+                            "y": round(float(od_pose[f, j, 1]), 1),
+                            "side": "right" if is_stereo else "full",
+                            "type": "pose",
+                        })
+            if pts:
+                result[str(f)] = pts
+
+    return {"landmarks": result, "has_pose": pose_data is not None}
 
 
 # ── Hand detection (single frame) ─────────────────────────────────────────
