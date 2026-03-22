@@ -454,6 +454,29 @@ def _migrate_add_mp_crop_boxes(conn):
         logger.info("Created mp_crop_boxes table")
 
 
+def _migrate_add_face_detections(conn):
+    """Create face_detections table if missing."""
+    tables = [r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()]
+    if "face_detections" not in tables:
+        conn.execute("""
+            CREATE TABLE face_detections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject_id INTEGER NOT NULL REFERENCES subjects(id),
+                trial_idx INTEGER NOT NULL,
+                frame_num INTEGER NOT NULL,
+                x1 REAL NOT NULL,
+                y1 REAL NOT NULL,
+                x2 REAL NOT NULL,
+                y2 REAL NOT NULL,
+                confidence REAL DEFAULT 1.0
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_face_detections ON face_detections(subject_id, trial_idx)")
+        logger.info("Created face_detections table")
+
+
 def init_db():
     """Create tables if they don't exist, run migrations."""
     conn = get_db()
