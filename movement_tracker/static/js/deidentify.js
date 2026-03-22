@@ -616,21 +616,23 @@ const deid = (() => {
     }
 
     function togglePlay() {
-        playing = !playing;
-        const btn = document.getElementById('playBtn');
         if (playing) {
-            btn.innerHTML = '&#9646;&#9646;';
+            // Stop
+            playing = false;
+            if (playTimer) { clearInterval(playTimer); playTimer = null; }
+            document.getElementById('playBtn').textContent = '\u25B6';
+        } else {
+            // Start
+            playing = true;
+            document.getElementById('playBtn').textContent = '\u23F8';
             const interval = 1000 / fps;
             playTimer = setInterval(() => {
                 if (currentFrame >= (trialMeta ? trialMeta.end_frame : 0)) {
                     togglePlay();
                     return;
                 }
-                seekFrame(currentFrame + 1);
+                loadFrame(currentFrame + 1);
             }, interval);
-        } else {
-            btn.innerHTML = '&#9654;';
-            if (playTimer) { clearInterval(playTimer); playTimer = null; }
         }
     }
 

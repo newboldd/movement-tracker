@@ -455,7 +455,7 @@ def _migrate_add_mp_crop_boxes(conn):
 
 
 def _migrate_add_face_detections(conn):
-    """Create face_detections table if missing."""
+    """Create face_detections table if missing, add side column if needed."""
     tables = [r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     ).fetchall()]
@@ -470,11 +470,18 @@ def _migrate_add_face_detections(conn):
                 y1 REAL NOT NULL,
                 x2 REAL NOT NULL,
                 y2 REAL NOT NULL,
-                confidence REAL DEFAULT 1.0
+                confidence REAL DEFAULT 1.0,
+                side TEXT DEFAULT 'full'
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_face_detections ON face_detections(subject_id, trial_idx)")
         logger.info("Created face_detections table")
+    else:
+        # Add side column if missing (migration for existing tables)
+        columns = _get_table_columns(conn, "face_detections")
+        if "side" not in columns:
+            conn.execute("ALTER TABLE face_detections ADD COLUMN side TEXT DEFAULT 'full'")
+            logger.info("Added side column to face_detections table")
 
 
 def init_db():

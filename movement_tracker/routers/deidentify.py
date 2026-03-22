@@ -168,11 +168,11 @@ def detect_faces(subject_id: int, body: dict = Body(...)) -> dict:
             for f in entry.get("faces", []):
                 db.execute(
                     """INSERT INTO face_detections
-                       (subject_id, trial_idx, frame_num, x1, y1, x2, y2, confidence)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (subject_id, trial_idx, frame_num, x1, y1, x2, y2, confidence, side)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (subject_id, trial_idx, frame_num,
                      float(f["x1"]), float(f["y1"]), float(f["x2"]), float(f["y2"]),
-                     float(f.get("confidence", 1.0))),
+                     float(f.get("confidence", 1.0)), f.get("side", "full")),
                 )
 
     return result
@@ -185,7 +185,7 @@ def get_face_detections(subject_id: int, trial_idx: int = Query(...)) -> dict:
     """Get saved face detections from DB."""
     with get_db_ctx() as db:
         rows = db.execute(
-            "SELECT frame_num, x1, y1, x2, y2, confidence FROM face_detections "
+            "SELECT frame_num, x1, y1, x2, y2, confidence, side FROM face_detections "
             "WHERE subject_id = ? AND trial_idx = ? ORDER BY frame_num",
             (subject_id, trial_idx),
         ).fetchall()
@@ -198,7 +198,7 @@ def get_face_detections(subject_id: int, trial_idx: int = Query(...)) -> dict:
             by_frame[fn] = []
         by_frame[fn].append({
             "x1": r["x1"], "y1": r["y1"], "x2": r["x2"], "y2": r["y2"],
-            "confidence": r["confidence"],
+            "confidence": r["confidence"], "side": r.get("side", "full"),
         })
 
     faces = []
