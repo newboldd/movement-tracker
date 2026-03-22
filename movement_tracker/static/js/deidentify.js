@@ -426,36 +426,71 @@ const deid = (() => {
             }
         }
 
-        // Draw blur spots — blue for face spots, red for custom — filtered by side
+        // Compute hand protection circles (used for subtraction and display)
         const curSideLabel = _sideLabel();
+        const visibleLandmarks = handLandmarks.filter(lm =>
+            (lm.side || 'full') === curSideLabel || (lm.side || 'full') === 'full'
+        );
+        const handProtectActive = handMaskEnabled && handOverlayEnabled
+            && visibleLandmarks.length > 0
+            && currentFrame >= handProtectStart && currentFrame <= handProtectEnd;
+
+        // Draw blur spots with hand protection subtracted via offscreen canvas
         for (const spot of blurSpots) {
             if (currentFrame < spot.frame_start || currentFrame > spot.frame_end) continue;
             const spotSide = spot.side || 'full';
             if (spotSide !== 'full' && spotSide !== curSideLabel) continue;
 
-            // Get position (face spots track detection centroids)
             const pos = _getSpotPosition(spot);
             const sx = offsetX + pos.x * scale;
             const sy = offsetY + pos.y * scale;
-
             const isFace = spot.spot_type === 'face';
             const isSelected = spot.id === selectedSpotId;
-
-            // Use width/height if set, otherwise fall back to radius for both
             const sw = (spot.width || spot.radius * 2) * scale / 2;
             const sh = (spot.height || spot.radius * 2) * scale / 2;
 
-            // Blue for face spots (matches detection boxes), red for custom
             const cr = isFace ? 33 : 244;
             const cg = isFace ? 150 : 67;
             const cb = isFace ? 243 : 54;
+            const fillAlpha = isSelected ? 0.35 : 0.2;
 
+            if (handProtectActive) {
+                // Offscreen canvas: draw blur ellipse, then punch out hand circles
+                const offCanvas = document.createElement('canvas');
+                offCanvas.width = cw;
+                offCanvas.height = ch;
+                const off = offCanvas.getContext('2d');
+
+                // Draw the blur ellipse fill
+                off.fillStyle = `rgba(${cr},${cg},${cb},${fillAlpha})`;
+                off.beginPath();
+                off.ellipse(sx, sy, sw, sh, 0, 0, Math.PI * 2);
+                off.fill();
+
+                // Subtract hand protection circles
+                off.globalCompositeOperation = 'destination-out';
+                const hr = handMaskRadius * scale;
+                for (const lm of visibleLandmarks) {
+                    const lx = offsetX + lm.x * scale;
+                    const ly = offsetY + lm.y * scale;
+                    off.beginPath();
+                    off.arc(lx, ly, hr, 0, Math.PI * 2);
+                    off.fill();
+                }
+
+                // Composite result onto main canvas
+                ctx.drawImage(offCanvas, 0, 0);
+            } else {
+                // Simple fill (no hand subtraction)
+                ctx.beginPath();
+                ctx.ellipse(sx, sy, sw, sh, 0, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(${cr},${cg},${cb},${fillAlpha})`;
+                ctx.fill();
+            }
+
+            // Always draw the outline
             ctx.beginPath();
             ctx.ellipse(sx, sy, sw, sh, 0, 0, Math.PI * 2);
-            ctx.fillStyle = isSelected
-                ? `rgba(${cr},${cg},${cb},0.35)`
-                : `rgba(${cr},${cg},${cb},0.2)`;
-            ctx.fill();
             ctx.strokeStyle = isSelected
                 ? `rgba(${cr},${cg},${cb},0.9)`
                 : `rgba(${cr},${cg},${cb},0.5)`;
@@ -463,11 +498,7 @@ const deid = (() => {
             ctx.stroke();
         }
 
-        // Draw hand landmarks (green dots) — filtered by current side
-        const sideLabel = _sideLabel();
-        const visibleLandmarks = handLandmarks.filter(lm =>
-            (lm.side || 'full') === sideLabel || (lm.side || 'full') === 'full'
-        );
+        // Draw hand landmarks (green dots)
         if (handOverlayEnabled && visibleLandmarks.length > 0) {
             ctx.fillStyle = 'rgba(76,175,80,0.7)';
             for (const lm of visibleLandmarks) {
@@ -478,16 +509,17 @@ const deid = (() => {
                 ctx.fill();
             }
 
-            // Draw hand mask radius preview
+            // Draw hand protection radius circles (dashed outlines)
             if (handMaskEnabled) {
                 ctx.strokeStyle = 'rgba(76,175,80,0.3)';
                 ctx.lineWidth = 1;
                 ctx.setLineDash([4, 4]);
+                const hr = handMaskRadius * scale;
                 for (const lm of visibleLandmarks) {
                     const sx = offsetX + lm.x * scale;
                     const sy = offsetY + lm.y * scale;
                     ctx.beginPath();
-                    ctx.arc(sx, sy, handMaskRadius * scale * 0.3, 0, Math.PI * 2);
+                    ctx.arc(sx, sy, hr, 0, Math.PI * 2);
                     ctx.stroke();
                 }
                 ctx.setLineDash([]);
