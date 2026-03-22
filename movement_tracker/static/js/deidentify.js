@@ -484,46 +484,17 @@ const deid = (() => {
                 off.fill();
             }
 
-            // Subtract hand protection from ALL blur fills using morphological close
+            // Subtract hand protection from ALL blur fills
             if (handProtectActive) {
-                const hr = activeProtectRadius * scale;
-                const sm = handSmooth * scale;
+                const hr = (activeProtectRadius + handSmooth) * scale;
 
-                // Build smoothed hand mask on a temp canvas
-                const maskCanvas = document.createElement('canvas');
-                maskCanvas.width = cw;
-                maskCanvas.height = ch;
-                const mask = maskCanvas.getContext('2d');
-
-                // Step 1: Dilate — draw circles at r + smooth
-                mask.fillStyle = '#fff';
-                for (const lm of visibleLandmarks) {
-                    mask.beginPath();
-                    mask.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr + sm, 0, Math.PI * 2);
-                    mask.fill();
-                }
-
-                // Step 2: Erode — keep only pixels also covered by r circles
-                if (sm > 0) {
-                    const erodeCanvas = document.createElement('canvas');
-                    erodeCanvas.width = cw;
-                    erodeCanvas.height = ch;
-                    const erode = erodeCanvas.getContext('2d');
-                    erode.fillStyle = '#fff';
-                    for (const lm of visibleLandmarks) {
-                        erode.beginPath();
-                        erode.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr, 0, Math.PI * 2);
-                        erode.fill();
-                    }
-                    // Intersect: keep only pixels in both dilated and original
-                    mask.globalCompositeOperation = 'destination-in';
-                    mask.drawImage(erodeCanvas, 0, 0);
-                    mask.globalCompositeOperation = 'source-over';
-                }
-
-                // Use the smoothed mask to erase blur fill
                 off.globalCompositeOperation = 'destination-out';
-                off.drawImage(maskCanvas, 0, 0);
+                off.fillStyle = 'rgba(0,0,0,1)';
+                for (const lm of visibleLandmarks) {
+                    off.beginPath();
+                    off.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr, 0, Math.PI * 2);
+                    off.fill();
+                }
                 off.globalCompositeOperation = 'source-over';
             }
 
@@ -572,72 +543,35 @@ const deid = (() => {
 
         // Draw hand protection union outline (smoothed, no fill)
         if (handProtectActive) {
-            const hr = activeProtectRadius * scale;
-            const sm = handSmooth * scale;
+            const hr = (activeProtectRadius + handSmooth) * scale;
 
-            // Build smoothed shape (same dilate+erode as blur subtraction)
-            const shapeCanvas = document.createElement('canvas');
-            shapeCanvas.width = cw;
-            shapeCanvas.height = ch;
-            const sc = shapeCanvas.getContext('2d');
+            const hOff = document.createElement('canvas');
+            hOff.width = cw;
+            hOff.height = ch;
+            const hCtx = hOff.getContext('2d');
 
-            sc.fillStyle = '#fff';
+            // Fill all circles
+            hCtx.fillStyle = '#fff';
             for (const lm of visibleLandmarks) {
-                sc.beginPath();
-                sc.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr + sm, 0, Math.PI * 2);
-                sc.fill();
-            }
-            if (sm > 0) {
-                const erCanvas = document.createElement('canvas');
-                erCanvas.width = cw;
-                erCanvas.height = ch;
-                const er = erCanvas.getContext('2d');
-                er.fillStyle = '#fff';
-                for (const lm of visibleLandmarks) {
-                    er.beginPath();
-                    er.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr, 0, Math.PI * 2);
-                    er.fill();
-                }
-                sc.globalCompositeOperation = 'destination-in';
-                sc.drawImage(erCanvas, 0, 0);
-                sc.globalCompositeOperation = 'source-over';
+                hCtx.beginPath();
+                hCtx.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr, 0, Math.PI * 2);
+                hCtx.fill();
             }
 
-            // Extract outline: erode inward by 2px
-            sc.globalCompositeOperation = 'destination-out';
-            const innerCanvas = document.createElement('canvas');
-            innerCanvas.width = cw;
-            innerCanvas.height = ch;
-            const ic = innerCanvas.getContext('2d');
-            ic.fillStyle = '#fff';
+            // Erase interior to leave 2px border
+            hCtx.globalCompositeOperation = 'destination-out';
             for (const lm of visibleLandmarks) {
-                ic.beginPath();
-                ic.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr + sm - 2, 0, Math.PI * 2);
-                ic.fill();
+                hCtx.beginPath();
+                hCtx.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr - 2, 0, Math.PI * 2);
+                hCtx.fill();
             }
-            if (sm > 0) {
-                const er2 = document.createElement('canvas');
-                er2.width = cw;
-                er2.height = ch;
-                const er2c = er2.getContext('2d');
-                er2c.fillStyle = '#fff';
-                for (const lm of visibleLandmarks) {
-                    er2c.beginPath();
-                    er2c.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, hr - 2, 0, Math.PI * 2);
-                    er2c.fill();
-                }
-                ic.globalCompositeOperation = 'destination-in';
-                ic.drawImage(er2, 0, 0);
-            }
-            sc.drawImage(innerCanvas, 0, 0);
-            sc.globalCompositeOperation = 'source-over';
 
             // Tint green
-            sc.globalCompositeOperation = 'source-in';
-            sc.fillStyle = 'rgba(76,175,80,0.8)';
-            sc.fillRect(0, 0, cw, ch);
+            hCtx.globalCompositeOperation = 'source-in';
+            hCtx.fillStyle = 'rgba(76,175,80,0.8)';
+            hCtx.fillRect(0, 0, cw, ch);
 
-            ctx.drawImage(shapeCanvas, 0, 0);
+            ctx.drawImage(hOff, 0, 0);
         }
 
         // "Adding custom" cursor indicator
@@ -1379,11 +1313,20 @@ const deid = (() => {
 
     // ── Timeline mouse handlers ──
 
-    function _tlHitTest(e) {
-        // Returns { type: 'spot'|'hand', spot?, edge: 'start'|'end'|'move' } or null
+    // Convert mouse event to canvas-space coordinates (handles CSS vs buffer size mismatch)
+    function _tlMouseToCanvas(e) {
         const rect = tlCanvas.getBoundingClientRect();
-        const mx = e.clientX - rect.left;
-        const my = e.clientY - rect.top;
+        const scaleX = tlCanvas.width / rect.width;
+        const scaleY = tlCanvas.height / rect.height;
+        return {
+            x: (e.clientX - rect.left) * scaleX,
+            y: (e.clientY - rect.top) * scaleY,
+        };
+    }
+
+    function _tlHitTest(e) {
+        // Returns { type: 'spot'|'hand'|'hand_empty', spot?, seg?, edge } or null
+        const { x: mx, y: my } = _tlMouseToCanvas(e);
         const L = _tlLayout();
         if (!L) return null;
 
@@ -1463,8 +1406,7 @@ const deid = (() => {
             // Start creating a new segment by dragging
             const L = _tlLayout();
             if (!L) return;
-            const rect = tlCanvas.getBoundingClientRect();
-            const mx = e.clientX - rect.left;
+            const { x: mx } = _tlMouseToCanvas(e);
             tlDragCreateFrame = _tlXToFrame(mx, L);
             tlDragSpot = 'newhand';
             tlDragEdge = 'create';
@@ -1484,8 +1426,7 @@ const deid = (() => {
             if (tlDragSpot === 'newhand') {
                 const L2 = _tlLayout();
                 if (!L2) return;
-                const rect = tlCanvas.getBoundingClientRect();
-                const mx = e.clientX - rect.left;
+                const { x: mx } = _tlMouseToCanvas(e);
                 const endFrame = _tlXToFrame(mx, L2);
                 // Show preview by temporarily adding a segment
                 const existing = handProtectSegments.find(s => s.id === -1);
@@ -1585,8 +1526,7 @@ const deid = (() => {
 
     function onTlClick(e) {
         if (tlDragSpot) return; // was a drag, not click
-        const rect = tlCanvas.getBoundingClientRect();
-        const mx = e.clientX - rect.left;
+        const { x: mx } = _tlMouseToCanvas(e);
         const L = _tlLayout();
         if (!L) return;
 
