@@ -50,9 +50,9 @@ def get_trials(subject_id: int) -> dict:
         # Check if deidentified version exists
         cam = t.get("camera_name")
         if cam:
-            deident_name = f"{subj['name']}_{t['trial_name']}_{cam}.mp4"
+            deident_name = f"{t['trial_name']}_{cam}.mp4"
         else:
-            deident_name = f"{subj['name']}_{t['trial_name']}.mp4"
+            deident_name = f"{t['trial_name']}.mp4"
         has_blurred = (deident_dir / deident_name).exists()
 
         entry = {
@@ -598,9 +598,9 @@ def render_deidentified(subject_id: int) -> dict:
                 trial = trials[trial_i]
                 cam = trial.get("camera_name")
                 if cam:
-                    output_name = f"{subject_name}_{trial['trial_name']}_{cam}.mp4"
+                    output_name = f"{trial['trial_name']}_{cam}.mp4"
                 else:
-                    output_name = f"{subject_name}_{trial['trial_name']}.mp4"
+                    output_name = f"{trial['trial_name']}.mp4"
                 output_path = str(deident_dir / output_name)
 
                 base_pct = ti_idx * (100.0 / max(n_trials, 1))
