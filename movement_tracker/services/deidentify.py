@@ -829,12 +829,13 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
         if 0 <= x < w and 0 <= y < h:
             cv2.circle(mask, (x, y), radius, 255, -1)
 
-    # Apply morphological close (dilate + erode) for smooth parameter — hand circles only
+    # Apply blur + threshold for smooth (matches frontend canvas behavior)
     if smooth > 0:
         k = 2 * smooth + 1
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
-        mask = cv2.dilate(mask, kernel)
-        mask = cv2.erode(mask, kernel)
+        if k % 2 == 0:
+            k += 1
+        mask = cv2.GaussianBlur(mask, (k, k), 0)
+        mask = (mask > 30).astype(np.uint8) * 255
 
     # Add forearm triangle: pinky MCP (joint 17) → elbow → thumb CMC (joint 1)
     pinky_mcp = next((lm for lm in hand_lms if lm.get("joint") == 17), None)
@@ -875,12 +876,13 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
         cv2.line(mask, (int(pinky_mcp["x"]), int(pinky_mcp["y"])),
                  (int(ext_x), int(ext_y)), 255, forearm_radius * 2)
 
-    # Apply second morphological close after adding forearm
+    # Apply second blur + threshold after adding forearm (matches frontend)
     if smooth2 > 0:
         k2 = 2 * smooth2 + 1
-        kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k2, k2))
-        mask = cv2.dilate(mask, kernel2)
-        mask = cv2.erode(mask, kernel2)
+        if k2 % 2 == 0:
+            k2 += 1
+        mask = cv2.GaussianBlur(mask, (k2, k2), 0)
+        mask = (mask > 30).astype(np.uint8) * 255
 
     return mask > 0
 
