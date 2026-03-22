@@ -509,23 +509,53 @@ const deid = (() => {
                 ctx.fill();
             }
 
-            // Draw union outline of all hand protection circles
+            // Draw merged hand protection region with clean union outline
             if (handMaskEnabled) {
                 const hr = handMaskRadius * scale;
-                // Build union shape: single path with all circles
-                ctx.beginPath();
+                // Offscreen canvas to build the union shape
+                const hOff = document.createElement('canvas');
+                hOff.width = cw;
+                hOff.height = ch;
+                const hCtx = hOff.getContext('2d');
+
+                // Fill all circles as a solid white shape
+                hCtx.fillStyle = '#fff';
                 for (const lm of visibleLandmarks) {
                     const lx = offsetX + lm.x * scale;
                     const ly = offsetY + lm.y * scale;
-                    ctx.moveTo(lx + hr, ly);
-                    ctx.arc(lx, ly, hr, 0, Math.PI * 2);
+                    hCtx.beginPath();
+                    hCtx.arc(lx, ly, hr, 0, Math.PI * 2);
+                    hCtx.fill();
                 }
-                // Fill with semi-transparent green, strong outline
-                ctx.fillStyle = 'rgba(76,175,80,0.08)';
-                ctx.fill();
-                ctx.strokeStyle = 'rgba(76,175,80,0.7)';
-                ctx.lineWidth = 2;
-                ctx.stroke();
+
+                // Shrink the shape inward to extract the outline:
+                // erase interior, leaving just the border pixels
+                hCtx.globalCompositeOperation = 'destination-out';
+                for (const lm of visibleLandmarks) {
+                    const lx = offsetX + lm.x * scale;
+                    const ly = offsetY + lm.y * scale;
+                    hCtx.beginPath();
+                    hCtx.arc(lx, ly, hr - 2, 0, Math.PI * 2);
+                    hCtx.fill();
+                }
+
+                // Tint the remaining outline green
+                hCtx.globalCompositeOperation = 'source-in';
+                hCtx.fillStyle = 'rgba(76,175,80,0.8)';
+                hCtx.fillRect(0, 0, cw, ch);
+
+                // Composite onto main canvas
+                ctx.drawImage(hOff, 0, 0);
+
+                // Also draw a subtle fill on the main canvas
+                ctx.fillStyle = 'rgba(76,175,80,0.06)';
+                for (const lm of visibleLandmarks) {
+                    const lx = offsetX + lm.x * scale;
+                    const ly = offsetY + lm.y * scale;
+                    ctx.beginPath();
+                    ctx.arc(lx, ly, hr, 0, Math.PI * 2);
+                    ctx.fill();
+                }
             }
         }
 
