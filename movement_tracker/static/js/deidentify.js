@@ -395,7 +395,7 @@ const deid = (() => {
             }
         }
 
-        // Draw blur spots (red semi-transparent circles) — filtered by current side
+        // Draw blur spots — blue for face spots, red for custom — filtered by side
         const curSideLabel = _sideLabel();
         for (const spot of blurSpots) {
             if (currentFrame < spot.frame_start || currentFrame > spot.frame_end) continue;
@@ -404,17 +404,24 @@ const deid = (() => {
             const sx = offsetX + spot.x * scale;
             const sy = offsetY + spot.y * scale;
             const sr = spot.radius * scale;
+            const isFace = spot.spot_type === 'face';
+            const isSelected = spot.id === selectedSpotId;
+
+            // Blue for face spots (matches detection boxes), red for custom
+            const r = isFace ? 33 : 244;
+            const g = isFace ? 150 : 67;
+            const b = isFace ? 243 : 54;
 
             ctx.beginPath();
             ctx.arc(sx, sy, sr, 0, Math.PI * 2);
-            ctx.fillStyle = spot.id === selectedSpotId
-                ? 'rgba(244,67,54,0.35)'
-                : 'rgba(244,67,54,0.2)';
+            ctx.fillStyle = isSelected
+                ? `rgba(${r},${g},${b},0.35)`
+                : `rgba(${r},${g},${b},0.2)`;
             ctx.fill();
-            ctx.strokeStyle = spot.id === selectedSpotId
-                ? 'rgba(244,67,54,0.9)'
-                : 'rgba(244,67,54,0.5)';
-            ctx.lineWidth = spot.id === selectedSpotId ? 2 : 1;
+            ctx.strokeStyle = isSelected
+                ? `rgba(${r},${g},${b},0.9)`
+                : `rgba(${r},${g},${b},0.5)`;
+            ctx.lineWidth = isSelected ? 2 : 1;
             ctx.stroke();
         }
 
@@ -1029,28 +1036,27 @@ const deid = (() => {
         const gap = 3;
         let y = 2;
 
-        // ── Face row: blue density heatmap + red blur spot bars overlaid ──
+        // ── Face row: dark detection coverage + bright blue blur bars ──
         tlCtx.fillStyle = 'rgba(150,150,150,0.5)';
         tlCtx.font = '10px sans-serif';
         tlCtx.fillText('Faces', 2, y + 12);
 
-        // Background density heatmap
+        // Dark background showing where faces were detected
         if (faceDetections.length > 0) {
+            tlCtx.fillStyle = 'rgba(33,150,243,0.15)';
             const pw = Math.max(1, L.barW / L.range);
             for (let i = 0; i < faceDetections.length; i++) {
                 const entry = faceDetections[i];
                 if (!entry || !entry.faces || entry.faces.length === 0) continue;
                 const frame = entry.frame != null ? entry.frame : (trialMeta.start_frame + i);
                 const x = _frameToTlX(frame, L);
-                const alpha = Math.min(0.7, 0.15 + entry.faces.length * 0.15);
-                tlCtx.fillStyle = `rgba(33,150,243,${alpha})`;
                 tlCtx.fillRect(x, y, pw, faceRowH);
             }
         }
 
-        // Overlaid blur spot bars (stacked within the face row)
+        // Bright blue blur spot bars on top (matching face detection box color)
         if (visibleSpots.length > 0) {
-            const spotBarH = Math.min(12, (faceRowH - 4) / visibleSpots.length);
+            const spotBarH = Math.min(14, (faceRowH - 4) / visibleSpots.length);
             let spotY = y + 2;
             for (const spot of visibleSpots) {
                 const x1 = _frameToTlX(spot.frame_start, L);
@@ -1059,19 +1065,19 @@ const deid = (() => {
                 const isSelected = spot.id === selectedSpotId;
 
                 tlCtx.fillStyle = isSelected
-                    ? 'rgba(244,67,54,0.7)'
-                    : 'rgba(244,67,54,0.35)';
+                    ? 'rgba(33,150,243,0.6)'
+                    : 'rgba(33,150,243,0.35)';
                 tlCtx.fillRect(x1, spotY, w, spotBarH - 1);
 
                 tlCtx.strokeStyle = isSelected
-                    ? 'rgba(244,67,54,1.0)'
-                    : 'rgba(244,67,54,0.6)';
+                    ? 'rgba(33,150,243,1.0)'
+                    : 'rgba(33,150,243,0.7)';
                 tlCtx.lineWidth = isSelected ? 1.5 : 0.5;
                 tlCtx.strokeRect(x1, spotY, w, spotBarH - 1);
 
                 // Edge handles for selected
                 if (isSelected) {
-                    tlCtx.fillStyle = 'rgba(244,67,54,1.0)';
+                    tlCtx.fillStyle = 'rgba(33,150,243,1.0)';
                     tlCtx.fillRect(x1 - 1, spotY, 3, spotBarH - 1);
                     tlCtx.fillRect(x2 - 2, spotY, 3, spotBarH - 1);
                 }
