@@ -119,12 +119,16 @@ const deid = (() => {
             renderTimeline();
         });
 
-        // Auto-select subject from URL param or if only one
+        // Auto-select subject from URL param, sessionStorage, or if only one
         const params = new URLSearchParams(window.location.search);
         const urlSubject = params.get('subject');
+        const savedSubject = sessionStorage.getItem('dlc_lastSubjectId');
         if (urlSubject) {
             sel.value = urlSubject;
             loadSubject(parseInt(urlSubject));
+        } else if (savedSubject && subjects.some(s => String(s.id) === savedSubject)) {
+            sel.value = savedSubject;
+            loadSubject(parseInt(savedSubject));
         } else if (subjects.length === 1) {
             sel.value = subjects[0].id;
             loadSubject(subjects[0].id);
@@ -134,6 +138,7 @@ const deid = (() => {
     // ── Load subject ──
     async function loadSubject(sid) {
         subjectId = sid;
+        sessionStorage.setItem('dlc_lastSubjectId', String(sid));
         faceDetections = [];
         blurSpots = [];
         selectedSpotId = null;
