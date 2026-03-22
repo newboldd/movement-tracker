@@ -309,9 +309,10 @@ def get_hand_landmarks_bulk(subject_id: int, trial_idx: int = Query(...)) -> dic
             if pts:
                 result[str(f)] = pts
 
-    # Pose landmarks (wrist, elbow, shoulder — indices 11-22 for upper body)
-    # These extend hand protection down the forearm
-    POSE_UPPER_BODY = list(range(11, 23))  # shoulders through thumbs
+    # Pose landmarks: shoulders (11,12) and elbows (13,14) only.
+    # Wrists (15,16) and hand points (17-22) are excluded because the
+    # dedicated Hands model provides more accurate positions for those.
+    POSE_UPPER_BODY = [11, 12, 13, 14]
     if pose_data:
         os_pose = pose_data["OS_pose"]
         od_pose = pose_data["OD_pose"]
