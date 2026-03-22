@@ -158,7 +158,11 @@
             <label style="font-size:12px;color:var(--text-muted);">Subject</label>
             <select id="subjectSelect"></select>
             <div id="trialBtns"></div>
-            <button class="btn btn-sm" id="previewToggle" onclick="deid.togglePreview()" style="display:none;" title="Toggle between original and blurred video (P)">Preview Blur</button>
+            <div style="display:flex;gap:2px;margin-left:auto;">
+                <button class="btn btn-sm" id="viewOriginal" onclick="deid.setViewMode('original')" title="Original video with overlays" style="background:var(--blue);color:#fff;">Original</button>
+                <button class="btn btn-sm" id="viewPreview" onclick="deid.setViewMode('preview')" title="Preview blur areas (P)">Preview</button>
+                <button class="btn btn-sm" id="viewDeidentified" onclick="deid.setViewMode('deidentified')" title="Show rendered deidentified video" disabled>Deidentified</button>
+            </div>
             <span id="statusMsg"></span>
         </div>
 

@@ -28,8 +28,8 @@ const deid = (() => {
     let selectedSpotId = null;
     let addingCustom = false;
 
-    // Preview mode (blurred video)
-    let previewMode = false;
+    // View mode: 'original' (with overlays), 'preview' (blur mask only), 'deidentified' (rendered video)
+    let viewMode = 'original';
 
     // Hand overlay
     let handOverlayEnabled = false;
@@ -292,7 +292,7 @@ const deid = (() => {
             } catch (e) {}
         }
 
-        _updatePreviewButton();
+        _updateViewButtons();
         await loadFrame(currentFrame);
         renderSpotList();
         renderTimeline();
@@ -302,7 +302,7 @@ const deid = (() => {
     async function loadFrame(frameNum) {
         currentFrame = frameNum;
         let url = `/api/deidentify/${subjectId}/frame?trial_idx=${currentTrialIdx}&frame_num=${frameNum}&side=${encodeURIComponent(currentSide)}`;
-        if (previewMode) url += '&blurred=true';
+        if (viewMode === 'deidentified') url += '&blurred=true';
 
         try {
             const img = new Image();
@@ -357,23 +357,50 @@ const deid = (() => {
         render();
     }
 
-    // ── Camera toggle ──
-    function togglePreview() {
-        previewMode = !previewMode;
-        const btn = document.getElementById('previewToggle');
-        if (btn) {
-            btn.textContent = previewMode ? 'Show Original' : 'Preview Blur';
-            btn.style.background = previewMode ? 'var(--blue)' : '';
-            btn.style.color = previewMode ? '#fff' : '';
-        }
+    // ── View mode ──
+    function setViewMode(mode) {
+        if (mode === 'deidentified' && (!trialMeta || !trialMeta.has_blurred)) return;
+        viewMode = mode;
+        _updateViewButtons();
+        _updateSidebarState();
         loadFrame(currentFrame);
     }
 
-    function _updatePreviewButton() {
-        const btn = document.getElementById('previewToggle');
-        if (!btn || !trialMeta) return;
-        btn.style.display = trialMeta.has_blurred ? '' : 'none';
-        if (!trialMeta.has_blurred) previewMode = false;
+    function _updateViewButtons() {
+        const btns = {
+            original: document.getElementById('viewOriginal'),
+            preview: document.getElementById('viewPreview'),
+            deidentified: document.getElementById('viewDeidentified'),
+        };
+        for (const [mode, btn] of Object.entries(btns)) {
+            if (!btn) continue;
+            if (mode === viewMode) {
+                btn.style.background = 'var(--blue)';
+                btn.style.color = '#fff';
+            } else {
+                btn.style.background = '';
+                btn.style.color = '';
+            }
+        }
+        // Disable deidentified button if no rendered video
+        const deidBtn = btns.deidentified;
+        if (deidBtn) {
+            deidBtn.disabled = !trialMeta || !trialMeta.has_blurred;
+            deidBtn.title = (!trialMeta || !trialMeta.has_blurred)
+                ? 'Render first to enable' : 'Show deidentified video';
+        }
+    }
+
+    function _updateSidebarState() {
+        const sidebar = document.querySelector('.deid-sidebar');
+        if (!sidebar) return;
+        if (viewMode === 'deidentified') {
+            sidebar.style.opacity = '0.4';
+            sidebar.style.pointerEvents = 'none';
+        } else {
+            sidebar.style.opacity = '';
+            sidebar.style.pointerEvents = '';
+        }
     }
 
     function toggleSide() {
@@ -548,6 +575,100 @@ const deid = (() => {
         return _morphClose(handSmoothed, smooth2Px);
     }
 
+    // ── Preview blur mask (shows exactly what will be blurred) ──
+    function _renderPreviewMask(cw, ch) {
+        const curSideLabel = _sideLabel();
+
+        // Build blur mask on offscreen canvas
+        const blurCanvas = document.createElement('canvas');
+        blurCanvas.width = cw;
+        blurCanvas.height = ch;
+        const bCtx = blurCanvas.getContext('2d');
+
+        // Draw blur ellipses
+        for (const spot of blurSpots) {
+            if (currentFrame < spot.frame_start || currentFrame > spot.frame_end) continue;
+            const spotSide = spot.side || 'full';
+            if (spotSide !== 'full' && spotSide !== curSideLabel) continue;
+
+            const pos = _getSpotPosition(spot);
+            const sx = offsetX + pos.x * scale;
+            const sy = offsetY + pos.y * scale;
+            const sw = (spot.width || spot.radius || 50) * scale / 2;
+            const sh = (spot.height || spot.radius || 50) * scale / 2;
+
+            bCtx.fillStyle = spot.spot_type === 'face'
+                ? 'rgba(33,150,243,0.45)' : 'rgba(244,67,54,0.45)';
+            bCtx.beginPath();
+            bCtx.ellipse(sx, sy, sw, sh, 0, 0, Math.PI * 2);
+            bCtx.fill();
+        }
+
+        // Build and subtract hand protection mask
+        const landmarks = _getVisibleLandmarks();
+        if (landmarks.length > 0) {
+            const activeSegment = _getActiveHandSegment();
+            if (activeSegment) {
+                const radiusPx = (activeSegment.radius || handMaskRadius) * scale;
+                const handMask = _buildHandMask(landmarks, cw, ch, radiusPx);
+
+                // Subtract hand mask from blur using destination-out
+                bCtx.globalCompositeOperation = 'destination-out';
+                bCtx.drawImage(handMask, 0, 0);
+                bCtx.globalCompositeOperation = 'source-over';
+            }
+        }
+
+        // Draw result onto main canvas
+        ctx.drawImage(blurCanvas, 0, 0);
+
+        // Draw outline of blur areas
+        ctx.setLineDash([6, 4]);
+        for (const spot of blurSpots) {
+            if (currentFrame < spot.frame_start || currentFrame > spot.frame_end) continue;
+            const spotSide = spot.side || 'full';
+            if (spotSide !== 'full' && spotSide !== curSideLabel) continue;
+
+            const pos = _getSpotPosition(spot);
+            const sx = offsetX + pos.x * scale;
+            const sy = offsetY + pos.y * scale;
+            const sw = (spot.width || spot.radius || 50) * scale / 2;
+            const sh = (spot.height || spot.radius || 50) * scale / 2;
+
+            ctx.strokeStyle = spot.spot_type === 'face'
+                ? 'rgba(33,150,243,0.8)' : 'rgba(244,67,54,0.8)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.ellipse(sx, sy, sw, sh, 0, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+        ctx.setLineDash([]);
+
+        // Draw hand protection outline
+        if (landmarks.length > 0) {
+            const activeSegment = _getActiveHandSegment();
+            if (activeSegment) {
+                const radiusPx = (activeSegment.radius || handMaskRadius) * scale;
+                const handMask = _buildHandMask(landmarks, cw, ch, radiusPx);
+                _drawHandOutline(handMask, cw, ch);
+            }
+        }
+    }
+
+    function _getVisibleLandmarks() {
+        const curSideLabel = _sideLabel();
+        return handLandmarks.filter(lm =>
+            (lm.side || 'full') === curSideLabel || (lm.side || 'full') === 'full'
+        );
+    }
+
+    function _getActiveHandSegment() {
+        for (const seg of handProtectSegments) {
+            if (seg.start <= currentFrame && currentFrame <= seg.end) return seg;
+        }
+        return null;
+    }
+
     // ── Render ──
     function render() {
         if (!ctx || !canvas) return;
@@ -560,8 +681,14 @@ const deid = (() => {
         // Draw video frame
         ctx.drawImage(currentImage, offsetX, offsetY, imgW * scale, imgH * scale);
 
-        // In preview mode, just show the blurred video — no overlays
-        if (previewMode) return;
+        // Deidentified mode: just show the rendered video, no overlays
+        if (viewMode === 'deidentified') return;
+
+        // Preview mode: show blur mask with hand protection subtracted
+        if (viewMode === 'preview') {
+            _renderPreviewMask(cw, ch);
+            return;
+        }
 
         // Draw face detections (blue dashed rectangles) — filtered by current side
         const localFrame = currentFrame - (trialMeta ? trialMeta.start_frame : 0);
@@ -939,7 +1066,10 @@ const deid = (() => {
         } else if (e.key === 'r') {
             resetZoom();
         } else if (e.key === 'p') {
-            if (trialMeta && trialMeta.has_blurred) togglePreview();
+            // Cycle view modes: original → preview → deidentified → original
+            if (viewMode === 'original') setViewMode('preview');
+            else if (viewMode === 'preview' && trialMeta && trialMeta.has_blurred) setViewMode('deidentified');
+            else setViewMode('original');
         } else if (e.key === 'Delete' || e.key === 'Backspace') {
             if (selectedHandSegId !== null) {
                 deleteSelectedHandSeg();
@@ -1457,7 +1587,7 @@ const deid = (() => {
                         status.textContent = 'Render complete! Deidentified videos saved.';
                         // Mark all trials as having blurred versions and show preview button
                         trials.forEach(t => { t.has_blurred = true; });
-                        _updatePreviewButton();
+                        _updateViewButtons();
                     } else if (data.status === 'failed') {
                         status.textContent = 'Render failed: ' + (data.error_msg || 'unknown');
                     } else {
@@ -1873,7 +2003,7 @@ const deid = (() => {
         detectFaces,
         togglePlay,
         toggleSide,
-        togglePreview,
+        setViewMode,
         resetZoom,
         seekFrame,
         toggleAddCustom,
