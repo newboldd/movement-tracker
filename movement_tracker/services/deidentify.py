@@ -832,13 +832,22 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
         if 0 <= x < w and 0 <= y < h:
             cv2.circle(mask, (x, y), radius, 255, -1)
 
-    # Apply blur + threshold for smooth (matches frontend canvas behavior)
-    if smooth > 0:
+    # Apply blur + threshold for smooth (morphological close approximation)
+    if smooth > 0 and mask.any():
+        pre_count = np.count_nonzero(mask)
         k = 2 * smooth + 1
         if k % 2 == 0:
             k += 1
-        mask = cv2.GaussianBlur(mask, (k, k), 0)
-        mask = (mask > 30).astype(np.uint8) * 255
+        blurred = cv2.GaussianBlur(mask, (k, k), 0)
+        # Adaptive threshold: lower threshold if kernel is large relative to features
+        # to avoid erasing the mask entirely
+        for thresh in (30, 15, 5, 1):
+            candidate = (blurred > thresh).astype(np.uint8) * 255
+            if np.count_nonzero(candidate) >= pre_count * 0.5:
+                mask = candidate
+                break
+        else:
+            mask = (blurred > 0).astype(np.uint8) * 255
 
     # Add forearm triangle: pinky MCP (joint 17) → elbow → thumb CMC (joint 1)
     pinky_mcp = next((lm for lm in hand_lms if lm.get("joint") == 17), None)
@@ -880,12 +889,19 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
                  (int(ext_x), int(ext_y)), 255, forearm_radius * 2)
 
     # Apply second blur + threshold after adding forearm (matches frontend)
-    if smooth2 > 0:
+    if smooth2 > 0 and mask.any():
+        pre_count = np.count_nonzero(mask)
         k2 = 2 * smooth2 + 1
         if k2 % 2 == 0:
             k2 += 1
-        mask = cv2.GaussianBlur(mask, (k2, k2), 0)
-        mask = (mask > 30).astype(np.uint8) * 255
+        blurred2 = cv2.GaussianBlur(mask, (k2, k2), 0)
+        for thresh in (30, 15, 5, 1):
+            candidate = (blurred2 > thresh).astype(np.uint8) * 255
+            if np.count_nonzero(candidate) >= pre_count * 0.5:
+                mask = candidate
+                break
+        else:
+            mask = (blurred2 > 0).astype(np.uint8) * 255
 
     return mask > 0
 
