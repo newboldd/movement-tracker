@@ -106,14 +106,14 @@ def list_source_videos() -> dict:
     Returns { videos: [{name, path, source}], browse_url: str }
     """
     import glob as _glob
-    from ..config import PROJECT_DIR
+    from ..config import DATA_DIR
 
     settings = get_settings()
     seen_paths: set[str] = set()
     videos: list[dict] = []
 
     # 1. Sample data
-    sample_dir = PROJECT_DIR / "sample_data"
+    sample_dir = DATA_DIR / "sample_data"
     if sample_dir.exists():
         for f in sorted(sample_dir.glob("*.mp4")):
             p = str(f)

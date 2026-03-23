@@ -367,10 +367,10 @@ def _ensure_example_subject(settings):
     Can be hidden via settings.show_example_subject = False.
     """
     import cv2
-    from .config import PROJECT_DIR
+    from .config import DATA_DIR
     from .db import get_db_ctx
 
-    sample_video = PROJECT_DIR / "sample_data" / "Con01_R1.mp4"
+    sample_video = DATA_DIR / "sample_data" / "Con01_R1.mp4"
     if not sample_video.exists():
         return
 

@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 import yaml
 
-from ..config import get_settings, PROJECT_DIR
+from ..config import get_settings, DATA_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ def _load_camera_assignments() -> dict:
     settings = get_settings()
     calib_dir = settings.calibration_dir
     if not calib_dir:
-        calib_dir = str(PROJECT_DIR / "calibration")
+        calib_dir = str(DATA_DIR / "calibration")
 
     yaml_path = os.path.join(calib_dir, 'camera_assignments.yaml')
     if not os.path.exists(yaml_path):
@@ -157,7 +157,7 @@ def get_calibration_for_subject(subject_name: str) -> dict | None:
             return None
         calib_rel_path = cameras[camera_name]['calibration']
         # Resolve relative to project dir (calibration paths are relative to project root)
-        calib_path = os.path.join(str(PROJECT_DIR), calib_rel_path)
+        calib_path = os.path.join(str(DATA_DIR), calib_rel_path)
         if not os.path.exists(calib_path):
             logger.warning(f"Calibration file not found: {calib_path}")
             return None

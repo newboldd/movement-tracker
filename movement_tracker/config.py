@@ -13,13 +13,19 @@ logger = logging.getLogger(__name__)
 # ── Fixed paths (not configurable) ────────────────────────────────────────
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = APP_DIR.parent
-DB_PATH = APP_DIR / "dlc_app.db"
-SETTINGS_PATH = APP_DIR / "settings.json"
+
+# DATA_DIR: where videos, dlc projects, and database live.
+# Defaults to PROJECT_DIR but can be overridden via MT_DATA_DIR env var
+# to keep data separate from code (recommended).
+DATA_DIR = Path(os.environ.get("MT_DATA_DIR", str(PROJECT_DIR)))
+
+DB_PATH = DATA_DIR / "dlc_app.db"
+SETTINGS_PATH = DATA_DIR / "settings.json"
 
 # ── Constants (not worth making configurable) ─────────────────────────────
 JPEG_QUALITY = 85
 FRAME_CACHE_SIZE = 256
-CALIBRATION_DIR = PROJECT_DIR / "calibration"
+CALIBRATION_DIR = DATA_DIR / "calibration"
 
 # Default calibrations shipped with the app (camera name -> YAML path)
 DEFAULT_CALIBRATIONS = {
@@ -82,12 +88,12 @@ class Settings:
 
     @property
     def video_path(self) -> Path:
-        return Path(self.video_dir) if self.video_dir else PROJECT_DIR / "videos"
+        return Path(self.video_dir) if self.video_dir else DATA_DIR / "videos"
 
     @property
     def dlc_path(self) -> Path:
-        """Always use dlc/ at the project root as the DLC project directory."""
-        return PROJECT_DIR / "dlc"
+        """DLC project directory. Lives in DATA_DIR to keep data separate from code."""
+        return DATA_DIR / "dlc"
 
     @property
     def remote_enabled(self) -> bool:
@@ -154,7 +160,7 @@ class Settings:
 
     @property
     def data_path(self) -> Path:
-        return PROJECT_DIR / "data"
+        return DATA_DIR / "data"
 
     def _load(self):
         """Load from settings.json, then apply env var overrides."""
@@ -173,14 +179,14 @@ class Settings:
         """On first run, set sensible defaults from project structure.
 
         Priority for video directory:
-          1. sample_data/  (ships with the repo for new users)
+          1. sample_data/  (in DATA_DIR for new users)
           2. videos/       (existing installs that have a real video library)
 
-        DLC directory defaults to dlc/ inside the repo; created if absent.
+        DLC directory defaults to dlc/ inside DATA_DIR; created if absent.
         """
-        sample_dir = PROJECT_DIR / "sample_data"
-        video_dir  = PROJECT_DIR / "videos"
-        dlc_dir    = PROJECT_DIR / "dlc"
+        sample_dir = DATA_DIR / "sample_data"
+        video_dir  = DATA_DIR / "videos"
+        dlc_dir    = DATA_DIR / "dlc"
 
         if sample_dir.exists():
             self.video_dir = str(sample_dir)

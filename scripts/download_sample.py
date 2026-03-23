@@ -9,12 +9,15 @@ The file is placed in sample_data/ at the project root.
 Source: https://doi.org/10.5281/zenodo.19099855  (~24 MB, CC-BY-4.0)
 """
 
+import os
 import urllib.request
 import pathlib
 import sys
 
 ZENODO_URL = "https://zenodo.org/records/19099855/files/Con01_R1.mp4"
-DEST_DIR   = pathlib.Path(__file__).parent.parent / "sample_data"
+_PROJECT_DIR = pathlib.Path(__file__).parent.parent
+_DATA_DIR = pathlib.Path(os.environ.get("MT_DATA_DIR", str(_PROJECT_DIR)))
+DEST_DIR   = _DATA_DIR / "sample_data"
 DEST_FILE  = DEST_DIR / "Con01_R1.mp4"
 
 
