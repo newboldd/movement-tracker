@@ -932,4 +932,8 @@ def _apply_blur_with_mask(frame_half, blur_mask, hand_mask):
     result = (frame_half.astype(np.float32) * (1 - mask_3ch) +
               blurred.astype(np.float32) * mask_3ch).astype(np.uint8)
 
+    # Restore original pixels in hand protection area (feathering can bleed into it)
+    if hand_mask is not None and hand_mask.any():
+        result[hand_mask] = frame_half[hand_mask]
+
     return result
