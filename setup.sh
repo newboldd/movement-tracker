@@ -18,6 +18,17 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$PROJECT_DIR/.venv"
 REQUIREMENTS="$PROJECT_DIR/requirements.txt"
 PORT=8080
+
+# Load local env overrides (e.g. MT_DATA_DIR)
+if [ -f "$PROJECT_DIR/.env" ]; then
+    set -a
+    source "$PROJECT_DIR/.env"
+    set +a
+fi
+
+# Data directory: separate from code. Defaults to PROJECT_DIR if not set.
+# Override via .env file or MT_DATA_DIR env var.
+export MT_DATA_DIR="${MT_DATA_DIR:-$PROJECT_DIR}"
 OS="$(uname -s)"   # Darwin | Linux
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -170,13 +181,13 @@ fi
 
 # ── Sample data ───────────────────────────────────────────────────────────
 
-if [ ! -f "$PROJECT_DIR/sample_data/Con01_R1.mp4" ]; then
+if [ ! -f "$MT_DATA_DIR/sample_data/Con01_R1.mp4" ]; then
     print_header "Downloading sample data"
     "$PYTHON" "$PROJECT_DIR/scripts/download_sample.py"
 fi
 
 # ── Ensure default directories exist ─────────────────────────────────────
-mkdir -p "$PROJECT_DIR/dlc"
+mkdir -p "$MT_DATA_DIR/dlc"
 
 # ── Kill any existing server on the port ─────────────────────────────────
 
@@ -212,7 +223,7 @@ cd "$PROJECT_DIR"
 
 # Launch with restart loop (exit code 42 = restart after in-app update)
 while true; do
-    python -m uvicorn movement_tracker.app:app --host 127.0.0.1 --port "$PORT" --reload
+    MT_DATA_DIR="$MT_DATA_DIR" python -m uvicorn movement_tracker.app:app --host 127.0.0.1 --port "$PORT" --reload
     exit_code=$?
     if [ "$exit_code" -ne 42 ]; then
         break
