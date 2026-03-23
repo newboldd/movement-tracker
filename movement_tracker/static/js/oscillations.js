@@ -183,27 +183,23 @@ const osc = (() => {
     }
 
     function _autoSetWaveDefaults() {
-        const mvs = _getVisibleMovements();
-        if (mvs.length < 3) return;
+        const distData = _getVisibleDistances();
+        if (distData.values.length < 10) return;
 
-        const amps = mvs.map(m => m.amplitude);
-        const mean = amps.reduce((a, b) => a + b, 0) / amps.length;
-        const range = Math.max(...amps) - Math.min(...amps);
-        const totalTime = mvs[mvs.length - 1].peak_time - mvs[0].peak_time;
+        const vals = distData.values;
+        const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+        const range = Math.max(...vals) - Math.min(...vals);
+        const totalTime = distData.times[distData.times.length - 1] - distData.times[0];
 
-        // Set wave 1 defaults: approximate dominant frequency
-        document.getElementById('w1Amp').value = range / 2;
+        // Wave 1: tapping frequency (~3-5 Hz typical)
+        document.getElementById('w1Amp').value = Math.min(100, range / 2);
         document.getElementById('w1Offset').value = mean;
-        if (totalTime > 0) {
-            document.getElementById('w1Freq').value = Math.min(2, Math.max(0.01, 1 / totalTime));
-        }
+        document.getElementById('w1Freq').value = 4;
 
-        // Wave 2: half the frequency, smaller amplitude
-        document.getElementById('w2Amp').value = range / 4;
+        // Wave 2: slower modulation
+        document.getElementById('w2Amp').value = Math.min(100, range / 6);
         document.getElementById('w2Offset').value = 0;
-        if (totalTime > 0) {
-            document.getElementById('w2Freq').value = Math.min(2, Math.max(0.01, 2 / totalTime));
-        }
+        document.getElementById('w2Freq').value = 0.3;
 
         updateWave();
     }
@@ -245,59 +241,68 @@ const osc = (() => {
     }
 
     function _updateFitInfo() {
-        const mvs = _getVisibleMovements();
-        if (mvs.length < 2) {
-            document.getElementById('fitInfo').textContent = 'Need at least 2 movements with amplitude data.';
+        const distData = _getVisibleDistances();
+        if (distData.values.length < 10) {
+            document.getElementById('fitInfo').textContent = 'Need distance trace data.';
             return;
         }
 
         const params = _getWaveParams();
-        let ssRes = 0, ssTot = 0;
-        const mean = mvs.reduce((a, m) => a + m.amplitude, 0) / mvs.length;
+        // Subsample for speed (every 5th point)
+        const step = Math.max(1, Math.floor(distData.times.length / 500));
+        let ssRes = 0, ssTot = 0, n = 0;
+        const mean = distData.values.reduce((a, b) => a + b, 0) / distData.values.length;
 
-        for (const m of mvs) {
-            const predicted = _evalWave(params.w1, m.peak_time) + _evalWave(params.w2, m.peak_time);
-            ssRes += (m.amplitude - predicted) ** 2;
-            ssTot += (m.amplitude - mean) ** 2;
+        for (let i = 0; i < distData.times.length; i += step) {
+            const predicted = _evalWave(params.w1, distData.times[i]) + _evalWave(params.w2, distData.times[i]);
+            ssRes += (distData.values[i] - predicted) ** 2;
+            ssTot += (distData.values[i] - mean) ** 2;
+            n++;
         }
 
         const r2 = ssTot > 0 ? 1 - ssRes / ssTot : 0;
-        const rmse = Math.sqrt(ssRes / mvs.length);
+        const rmse = Math.sqrt(ssRes / n);
 
         document.getElementById('fitInfo').textContent =
-            `R\u00b2 = ${r2.toFixed(4)} | RMSE = ${rmse.toFixed(2)} mm | n = ${mvs.length} movements`;
+            `R\u00b2 = ${r2.toFixed(4)} | RMSE = ${rmse.toFixed(2)} mm | n = ${n} samples (${distData.values.length} total)`;
     }
 
-    // ── Auto-fit using grid search ──
+    // ── Auto-fit using grid search on distance trace ──
     function autoFit() {
-        const mvs = _getVisibleMovements();
-        if (mvs.length < 3) return;
+        const distData = _getVisibleDistances();
+        if (distData.values.length < 20) return;
 
-        const amps = mvs.map(m => m.amplitude);
-        const times = mvs.map(m => m.peak_time);
-        const mean = amps.reduce((a, b) => a + b, 0) / amps.length;
-        const range = Math.max(...amps) - Math.min(...amps);
-        const totalTime = times[times.length - 1] - times[0];
+        document.getElementById('fitInfo').textContent = 'Fitting...';
+
+        // Subsample for speed
+        const step = Math.max(1, Math.floor(distData.times.length / 200));
+        const times = [], vals = [];
+        for (let i = 0; i < distData.times.length; i += step) {
+            times.push(distData.times[i]);
+            vals.push(distData.values[i]);
+        }
+        const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+        const range = Math.max(...vals) - Math.min(...vals);
 
         let bestR2 = -Infinity;
         let bestParams = null;
 
-        // Grid search over frequency combinations
-        for (let f1 = 0.05; f1 <= 12; f1 += 0.1) {
-            for (let f2 = 0.05; f2 <= 12; f2 += 0.1) {
-                // For each frequency pair, solve for optimal amplitude/phase/offset
-                // using least squares (simplified: try a few phases)
-                for (let p1 = 0; p1 < 6.28; p1 += 0.5) {
-                    for (let p2 = 0; p2 < 6.28; p2 += 0.5) {
+        // Grid search: coarser for the large frequency range
+        const freqStep = 0.2;
+        const phaseStep = 0.8;
+
+        for (let f1 = 0.1; f1 <= 12; f1 += freqStep) {
+            for (let f2 = 0.1; f2 <= 12; f2 += freqStep) {
+                for (let p1 = 0; p1 < 6.28; p1 += phaseStep) {
+                    for (let p2 = 0; p2 < 6.28; p2 += phaseStep) {
                         const w1 = { freq: f1, amp: range / 2, phase: p1, offset: mean };
                         const w2 = { freq: f2, amp: range / 4, phase: p2, offset: 0 };
 
-                        // Quick R2 calc
                         let ssRes = 0, ssTot = 0;
-                        for (let i = 0; i < mvs.length; i++) {
+                        for (let i = 0; i < times.length; i++) {
                             const pred = _evalWave(w1, times[i]) + _evalWave(w2, times[i]);
-                            ssRes += (amps[i] - pred) ** 2;
-                            ssTot += (amps[i] - mean) ** 2;
+                            ssRes += (vals[i] - pred) ** 2;
+                            ssTot += (vals[i] - mean) ** 2;
                         }
                         const r2 = ssTot > 0 ? 1 - ssRes / ssTot : 0;
                         if (r2 > bestR2) {
@@ -310,20 +315,14 @@ const osc = (() => {
         }
 
         if (bestParams) {
-            // Refine amplitudes with fixed frequencies/phases using linear regression
-            const { w1, w2 } = bestParams;
-
-            // Build design matrix: [sin1, cos1, sin2, cos2, 1]
-            // y = a1*sin(2pi*f1*t+p1) + a2*sin(2pi*f2*t+p2) + offset
-            // For now just set the sliders to the grid search result
-            document.getElementById('w1Freq').value = w1.freq;
-            document.getElementById('w1Amp').value = w1.amp;
-            document.getElementById('w1Phase').value = w1.phase;
-            document.getElementById('w1Offset').value = w1.offset;
-            document.getElementById('w2Freq').value = w2.freq;
-            document.getElementById('w2Amp').value = w2.amp;
-            document.getElementById('w2Phase').value = w2.phase;
-            document.getElementById('w2Offset').value = w2.offset;
+            document.getElementById('w1Freq').value = bestParams.w1.freq;
+            document.getElementById('w1Amp').value = bestParams.w1.amp;
+            document.getElementById('w1Phase').value = bestParams.w1.phase;
+            document.getElementById('w1Offset').value = bestParams.w1.offset;
+            document.getElementById('w2Freq').value = bestParams.w2.freq;
+            document.getElementById('w2Amp').value = bestParams.w2.amp;
+            document.getElementById('w2Phase').value = bestParams.w2.phase;
+            document.getElementById('w2Offset').value = bestParams.w2.offset;
             updateWave();
         }
     }
@@ -358,10 +357,8 @@ const osc = (() => {
         ctx.fillStyle = 'var(--bg)';
         ctx.fillRect(0, 0, cw, ch);
 
-        const mvs = _getVisibleMovements();
         const distData = _getVisibleDistances();
         const showDist = document.getElementById('showDistance').checked;
-        const showAmp = document.getElementById('showAmplitude').checked;
 
         // Determine time range (respects zoom/pan)
         let [tMin, tMax] = _getXRange();
@@ -373,14 +370,6 @@ const osc = (() => {
                 if (distData.times[i] >= tMin && distData.times[i] <= tMax) {
                     yMin = Math.min(yMin, distData.values[i]);
                     yMax = Math.max(yMax, distData.values[i]);
-                }
-            }
-        }
-        if (showAmp && mvs.length > 0) {
-            for (const m of mvs) {
-                if (m.peak_time >= tMin && m.peak_time <= tMax) {
-                    yMin = Math.min(yMin, m.amplitude);
-                    yMax = Math.max(yMax, m.amplitude);
                 }
             }
         }
@@ -451,20 +440,6 @@ const osc = (() => {
             ctx.stroke();
         }
 
-        // Amplitude scatter (orange diamonds)
-        if (showAmp && mvs.length > 0) {
-            ctx.fillStyle = 'rgba(255,152,0,0.8)';
-            for (const m of mvs) {
-                const x = tToX(m.peak_time);
-                const y = yToY(m.amplitude);
-                ctx.save();
-                ctx.translate(x, y);
-                ctx.rotate(Math.PI / 4);
-                ctx.fillRect(-4, -4, 8, 8);
-                ctx.restore();
-            }
-        }
-
         // Wave curves
         const dt = (tMax - tMin) / (plotW * 2);
         if (showW1) {
@@ -492,7 +467,6 @@ const osc = (() => {
         let ly = MARGIN.top + 10;
         ctx.font = '11px sans-serif';
         if (showDist) { _drawLegend(cw - MARGIN.right - 10, ly, 'Distance', 'rgba(33,150,243,0.6)'); ly += 16; }
-        if (showAmp) { _drawLegend(cw - MARGIN.right - 10, ly, 'Amplitude', 'rgba(255,152,0,0.8)'); ly += 16; }
         if (showW1) { _drawLegend(cw - MARGIN.right - 10, ly, 'Wave 1', 'rgba(255,152,0,0.7)'); ly += 16; }
         if (showW2) { _drawLegend(cw - MARGIN.right - 10, ly, 'Wave 2', 'rgba(76,175,80,0.7)'); ly += 16; }
         if (showSum) { _drawLegend(cw - MARGIN.right - 10, ly, 'Sum', 'rgba(244,67,54,0.8)'); }
