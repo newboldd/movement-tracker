@@ -54,6 +54,9 @@ const deid = (() => {
     let panning = false;
     let panStart = null;
 
+    // Spot drag state (for on-canvas resize/move)
+    let spotDrag = null; // {spotId, handle, startMx, startMy, origSpot}
+
     // Timeline
     let tlCanvas, tlCtx;
     let tlDragSpot = null;    // spot being dragged (blur spot object, segment object, or 'newhand')
@@ -231,10 +234,19 @@ const deid = (() => {
             if (faceDetections.length > 0) {
                 const nFaces = faceDetections.filter(f => f.faces.length > 0).length;
                 document.getElementById('faceDetStatus').textContent =
-                    `Loaded ${nFaces} frames with faces (saved)`;
+                    `${nFaces} frames with faces`;
+                document.getElementById('detectFacesBtn').style.display = 'block';
+                document.getElementById('detectFacesBtn').textContent = 'Re-detect Faces';
+            } else {
+                // No saved detections — auto-detect
+                document.getElementById('faceDetStatus').textContent = 'Detecting faces...';
+                // Fire and forget — will update UI when done
+                _autoDetectFaces(idx);
             }
         } catch (e) {
             faceDetections = [];
+            document.getElementById('faceDetStatus').textContent = 'Detecting faces...';
+            _autoDetectFaces(idx);
         }
 
         // Update UI
@@ -274,8 +286,7 @@ const deid = (() => {
             document.getElementById('handRadiusVal').textContent = handMaskRadius;
             document.getElementById('handSmoothSlider').value = handSmooth;
             document.getElementById('handSmoothVal').textContent = handSmooth;
-            document.getElementById('handForearmSlider').value = forearmRadius;
-            document.getElementById('handForearmVal').textContent = forearmRadius;
+            forearmRadius = 10; // hardcoded
             document.getElementById('handExtentSlider').value = forearmExtent;
             document.getElementById('handExtentVal').textContent = forearmExtent.toFixed(1);
             document.getElementById('handSmooth2Slider').value = handSmooth2;
@@ -427,6 +438,7 @@ const deid = (() => {
         const camLabel = document.getElementById('cameraLabel');
         if (camLabel) camLabel.textContent = currentSide;
 
+        renderSpotList();
         loadFrame(currentFrame);
     }
 
@@ -806,6 +818,25 @@ const deid = (() => {
                     : `rgba(${cr},${cg},${cb},0.5)`;
                 ctx.lineWidth = isSelected ? 2 : 1;
                 ctx.stroke();
+
+                // Draw drag handles for selected spot
+                if (isSelected) {
+                    const handleSize = 5;
+                    ctx.fillStyle = '#fff';
+                    ctx.strokeStyle = `rgba(${cr},${cg},${cb},0.9)`;
+                    ctx.lineWidth = 1.5;
+                    // N, S, E, W handles
+                    const handles = [
+                        { x: sx, y: sy - sh },        // N
+                        { x: sx, y: sy + sh },         // S
+                        { x: sx + sw, y: sy },         // E
+                        { x: sx - sw, y: sy },         // W
+                    ];
+                    for (const h of handles) {
+                        ctx.fillRect(h.x - handleSize, h.y - handleSize, handleSize * 2, handleSize * 2);
+                        ctx.strokeRect(h.x - handleSize, h.y - handleSize, handleSize * 2, handleSize * 2);
+                    }
+                }
             }
         }
 
@@ -1009,7 +1040,63 @@ const deid = (() => {
     }
 
     // ── Pan (right-click drag or middle-click drag) ──
+    // ── Hit-test blur spot edges/center for drag handles ──
+    function _spotHitTest(ix, iy) {
+        const curSideLabel = _sideLabel();
+        const threshold = 8 / scale; // 8 screen pixels
+        for (const spot of blurSpots) {
+            if (currentFrame < spot.frame_start || currentFrame > spot.frame_end) continue;
+            const sSide = spot.side || 'full';
+            if (sSide !== 'full' && sSide !== curSideLabel) continue;
+
+            const pos = _getSpotPosition(spot);
+            const w2 = (spot.width || spot.radius * 2) / 2;
+            const h2 = (spot.height || spot.radius * 2) / 2;
+            const cx = pos.x, cy = pos.y;
+
+            // Check edge handles (N, S, E, W)
+            if (Math.abs(ix - cx) < threshold && Math.abs(iy - (cy - h2)) < threshold) return { spotId: spot.id, handle: 'n' };
+            if (Math.abs(ix - cx) < threshold && Math.abs(iy - (cy + h2)) < threshold) return { spotId: spot.id, handle: 's' };
+            if (Math.abs(ix - (cx + w2)) < threshold && Math.abs(iy - cy) < threshold) return { spotId: spot.id, handle: 'e' };
+            if (Math.abs(ix - (cx - w2)) < threshold && Math.abs(iy - cy) < threshold) return { spotId: spot.id, handle: 'w' };
+
+            // Check interior for move
+            if (Math.abs(ix - cx) <= w2 && Math.abs(iy - cy) <= h2) return { spotId: spot.id, handle: 'move' };
+        }
+        return null;
+    }
+
     function onMouseDown(e) {
+        if (e.button === 0 && viewMode === 'original') {
+            const rect = canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
+            const ix = (mx - offsetX) / scale;
+            const iy = (my - offsetY) / scale;
+
+            // Check for spot drag handle
+            const hit = _spotHitTest(ix, iy);
+            if (hit) {
+                e.preventDefault();
+                const spot = blurSpots.find(s => s.id === hit.spotId);
+                if (spot) {
+                    spotDrag = {
+                        spotId: hit.spotId,
+                        handle: hit.handle,
+                        startMx: mx, startMy: my,
+                        origW: spot.width || spot.radius * 2,
+                        origH: spot.height || spot.radius * 2,
+                        origOffX: spot.offset_x || 0,
+                        origOffY: spot.offset_y || 0,
+                    };
+                    selectedSpotId = hit.spotId;
+                    renderSpotList();
+                    render();
+                    return;
+                }
+            }
+        }
+
         // Right-click or middle-click for pan
         if (e.button === 1 || e.button === 2) {
             e.preventDefault();
@@ -1019,7 +1106,7 @@ const deid = (() => {
             return;
         }
         // Left-click pan when zoomed in (hold and drag)
-        if (e.button === 0 && hasUserZoom && !addingCustom) {
+        if (e.button === 0 && hasUserZoom && !addingCustom && !spotDrag) {
             panning = true;
             panStart = { x: e.clientX, y: e.clientY, ox: offsetX, oy: offsetY };
             canvas.style.cursor = 'grabbing';
@@ -1027,26 +1114,75 @@ const deid = (() => {
     }
 
     function onMouseMove(e) {
-        if (!panning || !panStart) return;
+        // Spot dragging
+        if (spotDrag) {
+            const rect = canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
+            const dxImg = (mx - spotDrag.startMx) / scale;
+            const dyImg = (my - spotDrag.startMy) / scale;
+            const spot = blurSpots.find(s => s.id === spotDrag.spotId);
+            if (!spot) return;
+
+            if (spotDrag.handle === 'move') {
+                spot.offset_x = Math.round(spotDrag.origOffX + dxImg);
+                spot.offset_y = Math.round(spotDrag.origOffY + dyImg);
+            } else if (spotDrag.handle === 'e') {
+                spot.width = Math.max(10, Math.round(spotDrag.origW + dxImg * 2));
+            } else if (spotDrag.handle === 'w') {
+                spot.width = Math.max(10, Math.round(spotDrag.origW - dxImg * 2));
+            } else if (spotDrag.handle === 's') {
+                spot.height = Math.max(10, Math.round(spotDrag.origH + dyImg * 2));
+            } else if (spotDrag.handle === 'n') {
+                spot.height = Math.max(10, Math.round(spotDrag.origH - dyImg * 2));
+            }
+            render();
+            return;
+        }
+
+        // Pan
+        if (!panning || !panStart) {
+            // Update cursor for spot hover
+            if (viewMode === 'original') {
+                const rect = canvas.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const my = e.clientY - rect.top;
+                const ix = (mx - offsetX) / scale;
+                const iy = (my - offsetY) / scale;
+                const hit = _spotHitTest(ix, iy);
+                if (hit) {
+                    if (hit.handle === 'move') canvas.style.cursor = 'grab';
+                    else if (hit.handle === 'n' || hit.handle === 's') canvas.style.cursor = 'ns-resize';
+                    else canvas.style.cursor = 'ew-resize';
+                } else {
+                    canvas.style.cursor = '';
+                }
+            }
+            return;
+        }
         offsetX = panStart.ox + (e.clientX - panStart.x);
         offsetY = panStart.oy + (e.clientY - panStart.y);
         render();
     }
 
     function onMouseUp(e) {
+        if (spotDrag) {
+            spotDrag = null;
+            scheduleSave();
+            renderSpotList();
+            return;
+        }
         if (panning) {
             canvas.style.cursor = '';
-            // If mouse barely moved, don't suppress click
             if (panStart) {
                 const dx = Math.abs(e.clientX - panStart.x);
                 const dy = Math.abs(e.clientY - panStart.y);
                 if (dx < 3 && dy < 3) {
                     panning = false;
                     panStart = null;
-                    return; // allow click to fire
+                    return;
                 }
             }
-            // Suppress click after real pan drag
             setTimeout(() => { panning = false; }, 50);
             panStart = null;
         }
@@ -1166,6 +1302,32 @@ const deid = (() => {
             status.textContent = 'Error: ' + e.message;
         }
         btn.disabled = false;
+        document.getElementById('detectFacesBtn').style.display = 'block';
+    }
+
+    // ── Auto-detect faces on trial load ──
+    async function _autoDetectFaces(trialIdx) {
+        try {
+            const result = await API.post(`/api/deidentify/${subjectId}/detect-faces`, {
+                trial_idx: trialIdx,
+            });
+            faceDetections = result.faces || [];
+            const nFaces = faceDetections.filter(f => f.faces.length > 0).length;
+            document.getElementById('faceDetStatus').textContent =
+                `${nFaces} frames with faces`;
+            document.getElementById('detectFacesBtn').style.display = 'block';
+            document.getElementById('detectFacesBtn').textContent = 'Re-detect Faces';
+
+            _autoCreateFaceSpots();
+            renderSpotList();
+            scheduleSave();
+            render();
+            renderTimeline();
+        } catch (e) {
+            document.getElementById('faceDetStatus').textContent = 'Detection failed: ' + e.message;
+            document.getElementById('detectFacesBtn').style.display = 'block';
+            document.getElementById('detectFacesBtn').textContent = 'Detect Faces';
+        }
     }
 
     // ── Auto-create blur spots from face detections ──
@@ -1241,16 +1403,22 @@ const deid = (() => {
         const list = document.getElementById('spotList');
         if (!list) return;
 
-        if (blurSpots.length === 0) {
-            list.innerHTML = '<div style="font-size:11px;color:var(--text-muted);">No blur spots yet. Click a detected face or use + Custom Spot.</div>';
+        const curSideLabel = _sideLabel();
+        const visible = blurSpots.filter(s => {
+            const sSide = s.side || 'full';
+            return sSide === 'full' || sSide === curSideLabel;
+        });
+
+        if (visible.length === 0) {
+            list.innerHTML = '<div style="font-size:11px;color:var(--text-muted);">No blur spots for this camera. Use + Custom Spot.</div>';
             return;
         }
 
-        list.innerHTML = blurSpots.map(s => `
+        list.innerHTML = visible.map(s => `
             <div class="spot-item ${s.id === selectedSpotId ? 'selected' : ''}"
                  onclick="deid.selectSpot(${s.id})">
                 <span class="spot-label">${s.spot_type === 'face' ? '\u{1F464}' : '\u2295'}
-                    r=${s.radius} [${s.frame_start}-${s.frame_end}]</span>
+                    ${s.width || s.radius}×${s.height || s.radius}</span>
                 <span class="spot-delete" onclick="event.stopPropagation(); deid.deleteSpot(${s.id})">×</span>
             </div>
         `).join('');
@@ -1276,25 +1444,9 @@ const deid = (() => {
     }
 
     function updateSpotControls() {
-        const controls = document.getElementById('spotControls');
-        const spot = blurSpots.find(s => s.id === selectedSpotId);
-        if (!spot) {
-            if (controls) controls.style.display = 'none';
-            return;
-        }
-        if (controls) controls.style.display = 'block';
-        const w = spot.width || spot.radius * 2;
-        const h = spot.height || spot.radius * 2;
-        document.getElementById('widthSlider').value = w;
-        document.getElementById('widthVal').textContent = Math.round(w);
-        document.getElementById('heightSlider').value = h;
-        document.getElementById('heightVal').textContent = Math.round(h);
-        document.getElementById('offsetXSlider').value = spot.offset_x || 0;
-        document.getElementById('offsetXVal').textContent = Math.round(spot.offset_x || 0);
-        document.getElementById('offsetYSlider').value = spot.offset_y || 0;
-        document.getElementById('offsetYVal').textContent = Math.round(spot.offset_y || 0);
-        document.getElementById('frameStartInput').value = spot.frame_start;
-        document.getElementById('frameEndInput').value = spot.frame_end;
+        // Spot controls are now on-canvas (drag handles) and timeline (frame range)
+        // This function just triggers a re-render to show/hide handles
+        render();
     }
 
     function updateSpotDim(dim, val) {

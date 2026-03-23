@@ -169,13 +169,13 @@
         <div class="deid-main">
             <!-- Left sidebar -->
             <div class="deid-sidebar">
-                <!-- Face Detection -->
+                <!-- Face Detection (auto-runs on load) -->
                 <div class="section">
                     <h3>Face Detection</h3>
-                    <button class="btn btn-sm" id="detectFacesBtn" onclick="deid.detectFaces()" style="width:100%;">
-                        Detect Faces
+                    <div id="faceDetStatus" style="font-size:11px;color:var(--text-muted);"></div>
+                    <button class="btn btn-sm" id="detectFacesBtn" onclick="deid.detectFaces()" style="width:100%;margin-top:4px;display:none;">
+                        Re-detect Faces
                     </button>
-                    <div id="faceDetStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
                 </div>
 
                 <!-- Blur Spots -->
@@ -187,40 +187,8 @@
                             + Custom Spot
                         </button>
                     </div>
-                </div>
-
-                <!-- Selected Spot Controls -->
-                <div class="section" id="spotControls" style="display:none;">
-                    <h3>Selected Spot</h3>
-                    <div class="slider-row">
-                        <label>Width</label>
-                        <input type="range" id="widthSlider" min="10" max="400" value="80"
-                               oninput="deid.updateSpotDim('width', this.value)">
-                        <span class="val" id="widthVal">80</span>
-                    </div>
-                    <div class="slider-row">
-                        <label>Height</label>
-                        <input type="range" id="heightSlider" min="10" max="400" value="80"
-                               oninput="deid.updateSpotDim('height', this.value)">
-                        <span class="val" id="heightVal">80</span>
-                    </div>
-                    <div class="slider-row">
-                        <label>Offset X</label>
-                        <input type="range" id="offsetXSlider" min="-200" max="200" value="0"
-                               oninput="deid.updateSpotDim('offset_x', this.value)">
-                        <span class="val" id="offsetXVal">0</span>
-                    </div>
-                    <div class="slider-row">
-                        <label>Offset Y</label>
-                        <input type="range" id="offsetYSlider" min="-200" max="200" value="0"
-                               oninput="deid.updateSpotDim('offset_y', this.value)">
-                        <span class="val" id="offsetYVal">0</span>
-                    </div>
-                    <div class="frame-range">
-                        <span>Frames:</span>
-                        <input type="number" id="frameStartInput" onchange="deid.updateSpotFrameRange()">
-                        <span>to</span>
-                        <input type="number" id="frameEndInput" onchange="deid.updateSpotFrameRange()">
+                    <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">
+                        Drag edges to resize, drag center to move. Use timeline for frame range.
                     </div>
                 </div>
 
@@ -238,12 +206,6 @@
                         <span class="val" id="handRadiusVal">5</span>
                     </div>
                     <div class="slider-row">
-                        <label>Forearm</label>
-                        <input type="range" id="handForearmSlider" min="0" max="40" value="10"
-                               oninput="deid.updateForearmRadius(this.value)">
-                        <span class="val" id="handForearmVal">10</span>
-                    </div>
-                    <div class="slider-row">
                         <label>Extent</label>
                         <input type="range" id="handExtentSlider" min="0" max="2.0" step="0.05" value="0.4"
                                oninput="deid.updateForearmExtent(this.value)">
@@ -256,7 +218,7 @@
                         <span class="val" id="handSmoothVal">7</span>
                     </div>
                     <div class="slider-row">
-                        <label>Join smooth</label>
+                        <label>Arm smooth</label>
                         <input type="range" id="handSmooth2Slider" min="0" max="30" value="5"
                                oninput="deid.updateHandSmooth2(this.value)">
                         <span class="val" id="handSmooth2Val">5</span>
@@ -265,7 +227,7 @@
                         <label>Temporal</label>
                         <input type="range" id="handTemporalSlider" min="0" max="15" value="0"
                                oninput="deid.updateHandTemporalSmooth(this.value)">
-                        <span class="val" id="handTemporalVal">3</span>
+                        <span class="val" id="handTemporalVal">0</span>
                     </div>
                     <div style="display:flex;gap:4px;margin-top:6px;">
                         <button class="btn btn-sm" onclick="deid.deleteSelectedHandSeg()" style="flex:1;font-size:11px;" title="Delete selected hand segment (Del)">
