@@ -107,7 +107,7 @@ const osc = (() => {
             ]);
             traceData = traces;
             movements = movData.movements || [];
-            trialNames = movData.trial_names || [];
+            trialNames = (traces.trials || []).map(t => t.name);
         } catch (e) {
             document.getElementById('fitInfo').textContent = 'Error loading data: ' + e.message;
             return;
@@ -152,33 +152,37 @@ const osc = (() => {
     }
 
     function _getVisibleDistances() {
-        if (!traceData || !traceData.distances) return { times: [], values: [] };
-        const fps = traceData.fps || 30;
-        const ranges = traceData.trial_ranges || [];
-        const dist = traceData.distances;
+        if (!traceData || !traceData.trials || traceData.trials.length === 0) return { times: [], values: [] };
+
+        const trials = traceData.trials;
+        const times = [], values = [];
 
         if (selectedTrial < 0) {
-            // All trials
-            const times = [], values = [];
+            // All trials concatenated with time offset
+            let timeOffset = 0;
+            for (const trial of trials) {
+                const fps = trial.fps || 30;
+                const dist = trial.distances || [];
+                for (let i = 0; i < dist.length; i++) {
+                    if (dist[i] != null) {
+                        times.push(timeOffset + i / fps);
+                        values.push(dist[i]);
+                    }
+                }
+                timeOffset += dist.length / (trial.fps || 30);
+            }
+        } else if (selectedTrial < trials.length) {
+            const trial = trials[selectedTrial];
+            const fps = trial.fps || 30;
+            const dist = trial.distances || [];
             for (let i = 0; i < dist.length; i++) {
                 if (dist[i] != null) {
                     times.push(i / fps);
                     values.push(dist[i]);
                 }
             }
-            return { times, values };
         }
 
-        // Single trial
-        if (selectedTrial >= ranges.length) return { times: [], values: [] };
-        const r = ranges[selectedTrial];
-        const times = [], values = [];
-        for (let i = r.start; i <= r.end; i++) {
-            if (i < dist.length && dist[i] != null) {
-                times.push((i - r.start) / fps);
-                values.push(dist[i]);
-            }
-        }
         return { times, values };
     }
 
