@@ -35,7 +35,7 @@ const deid = (() => {
     let handOverlayEnabled = false;
     let handLandmarks = [];   // [{x, y, side}] for current frame (after smoothing)
     let handLandmarksBulk = {}; // {frameNum: [{x, y, side}]} all frames
-    let handTemporalSmooth = 3; // temporal smoothing window (frames each direction)
+    let handTemporalSmooth = 0; // temporal smoothing window (frames each direction)
     let handMaskRadius = 5;
     let forearmRadius = 10;  // dilation around forearm triangle (separate from circle radius)
     let forearmExtent = 0.4; // 0=wrist, 1=elbow, >1=past elbow
@@ -1119,7 +1119,10 @@ const deid = (() => {
                 loading = true;
                 currentFrame++;
                 // Simple sync render: just update frame and draw
-                const url = `/api/deidentify/${subjectId}/frame?trial_idx=${currentTrialIdx}&frame_num=${currentFrame}&side=${encodeURIComponent(currentSide)}`;
+                let url = `/api/deidentify/${subjectId}/frame?trial_idx=${currentTrialIdx}&frame_num=${currentFrame}&side=${encodeURIComponent(currentSide)}`;
+                if (viewMode === 'deidentified') url += '&blurred=true';
+                else if (viewMode === 'preview') url += '&preview=true';
+                url += `&_=${viewMode}_${Date.now()}`;
                 const img = new Image();
                 img.onload = () => {
                     currentImage = img;
