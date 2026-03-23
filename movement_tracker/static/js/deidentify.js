@@ -939,20 +939,40 @@ const deid = (() => {
 
         if (ix < 0 || iy < 0 || ix > imgW || iy > imgH) return;
 
-        // Check if clicking on a face detection → create face spot
+        // Check if clicking on a face detection → create face spot (if none exists for this face)
         const localFrame = currentFrame - (trialMeta ? trialMeta.start_frame : 0);
         if (faceDetections.length > localFrame) {
             const entry = faceDetections[localFrame];
             if (entry && entry.faces) {
                 for (const f of entry.faces) {
                     if (ix >= f.x1 && ix <= f.x2 && iy >= f.y1 && iy <= f.y2) {
+                        const fcx = (f.x1 + f.x2) / 2;
+                        const fcy = (f.y1 + f.y2) / 2;
+                        const fSide = f.side || 'full';
+
+                        // Check if a blur spot already covers this face
+                        const existing = blurSpots.find(s => {
+                            if (s.spot_type !== 'face') return false;
+                            if (s.side !== fSide) return false;
+                            const dx = s.x - fcx;
+                            const dy = s.y - fcy;
+                            return Math.sqrt(dx * dx + dy * dy) < Math.max(f.x2 - f.x1, f.y2 - f.y1);
+                        });
+                        if (existing) {
+                            // Select the existing spot instead
+                            selectedSpotId = existing.id;
+                            renderSpotList();
+                            render();
+                            return;
+                        }
+
                         const fw = f.x2 - f.x1;
                         const fh = f.y2 - f.y1;
                         const spot = {
                             id: nextSpotId++,
                             spot_type: 'face',
-                            x: Math.round((f.x1 + f.x2) / 2),
-                            y: Math.round((f.y1 + f.y2) / 2),
+                            x: Math.round(fcx),
+                            y: Math.round(fcy),
                             radius: Math.round(Math.max(fw, fh) / 2 * 1.2),
                             width: Math.round(fw * 1.2),
                             height: Math.round(fh * 1.2),
@@ -960,7 +980,7 @@ const deid = (() => {
                             offset_y: 0,
                             frame_start: trialMeta.start_frame,
                             frame_end: trialMeta.end_frame,
-                            side: f.side || 'full',
+                            side: fSide,
                         };
                         blurSpots.push(spot);
                         selectedSpotId = spot.id;
