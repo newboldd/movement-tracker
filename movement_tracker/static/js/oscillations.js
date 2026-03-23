@@ -12,6 +12,12 @@ const osc = (() => {
     // Chart layout
     const MARGIN = { top: 20, right: 60, bottom: 40, left: 60 };
 
+    // X-axis zoom/pan state
+    let xZoomMin = null;  // null = auto
+    let xZoomMax = null;
+    let xDragging = false;
+    let xDragStart = null;
+
     async function init() {
         canvas = document.getElementById('chart');
         ctx = canvas.getContext('2d');
@@ -34,6 +40,53 @@ const osc = (() => {
         });
 
         window.addEventListener('resize', () => render());
+
+        // Zoom/pan on chart
+        canvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const rect = canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            const plotW = canvas.width - MARGIN.left - MARGIN.right;
+            const frac = (mx - MARGIN.left) / plotW;  // 0-1 position of mouse
+
+            const [curMin, curMax] = _getXRange();
+            const span = curMax - curMin;
+            const zoomFactor = e.deltaY < 0 ? 0.85 : 1.18;
+            const newSpan = span * zoomFactor;
+            const pivot = curMin + frac * span;
+
+            xZoomMin = pivot - frac * newSpan;
+            xZoomMax = pivot + (1 - frac) * newSpan;
+            render();
+        }, { passive: false });
+
+        canvas.addEventListener('mousedown', (e) => {
+            if (e.button === 0) {
+                xDragging = true;
+                xDragStart = { x: e.clientX, min: xZoomMin, max: xZoomMax };
+                canvas.style.cursor = 'grabbing';
+            }
+        });
+        canvas.addEventListener('mousemove', (e) => {
+            if (!xDragging || !xDragStart) return;
+            const plotW = canvas.width - MARGIN.left - MARGIN.right;
+            const [curMin, curMax] = [xDragStart.min, xDragStart.max];
+            if (curMin == null || curMax == null) return;
+            const span = curMax - curMin;
+            const dx = (xDragStart.x - e.clientX) / plotW * span;
+            xZoomMin = curMin + dx;
+            xZoomMax = curMax + dx;
+            render();
+        });
+        canvas.addEventListener('mouseup', () => {
+            xDragging = false; xDragStart = null; canvas.style.cursor = '';
+        });
+        canvas.addEventListener('mouseleave', () => {
+            xDragging = false; xDragStart = null; canvas.style.cursor = '';
+        });
+        canvas.addEventListener('dblclick', () => {
+            xZoomMin = null; xZoomMax = null; render();  // reset zoom
+        });
 
         // Auto-select from URL or if single subject
         const params = new URLSearchParams(window.location.search);
@@ -77,12 +130,14 @@ const osc = (() => {
         });
 
         selectedTrial = -1;
+        xZoomMin = null; xZoomMax = null;
         _autoSetWaveDefaults();
         render();
     }
 
     function selectTrial(idx) {
         selectedTrial = idx;
+        xZoomMin = null; xZoomMax = null;
         document.querySelectorAll('.trial-btn').forEach((b, i) => {
             b.classList.toggle('active', i === (idx + 1));
         });
@@ -228,8 +283,8 @@ const osc = (() => {
         let bestParams = null;
 
         // Grid search over frequency combinations
-        for (let f1 = 0.05; f1 <= 1.5; f1 += 0.05) {
-            for (let f2 = 0.05; f2 <= 1.5; f2 += 0.05) {
+        for (let f1 = 0.05; f1 <= 12; f1 += 0.1) {
+            for (let f2 = 0.05; f2 <= 12; f2 += 0.1) {
                 // For each frequency pair, solve for optimal amplitude/phase/offset
                 // using least squares (simplified: try a few phases)
                 for (let p1 = 0; p1 < 6.28; p1 += 0.5) {
@@ -273,6 +328,24 @@ const osc = (() => {
         }
     }
 
+    function _getXRange() {
+        if (xZoomMin != null && xZoomMax != null) return [xZoomMin, xZoomMax];
+        // Auto range from data
+        const mvs = _getVisibleMovements();
+        const distData = _getVisibleDistances();
+        let tMin = Infinity, tMax = -Infinity;
+        if (distData.times.length > 0) {
+            tMin = Math.min(tMin, distData.times[0]);
+            tMax = Math.max(tMax, distData.times[distData.times.length - 1]);
+        }
+        for (const m of mvs) {
+            tMin = Math.min(tMin, m.peak_time);
+            tMax = Math.max(tMax, m.peak_time);
+        }
+        if (tMax <= tMin) { tMin = 0; tMax = 10; }
+        return [tMin, tMax];
+    }
+
     // ── Rendering ──
     function render() {
         if (!ctx || !canvas) return;
@@ -290,21 +363,25 @@ const osc = (() => {
         const showDist = document.getElementById('showDistance').checked;
         const showAmp = document.getElementById('showAmplitude').checked;
 
-        // Determine time and value ranges
-        let tMin = Infinity, tMax = -Infinity;
+        // Determine time range (respects zoom/pan)
+        let [tMin, tMax] = _getXRange();
         let yMin = Infinity, yMax = -Infinity;
 
+        // Y range from visible data within the current x range
         if (showDist && distData.times.length > 0) {
-            tMin = Math.min(tMin, distData.times[0]);
-            tMax = Math.max(tMax, distData.times[distData.times.length - 1]);
-            for (const v of distData.values) { yMin = Math.min(yMin, v); yMax = Math.max(yMax, v); }
+            for (let i = 0; i < distData.times.length; i++) {
+                if (distData.times[i] >= tMin && distData.times[i] <= tMax) {
+                    yMin = Math.min(yMin, distData.values[i]);
+                    yMax = Math.max(yMax, distData.values[i]);
+                }
+            }
         }
         if (showAmp && mvs.length > 0) {
             for (const m of mvs) {
-                tMin = Math.min(tMin, m.peak_time);
-                tMax = Math.max(tMax, m.peak_time);
-                yMin = Math.min(yMin, m.amplitude);
-                yMax = Math.max(yMax, m.amplitude);
+                if (m.peak_time >= tMin && m.peak_time <= tMax) {
+                    yMin = Math.min(yMin, m.amplitude);
+                    yMax = Math.max(yMax, m.amplitude);
+                }
             }
         }
 
