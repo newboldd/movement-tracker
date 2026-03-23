@@ -265,9 +265,21 @@ const deid = (() => {
         selectedHandSegId = null;
         try {
             const hs = await API.get(`/api/deidentify/${subjectId}/hand-settings?trial_idx=${idx}`);
-            handMaskRadius = hs.mask_radius || 30;
+            handMaskRadius = hs.mask_radius || 10;
+            handSmooth = hs.hand_smooth || 10;
+            forearmRadius = hs.forearm_radius || 10;
+            forearmExtent = hs.forearm_extent != null ? hs.forearm_extent : 0.5;
+            handSmooth2 = hs.hand_smooth2 || 0;
             document.getElementById('handRadiusSlider').value = handMaskRadius;
             document.getElementById('handRadiusVal').textContent = handMaskRadius;
+            document.getElementById('handSmoothSlider').value = handSmooth;
+            document.getElementById('handSmoothVal').textContent = handSmooth;
+            document.getElementById('handForearmSlider').value = forearmRadius;
+            document.getElementById('handForearmVal').textContent = forearmRadius;
+            document.getElementById('handExtentSlider').value = forearmExtent;
+            document.getElementById('handExtentVal').textContent = forearmExtent.toFixed(1);
+            document.getElementById('handSmooth2Slider').value = handSmooth2;
+            document.getElementById('handSmooth2Val').textContent = handSmooth2;
             if (hs.segments && hs.segments.length > 0) {
                 handProtectSegments = hs.segments.map(s => ({
                     id: nextHandSegId++,
@@ -677,14 +689,8 @@ const deid = (() => {
         // Draw video frame
         ctx.drawImage(currentImage, offsetX, offsetY, imgW * scale, imgH * scale);
 
-        // Deidentified mode: just show the rendered video, no overlays
-        if (viewMode === 'deidentified') return;
-
-        // Preview mode: show blur mask with hand protection subtracted
-        if (viewMode === 'preview') {
-            _renderPreviewMask(cw, ch);
-            return;
-        }
+        // In deidentified or preview mode, the server provides the blurred frame — no overlays
+        if (viewMode === 'deidentified' || viewMode === 'preview') return;
 
         // Draw face detections (blue dashed rectangles) — filtered by current side
         const localFrame = currentFrame - (trialMeta ? trialMeta.start_frame : 0);
@@ -1466,12 +1472,14 @@ const deid = (() => {
     function updateForearmRadius(val) {
         forearmRadius = parseInt(val);
         document.getElementById('handForearmVal').textContent = forearmRadius;
+        saveHandSettings();
         render();
     }
 
     function updateForearmExtent(val) {
         forearmExtent = parseFloat(val);
         document.getElementById('handExtentVal').textContent = forearmExtent.toFixed(1);
+        saveHandSettings();
         render();
     }
 
@@ -1494,6 +1502,7 @@ const deid = (() => {
     function updateHandSmooth2(val) {
         handSmooth2 = parseInt(val);
         document.getElementById('handSmooth2Val').textContent = handSmooth2;
+        saveHandSettings();
         render();
     }
 
@@ -1505,6 +1514,9 @@ const deid = (() => {
                 enabled: true,
                 mask_radius: handMaskRadius,
                 hand_smooth: handSmooth,
+                forearm_radius: forearmRadius,
+                forearm_extent: forearmExtent,
+                hand_smooth2: handSmooth2,
                 segments: handProtectSegments.map(s => ({
                     start: s.start, end: s.end, radius: s.radius,
                     smooth: s.smooth != null ? s.smooth : handSmooth,

@@ -789,6 +789,9 @@ def _build_blur_mask(specs: list[dict], w: int, h: int,
                 cx, cy = centroid[0] + ox, centroid[1] + oy
             else:
                 cx, cy = cx + ox, cy + oy
+        else:
+            # Custom spots: apply offset to stored position
+            cx, cy = cx + ox, cy + oy
 
         # Use width/height if available, otherwise fall back to radius
         # width/height are full dimensions; cv2.ellipse needs semi-axes (half)
