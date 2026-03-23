@@ -229,16 +229,12 @@
                                oninput="deid.updateHandTemporalSmooth(this.value)">
                         <span class="val" id="handTemporalVal">0</span>
                     </div>
-                    <div style="display:flex;gap:4px;margin-top:6px;">
-                        <button class="btn btn-sm" onclick="deid.deleteSelectedHandSeg()" style="flex:1;font-size:11px;" title="Delete selected hand segment (Del)">
-                            Remove Segment
-                        </button>
-                    </div>
-                    <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">
+                    <div id="handHelpText" style="font-size:10px;color:var(--text-muted);margin-top:4px;">
                         Drag on the timeline hand row to create protection segments. Each segment can have its own radius.
                     </div>
-                    <button class="btn btn-sm" id="goMediapipeBtn" onclick="deid.goToMediapipe()"
-                            style="width:100%;margin-top:6px;">Run MediaPipe</button>
+                    <div id="handDisabledMsg" style="display:none;font-size:11px;color:var(--text-muted);margin-top:4px;font-style:italic;">
+                        Run MediaPipe from the MediaPipe page to enable hand overlap protection.
+                    </div>
                 </div>
 
                 <!-- Render -->

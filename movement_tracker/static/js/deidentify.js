@@ -200,7 +200,7 @@ const deid = (() => {
         const handSection = document.getElementById('handSection');
         if (!handSection) return;
 
-        // Grey out controls if no MP labels, but keep MP button always active
+        // Disable controls if no MP labels
         const inputs = handSection.querySelectorAll('input[type=checkbox], input[type=range]');
         inputs.forEach(el => { el.disabled = !hasMediapipe; });
         if (!hasMediapipe) {
@@ -209,11 +209,11 @@ const deid = (() => {
             handSection.classList.remove('hand-disabled');
         }
 
-        // Update button text — always visible
-        const mpBtn = document.getElementById('goMediapipeBtn');
-        if (mpBtn) {
-            mpBtn.textContent = hasMediapipe ? 'Re-run MediaPipe' : 'Run MediaPipe';
-        }
+        // Show/hide help text vs disabled message
+        const helpText = document.getElementById('handHelpText');
+        const disabledMsg = document.getElementById('handDisabledMsg');
+        if (helpText) helpText.style.display = hasMediapipe ? '' : 'none';
+        if (disabledMsg) disabledMsg.style.display = hasMediapipe ? 'none' : 'block';
     }
 
     // ── Select trial ──
