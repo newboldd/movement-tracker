@@ -237,7 +237,7 @@ def get_frame(
             pose_path = settings.dlc_path / subject_name / "pose_prelabels.npz"
             if pose_path.exists():
                 pose_npz = np.load(str(pose_path))
-                for cam_key, side_label in [("OS_landmarks", "left"), ("OD_landmarks", "right")]:
+                for cam_key, side_label in [("OS_pose", "left"), ("OD_pose", "right")]:
                     plm = pose_npz.get(cam_key)
                     if plm is not None and frame_num < plm.shape[0]:
                         for j in range(plm.shape[1]):

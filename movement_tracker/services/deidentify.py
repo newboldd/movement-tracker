@@ -640,8 +640,8 @@ def render_with_blur_specs(input_path: str, output_path: str,
                 pose_path = settings.dlc_path / subject_name / "pose_prelabels.npz"
                 if pose_path.exists():
                     pose_npz = np2.load(str(pose_path))
-                    pose_os = pose_npz.get("OS_landmarks")
-                    pose_od = pose_npz.get("OD_landmarks")
+                    pose_os = pose_npz.get("OS_pose")
+                    pose_od = pose_npz.get("OD_pose")
                     if pose_os is not None:
                         for f in range(pose_os.shape[0]):
                             if f not in hand_lm_data:
