@@ -933,7 +933,15 @@ def _apply_blur_with_mask(frame_half, blur_mask, hand_mask):
               blurred.astype(np.float32) * mask_3ch).astype(np.uint8)
 
     # Restore original pixels in hand protection area (feathering can bleed into it)
+    # Dilate the hand mask slightly to ensure full coverage matches frontend display
     if hand_mask is not None and hand_mask.any():
-        result[hand_mask] = frame_half[hand_mask]
+        # Dilate by the feather kernel radius to cover any bleed from edge feathering
+        dilate_r = FEATHER_KERNEL // 2
+        if dilate_r > 0:
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_r * 2 + 1, dilate_r * 2 + 1))
+            expanded_mask = cv2.dilate(hand_mask.astype(np.uint8), kernel, iterations=1).astype(bool)
+        else:
+            expanded_mask = hand_mask
+        result[expanded_mask] = frame_half[expanded_mask]
 
     return result
