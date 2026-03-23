@@ -316,6 +316,8 @@ const deid = (() => {
         let url = `/api/deidentify/${subjectId}/frame?trial_idx=${currentTrialIdx}&frame_num=${frameNum}&side=${encodeURIComponent(currentSide)}`;
         if (viewMode === 'deidentified') url += '&blurred=true';
         else if (viewMode === 'preview') url += '&preview=true';
+        // Cache-bust to prevent browser from reusing frames across view modes
+        url += `&_=${viewMode}_${Date.now()}`;
 
         try {
             const img = new Image();
