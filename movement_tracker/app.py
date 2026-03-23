@@ -28,7 +28,7 @@ class NoCacheMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
         if request.url.path.startswith("/static") or request.url.path in (
-            "/", "/labeling", "/mediapipe", "/deidentify", "/results", "/settings", "/onboarding", "/remote", "/videos", "/calibration", "/tutorials", "/tutorial"
+            "/", "/labeling", "/mediapipe", "/deidentify", "/mano", "/results", "/settings", "/onboarding", "/remote", "/videos", "/calibration", "/tutorials", "/tutorial"
         ):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return response
@@ -479,6 +479,12 @@ def mediapipe_page():
 def deidentify_page():
     """Serve the interactive deidentify/blur page."""
     return FileResponse(str(STATIC_DIR / "deidentify.html"))
+
+
+@app.get("/mano")
+def mano_page():
+    """Serve the MANO viewer page."""
+    return FileResponse(str(STATIC_DIR / "mano.html"))
 
 
 @app.get("/labeling-select")
