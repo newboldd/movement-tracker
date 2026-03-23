@@ -223,7 +223,7 @@ cd "$PROJECT_DIR"
 
 # Launch with restart loop (exit code 42 = restart after in-app update)
 while true; do
-    python -m uvicorn movement_tracker.app:app --host 127.0.0.1 --port "$PORT" --reload
+    "$VENV_DIR/bin/python" -m uvicorn movement_tracker.app:app --host 127.0.0.1 --port "$PORT" --reload
     exit_code=$?
     if [ "$exit_code" -ne 42 ]; then
         break
