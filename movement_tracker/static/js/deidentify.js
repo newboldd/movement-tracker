@@ -1901,10 +1901,10 @@ const deid = (() => {
             }
         }
 
-        // Face blur spot bars (blue) on top of detection coverage
+        // Face blur spot bars (blue) on top of detection coverage — use full row height
         const faceSpots = visibleSpots.filter(s => s.spot_type === 'face');
         if (faceSpots.length > 0) {
-            const spotBarH = Math.min(14, (faceRowH - 4) / faceSpots.length);
+            const spotBarH = (faceRowH - 4) / faceSpots.length;
             let spotY = y + 2;
             for (const spot of faceSpots) {
                 const x1 = _frameToTlX(spot.frame_start, L);
@@ -2043,7 +2043,7 @@ const deid = (() => {
         // Hit test face blur spot bars within face row
         const faceSpots = visibleSpots.filter(s => s.spot_type === 'face');
         if (faceSpots.length > 0) {
-            const spotBarH = Math.min(12, (faceRowH - 4) / faceSpots.length);
+            const spotBarH = (faceRowH - 4) / faceSpots.length;
             let spotY = y + 2;
             for (const spot of faceSpots) {
                 const x1 = _frameToTlX(spot.frame_start, L);
