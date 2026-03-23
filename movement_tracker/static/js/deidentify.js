@@ -1901,45 +1901,68 @@ const deid = (() => {
             }
         }
 
-        // Bright blue blur spot bars on top (matching face detection box color)
-        if (visibleSpots.length > 0) {
-            const spotBarH = Math.min(14, (faceRowH - 4) / visibleSpots.length);
+        // Face blur spot bars (blue) on top of detection coverage
+        const faceSpots = visibleSpots.filter(s => s.spot_type === 'face');
+        if (faceSpots.length > 0) {
+            const spotBarH = Math.min(14, (faceRowH - 4) / faceSpots.length);
             let spotY = y + 2;
-            for (const spot of visibleSpots) {
+            for (const spot of faceSpots) {
                 const x1 = _frameToTlX(spot.frame_start, L);
                 const x2 = _frameToTlX(spot.frame_end, L);
                 const w = Math.max(3, x2 - x1);
                 const isSelected = spot.id === selectedSpotId;
 
-                // Face spots are blue, custom spots are red
-                const isCustom = spot.spot_type === 'custom';
-                const cr = isCustom ? 244 : 33;
-                const cg = isCustom ? 67 : 150;
-                const cb = isCustom ? 54 : 243;
-
                 tlCtx.fillStyle = isSelected
-                    ? `rgba(${cr},${cg},${cb},0.6)`
-                    : `rgba(${cr},${cg},${cb},0.35)`;
+                    ? 'rgba(33,150,243,0.6)' : 'rgba(33,150,243,0.35)';
                 tlCtx.fillRect(x1, spotY, w, spotBarH - 1);
-
                 tlCtx.strokeStyle = isSelected
-                    ? `rgba(${cr},${cg},${cb},1.0)`
-                    : `rgba(${cr},${cg},${cb},0.7)`;
+                    ? 'rgba(33,150,243,1.0)' : 'rgba(33,150,243,0.7)';
                 tlCtx.lineWidth = isSelected ? 1.5 : 0.5;
                 tlCtx.strokeRect(x1, spotY, w, spotBarH - 1);
 
-                // Edge handles for selected
                 if (isSelected) {
                     tlCtx.fillStyle = 'rgba(33,150,243,1.0)';
                     tlCtx.fillRect(x1 - 1, spotY, 3, spotBarH - 1);
                     tlCtx.fillRect(x2 - 2, spotY, 3, spotBarH - 1);
                 }
-
                 spotY += spotBarH;
             }
         }
 
         y += faceRowH + gap;
+
+        // ── Custom spots row (red) ──
+        const customSpots = visibleSpots.filter(s => s.spot_type === 'custom');
+        if (customSpots.length > 0) {
+            const customRowH = 25;
+            tlCtx.fillStyle = 'rgba(150,150,150,0.5)';
+            tlCtx.fillText('Custom', 2, y + 12);
+
+            const spotBarH = Math.min(14, (customRowH - 4) / customSpots.length);
+            let spotY = y + 2;
+            for (const spot of customSpots) {
+                const x1 = _frameToTlX(spot.frame_start, L);
+                const x2 = _frameToTlX(spot.frame_end, L);
+                const w = Math.max(3, x2 - x1);
+                const isSelected = spot.id === selectedSpotId;
+
+                tlCtx.fillStyle = isSelected
+                    ? 'rgba(244,67,54,0.6)' : 'rgba(244,67,54,0.35)';
+                tlCtx.fillRect(x1, spotY, w, spotBarH - 1);
+                tlCtx.strokeStyle = isSelected
+                    ? 'rgba(244,67,54,1.0)' : 'rgba(244,67,54,0.7)';
+                tlCtx.lineWidth = isSelected ? 1.5 : 0.5;
+                tlCtx.strokeRect(x1, spotY, w, spotBarH - 1);
+
+                if (isSelected) {
+                    tlCtx.fillStyle = 'rgba(244,67,54,1.0)';
+                    tlCtx.fillRect(x1 - 1, spotY, 3, spotBarH - 1);
+                    tlCtx.fillRect(x2 - 2, spotY, 3, spotBarH - 1);
+                }
+                spotY += spotBarH;
+            }
+            y += customRowH + gap;
+        }
 
         // ── Hand row: green coverage + multiple draggable protection segments ──
         if (handCoverage.length > 0 || hasMediapipe) {
@@ -2014,14 +2037,15 @@ const deid = (() => {
             return ss === 'full' || ss === sideLabel;
         });
 
-        const faceRowH = 35, handRowH = 25, gap = 3;
+        const faceRowH = 35, customRowH = 25, handRowH = 25, gap = 3;
         let y = 2;
 
-        // Hit test blur spot bars within face row
-        if (visibleSpots.length > 0) {
-            const spotBarH = Math.min(12, (faceRowH - 4) / visibleSpots.length);
+        // Hit test face blur spot bars within face row
+        const faceSpots = visibleSpots.filter(s => s.spot_type === 'face');
+        if (faceSpots.length > 0) {
+            const spotBarH = Math.min(12, (faceRowH - 4) / faceSpots.length);
             let spotY = y + 2;
-            for (const spot of visibleSpots) {
+            for (const spot of faceSpots) {
                 const x1 = _frameToTlX(spot.frame_start, L);
                 const x2 = _frameToTlX(spot.frame_end, L);
 
@@ -2035,6 +2059,25 @@ const deid = (() => {
         }
 
         y += faceRowH + gap;
+
+        // Hit test custom spot bars
+        const customSpots = visibleSpots.filter(s => s.spot_type === 'custom');
+        if (customSpots.length > 0) {
+            const spotBarH = Math.min(12, (customRowH - 4) / customSpots.length);
+            let spotY = y + 2;
+            for (const spot of customSpots) {
+                const x1 = _frameToTlX(spot.frame_start, L);
+                const x2 = _frameToTlX(spot.frame_end, L);
+
+                if (my >= spotY && my <= spotY + spotBarH) {
+                    if (Math.abs(mx - x1) < 6) return { type: 'spot', spot, edge: 'start' };
+                    if (Math.abs(mx - x2) < 6) return { type: 'spot', spot, edge: 'end' };
+                    if (mx > x1 + 4 && mx < x2 - 4) return { type: 'spot', spot, edge: 'move' };
+                }
+                spotY += spotBarH;
+            }
+            y += customRowH + gap;
+        }
 
         // Hit test hand protection segments
         if (handCoverage.length > 0 || hasMediapipe) {
