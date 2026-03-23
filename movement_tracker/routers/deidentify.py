@@ -277,7 +277,7 @@ def get_frame(
                 frame = _apply_blur_with_mask(frame, blur_mask, hand_mask)
 
     # Stereo: crop to left or right half based on camera name
-    if is_stereo and side != "full" and not blurred:
+    if is_stereo and side != "full":
         half_w = fw // 2
         if len(cam_names) >= 2 and side == cam_names[1]:
             frame = frame[:, half_w:, :]
