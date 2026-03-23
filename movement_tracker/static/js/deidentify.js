@@ -668,9 +668,13 @@ const deid = (() => {
             ctx.strokeStyle = spot.spot_type === 'face'
                 ? 'rgba(33,150,243,0.8)' : 'rgba(244,67,54,0.8)';
             ctx.lineWidth = 2;
-            ctx.beginPath();
-            ctx.ellipse(sx, sy, sw, sh, 0, 0, Math.PI * 2);
-            ctx.stroke();
+            if (spot.shape === 'rect') {
+                ctx.strokeRect(sx - sw, sy - sh, sw * 2, sh * 2);
+            } else {
+                ctx.beginPath();
+                ctx.ellipse(sx, sy, sw, sh, 0, 0, Math.PI * 2);
+                ctx.stroke();
+            }
         }
         ctx.setLineDash([]);
 
@@ -778,9 +782,13 @@ const deid = (() => {
                 const fillAlpha = isSelected ? 0.35 : 0.2;
 
                 off.fillStyle = `rgba(${cr},${cg},${cb},${fillAlpha})`;
-                off.beginPath();
-                off.ellipse(sx, sy, sw, sh, 0, 0, Math.PI * 2);
-                off.fill();
+                if (spot.shape === 'rect') {
+                    off.fillRect(sx - sw, sy - sh, sw * 2, sh * 2);
+                } else {
+                    off.beginPath();
+                    off.ellipse(sx, sy, sw, sh, 0, 0, Math.PI * 2);
+                    off.fill();
+                }
             }
 
             // Subtract hand protection mask from ALL blur fills
@@ -811,13 +819,17 @@ const deid = (() => {
                 const cg = isFace ? 150 : 67;
                 const cb = isFace ? 243 : 54;
 
-                ctx.beginPath();
-                ctx.ellipse(sx, sy, sw, sh, 0, 0, Math.PI * 2);
                 ctx.strokeStyle = isSelected
                     ? `rgba(${cr},${cg},${cb},0.9)`
                     : `rgba(${cr},${cg},${cb},0.5)`;
                 ctx.lineWidth = isSelected ? 2 : 1;
-                ctx.stroke();
+                if (spot.shape === 'rect') {
+                    ctx.strokeRect(sx - sw, sy - sh, sw * 2, sh * 2);
+                } else {
+                    ctx.beginPath();
+                    ctx.ellipse(sx, sy, sw, sh, 0, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
 
                 // Draw drag handles for selected spot
                 if (isSelected) {
@@ -1013,6 +1025,7 @@ const deid = (() => {
             const spot = {
                 id: nextSpotId++,
                 spot_type: 'custom',
+                shape: 'oval',
                 x: Math.round(ix),
                 y: Math.round(iy),
                 radius: 40,
@@ -1447,7 +1460,31 @@ const deid = (() => {
     function selectSpot(id) {
         selectedSpotId = id;
         renderSpotList();
+        _updateShapeToggle();
         updateSpotControls();
+        render();
+    }
+
+    function _updateShapeToggle() {
+        const toggle = document.getElementById('spotShapeToggle');
+        const btn = document.getElementById('shapeBtn');
+        if (!toggle || !btn) return;
+        const spot = blurSpots.find(s => s.id === selectedSpotId);
+        if (spot && spot.spot_type === 'custom') {
+            toggle.style.display = 'block';
+            const shape = spot.shape || 'oval';
+            btn.textContent = `Shape: ${shape === 'rect' ? 'Rectangle' : 'Oval'}`;
+        } else {
+            toggle.style.display = 'none';
+        }
+    }
+
+    function toggleSpotShape() {
+        const spot = blurSpots.find(s => s.id === selectedSpotId);
+        if (!spot || spot.spot_type !== 'custom') return;
+        spot.shape = (spot.shape || 'oval') === 'oval' ? 'rect' : 'oval';
+        _updateShapeToggle();
+        scheduleSave();
         render();
     }
 
@@ -1732,6 +1769,7 @@ const deid = (() => {
             frame_start: s.frame_start,
             frame_end: s.frame_end,
             side: s.side || 'full',
+            shape: s.shape || 'oval',
         }));
         try {
             await API.put(`/api/deidentify/${subjectId}/blur-specs`, {
@@ -1873,14 +1911,20 @@ const deid = (() => {
                 const w = Math.max(3, x2 - x1);
                 const isSelected = spot.id === selectedSpotId;
 
+                // Face spots are blue, custom spots are red
+                const isCustom = spot.spot_type === 'custom';
+                const cr = isCustom ? 244 : 33;
+                const cg = isCustom ? 67 : 150;
+                const cb = isCustom ? 54 : 243;
+
                 tlCtx.fillStyle = isSelected
-                    ? 'rgba(33,150,243,0.6)'
-                    : 'rgba(33,150,243,0.35)';
+                    ? `rgba(${cr},${cg},${cb},0.6)`
+                    : `rgba(${cr},${cg},${cb},0.35)`;
                 tlCtx.fillRect(x1, spotY, w, spotBarH - 1);
 
                 tlCtx.strokeStyle = isSelected
-                    ? 'rgba(33,150,243,1.0)'
-                    : 'rgba(33,150,243,0.7)';
+                    ? `rgba(${cr},${cg},${cb},1.0)`
+                    : `rgba(${cr},${cg},${cb},0.7)`;
                 tlCtx.lineWidth = isSelected ? 1.5 : 0.5;
                 tlCtx.strokeRect(x1, spotY, w, spotBarH - 1);
 
@@ -2192,6 +2236,7 @@ const deid = (() => {
         resetZoom,
         seekFrame,
         toggleAddCustom,
+        toggleSpotShape,
         selectSpot,
         deleteSpot,
         updateSpotDim,

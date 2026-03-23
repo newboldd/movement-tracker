@@ -798,11 +798,19 @@ def _build_blur_mask(specs: list[dict], w: int, h: int,
         bw = float(s.get("width") or s.get("radius") or 50)
         bh = float(s.get("height") or s.get("radius") or 50)
 
-        # Draw filled ellipse (axes = semi-axes = half of full dimensions)
+        # Draw filled shape
+        shape = spec.get("shape", "oval")
         center = (int(cx), int(cy))
         axes = (int(bw / 2), int(bh / 2))
         if axes[0] > 0 and axes[1] > 0:
-            cv2.ellipse(mask, center, axes, 0, 0, 360, 255, -1)
+            if shape == "rect":
+                x1r = max(0, int(cx - bw / 2))
+                y1r = max(0, int(cy - bh / 2))
+                x2r = min(w, int(cx + bw / 2))
+                y2r = min(h, int(cy + bh / 2))
+                cv2.rectangle(mask, (x1r, y1r), (x2r, y2r), 255, -1)
+            else:
+                cv2.ellipse(mask, center, axes, 0, 0, 360, 255, -1)
 
     return mask
 
