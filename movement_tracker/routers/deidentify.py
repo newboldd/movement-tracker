@@ -183,11 +183,11 @@ def get_frame(
 
         # Load hand settings
         import json as _json
-        hand_mask_radius = 10
-        hand_smooth = 10
+        hand_mask_radius = 5
+        hand_smooth = 7
         forearm_radius_val = 10
-        forearm_extent_val = 0.5
-        hand_smooth2_val = 0
+        forearm_extent_val = 0.4
+        hand_smooth2_val = 5
         hand_segments = []
         if hs_row:
             hand_mask_radius = hs_row.get("hand_mask_radius", 10) or 10

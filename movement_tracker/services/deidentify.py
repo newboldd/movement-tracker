@@ -590,11 +590,11 @@ def render_with_blur_specs(input_path: str, output_path: str,
     # Load hand landmarks from npz for hand protection
     hand_lm_data = None  # {frame: [{x, y, side}]}
     hand_segments = []
-    hand_mask_radius = 10
-    hand_smooth = 10
+    hand_mask_radius = 5
+    hand_smooth = 7
     forearm_radius = 10
-    forearm_extent = 0.7
-    hand_smooth2 = 0
+    forearm_extent = 0.4
+    hand_smooth2 = 5
     if hand_settings:
         import json as _json
         hand_mask_radius = hand_settings.get("hand_mask_radius") or hand_settings.get("mask_radius") or 10

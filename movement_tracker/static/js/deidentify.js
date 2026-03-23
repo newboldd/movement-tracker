@@ -35,11 +35,11 @@ const deid = (() => {
     let handOverlayEnabled = false;
     let handLandmarks = [];   // [{x, y, side}] for current frame (after smoothing)
     let handLandmarksBulk = {}; // {frameNum: [{x, y, side}]} all frames
-    let handTemporalSmooth = 0; // temporal smoothing window (frames each direction)
-    let handMaskRadius = 10;
+    let handTemporalSmooth = 3; // temporal smoothing window (frames each direction)
+    let handMaskRadius = 5;
     let forearmRadius = 10;  // dilation around forearm triangle (separate from circle radius)
-    let forearmExtent = 0.5; // 0=wrist, 1=elbow, >1=past elbow
-    let handSmooth = 10;  // morphological close on hand circles
+    let forearmExtent = 0.4; // 0=wrist, 1=elbow, >1=past elbow
+    let handSmooth = 7;  // morphological close on hand circles
     let handSmooth2 = 5;  // morphological close after joining forearm
     let handMaskEnabled = true;
 
