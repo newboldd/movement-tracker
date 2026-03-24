@@ -701,7 +701,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
         blur_cmd += ["-ss", str(start_frame / fps)]
     blur_cmd += [
         "-frames:v", str(total),
-        "-vf", "boxblur=luma=25:chroma=25",
+        "-vf", "boxblur=25:25",
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "15",
         "-pix_fmt", "yuv420p", "-an",
         preblurred_path,
