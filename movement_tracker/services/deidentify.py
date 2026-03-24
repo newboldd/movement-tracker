@@ -607,8 +607,10 @@ def render_with_blur_specs(input_path: str, output_path: str,
         hand_smooth2 = hand_settings.get("hand_smooth2", 0)
         seg_json = hand_settings.get("segments_json", "[]")
         try:
-            hand_segments = _json.loads(seg_json) if isinstance(seg_json, str) else seg_json
+            hand_segments = _json.loads(seg_json) if isinstance(seg_json, str) else (seg_json or [])
         except (ValueError, TypeError):
+            hand_segments = []
+        if not hand_segments:
             hand_segments = []
 
         # Load from npz if subject_name provided

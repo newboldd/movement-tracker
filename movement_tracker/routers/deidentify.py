@@ -38,6 +38,14 @@ def get_trials(subject_id: int) -> dict:
 
     deident_dir = Path(str(settings.video_path)) / "deidentified"
 
+    # Parse no-face trial list from onboarding
+    import json as _json
+    no_face_raw = subj.get("no_face_videos")
+    try:
+        no_face_set = set(_json.loads(no_face_raw)) if no_face_raw else set()
+    except (ValueError, TypeError):
+        no_face_set = set()
+
     trial_list = []
     for i, t in enumerate(trials):
         # Check if video is stereo
@@ -67,6 +75,7 @@ def get_trials(subject_id: int) -> dict:
             "frame_width": fw // 2 if is_stereo else fw,
             "frame_height": fh,
             "has_blurred": has_blurred,
+            "has_faces": t["trial_name"] not in no_face_set,
         }
         # Include camera info for multicam trials
         cameras = t.get("cameras", [])

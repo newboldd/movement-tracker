@@ -13,6 +13,7 @@ const deid = (() => {
     let fps = 30;
     let playing = false;
     let playTimer = null;
+    let playbackSpeed = 1.0;
 
     // Camera
     let cameraMode = 'stereo';
@@ -188,6 +189,14 @@ const deid = (() => {
             const btn = document.createElement('button');
             btn.className = 'trial-btn';
             btn.textContent = t.trial_name;
+            // Color: green if no faces or already deidentified, red if needs deident
+            if (!t.has_faces || t.has_blurred) {
+                btn.style.borderColor = 'var(--green)';
+                btn.style.color = 'var(--green)';
+            } else {
+                btn.style.borderColor = '#e53935';
+                btn.style.color = '#e53935';
+            }
             btn.onclick = () => selectTrial(i);
             btns.appendChild(btn);
         });
@@ -1267,6 +1276,16 @@ const deid = (() => {
     }
 
     // ── Frame navigation ──
+    function setPlaybackSpeed(val) {
+        playbackSpeed = val;
+        document.getElementById('speedVal').textContent = val + 'x';
+        // Restart playback with new speed if playing
+        if (playing) {
+            togglePlay();
+            togglePlay();
+        }
+    }
+
     function seekFrame(n) {
         if (!trialMeta) return;
         n = Math.max(trialMeta.start_frame, Math.min(trialMeta.end_frame, n));
@@ -1286,6 +1305,7 @@ const deid = (() => {
             playing = true;
             btn.innerHTML = '&#9616;&#9616;';
             let loading = false; // prevent overlapping loads
+            const interval = Math.max(16, 1000 / (fps * playbackSpeed));
             playTimer = setInterval(() => {
                 if (!playing) return;
                 if (loading) return;
@@ -1875,6 +1895,12 @@ const deid = (() => {
                         status.textContent = `Render complete! ${trialName} saved.`;
                         if (trialMeta) trialMeta.has_blurred = true;
                         _updateViewButtons();
+                        // Update trial button color to green
+                        const trialBtns = document.querySelectorAll('.trial-btn');
+                        if (trialBtns[currentTrialIdx]) {
+                            trialBtns[currentTrialIdx].style.borderColor = 'var(--green)';
+                            trialBtns[currentTrialIdx].style.color = 'var(--green)';
+                        }
                     } else if (data.status === 'failed') {
                         status.textContent = 'Render failed: ' + (data.error_msg || 'unknown');
                     } else {
@@ -2346,6 +2372,7 @@ const deid = (() => {
     return {
         detectFaces,
         togglePlay,
+        setPlaybackSpeed,
         toggleSide,
         setViewMode,
         resetZoom,
