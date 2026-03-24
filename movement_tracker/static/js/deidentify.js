@@ -1000,6 +1000,7 @@ const deid = (() => {
                         updateSpotControls();
                         scheduleSave();
                         render();
+                        renderTimeline();
                         return;
                     }
                 }
@@ -1009,19 +1010,23 @@ const deid = (() => {
         // Check if clicking on an existing blur spot → select it
         for (const spot of blurSpots) {
             if (currentFrame < spot.frame_start || currentFrame > spot.frame_end) continue;
-            const dx = ix - spot.x;
-            const dy = iy - spot.y;
-            if (Math.sqrt(dx * dx + dy * dy) <= spot.radius) {
+            const pos = _getSpotPosition(spot);
+            const dx = ix - pos.x;
+            const dy = ix - pos.y;
+            // Use the larger dimension for hit testing
+            const hitR = Math.max(spot.width || spot.radius, spot.height || spot.radius) / 2;
+            if (Math.sqrt(dx * dx + (iy - pos.y) * (iy - pos.y)) <= hitR) {
                 selectedSpotId = spot.id;
                 renderSpotList();
                 updateSpotControls();
                 render();
+                renderTimeline();
                 return;
             }
         }
 
-        // Adding custom spot mode
-        if (addingCustom) {
+        // In original view, clicking empty canvas creates a custom spot
+        if (viewMode === 'original') {
             const spot = {
                 id: nextSpotId++,
                 spot_type: 'custom',
@@ -1040,11 +1045,13 @@ const deid = (() => {
             blurSpots.push(spot);
             selectedSpotId = spot.id;
             addingCustom = false;
-            document.getElementById('addCustomBtn').style.background = '';
+            const customBtn = document.getElementById('addCustomBtn');
+            if (customBtn) { customBtn.style.background = ''; customBtn.style.color = ''; }
             renderSpotList();
             updateSpotControls();
             scheduleSave();
             render();
+            renderTimeline();
             return;
         }
 
@@ -1053,6 +1060,7 @@ const deid = (() => {
         renderSpotList();
         updateSpotControls();
         render();
+        renderTimeline();
     }
 
     // ── Zoom ──
@@ -1543,6 +1551,60 @@ const deid = (() => {
         btn.style.background = addingCustom ? 'var(--blue)' : '';
         btn.style.color = addingCustom ? '#fff' : '';
         render();
+    }
+
+    // ── Copy custom spots from other camera ──
+    function copyFromOtherCamera() {
+        if (cameraMode === 'single' || cameraNames.length < 2) return;
+
+        const curSide = _sideLabel();
+        const otherSide = curSide === 'left' ? 'right' : 'left';
+
+        const otherCustom = blurSpots.filter(s =>
+            s.spot_type === 'custom' && s.side === otherSide
+        );
+
+        if (otherCustom.length === 0) {
+            document.getElementById('renderStatus').textContent = 'No custom spots on the other camera.';
+            return;
+        }
+
+        let copied = 0;
+        for (const s of otherCustom) {
+            // Check if a similar spot already exists on this side
+            const exists = blurSpots.find(b =>
+                b.spot_type === 'custom' && b.side === curSide &&
+                Math.abs(b.x - s.x) < 20 && Math.abs(b.y - s.y) < 20
+            );
+            if (exists) continue;
+
+            blurSpots.push({
+                id: nextSpotId++,
+                spot_type: 'custom',
+                shape: s.shape || 'oval',
+                x: s.x,
+                y: s.y,
+                radius: s.radius,
+                width: s.width || s.radius * 2,
+                height: s.height || s.radius * 2,
+                offset_x: s.offset_x || 0,
+                offset_y: s.offset_y || 0,
+                frame_start: s.frame_start,
+                frame_end: s.frame_end,
+                side: curSide,
+            });
+            copied++;
+        }
+
+        if (copied > 0) {
+            renderSpotList();
+            scheduleSave();
+            render();
+            renderTimeline();
+            document.getElementById('renderStatus').textContent = `Copied ${copied} custom spot(s) from ${otherSide} camera.`;
+        } else {
+            document.getElementById('renderStatus').textContent = 'All spots already exist on this camera.';
+        }
     }
 
     // ── Hand overlay ──
@@ -2290,6 +2352,7 @@ const deid = (() => {
         resetZoom,
         seekFrame,
         toggleAddCustom,
+        copyFromOtherCamera,
         toggleSpotShape,
         selectSpot,
         deleteSpot,
