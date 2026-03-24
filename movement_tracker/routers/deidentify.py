@@ -7,7 +7,7 @@ from pathlib import Path
 
 import cv2
 from fastapi import APIRouter, Body, HTTPException, Query
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 
 from ..config import get_settings, JPEG_QUALITY
 from ..db import get_db_ctx
@@ -297,6 +297,53 @@ def get_frame(
 
     _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
     return Response(content=jpeg.tobytes(), media_type="image/jpeg")
+
+
+@router.get("/{subject_id}/video")
+def stream_video(
+    subject_id: int,
+    trial_idx: int = Query(...),
+    blurred: bool = Query(False),
+) -> FileResponse:
+    """Stream a trial's video file for HTML5 playback."""
+    with get_db_ctx() as db:
+        subj = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
+        if not subj:
+            raise HTTPException(404, "Subject not found")
+
+    subject_name = subj["name"]
+    camera_mode = subj.get("camera_mode") or "stereo"
+    trials = build_trial_map(subject_name, camera_mode=camera_mode)
+    if trial_idx < 0 or trial_idx >= len(trials):
+        raise HTTPException(400, f"Invalid trial_idx {trial_idx}")
+
+    trial = trials[trial_idx]
+    video_path = trial["video_path"]
+
+    if blurred:
+        settings = get_settings()
+        deident_dir = Path(str(settings.video_path)) / "deidentified"
+        cam = trial.get("camera_name")
+        if cam:
+            deident_name = f"{trial['trial_name']}_{cam}.mp4"
+        else:
+            deident_name = f"{trial['trial_name']}.mp4"
+        deident_path = deident_dir / deident_name
+        if deident_path.exists():
+            video_path = str(deident_path)
+        else:
+            raise HTTPException(404, f"Deidentified video not found: {deident_name}")
+
+    # For multicam, resolve per-camera file
+    if camera_mode == "multicam" and not blurred:
+        cameras = trial.get("cameras", [])
+        if cameras:
+            video_path = cameras[0]["path"]
+
+    if not Path(video_path).exists():
+        raise HTTPException(404, f"Video not found: {video_path}")
+
+    return FileResponse(video_path, media_type="video/mp4", filename=Path(video_path).name)
 
 
 # ── Face detection ────────────────────────────────────────────────────────

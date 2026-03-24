@@ -51,6 +51,12 @@ const deid = (() => {
     let scale = 1, offsetX = 0, offsetY = 0;
     let hasUserZoom = false;
 
+    // Video element for smooth playback
+    let videoEl = null;
+    let videoPlaying = false;
+    let currentVideoTrialIdx = -1;
+    let currentVideoBlurred = false;
+
     // Pan state
     let panning = false;
     let panStart = null;
@@ -78,6 +84,7 @@ const deid = (() => {
     async function init() {
         canvas = document.getElementById('canvas');
         ctx = canvas.getContext('2d');
+        videoEl = document.getElementById('videoPlayer');
 
         // Load subjects
         try {
@@ -719,6 +726,13 @@ const deid = (() => {
         // In deidentified or preview mode, the server provides the blurred frame — no overlays
         if (viewMode === 'deidentified' || viewMode === 'preview') return;
 
+        _drawOverlays();
+    }
+
+    function _drawOverlays() {
+        const cw = canvas.width;
+        const ch = canvas.height;
+
         // Draw face detections (blue dashed rectangles) — filtered by current side
         const localFrame = currentFrame - (trialMeta ? trialMeta.start_frame : 0);
         if (faceDetections.length > localFrame) {
@@ -1297,44 +1311,178 @@ const deid = (() => {
         if (playing) {
             // Stop
             playing = false;
+            videoPlaying = false;
             if (playTimer) { clearInterval(playTimer); playTimer = null; }
+            if (videoEl) videoEl.pause();
             btn.innerHTML = '&#9654;';
+            // Reload current frame as JPEG for precise overlay rendering
+            loadFrame(currentFrame);
         } else {
             if (!trialMeta) return;
-            // Start
             playing = true;
             btn.innerHTML = '&#9616;&#9616;';
-            let loading = false; // prevent overlapping loads
-            const interval = Math.max(16, 1000 / (fps * playbackSpeed));
-            playTimer = setInterval(() => {
-                if (!playing) return;
-                if (loading) return;
-                if (currentFrame >= trialMeta.end_frame) {
-                    togglePlay();
-                    return;
-                }
-                loading = true;
-                currentFrame++;
-                // Simple sync render: just update frame and draw
-                let url = `/api/deidentify/${subjectId}/frame?trial_idx=${currentTrialIdx}&frame_num=${currentFrame}&side=${encodeURIComponent(currentSide)}`;
-                if (viewMode === 'deidentified') url += '&blurred=true';
-                else if (viewMode === 'preview') url += '&preview=true';
-                url += `&_=${viewMode}_${Date.now()}`;
-                const img = new Image();
-                img.onload = () => {
-                    currentImage = img;
-                    imgW = img.width;
-                    imgH = img.height;
-                    const localFrame = currentFrame - trialMeta.start_frame;
-                    document.getElementById('frameDisplay').textContent =
-                        `Frame: ${localFrame} / ${totalFrames - 1}`;
-                    render();
-                    loading = false;
-                };
-                img.onerror = () => { loading = false; };
-                img.src = url;
-            }, 1000 / fps);
+            _startVideoPlayback();
         }
+    }
+
+    async function _startVideoPlayback() {
+        if (!trialMeta || !videoEl) {
+            _fallbackPlay();
+            return;
+        }
+
+        // Load the correct video into the element
+        const isBlurred = viewMode === 'deidentified';
+        const needReload = (currentVideoTrialIdx !== currentTrialIdx || currentVideoBlurred !== isBlurred);
+
+        if (needReload) {
+            let videoUrl = `/api/deidentify/${subjectId}/video?trial_idx=${currentTrialIdx}`;
+            if (isBlurred) videoUrl += '&blurred=true';
+            videoUrl += `&_=${Date.now()}`;
+            videoEl.src = videoUrl;
+            currentVideoTrialIdx = currentTrialIdx;
+            currentVideoBlurred = isBlurred;
+
+            // Wait for metadata
+            const loaded = await new Promise(resolve => {
+                if (videoEl.readyState >= 1) { resolve(true); return; }
+                const timer = setTimeout(() => resolve(false), 5000);
+                videoEl.addEventListener('loadedmetadata', () => { clearTimeout(timer); resolve(true); }, { once: true });
+                videoEl.addEventListener('error', () => { clearTimeout(timer); resolve(false); }, { once: true });
+            });
+            if (!loaded || !playing) {
+                _fallbackPlay();
+                return;
+            }
+        }
+
+        // Seek to current frame position
+        const localFrame = currentFrame - trialMeta.start_frame;
+        const startTime = localFrame / fps;
+        videoEl.currentTime = startTime;
+        videoPlaying = true;
+
+        try {
+            await videoEl.play();
+            // Use requestVideoFrameCallback for precise frame sync
+            if ('requestVideoFrameCallback' in videoEl) {
+                videoEl.requestVideoFrameCallback(_videoDrawLoop);
+            } else {
+                requestAnimationFrame(_videoDrawLoop);
+            }
+        } catch (e) {
+            console.error('[deid] video play() rejected:', e);
+            videoPlaying = false;
+            _fallbackPlay();
+        }
+
+        videoEl.onended = () => {
+            playing = false;
+            videoPlaying = false;
+            document.getElementById('playBtn').innerHTML = '&#9654;';
+            loadFrame(currentFrame);
+        };
+    }
+
+    function _videoDrawLoop(now, metadata) {
+        if (!videoPlaying || !playing) return;
+        if (!trialMeta) return;
+
+        // Get the actual media time for frame sync
+        const mediaTime = (metadata && metadata.mediaTime != null)
+            ? metadata.mediaTime : videoEl.currentTime;
+        const localFrame = Math.floor(mediaTime * fps);
+        currentFrame = trialMeta.start_frame + Math.min(localFrame, totalFrames - 1);
+
+        if (currentFrame >= trialMeta.end_frame) {
+            playing = false;
+            videoPlaying = false;
+            videoEl.pause();
+            document.getElementById('playBtn').innerHTML = '&#9654;';
+            loadFrame(currentFrame);
+            return;
+        }
+
+        // Draw video to canvas (with stereo cropping)
+        const cw = canvas.clientWidth;
+        const ch = canvas.clientHeight;
+        canvas.width = cw;
+        canvas.height = ch;
+
+        const vw = videoEl.videoWidth;
+        const vh = videoEl.videoHeight;
+        const isStereo = cameraMode === 'stereo' && vw > 0 && vh > 0 && (vw / vh) > 1.7;
+
+        let sx = 0, sw = vw;
+        if (isStereo && viewMode !== 'deidentified') {
+            const midline = Math.floor(vw / 2);
+            if (cameraNames.length >= 2 && currentSide === cameraNames[1]) {
+                sx = midline; sw = vw - midline;
+            } else {
+                sx = 0; sw = midline;
+            }
+        }
+
+        imgW = sw;
+        imgH = vh;
+        if (!hasUserZoom) {
+            scale = Math.min(cw / imgW, ch / imgH);
+            offsetX = (cw - imgW * scale) / 2;
+            offsetY = (ch - imgH * scale) / 2;
+        }
+
+        ctx.clearRect(0, 0, cw, ch);
+        ctx.drawImage(videoEl, sx, 0, sw, vh, offsetX, offsetY, imgW * scale, imgH * scale);
+
+        // Draw overlays (except in deidentified mode)
+        if (viewMode === 'original') {
+            _drawOverlays();
+        }
+
+        // Update frame display
+        document.getElementById('frameDisplay').textContent =
+            `Frame: ${localFrame} / ${totalFrames - 1}`;
+        renderTimeline();
+
+        // Schedule next frame
+        if ('requestVideoFrameCallback' in videoEl) {
+            videoEl.requestVideoFrameCallback(_videoDrawLoop);
+        } else {
+            requestAnimationFrame(_videoDrawLoop);
+        }
+    }
+
+    function _fallbackPlay() {
+        // Fallback: per-frame JPEG loading (slow but works for preview mode)
+        if (playTimer) clearInterval(playTimer);
+        let loading = false;
+        playTimer = setInterval(() => {
+            if (!playing) return;
+            if (loading) return;
+            if (currentFrame >= trialMeta.end_frame) {
+                togglePlay();
+                return;
+            }
+            loading = true;
+            currentFrame++;
+            let url = `/api/deidentify/${subjectId}/frame?trial_idx=${currentTrialIdx}&frame_num=${currentFrame}&side=${encodeURIComponent(currentSide)}`;
+            if (viewMode === 'deidentified') url += '&blurred=true';
+            else if (viewMode === 'preview') url += '&preview=true';
+            url += `&_=${viewMode}_${Date.now()}`;
+            const img = new Image();
+            img.onload = () => {
+                currentImage = img;
+                imgW = img.width;
+                imgH = img.height;
+                const localFrame = currentFrame - trialMeta.start_frame;
+                document.getElementById('frameDisplay').textContent =
+                    `Frame: ${localFrame} / ${totalFrames - 1}`;
+                render();
+                loading = false;
+            };
+            img.onerror = () => { loading = false; };
+            img.src = url;
+        }, 1000 / fps);
     }
 
     // ── Face detection ──
