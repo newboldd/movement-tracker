@@ -884,8 +884,30 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
     forearm_radius = max(1, int(forearm_radius * scale_factor))
     smooth2 = max(0, int(smooth2 * scale_factor))
 
-    # Draw circles at each hand landmark position (not pose)
-    for lm in hand_lms:
+    # Interpolate midpoints along each finger segment for smoother coverage
+    # MediaPipe joints: 0=wrist, 1-4=thumb, 5-8=index, 9-12=middle, 13-16=ring, 17-20=pinky
+    finger_chains = [
+        [0, 1, 2, 3, 4],
+        [0, 5, 6, 7, 8],
+        [0, 9, 10, 11, 12],
+        [0, 13, 14, 15, 16],
+        [0, 17, 18, 19, 20],
+    ]
+    by_joint = {lm.get("joint", -1): lm for lm in hand_lms}
+    all_points = list(hand_lms)
+    for chain in finger_chains:
+        for ci in range(len(chain) - 1):
+            a = by_joint.get(chain[ci])
+            b = by_joint.get(chain[ci + 1])
+            if a and b:
+                all_points.append({
+                    "x": (a["x"] + b["x"]) / 2,
+                    "y": (a["y"] + b["y"]) / 2,
+                    "type": "interp",
+                })
+
+    # Draw circles at each hand landmark + interpolated midpoints
+    for lm in all_points:
         x, y = int(lm["x"]), int(lm["y"])
         if 0 <= x < w and 0 <= y < h:
             cv2.circle(mask, (x, y), radius, 255, -1)

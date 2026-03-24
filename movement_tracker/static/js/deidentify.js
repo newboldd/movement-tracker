@@ -547,9 +547,32 @@ const deid = (() => {
         const ctx1 = c1.getContext('2d');
         ctx1.fillStyle = '#fff';
 
-        // Only draw circles for hand keypoints — pose (elbows) are used for forearm triangle only
-        for (const lm of landmarks) {
-            if (lm.type === 'pose') continue;
+        // Build interpolated hand points: add midpoints along each finger segment
+        // MediaPipe hand joints: 0=wrist, 1-4=thumb, 5-8=index, 9-12=middle, 13-16=ring, 17-20=pinky
+        const fingerChains = [
+            [0, 1, 2, 3, 4],     // thumb: wrist→CMC→MCP→IP→TIP
+            [0, 5, 6, 7, 8],     // index: wrist→MCP→PIP→DIP→TIP
+            [0, 9, 10, 11, 12],  // middle
+            [0, 13, 14, 15, 16], // ring
+            [0, 17, 18, 19, 20], // pinky
+        ];
+        const handLms = landmarks.filter(l => l.type !== 'pose');
+        const byJoint = {};
+        for (const lm of handLms) byJoint[lm.joint] = lm;
+
+        const allPoints = [...handLms]; // start with original keypoints
+        for (const chain of fingerChains) {
+            for (let ci = 0; ci < chain.length - 1; ci++) {
+                const a = byJoint[chain[ci]];
+                const b = byJoint[chain[ci + 1]];
+                if (a && b) {
+                    allPoints.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, type: 'interp' });
+                }
+            }
+        }
+
+        // Draw circles for all hand keypoints + interpolated midpoints
+        for (const lm of allPoints) {
             ctx1.beginPath();
             ctx1.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, radiusPx, 0, Math.PI * 2);
             ctx1.fill();
