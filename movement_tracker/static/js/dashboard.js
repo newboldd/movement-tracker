@@ -89,7 +89,7 @@ function renderDiagnosisGroups() {
                         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
                             <span style="font-weight:600;font-size:13px;">${s.name}</span>
                             <div style="display:flex;align-items:center;gap:4px;">
-                                ${s.has_blur ? '<span style="color:var(--green);font-size:11px;" title="Deidentified">Deident</span>' : ''}
+                                ${(s.has_blur || !s.has_faces) ? '<span style="color:var(--green);font-size:11px;" title="Deidentified">Deident</span>' : ''}
                                 <span class="badge ${stageColor}" style="font-size:11px;">${stageLabel(s.stage)}</span>
                             </div>
                         </div>
