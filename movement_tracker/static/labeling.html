@@ -110,21 +110,29 @@
 
             <!-- MediaPipe Region (Label/Refine modes) -->
             <div id="mpCropSection" style="display:none;margin-bottom:16px;">
-                <h3 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">MediaPipe</h3>
-                <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:4px;">
-                    <input type="checkbox" id="mpCropToggle" onchange="labeler.toggleMpCrop(this.checked)">
-                    Edit bounding box
-                </label>
-                <div id="mpCamStatus" style="font-size:11px;color:var(--text-muted);margin-bottom:6px;"></div>
-                <div id="mpCropActions" style="display:none;gap:4px;margin-bottom:6px;">
-                    <button class="btn btn-sm" onclick="labeler.saveMpCrop()" style="flex:1;">Save</button>
-                    <button class="btn btn-sm" onclick="labeler.cancelMpCrop()" style="flex:1;">Cancel</button>
+                <!-- Hand Detection -->
+                <h3 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">Hand Detection</h3>
+                <div style="padding-left:2px;">
+                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:4px;">
+                        <input type="checkbox" id="mpCropToggle" onchange="labeler.toggleMpCrop(this.checked)">
+                        Edit crop bounding box
+                    </label>
+                    <div id="mpCamStatus" style="font-size:11px;color:var(--text-muted);margin-bottom:6px;"></div>
+                    <div id="mpCropActions" style="display:none;gap:4px;margin-bottom:6px;">
+                        <button class="btn btn-sm" onclick="labeler.saveMpCrop()" style="flex:1;">Save</button>
+                        <button class="btn btn-sm" onclick="labeler.cancelMpCrop()" style="flex:1;">Cancel</button>
+                    </div>
+                    <button class="btn btn-sm" id="mpRerunBtn" onclick="labeler.rerunMediapipe()" style="width:100%;margin-top:6px;">Detect Hands (this trial)</button>
+                    <div id="mpRerunStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
+                    <button class="btn btn-sm" id="mpClearHistoryBtn" onclick="labeler.clearMpHistory()" style="width:100%;display:none;margin-top:4px;font-size:11px;">Clear run history</button>
                 </div>
-                <button class="btn btn-sm" id="mpRerunBtn" onclick="labeler.rerunMediapipe()" style="width:100%;margin-top:6px;">Run MediaPipe (this trial)</button>
-                <div id="mpRerunStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
-                <button class="btn btn-sm" id="mpClearHistoryBtn" onclick="labeler.clearMpHistory()" style="width:100%;display:none;margin-top:4px;font-size:11px;">Clear run history</button>
-                <button class="btn btn-sm" id="mpRunPoseBtn" onclick="labeler.runPose()" style="width:100%;margin-top:8px;">Run Pose Detection</button>
-                <div id="mpPoseStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
+
+                <!-- Pose Detection -->
+                <h3 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;margin-top:12px;">Pose Detection</h3>
+                <div style="padding-left:2px;">
+                    <button class="btn btn-sm" id="mpRunPoseBtn" onclick="labeler.runPose()" style="width:100%;">Detect Pose (all trials)</button>
+                    <div id="mpPoseStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
+                </div>
             </div>
 
             <div style="margin-bottom: 16px;">
@@ -239,7 +247,7 @@
 
     <script src="/static/js/nav.js"></script>
     <script src="/static/js/api.js?v=10"></script>
-    <script src="/static/js/labeler.js?v=49"></script>
+    <script src="/static/js/labeler.js?v=50"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

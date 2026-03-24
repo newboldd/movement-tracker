@@ -1530,9 +1530,9 @@ const labeler = (() => {
         const hasLabels = mpHasMediapipe[ti];
         const runBtn = document.getElementById('mpRunBtn');
         const rerunBtn = document.getElementById('mpRerunBtn');
-        if (runBtn) runBtn.textContent = hasLabels ? 'Re-run MediaPipe' : 'Run MediaPipe';
+        if (runBtn) runBtn.textContent = hasLabels ? 'Re-detect Hands' : 'Detect Hands';
         if (rerunBtn) rerunBtn.textContent = hasLabels
-            ? 'Re-run MediaPipe (this trial)' : 'Run MediaPipe (this trial)';
+            ? 'Re-detect Hands (this trial)' : 'Detect Hands (this trial)';
     }
 
     // ── Update per-camera adjustment status display ──
@@ -1650,8 +1650,8 @@ const labeler = (() => {
 
         const statusEl = document.getElementById('mpRerunStatus');
         const rerunBtn = document.getElementById('mpRerunBtn');
-        const runLabel = mpHasMediapipe[ti] ? 'Re-running' : 'Running';
-        if (statusEl) statusEl.textContent = `${runLabel} MediaPipe…`;
+        const runLabel = mpHasMediapipe[ti] ? 'Re-detecting' : 'Detecting';
+        if (statusEl) statusEl.textContent = `${runLabel} hands…`;
         if (rerunBtn) rerunBtn.disabled = true;
 
         try {
@@ -1669,7 +1669,7 @@ const labeler = (() => {
                 const data = JSON.parse(event.data);
                 if (data.status === 'running') {
                     const pct = data.progress_pct ? Math.round(data.progress_pct) : 0;
-                    if (statusEl) statusEl.textContent = `${runLabel} MediaPipe… ${pct}%`;
+                    if (statusEl) statusEl.textContent = `${runLabel} hands… ${pct}%`;
                 } else if (data.status === 'completed') {
                     evtSource.close();
                     if (statusEl) statusEl.textContent = 'Done! Reloading page…';
