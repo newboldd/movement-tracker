@@ -418,7 +418,10 @@ def detect_faces_in_video(video_path: str, start_frame: int = 0,
         min_detection_confidence=FACE_CONF_THRESHOLD,
     )
 
-    if start_frame > 0:
+    # Only seek if start_frame is within this file's frame count.
+    # start_frame is a global offset — for multi-file subjects each trial
+    # has its own video starting at local frame 0, so don't seek past the end.
+    if start_frame > 0 and start_frame < reported:
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
     raw_L, raw_R, raw_mono = [], [], []
@@ -659,7 +662,10 @@ def render_with_blur_specs(input_path: str, output_path: str,
                                 if not np.isnan(x):
                                     hand_lm_data[f].append({"x": float(x), "y": float(y), "side": "right", "type": "pose", "joint": j})
 
-    if start_frame > 0:
+    # Only seek if start_frame is within this file's frame count.
+    # start_frame is a global offset — for multi-file subjects each trial
+    # has its own video starting at local frame 0, so don't seek past the end.
+    if start_frame > 0 and start_frame < reported:
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
     # Remove existing output file — macOS AVFoundation refuses to overwrite
