@@ -695,7 +695,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
     # Build ffmpeg command: seek to start_frame, process 'total' frames
     blur_cmd = [
         ffmpeg, "-y",
-        "-i", source_path,
+        "-i", video_path,
     ]
     if start_frame > 0:
         blur_cmd += ["-ss", str(start_frame / fps)]
