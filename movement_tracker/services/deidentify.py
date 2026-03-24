@@ -1077,35 +1077,46 @@ def _apply_blur_roi(frame_half, blur_mask, hand_mask):
     if final_mask.max() == 0:
         return frame_half
 
-    # Find bounding box of the mask with padding for blur kernel + feather
+    # Find separate connected regions and process each as its own ROI.
+    # This avoids blurring the entire frame when spots are far apart
+    # (e.g., face at top + custom spot at bottom).
     pad = BLUR_KERNEL_SIZE // 2 + FEATHER_KERNEL
     h, w = frame_half.shape[:2]
-    ys, xs = np.where(final_mask > 0)
-    y1 = max(0, ys.min() - pad)
-    y2 = min(h, ys.max() + pad + 1)
-    x1 = max(0, xs.min() - pad)
-    x2 = min(w, xs.max() + pad + 1)
 
-    # Crop ROI
-    roi = frame_half[y1:y2, x1:x2].copy()
-    roi_mask = final_mask[y1:y2, x1:x2]
+    # Dilate the mask to merge nearby regions before finding components
+    merge_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (pad * 2 + 1, pad * 2 + 1))
+    dilated_for_components = cv2.dilate(final_mask, merge_kernel, iterations=1)
+    n_labels, labels = cv2.connectedComponents(dilated_for_components)
 
-    # Feather the mask edges (on ROI only)
-    mask_f = cv2.GaussianBlur(
-        roi_mask.astype(np.float32) / 255.0,
-        (FEATHER_KERNEL, FEATHER_KERNEL), 5)
-
-    # Blur the ROI only
-    blurred_roi = cv2.GaussianBlur(roi, (BLUR_KERNEL_SIZE, BLUR_KERNEL_SIZE), BLUR_SIGMA)
-
-    # Composite ROI
-    mask_3ch = mask_f[:, :, np.newaxis]
-    composited = (roi.astype(np.float32) * (1 - mask_3ch) +
-                  blurred_roi.astype(np.float32) * mask_3ch).astype(np.uint8)
-
-    # Write back to frame
     result = frame_half.copy()
-    result[y1:y2, x1:x2] = composited
+
+    for label_id in range(1, n_labels):
+        # Bounding box of this component (with padding)
+        ys, xs = np.where(labels == label_id)
+        y1 = max(0, ys.min() - pad)
+        y2 = min(h, ys.max() + pad + 1)
+        x1 = max(0, xs.min() - pad)
+        x2 = min(w, xs.max() + pad + 1)
+
+        # Get the actual mask for this ROI (from the original, not dilated)
+        roi_mask = final_mask[y1:y2, x1:x2]
+        if roi_mask.max() == 0:
+            continue
+
+        # Crop, blur, composite this ROI
+        roi = frame_half[y1:y2, x1:x2].copy()
+
+        mask_f = cv2.GaussianBlur(
+            roi_mask.astype(np.float32) / 255.0,
+            (FEATHER_KERNEL, FEATHER_KERNEL), 5)
+
+        blurred_roi = cv2.GaussianBlur(roi, (BLUR_KERNEL_SIZE, BLUR_KERNEL_SIZE), BLUR_SIGMA)
+
+        mask_3ch = mask_f[:, :, np.newaxis]
+        composited = (roi.astype(np.float32) * (1 - mask_3ch) +
+                      blurred_roi.astype(np.float32) * mask_3ch).astype(np.uint8)
+
+        result[y1:y2, x1:x2] = composited
 
     # Restore original pixels in hand protection area
     if hand_mask is not None and hand_mask.any():
