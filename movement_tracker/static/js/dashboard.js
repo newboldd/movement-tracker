@@ -88,12 +88,16 @@ function renderDiagnosisGroups() {
                     <div style="padding: 8px; background: var(--bg); border-radius: 4px; border: 1px solid var(--border);">
                         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
                             <span style="font-weight:600;font-size:13px;">${s.name}</span>
-                            <span class="badge ${stageColor}" style="font-size:11px;">${stageLabel(s.stage)}</span>
+                            <div style="display:flex;align-items:center;gap:4px;">
+                                ${s.has_blur ? '<span style="color:var(--green);font-size:11px;" title="Deidentified">Deident</span>' : ''}
+                                <span class="badge ${stageColor}" style="font-size:11px;">${stageLabel(s.stage)}</span>
+                            </div>
                         </div>
                         <div style="display:flex;gap:4px;flex-wrap:wrap;">
                             ${s.video_count > 0 ? `<button class="btn btn-sm" style="white-space:nowrap;" onclick="window.location.href='/videos?subject=${s.id}'">Video</button>` : ''}
                             <button class="btn btn-sm" style="white-space:nowrap;" onclick="openLabeling(${s.id})">DLC</button>
                             <button class="btn btn-sm" style="white-space:nowrap;" onclick="sessionStorage.setItem('dlc_lastSubjectId','${s.id}');window.location.href='/results?subject=${s.id}&from=dashboard'">Results</button>
+                            ${s.has_faces && !s.has_blur ? `<button class="btn btn-sm" style="white-space:nowrap;" onclick="window.location.href='/deidentify?subject=${s.id}'">Deident</button>` : ''}
                             <button class="btn btn-sm" style="white-space:nowrap;" onclick="showDetail(${s.id})">Info</button>
                         </div>
                     </div>
