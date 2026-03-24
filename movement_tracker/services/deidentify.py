@@ -670,117 +670,123 @@ def render_with_blur_specs(input_path: str, output_path: str,
     if start_frame > 0 and start_frame < reported:
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
-    # Remove existing output file — macOS AVFoundation refuses to overwrite
-    import os, sys
+    import os, subprocess
+
+    # Remove existing output file
     if os.path.exists(output_path):
         os.remove(output_path)
 
-    writer = None
-    for codec in (["avc1", "mp4v"] if sys.platform == "darwin" else ["mp4v"]):
-        fourcc = cv2.VideoWriter_fourcc(*codec)
-        writer = cv2.VideoWriter(output_path, fourcc, fps, (full_w, fh))
-        if writer.isOpened():
-            break
-        writer.release()
-        writer = None
-    if writer is None:
-        cap.release()
-        raise RuntimeError(f"cv2.VideoWriter failed: {output_path}")
-
-    for i in range(total):
-        global_frame = start_frame + i
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        frame = np.ascontiguousarray(frame, dtype=np.uint8)
-
-        # Collect active blur specs for this frame
-        active_specs = [s for s in blur_specs
-                        if s["frame_start"] <= global_frame <= s["frame_end"]]
-
-        if active_specs:
-            # Check if hand protection is active for this frame
-            hand_active = False
-            active_radius = hand_mask_radius
-            active_smooth = hand_smooth
-            for seg in hand_segments:
-                if seg.get("start", 0) <= global_frame <= seg.get("end", 0):
-                    hand_active = True
-                    active_radius = seg.get("radius", hand_mask_radius)
-                    active_smooth = seg.get("smooth", hand_smooth)
-                    break
-
-            if is_stereo:
-                left = frame[:, :half_w, :].copy()
-                right = frame[:, half_w:, :].copy()
-
-                left_specs = [s for s in active_specs if s.get("side", "left") == "left"]
-                right_specs = [s for s in active_specs if s.get("side", "right") == "right"]
-
-                # Build elliptical blur masks
-                left_mask = _build_blur_mask(left_specs, half_w, fh, global_frame, face_by_frame, "left")
-                right_mask = _build_blur_mask(right_specs, full_w - half_w, fh, global_frame, face_by_frame, "right")
-
-                # Build hand protection masks
-                hand_mask_l = np.zeros((fh, half_w), dtype=bool)
-                hand_mask_r = np.zeros((fh, full_w - half_w), dtype=bool)
-                if hand_active and hand_lm_data and global_frame in hand_lm_data:
-                    lms_l = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "left"]
-                    lms_r = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "right"]
-                    hand_mask_l = _build_hand_mask_from_landmarks(lms_l, half_w, fh, active_radius, active_smooth,
-                                                                  forearm_radius, forearm_extent, hand_smooth2)
-                    hand_mask_r = _build_hand_mask_from_landmarks(lms_r, full_w - half_w, fh, active_radius, active_smooth,
-                                                                  forearm_radius, forearm_extent, hand_smooth2)
-
-                left = _apply_blur_with_mask(left, left_mask, hand_mask_l)
-                right = _apply_blur_with_mask(right, right_mask, hand_mask_r)
-                frame = np.concatenate([left, right], axis=1)
-            else:
-                blur_mask = _build_blur_mask(active_specs, full_w, fh, global_frame, face_by_frame, "full")
-
-                hand_mask = np.zeros((fh, full_w), dtype=bool)
-                if hand_active and hand_lm_data and global_frame in hand_lm_data:
-                    hand_mask = _build_hand_mask_from_landmarks(
-                        hand_lm_data[global_frame], full_w, fh, active_radius, active_smooth,
-                        forearm_radius, forearm_extent, hand_smooth2)
-
-                frame = _apply_blur_with_mask(frame, blur_mask, hand_mask)
-
-        writer.write(frame)
-
-        if progress_callback and i % 10 == 0:
-            progress_callback(i / total * 100)
-
-    cap.release()
-    writer.release()
-
-    # Re-encode with ffmpeg for proper H.264 compression (cv2 mp4v is ~2x larger)
+    # Pipe frames directly to ffmpeg for H.264 encoding (no intermediate file)
     try:
         from .ffmpeg import get_ffmpeg_path
-        import subprocess
         ffmpeg = get_ffmpeg_path()
-        tmp_path = output_path + ".tmp.mp4"
-        os.rename(output_path, tmp_path)
-        result = subprocess.run([
-            ffmpeg, "-y", "-i", tmp_path,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-            "-pix_fmt", "yuv420p", "-an", output_path,
-        ], capture_output=True, text=True, timeout=600)
-        if result.returncode == 0:
-            os.remove(tmp_path)
-            logger.info(f"Re-encoded with H.264: {output_path}")
-        else:
-            # ffmpeg failed — keep the OpenCV version
-            os.rename(tmp_path, output_path)
-            logger.warning(f"ffmpeg re-encode failed, keeping original: {result.stderr[:200]}")
     except (ImportError, FileNotFoundError):
-        logger.info("ffmpeg not available, keeping cv2 output")
+        cap.release()
+        raise RuntimeError("ffmpeg not found. Install FFmpeg or pip install imageio-ffmpeg")
+
+    ffmpeg_cmd = [
+        ffmpeg, "-y",
+        "-f", "rawvideo",
+        "-vcodec", "rawvideo",
+        "-s", f"{full_w}x{fh}",
+        "-pix_fmt", "bgr24",
+        "-r", str(fps),
+        "-i", "-",  # read from stdin
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-an",
+        output_path,
+    ]
+
+    proc = subprocess.Popen(
+        ffmpeg_cmd, stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+    )
+
+    frames_written = 0
+    try:
+        for i in range(total):
+            global_frame = start_frame + i
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # Collect active blur specs for this frame
+            active_specs = [s for s in blur_specs
+                            if s["frame_start"] <= global_frame <= s["frame_end"]]
+
+            if active_specs:
+                frame = np.ascontiguousarray(frame, dtype=np.uint8)
+
+                # Check if hand protection is active for this frame
+                hand_active = False
+                active_radius = hand_mask_radius
+                active_smooth = hand_smooth
+                for seg in hand_segments:
+                    if seg.get("start", 0) <= global_frame <= seg.get("end", 0):
+                        hand_active = True
+                        active_radius = seg.get("radius", hand_mask_radius)
+                        active_smooth = seg.get("smooth", hand_smooth)
+                        break
+
+                if is_stereo:
+                    left = frame[:, :half_w, :].copy()
+                    right = frame[:, half_w:, :].copy()
+
+                    left_specs = [s for s in active_specs if s.get("side", "left") == "left"]
+                    right_specs = [s for s in active_specs if s.get("side", "right") == "right"]
+
+                    if left_specs:
+                        left_mask = _build_blur_mask(left_specs, half_w, fh, global_frame, face_by_frame, "left")
+                        hand_mask_l = np.zeros((fh, half_w), dtype=bool)
+                        if hand_active and hand_lm_data and global_frame in hand_lm_data:
+                            lms_l = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "left"]
+                            hand_mask_l = _build_hand_mask_from_landmarks(lms_l, half_w, fh, active_radius, active_smooth,
+                                                                          forearm_radius, forearm_extent, hand_smooth2)
+                        left = _apply_blur_with_mask(left, left_mask, hand_mask_l)
+
+                    if right_specs:
+                        right_mask = _build_blur_mask(right_specs, full_w - half_w, fh, global_frame, face_by_frame, "right")
+                        hand_mask_r = np.zeros((fh, full_w - half_w), dtype=bool)
+                        if hand_active and hand_lm_data and global_frame in hand_lm_data:
+                            lms_r = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "right"]
+                            hand_mask_r = _build_hand_mask_from_landmarks(lms_r, full_w - half_w, fh, active_radius, active_smooth,
+                                                                          forearm_radius, forearm_extent, hand_smooth2)
+                        right = _apply_blur_with_mask(right, right_mask, hand_mask_r)
+
+                    frame = np.concatenate([left, right], axis=1)
+                else:
+                    blur_mask = _build_blur_mask(active_specs, full_w, fh, global_frame, face_by_frame, "full")
+                    hand_mask = np.zeros((fh, full_w), dtype=bool)
+                    if hand_active and hand_lm_data and global_frame in hand_lm_data:
+                        hand_mask = _build_hand_mask_from_landmarks(
+                            hand_lm_data[global_frame], full_w, fh, active_radius, active_smooth,
+                            forearm_radius, forearm_extent, hand_smooth2)
+                    frame = _apply_blur_with_mask(frame, blur_mask, hand_mask)
+
+            # Write raw BGR frame to ffmpeg stdin
+            proc.stdin.write(frame.tobytes())
+            frames_written += 1
+
+            if progress_callback and i % 10 == 0:
+                progress_callback(i / total * 100)
+
+    finally:
+        cap.release()
+        proc.stdin.close()
+        proc.wait(timeout=120)
+
+    if proc.returncode != 0:
+        stderr = proc.stderr.read().decode() if proc.stderr else ""
+        raise RuntimeError(f"ffmpeg encoding failed: {stderr[:500]}")
 
     if progress_callback:
         progress_callback(100)
 
-    return {"n_frames": total, "is_stereo": is_stereo}
+    logger.info(f"Rendered {frames_written} frames → {output_path}")
+    return {"n_frames": frames_written, "is_stereo": is_stereo}
 
 
 def _get_face_centroid(face_by_frame: dict, global_frame: int, side: str,
