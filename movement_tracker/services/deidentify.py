@@ -799,7 +799,7 @@ def _build_blur_mask(specs: list[dict], w: int, h: int,
         bh = float(s.get("height") or s.get("radius") or 50)
 
         # Draw filled shape
-        shape = spec.get("shape", "oval")
+        shape = s.get("shape", "oval")
         center = (int(cx), int(cy))
         axes = (int(bw / 2), int(bh / 2))
         if axes[0] > 0 and axes[1] > 0:
