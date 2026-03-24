@@ -53,54 +53,64 @@ def _all_no_face(row: dict) -> bool:
     return video_stems.issubset(set(no_face))
 
 
+def _has_faces(row: dict) -> bool:
+    """True if the subject has any trial videos that may contain faces.
+
+    Based on the no_face_videos flag set by the user during onboarding.
+    If no_face_videos is empty/unset, ALL trials are assumed to contain faces.
+    Returns False only if every trial is explicitly marked as no-face.
+    """
+    no_face = _parse_no_face_videos(row.get("no_face_videos"))
+    if not no_face:
+        return True  # No marking → assume faces present
+    videos = _find_videos(row.get("name", ""))
+    if not videos:
+        return False
+    # Check if ALL video stems are in the no-face list
+    video_stems = {Path(v).stem for v in videos}
+    return not video_stems.issubset(set(no_face))
+
+
 def _has_blur_complete(dlc_path: Path, row: dict) -> bool:
     """True if deidentification is complete.
 
-    Checks that every trial video with detected faces has a corresponding
-    deidentified video file.  Falls back to the old .deidentified marker
-    or all-no-face heuristic.
+    A subject is fully deidentified if every trial that contains faces
+    (per the user's onboarding flag) has a corresponding deidentified video.
+    Subjects where all trials are marked no-face are also considered complete.
     """
     subject_name = row.get("name", "")
     if not subject_name:
         return False
 
-    # Check for actual deidentified video files
+    # If all trials are no-face, nothing to deidentify
+    if not _has_faces(row):
+        return True
+
+    # Find which trials need deidentification (not in no-face list)
+    no_face = set(_parse_no_face_videos(row.get("no_face_videos")))
     deident_videos = _find_deidentified_videos(subject_name)
-    trial_videos = _find_videos(subject_name)
+    deident_stems = {Path(d).stem for d in deident_videos}
 
-    if not trial_videos:
-        return True  # No videos → nothing to deidentify
-
-    # Check if any trials have face detections in DB
     try:
-        from ..db import get_db_ctx
-        subject_id = row.get("id")
-        if subject_id:
-            with get_db_ctx() as db:
-                face_trials = db.execute(
-                    "SELECT DISTINCT trial_idx FROM face_detections WHERE subject_id = ?",
-                    (subject_id,),
-                ).fetchall()
-            if face_trials:
-                # Check each face-containing trial has a deidentified video
-                from ..services.video import build_trial_map
-                camera_mode = row.get("camera_mode") or "stereo"
-                trials = build_trial_map(subject_name, camera_mode=camera_mode)
-                deident_stems = {Path(d).stem for d in deident_videos}
-                for ft in face_trials:
-                    ti = ft["trial_idx"]
-                    if ti < len(trials):
-                        trial_name = trials[ti]["trial_name"]
-                        if trial_name not in deident_stems:
-                            return False
-                return True
+        from ..services.video import build_trial_map
+        camera_mode = row.get("camera_mode") or "stereo"
+        trials = build_trial_map(subject_name, camera_mode=camera_mode)
+        for t in trials:
+            trial_name = t["trial_name"]
+            # Skip trials explicitly marked as no-face
+            if trial_name in no_face:
+                continue
+            # This trial has faces — check for deidentified version
+            if trial_name not in deident_stems:
+                return False
+        return True
     except Exception:
         pass
 
-    # Fallback to old logic
+    # Fallback
     if _has_deidentified(dlc_path):
         return True
-    return _all_no_face(row)
+    return False
 
 
 def _delete_subject_deps(db, subject_id: int):
@@ -131,21 +141,6 @@ def _subject_row_to_response(row: dict) -> dict:
     videos = _find_videos(row["name"]) if row.get("name") else []
     has_blur = _has_blur_complete(dlc_path, row) if dlc_path and dlc_path.exists() else _all_no_face(row)
 
-    # Check if subject has any face detections (needs deidentification)
-    has_faces = False
-    try:
-        from ..db import get_db_ctx
-        subject_id = row.get("id")
-        if subject_id:
-            with get_db_ctx() as db:
-                fc = db.execute(
-                    "SELECT COUNT(*) as c FROM face_detections WHERE subject_id = ?",
-                    (subject_id,),
-                ).fetchone()
-                has_faces = (fc["c"] or 0) > 0
-    except Exception:
-        pass
-
     resp = {
         **row,
         "stage_idx": STAGE_INDEX.get(row.get("stage", "created"), 0),
@@ -154,7 +149,7 @@ def _subject_row_to_response(row: dict) -> dict:
         "has_labels": _has_labeled_data(dlc_path) if dlc_path and dlc_path.exists() else False,
         "has_mediapipe": _has_mediapipe(dlc_path) if dlc_path and dlc_path.exists() else False,
         "has_blur": has_blur,
-        "has_faces": has_faces,
+        "has_faces": _has_faces(row),
     }
     resp["no_face_videos"] = _parse_no_face_videos(row.get("no_face_videos"))
     return resp
