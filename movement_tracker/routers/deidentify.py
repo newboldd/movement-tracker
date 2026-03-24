@@ -141,12 +141,14 @@ def get_frame(
     fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     is_stereo = camera_mode == "stereo" and ((fw / fh) > 1.7 if fh > 0 else False)
 
-    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+    # Convert global frame number to local frame within this trial's video
+    local_frame = frame_num - trial.get("start_frame", 0)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, local_frame)
     ret, frame = cap.read()
     cap.release()
 
     if not ret:
-        raise HTTPException(400, f"Cannot read frame {frame_num}")
+        raise HTTPException(400, f"Cannot read frame {frame_num} (local {local_frame})")
 
     # Preview mode: apply blur using the same pipeline as the full render
     if preview:
