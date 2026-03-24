@@ -875,14 +875,13 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
     hand_lms = [lm for lm in landmarks if lm.get("type") != "pose"]
     pose_lms = [lm for lm in landmarks if lm.get("type") == "pose"]
 
-    # Scale parameters: frontend uses CSS pixels (~700px viewport),
-    # backend works in image pixels (e.g. 1920px). Scale up to match.
-    REFERENCE_DISPLAY_W = 700
-    scale_factor = max(1.0, w / REFERENCE_DISPLAY_W)
-    radius = max(1, int(radius * scale_factor))
-    smooth = max(0, int(smooth * scale_factor))
-    forearm_radius = max(1, int(forearm_radius * scale_factor))
-    smooth2 = max(0, int(smooth2 * scale_factor))
+    # Slider values are in image pixels — no scaling needed.
+    # The frontend converts to screen pixels via (value * canvasScale) for display,
+    # but the underlying value is in image coordinate space.
+    radius = max(1, int(radius))
+    smooth = max(0, int(smooth))
+    forearm_radius = max(1, int(forearm_radius))
+    smooth2 = max(0, int(smooth2))
 
     # Interpolate midpoints along each finger segment for smoother coverage
     # MediaPipe joints: 0=wrist, 1-4=thumb, 5-8=index, 9-12=middle, 13-16=ring, 17-20=pinky
