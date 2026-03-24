@@ -1438,7 +1438,7 @@ const deid = (() => {
         const isStereo = cameraMode === 'stereo' && vw > 0 && vh > 0 && (vw / vh) > 1.7;
 
         let sx = 0, sw = vw;
-        if (isStereo && viewMode !== 'deidentified') {
+        if (isStereo) {
             const midline = Math.floor(vw / 2);
             if (cameraNames.length >= 2 && currentSide === cameraNames[1]) {
                 sx = midline; sw = vw - midline;
