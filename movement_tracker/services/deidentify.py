@@ -746,6 +746,29 @@ def render_with_blur_specs(input_path: str, output_path: str,
 
     cap.release()
     writer.release()
+
+    # Re-encode with ffmpeg for proper H.264 compression (cv2 mp4v is ~2x larger)
+    try:
+        from .ffmpeg import get_ffmpeg_path
+        import subprocess
+        ffmpeg = get_ffmpeg_path()
+        tmp_path = output_path + ".tmp.mp4"
+        os.rename(output_path, tmp_path)
+        result = subprocess.run([
+            ffmpeg, "-y", "-i", tmp_path,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+            "-pix_fmt", "yuv420p", "-an", output_path,
+        ], capture_output=True, text=True, timeout=600)
+        if result.returncode == 0:
+            os.remove(tmp_path)
+            logger.info(f"Re-encoded with H.264: {output_path}")
+        else:
+            # ffmpeg failed — keep the OpenCV version
+            os.rename(tmp_path, output_path)
+            logger.warning(f"ffmpeg re-encode failed, keeping original: {result.stderr[:200]}")
+    except (ImportError, FileNotFoundError):
+        logger.info("ffmpeg not available, keeping cv2 output")
+
     if progress_callback:
         progress_callback(100)
 
