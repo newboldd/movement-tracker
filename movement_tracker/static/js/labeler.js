@@ -380,6 +380,7 @@ const labeler = (() => {
             currentSubjectId = sessionInfo.subject.id;
             // Persist subject, mode, and session ID for cross-page navigation
             sessionStorage.setItem('dlc_lastSubjectId', String(currentSubjectId));
+            if (typeof setLastSubject === 'function') setLastSubject(currentSubjectId);
             sessionStorage.setItem(`dlc_labelTab_${currentSubjectId}`, currentSessionType());
             sessionStorage.setItem('dlc_lastSessionId', String(sessionId));
             // Update nav links with current subject/session context

@@ -150,6 +150,7 @@ const deid = (() => {
     async function loadSubject(sid) {
         subjectId = sid;
         sessionStorage.setItem('dlc_lastSubjectId', String(sid));
+        if (typeof setLastSubject === 'function') setLastSubject(sid);
         faceDetections = [];
         blurSpots = [];
         selectedSpotId = null;

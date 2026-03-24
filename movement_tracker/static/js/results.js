@@ -1207,6 +1207,7 @@ function highlightSubject(name) {
 document.getElementById('subjectSelect').addEventListener('change', (e) => {
     currentSubjectId = e.target.value;
     sessionStorage.setItem('dlc_lastSubjectId', String(currentSubjectId));
+    if (typeof setLastSubject === 'function') setLastSubject(currentSubjectId);
     cachedTraces = null;
     cachedMovements = null;
     cachedSequenceAssignments = null;
