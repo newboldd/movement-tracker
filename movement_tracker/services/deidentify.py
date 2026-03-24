@@ -695,6 +695,9 @@ def render_with_blur_specs(input_path: str, output_path: str,
     # Build ffmpeg command: seek to start_frame, process 'total' frames
     # Pre-blur the video. Each trial has its own video file starting at local
     # frame 0, so no seeking is needed — just limit to 'total' frames.
+    import re as _re
+    duration_us = total / fps * 1_000_000
+
     blur_cmd = [
         ffmpeg, "-y",
         "-i", input_path,
@@ -702,18 +705,30 @@ def render_with_blur_specs(input_path: str, output_path: str,
         "-vf", "boxblur=25:25",
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "15",
         "-pix_fmt", "yuv420p", "-an",
+        "-progress", "pipe:1",
         preblurred_path,
     ]
 
-    result = subprocess.run(blur_cmd, capture_output=True, text=True, timeout=600)
-    if result.returncode != 0:
+    blur_proc = subprocess.Popen(
+        blur_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    # Track progress of Pass 1 (1-10%)
+    for line in blur_proc.stdout:
+        m = _re.match(r"out_time_us=(\d+)", line.strip())
+        if m and duration_us > 0 and progress_callback:
+            pct = min(10.0, 1 + float(m.group(1)) / duration_us * 9)
+            progress_callback(pct)
+    blur_proc.wait()
+
+    if blur_proc.returncode != 0:
+        stderr = blur_proc.stderr.read() if blur_proc.stderr else ""
         import shutil
         shutil.rmtree(tmp_dir, ignore_errors=True)
         cap.release()
-        raise RuntimeError(f"Pre-blur failed: {result.stderr[:500]}")
+        raise RuntimeError(f"Pre-blur failed: {stderr[:500]}")
 
     if progress_callback:
-        progress_callback(10)  # Pre-blur done (~10% of work)
+        progress_callback(10)
 
     # ── Pass 2: Read original + pre-blurred, composite with masks, pipe to output ──
     blur_cap = cv2.VideoCapture(preblurred_path)
