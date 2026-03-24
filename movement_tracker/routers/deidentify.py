@@ -162,7 +162,7 @@ def get_frame(
 
     # Preview mode: apply blur using the same pipeline as the full render
     if preview:
-        from ..services.deidentify import _build_blur_mask, _build_hand_mask_from_landmarks, _apply_blur_with_mask
+        from ..services.deidentify import _build_blur_mask, _build_hand_mask_from_landmarks, _apply_blur_roi
         import numpy as np
 
         half_w = fw // 2 if is_stereo else fw
@@ -278,8 +278,8 @@ def get_frame(
                     hand_mask_r = _build_hand_mask_from_landmarks(lms_r, fw - half_w, fh, active_radius, active_smooth,
                                                                   forearm_radius_val, forearm_extent_val, hand_smooth2_val,
                                                                   canvas_w=canvas_w)
-                left = _apply_blur_with_mask(left, left_mask, hand_mask_l)
-                right = _apply_blur_with_mask(right, right_mask, hand_mask_r)
+                left = _apply_blur_roi(left, left_mask, hand_mask_l)
+                right = _apply_blur_roi(right, right_mask, hand_mask_r)
                 frame = np.concatenate([left, right], axis=1)
             else:
                 blur_mask = _build_blur_mask(active_specs, fw, fh, frame_num, face_by_frame, "full")
@@ -289,7 +289,7 @@ def get_frame(
                         hand_lm_data[frame_num], fw, fh, active_radius, active_smooth,
                         forearm_radius_val, forearm_extent_val, hand_smooth2_val,
                         canvas_w=canvas_w)
-                frame = _apply_blur_with_mask(frame, blur_mask, hand_mask)
+                frame = _apply_blur_roi(frame, blur_mask, hand_mask)
 
     # Stereo: crop to left or right half based on camera name
     if is_stereo and side != "full":
