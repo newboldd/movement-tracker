@@ -1867,12 +1867,6 @@ const deid = (() => {
         if (!tlCtx || !tlCanvas || !trialMeta) return;
 
         const container = tlCanvas.parentElement;
-        tlCanvas.width = container.clientWidth;
-        tlCanvas.height = container.clientHeight;
-        const L = _tlLayout();
-        if (!L) return;
-
-        tlCtx.clearRect(0, 0, L.cw, L.ch);
 
         const sideLabel = _sideLabel();
         const visibleSpots = blurSpots.filter(s => {
@@ -1881,8 +1875,26 @@ const deid = (() => {
         });
 
         const faceRowH = 35;
+        const customSpotRowH = 18;
         const handRowH = 25;
         const gap = 3;
+        const nCustom = visibleSpots.filter(s => s.spot_type === 'custom').length;
+        const hasHands = handCoverage.length > 0 || hasMediapipe;
+
+        // Compute needed height and resize container
+        let neededH = 4 + faceRowH + gap;
+        if (nCustom > 0) neededH += nCustom * customSpotRowH + gap;
+        if (hasHands) neededH += handRowH + gap;
+        neededH = Math.max(neededH, 65);
+        container.style.height = neededH + 8 + 'px';
+
+        tlCanvas.width = container.clientWidth;
+        tlCanvas.height = container.clientHeight;
+        const L = _tlLayout();
+        if (!L) return;
+
+        tlCtx.clearRect(0, 0, L.cw, L.ch);
+
         let y = 2;
 
         // ── Face row: dark detection coverage + bright blue blur bars ──
@@ -1933,38 +1945,38 @@ const deid = (() => {
 
         y += faceRowH + gap;
 
-        // ── Custom spots row (red) ──
+        // ── Custom spots: one row per spot (red) ──
         const customSpots = visibleSpots.filter(s => s.spot_type === 'custom');
-        if (customSpots.length > 0) {
-            const customRowH = 25;
+        const customSpotRowH = 18;
+        for (let ci = 0; ci < customSpots.length; ci++) {
+            const spot = customSpots[ci];
+            const x1 = _frameToTlX(spot.frame_start, L);
+            const x2 = _frameToTlX(spot.frame_end, L);
+            const w = Math.max(3, x2 - x1);
+            const isSelected = spot.id === selectedSpotId;
+
+            // Label
             tlCtx.fillStyle = 'rgba(150,150,150,0.5)';
-            tlCtx.fillText('Custom', 2, y + 12);
+            tlCtx.font = '10px sans-serif';
+            tlCtx.fillText(`C${ci + 1}`, 2, y + 12);
 
-            const spotBarH = Math.min(14, (customRowH - 4) / customSpots.length);
-            let spotY = y + 2;
-            for (const spot of customSpots) {
-                const x1 = _frameToTlX(spot.frame_start, L);
-                const x2 = _frameToTlX(spot.frame_end, L);
-                const w = Math.max(3, x2 - x1);
-                const isSelected = spot.id === selectedSpotId;
+            // Bar
+            tlCtx.fillStyle = isSelected
+                ? 'rgba(244,67,54,0.6)' : 'rgba(244,67,54,0.35)';
+            tlCtx.fillRect(x1, y + 2, w, customSpotRowH - 4);
+            tlCtx.strokeStyle = isSelected
+                ? 'rgba(244,67,54,1.0)' : 'rgba(244,67,54,0.7)';
+            tlCtx.lineWidth = isSelected ? 1.5 : 0.5;
+            tlCtx.strokeRect(x1, y + 2, w, customSpotRowH - 4);
 
-                tlCtx.fillStyle = isSelected
-                    ? 'rgba(244,67,54,0.6)' : 'rgba(244,67,54,0.35)';
-                tlCtx.fillRect(x1, spotY, w, spotBarH - 1);
-                tlCtx.strokeStyle = isSelected
-                    ? 'rgba(244,67,54,1.0)' : 'rgba(244,67,54,0.7)';
-                tlCtx.lineWidth = isSelected ? 1.5 : 0.5;
-                tlCtx.strokeRect(x1, spotY, w, spotBarH - 1);
-
-                if (isSelected) {
-                    tlCtx.fillStyle = 'rgba(244,67,54,1.0)';
-                    tlCtx.fillRect(x1 - 1, spotY, 3, spotBarH - 1);
-                    tlCtx.fillRect(x2 - 2, spotY, 3, spotBarH - 1);
-                }
-                spotY += spotBarH;
+            if (isSelected) {
+                tlCtx.fillStyle = 'rgba(244,67,54,1.0)';
+                tlCtx.fillRect(x1 - 1, y + 2, 3, customSpotRowH - 4);
+                tlCtx.fillRect(x2 - 2, y + 2, 3, customSpotRowH - 4);
             }
-            y += customRowH + gap;
+            y += customSpotRowH;
         }
+        if (customSpots.length > 0) y += gap;
 
         // ── Hand row: green coverage + multiple draggable protection segments ──
         if (handCoverage.length > 0 || hasMediapipe) {
@@ -2062,24 +2074,21 @@ const deid = (() => {
 
         y += faceRowH + gap;
 
-        // Hit test custom spot bars
+        // Hit test custom spot bars — one row per spot
         const customSpots = visibleSpots.filter(s => s.spot_type === 'custom');
-        if (customSpots.length > 0) {
-            const spotBarH = Math.min(12, (customRowH - 4) / customSpots.length);
-            let spotY = y + 2;
-            for (const spot of customSpots) {
-                const x1 = _frameToTlX(spot.frame_start, L);
-                const x2 = _frameToTlX(spot.frame_end, L);
+        const customSpotRowH = 18;
+        for (const spot of customSpots) {
+            const x1 = _frameToTlX(spot.frame_start, L);
+            const x2 = _frameToTlX(spot.frame_end, L);
 
-                if (my >= spotY && my <= spotY + spotBarH) {
-                    if (Math.abs(mx - x1) < 6) return { type: 'spot', spot, edge: 'start' };
-                    if (Math.abs(mx - x2) < 6) return { type: 'spot', spot, edge: 'end' };
-                    if (mx > x1 + 4 && mx < x2 - 4) return { type: 'spot', spot, edge: 'move' };
-                }
-                spotY += spotBarH;
+            if (my >= y + 2 && my <= y + customSpotRowH - 2) {
+                if (Math.abs(mx - x1) < 6) return { type: 'spot', spot, edge: 'start' };
+                if (Math.abs(mx - x2) < 6) return { type: 'spot', spot, edge: 'end' };
+                if (mx > x1 + 4 && mx < x2 - 4) return { type: 'spot', spot, edge: 'move' };
             }
-            y += customRowH + gap;
+            y += customSpotRowH;
         }
+        if (customSpots.length > 0) y += gap;
 
         // Hit test hand protection segments
         if (handCoverage.length > 0 || hasMediapipe) {
