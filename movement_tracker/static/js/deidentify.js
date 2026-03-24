@@ -2009,7 +2009,6 @@ const deid = (() => {
 
         // ── Custom spots: one row per spot (red) ──
         const customSpots = visibleSpots.filter(s => s.spot_type === 'custom');
-        const customSpotRowH = 18;
         for (let ci = 0; ci < customSpots.length; ci++) {
             const spot = customSpots[ci];
             const x1 = _frameToTlX(spot.frame_start, L);
