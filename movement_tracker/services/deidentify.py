@@ -670,13 +670,12 @@ def render_with_blur_specs(input_path: str, output_path: str,
     if start_frame > 0 and start_frame < reported:
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
-    import os, subprocess
+    import os, subprocess, tempfile
 
     # Remove existing output file
     if os.path.exists(output_path):
         os.remove(output_path)
 
-    # Pipe frames directly to ffmpeg for H.264 encoding (no intermediate file)
     try:
         from .ffmpeg import get_ffmpeg_path
         ffmpeg = get_ffmpeg_path()
@@ -684,33 +683,105 @@ def render_with_blur_specs(input_path: str, output_path: str,
         cap.release()
         raise RuntimeError("ffmpeg not found. Install FFmpeg or pip install imageio-ffmpeg")
 
-    ffmpeg_cmd = [
+    # ── Pass 1: Pre-blur entire video with ffmpeg (fast, hardware-friendly) ──
+    # This eliminates the expensive per-frame cv2.GaussianBlur.
+    # boxblur luma=25:25 is roughly equivalent to GaussianBlur(99, sigma=50)
+    tmp_dir = tempfile.mkdtemp(prefix="deid_")
+    preblurred_path = os.path.join(tmp_dir, "preblurred.mp4")
+
+    if progress_callback:
+        progress_callback(1)
+
+    # Build ffmpeg command: seek to start_frame, process 'total' frames
+    blur_cmd = [
         ffmpeg, "-y",
-        "-f", "rawvideo",
-        "-vcodec", "rawvideo",
-        "-s", f"{full_w}x{fh}",
-        "-pix_fmt", "bgr24",
+        "-i", source_path,
+    ]
+    if start_frame > 0:
+        blur_cmd += ["-ss", str(start_frame / fps)]
+    blur_cmd += [
+        "-frames:v", str(total),
+        "-vf", "boxblur=luma=25:chroma=25",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "15",
+        "-pix_fmt", "yuv420p", "-an",
+        preblurred_path,
+    ]
+
+    result = subprocess.run(blur_cmd, capture_output=True, text=True, timeout=600)
+    if result.returncode != 0:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        cap.release()
+        raise RuntimeError(f"Pre-blur failed: {result.stderr[:500]}")
+
+    if progress_callback:
+        progress_callback(10)  # Pre-blur done (~10% of work)
+
+    # ── Pass 2: Read original + pre-blurred, composite with masks, pipe to output ──
+    blur_cap = cv2.VideoCapture(preblurred_path)
+    if not blur_cap.isOpened():
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        cap.release()
+        raise RuntimeError(f"Cannot open pre-blurred video: {preblurred_path}")
+
+    # Reset original video to start
+    if start_frame > 0 and start_frame < reported:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    else:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+    out_cmd = [
+        ffmpeg, "-y",
+        "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-s", f"{full_w}x{fh}", "-pix_fmt", "bgr24",
         "-r", str(fps),
-        "-i", "-",  # read from stdin
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "18",
-        "-pix_fmt", "yuv420p",
-        "-an",
+        "-i", "-",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-an",
         output_path,
     ]
 
     proc = subprocess.Popen(
-        ffmpeg_cmd, stdin=subprocess.PIPE,
+        out_cmd, stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
     )
+
+    # Hand mask cache
+    _hand_cache = {}
+    HAND_CACHE_THRESHOLD = 3.0
+
+    def _lm_hash(lms):
+        if not lms:
+            return None
+        return tuple((round(lm["x"], 1), round(lm["y"], 1)) for lm in lms)
+
+    def _lm_moved(old_hash, new_hash):
+        if old_hash is None or new_hash is None:
+            return True
+        if len(old_hash) != len(new_hash):
+            return True
+        return max(max(abs(a[0]-b[0]), abs(a[1]-b[1]))
+                   for a, b in zip(old_hash, new_hash)) > HAND_CACHE_THRESHOLD
+
+    def _get_hand_mask_cached(side_label, lms, w_side, h_side, r, sm, fa_r, fa_e, sm2):
+        key = side_label
+        new_hash = _lm_hash(lms)
+        params = (r, sm, fa_r, fa_e, sm2)
+        cached = _hand_cache.get(key)
+        if cached and cached["params"] == params and not _lm_moved(cached["lm_hash"], new_hash):
+            return cached["mask"]
+        mask = _build_hand_mask_from_landmarks(lms, w_side, h_side, r, sm, fa_r, fa_e, sm2)
+        _hand_cache[key] = {"lm_hash": new_hash, "mask": mask, "params": params}
+        return mask
 
     frames_written = 0
     try:
         for i in range(total):
             global_frame = start_frame + i
-            ret, frame = cap.read()
-            if not ret:
+            ret_orig, frame = cap.read()
+            ret_blur, blurred = blur_cap.read()
+            if not ret_orig or not ret_blur:
                 break
 
             # Collect active blur specs for this frame
@@ -719,8 +790,9 @@ def render_with_blur_specs(input_path: str, output_path: str,
 
             if active_specs:
                 frame = np.ascontiguousarray(frame, dtype=np.uint8)
+                blurred = np.ascontiguousarray(blurred, dtype=np.uint8)
 
-                # Check if hand protection is active for this frame
+                # Check if hand protection is active
                 hand_active = False
                 active_radius = hand_mask_radius
                 active_smooth = hand_smooth
@@ -732,8 +804,10 @@ def render_with_blur_specs(input_path: str, output_path: str,
                         break
 
                 if is_stereo:
-                    left = frame[:, :half_w, :].copy()
-                    right = frame[:, half_w:, :].copy()
+                    left_o = frame[:, :half_w, :]
+                    right_o = frame[:, half_w:, :]
+                    left_b = blurred[:, :half_w, :]
+                    right_b = blurred[:, half_w:, :]
 
                     left_specs = [s for s in active_specs if s.get("side", "left") == "left"]
                     right_specs = [s for s in active_specs if s.get("side", "right") == "right"]
@@ -743,40 +817,47 @@ def render_with_blur_specs(input_path: str, output_path: str,
                         hand_mask_l = np.zeros((fh, half_w), dtype=bool)
                         if hand_active and hand_lm_data and global_frame in hand_lm_data:
                             lms_l = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "left"]
-                            hand_mask_l = _build_hand_mask_from_landmarks(lms_l, half_w, fh, active_radius, active_smooth,
-                                                                          forearm_radius, forearm_extent, hand_smooth2)
-                        left = _apply_blur_with_mask(left, left_mask, hand_mask_l)
+                            hand_mask_l = _get_hand_mask_cached(
+                                "left", lms_l, half_w, fh, active_radius, active_smooth,
+                                forearm_radius, forearm_extent, hand_smooth2)
+                        left_o = _composite_with_preblurred(left_o, left_b, left_mask, hand_mask_l)
 
                     if right_specs:
                         right_mask = _build_blur_mask(right_specs, full_w - half_w, fh, global_frame, face_by_frame, "right")
                         hand_mask_r = np.zeros((fh, full_w - half_w), dtype=bool)
                         if hand_active and hand_lm_data and global_frame in hand_lm_data:
                             lms_r = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "right"]
-                            hand_mask_r = _build_hand_mask_from_landmarks(lms_r, full_w - half_w, fh, active_radius, active_smooth,
-                                                                          forearm_radius, forearm_extent, hand_smooth2)
-                        right = _apply_blur_with_mask(right, right_mask, hand_mask_r)
+                            hand_mask_r = _get_hand_mask_cached(
+                                "right", lms_r, full_w - half_w, fh, active_radius, active_smooth,
+                                forearm_radius, forearm_extent, hand_smooth2)
+                        right_o = _composite_with_preblurred(right_o, right_b, right_mask, hand_mask_r)
 
-                    frame = np.concatenate([left, right], axis=1)
+                    frame = np.concatenate([left_o, right_o], axis=1)
                 else:
                     blur_mask = _build_blur_mask(active_specs, full_w, fh, global_frame, face_by_frame, "full")
                     hand_mask = np.zeros((fh, full_w), dtype=bool)
                     if hand_active and hand_lm_data and global_frame in hand_lm_data:
-                        hand_mask = _build_hand_mask_from_landmarks(
-                            hand_lm_data[global_frame], full_w, fh, active_radius, active_smooth,
+                        hand_mask = _get_hand_mask_cached(
+                            "full", hand_lm_data[global_frame], full_w, fh, active_radius, active_smooth,
                             forearm_radius, forearm_extent, hand_smooth2)
-                    frame = _apply_blur_with_mask(frame, blur_mask, hand_mask)
+                    frame = _composite_with_preblurred(frame, blurred, blur_mask, hand_mask)
 
             # Write raw BGR frame to ffmpeg stdin
             proc.stdin.write(frame.tobytes())
             frames_written += 1
 
             if progress_callback and i % 10 == 0:
-                progress_callback(i / total * 100)
+                pct = 10 + (i / total * 90)  # 10-100% for pass 2
+                progress_callback(pct)
 
     finally:
         cap.release()
+        blur_cap.release()
         proc.stdin.close()
         proc.wait(timeout=120)
+        # Clean up temp files
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
     if proc.returncode != 0:
         stderr = proc.stderr.read().decode() if proc.stderr else ""
@@ -1027,5 +1108,45 @@ def _apply_blur_with_mask(frame_half, blur_mask, hand_mask):
         else:
             expanded_mask = hand_mask
         result[expanded_mask] = frame_half[expanded_mask]
+
+    return result
+
+
+def _composite_with_preblurred(original, preblurred, blur_mask, hand_mask):
+    """Composite original and pre-blurred frames using the blur mask.
+
+    Like _apply_blur_with_mask but uses a pre-blurred frame instead of
+    computing GaussianBlur per-frame. Much faster for video rendering.
+    """
+    if blur_mask.max() == 0:
+        return original
+
+    # Subtract hand protection from blur mask
+    final_mask = blur_mask.copy()
+    if hand_mask is not None and hand_mask.any():
+        final_mask[hand_mask] = 0
+
+    if final_mask.max() == 0:
+        return original
+
+    # Feather the mask edges
+    mask_f = cv2.GaussianBlur(
+        final_mask.astype(np.float32) / 255.0,
+        (FEATHER_KERNEL, FEATHER_KERNEL), 5)
+
+    # Composite: original where mask=0, preblurred where mask=1
+    mask_3ch = mask_f[:, :, np.newaxis]
+    result = (original.astype(np.float32) * (1 - mask_3ch) +
+              preblurred.astype(np.float32) * mask_3ch).astype(np.uint8)
+
+    # Restore original pixels in hand protection area
+    if hand_mask is not None and hand_mask.any():
+        dilate_r = FEATHER_KERNEL // 2
+        if dilate_r > 0:
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_r * 2 + 1, dilate_r * 2 + 1))
+            expanded_mask = cv2.dilate(hand_mask.astype(np.uint8), kernel, iterations=1).astype(bool)
+        else:
+            expanded_mask = hand_mask
+        result[expanded_mask] = original[expanded_mask]
 
     return result
