@@ -803,12 +803,16 @@ def render_with_blur_specs(input_path: str, output_path: str,
 
     finally:
         cap.release()
-        proc.stdin.close()
-        # communicate() drains stderr to prevent deadlock from full pipe buffer
-        _, stderr_bytes = proc.communicate(timeout=600)
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+        # Read stderr to prevent pipe buffer deadlock, then wait
+        stderr_bytes = proc.stderr.read() if proc.stderr else b""
+        proc.wait(timeout=600)
 
     if proc.returncode != 0:
-        stderr = stderr_bytes.decode() if stderr_bytes else ""
+        stderr = stderr_bytes.decode(errors="replace") if stderr_bytes else ""
         raise RuntimeError(f"ffmpeg encoding failed: {stderr[:500]}")
 
     if progress_callback:
