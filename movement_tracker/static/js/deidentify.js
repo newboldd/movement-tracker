@@ -1781,35 +1781,37 @@ const deid = (() => {
         }
     }
 
-    // ── Render all trials ──
-    async function renderAll() {
-        if (!subjectId) return;
+    // ── Render current trial ──
+    async function renderTrial() {
+        if (!subjectId || currentTrialIdx < 0) return;
 
         // Save current specs first
         await saveSpecs();
 
         const btn = document.getElementById('renderBtn');
         const status = document.getElementById('renderStatus');
+        const trialName = trialMeta ? trialMeta.trial_name : `trial ${currentTrialIdx}`;
         btn.disabled = true;
-        status.textContent = 'Starting render...';
+        status.textContent = `Rendering ${trialName}...`;
 
         try {
-            const result = await API.post(`/api/deidentify/${subjectId}/render`);
+            const result = await API.post(`/api/deidentify/${subjectId}/render`, {
+                trial_idx: currentTrialIdx,
+            });
             const jobId = result.job_id;
 
             API.streamJob(jobId,
                 (data) => {
                     if (data.status === 'running') {
                         const pct = data.progress_pct ? Math.round(data.progress_pct) : 0;
-                        status.textContent = `Rendering... ${pct}%`;
+                        status.textContent = `Rendering ${trialName}... ${pct}%`;
                     }
                 },
                 (data) => {
                     btn.disabled = false;
                     if (data.status === 'completed') {
-                        status.textContent = 'Render complete! Deidentified videos saved.';
-                        // Mark all trials as having blurred versions and show preview button
-                        trials.forEach(t => { t.has_blurred = true; });
+                        status.textContent = `Render complete! ${trialName} saved.`;
+                        if (trialMeta) trialMeta.has_blurred = true;
                         _updateViewButtons();
                     } else if (data.status === 'failed') {
                         status.textContent = 'Render failed: ' + (data.error_msg || 'unknown');
@@ -2293,6 +2295,6 @@ const deid = (() => {
         updateHandSmooth2,
         updateHandTemporalSmooth,
         goToMediapipe,
-        renderAll,
+        renderTrial,
     };
 })();

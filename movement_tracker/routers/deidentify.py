@@ -665,8 +665,12 @@ def save_hand_settings(subject_id: int, body: dict = Body(...)) -> dict:
 # ── Render ────────────────────────────────────────────────────────────────
 
 @router.post("/{subject_id}/render")
-def render_deidentified(subject_id: int) -> dict:
-    """Render deidentified videos for all trials using saved blur specs.
+def render_deidentified(subject_id: int, body: dict = Body(default={})) -> dict:
+    """Render deidentified video(s) using saved blur specs.
+
+    Body: { trial_idx: int (optional) }
+    If trial_idx is provided, only that trial is rendered.
+    Otherwise renders all trials with blur specs.
 
     Creates a background job. Returns {job_id}.
     """
@@ -736,7 +740,11 @@ def render_deidentified(subject_id: int) -> dict:
             deident_dir = Path(output_dir) / "deidentified"
             deident_dir.mkdir(parents=True, exist_ok=True)
 
-            trials_with_specs = [i for i in range(len(trials)) if i in specs_by_trial]
+            requested_trial = body.get("trial_idx") if body else None
+            if requested_trial is not None:
+                trials_with_specs = [requested_trial] if requested_trial in specs_by_trial else []
+            else:
+                trials_with_specs = [i for i in range(len(trials)) if i in specs_by_trial]
             n_trials = len(trials_with_specs)
 
             for ti_idx, trial_i in enumerate(trials_with_specs):
