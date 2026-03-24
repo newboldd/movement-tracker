@@ -693,13 +693,11 @@ def render_with_blur_specs(input_path: str, output_path: str,
         progress_callback(1)
 
     # Build ffmpeg command: seek to start_frame, process 'total' frames
-    blur_cmd = [
-        ffmpeg, "-y",
-        "-i", input_path,
-    ]
+    blur_cmd = [ffmpeg, "-y"]
     if start_frame > 0:
-        blur_cmd += ["-ss", str(start_frame / fps)]
+        blur_cmd += ["-ss", str(start_frame / fps)]  # before -i = fast seek
     blur_cmd += [
+        "-i", input_path,
         "-frames:v", str(total),
         "-vf", "boxblur=25:25",
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "15",
