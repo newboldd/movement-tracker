@@ -693,10 +693,10 @@ def render_with_blur_specs(input_path: str, output_path: str,
         progress_callback(1)
 
     # Build ffmpeg command: seek to start_frame, process 'total' frames
-    blur_cmd = [ffmpeg, "-y"]
-    if start_frame > 0:
-        blur_cmd += ["-ss", str(start_frame / fps)]  # before -i = fast seek
-    blur_cmd += [
+    # Pre-blur the video. Each trial has its own video file starting at local
+    # frame 0, so no seeking is needed — just limit to 'total' frames.
+    blur_cmd = [
+        ffmpeg, "-y",
         "-i", input_path,
         "-frames:v", str(total),
         "-vf", "boxblur=25:25",
@@ -723,11 +723,8 @@ def render_with_blur_specs(input_path: str, output_path: str,
         cap.release()
         raise RuntimeError(f"Cannot open pre-blurred video: {preblurred_path}")
 
-    # Reset original video to start
-    if start_frame > 0 and start_frame < reported:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-    else:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    # Reset original video to local frame 0 (each trial has its own file)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
     out_cmd = [
         ffmpeg, "-y",
