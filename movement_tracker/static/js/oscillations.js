@@ -88,15 +88,20 @@ const osc = (() => {
             xZoomMin = null; xZoomMax = null; render();  // reset zoom
         });
 
-        // Auto-select from URL or if single subject
+        // Auto-select from URL, sessionStorage, or first subject
         const params = new URLSearchParams(window.location.search);
         const urlSubj = params.get('subject');
+        const savedSubject = sessionStorage.getItem('dlc_lastSubjectId');
         if (urlSubj) { sel.value = urlSubj; loadSubject(parseInt(urlSubj)); }
-        else if (subjects.length === 1) { sel.value = subjects[0].id; loadSubject(subjects[0].id); }
+        else if (savedSubject && subjects.some(s => String(s.id) === savedSubject)) {
+            sel.value = savedSubject; loadSubject(parseInt(savedSubject));
+        }
+        else if (subjects.length >= 1) { sel.value = subjects[0].id; loadSubject(subjects[0].id); }
     }
 
     async function loadSubject(sid) {
         subjectId = sid;
+        sessionStorage.setItem('dlc_lastSubjectId', String(sid));
         traceData = null;
         movements = null;
 

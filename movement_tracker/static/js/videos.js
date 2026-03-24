@@ -92,11 +92,14 @@
             sel.appendChild(opt);
         });
 
-        // Restore from URL, or default to first subject with videos
+        // Restore from URL, sessionStorage, or default to first subject with videos
         const params = new URLSearchParams(window.location.search);
         const subParam = params.get('subject');
+        const savedSubject = sessionStorage.getItem('dlc_lastSubjectId');
         if (subParam) {
             sel.value = subParam;
+        } else if (savedSubject && allSubjects.some(s => String(s.id) === savedSubject)) {
+            sel.value = savedSubject;
         } else {
             const first = allSubjects.find(s => s.video_count > 0);
             if (first) sel.value = first.id;
@@ -111,6 +114,7 @@
     // ── Subject / Trial loading ──────────────────────────────
     async function loadSubject(sid) {
         subjectId = sid;
+        sessionStorage.setItem('dlc_lastSubjectId', String(sid));
         const subj = allSubjects.find(s => s.id === sid);
         subjectName = subj ? subj.name : '';
         // Per-subject camera mode

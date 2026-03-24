@@ -123,8 +123,11 @@ const manoViewer = (() => {
             sel.appendChild(opt);
         });
 
+        const savedSubject = sessionStorage.getItem('dlc_lastSubjectId');
         if (subjectParam) {
             sel.value = subjectParam;
+        } else if (savedSubject && allSubjects.some(s => String(s.id) === savedSubject)) {
+            sel.value = savedSubject;
         } else if (allSubjects.length) {
             sel.value = allSubjects[0].id;
         }
@@ -178,6 +181,7 @@ const manoViewer = (() => {
 
     async function loadSubject(sid) {
         subjectId = sid;
+        sessionStorage.setItem('dlc_lastSubjectId', String(sid));
         const subj = allSubjects.find(s => s.id === sid);
         subjectName = subj ? subj.name : '';
         // Per-subject camera mode
