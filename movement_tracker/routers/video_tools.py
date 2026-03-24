@@ -156,6 +156,31 @@ def stream_video(path: str = Query(..., description="Path to video file")) -> Fi
 
 # ── Trim ──────────────────────────────────────────────────────────────────
 
+def _is_full_video(source_path: str, start_time: float, end_time: float,
+                   tolerance: float = 0.5) -> bool:
+    """Check if trim covers the entire video (within tolerance seconds)."""
+    import cv2
+    cap = cv2.VideoCapture(source_path)
+    if not cap.isOpened():
+        return False
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    cap.release()
+    duration = frame_count / fps if fps > 0 else 0
+    return start_time <= tolerance and end_time >= (duration - tolerance)
+
+
+def _copy_video(source_path: str, output_path: str, progress_callback=None):
+    """Copy a video file without re-encoding."""
+    import shutil
+    if progress_callback:
+        progress_callback(0)
+    shutil.copy2(source_path, output_path)
+    if progress_callback:
+        progress_callback(100)
+    return output_path
+
+
 def _ffmpeg_trim(source_path: str, start_time: float, end_time: float,
                  output_path: str, progress_callback=None) -> str:
     """Trim a video segment using ffmpeg with frame-accurate re-encoding.
@@ -395,13 +420,20 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
                     if blur_faces:
                         # Trim to temp, then blur to deidentified/ dir
                         temp_trimmed = str(output_dir / f"_temp_trim_{subject_name}_{trial}.mp4")
-                        logfile.write(f"  Trimming {seg['source_path']} [{seg['start_time']:.1f}-{seg['end_time']:.1f}s]\n")
+                        full_video = _is_full_video(seg["source_path"], seg["start_time"], seg["end_time"])
+                        if full_video:
+                            logfile.write(f"  Copying full video {seg['source_path']} (no trim needed)\n")
+                        else:
+                            logfile.write(f"  Trimming {seg['source_path']} [{seg['start_time']:.1f}-{seg['end_time']:.1f}s]\n")
                         logfile.flush()
 
                         try:
-                            _ffmpeg_trim(seg["source_path"], seg["start_time"],
-                                        seg["end_time"], temp_trimmed,
-                                        progress_callback=_trim_progress)
+                            if full_video:
+                                _copy_video(seg["source_path"], temp_trimmed, _trim_progress)
+                            else:
+                                _ffmpeg_trim(seg["source_path"], seg["start_time"],
+                                            seg["end_time"], temp_trimmed,
+                                            progress_callback=_trim_progress)
                         except Exception as e:
                             logfile.write(f"  Trim failed: {e}\n")
                             temp_trimmed = None
@@ -450,14 +482,21 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
                             if os.path.exists(temp_blur):
                                 os.remove(temp_blur)
                     else:
-                        # No blur — trim directly to output
-                        logfile.write(f"  Trimming {seg['source_path']} [{seg['start_time']:.1f}-{seg['end_time']:.1f}s] (no blur)\n")
+                        # No blur — trim directly to output (or copy if full video)
+                        full_video = _is_full_video(seg["source_path"], seg["start_time"], seg["end_time"])
+                        if full_video:
+                            logfile.write(f"  Copying full video {seg['source_path']} (no trim needed)\n")
+                        else:
+                            logfile.write(f"  Trimming {seg['source_path']} [{seg['start_time']:.1f}-{seg['end_time']:.1f}s] (no blur)\n")
                         logfile.flush()
 
                         try:
-                            _ffmpeg_trim(seg["source_path"], seg["start_time"],
-                                        seg["end_time"], output_path,
-                                        progress_callback=_trim_progress)
+                            if full_video:
+                                _copy_video(seg["source_path"], output_path, _trim_progress)
+                            else:
+                                _ffmpeg_trim(seg["source_path"], seg["start_time"],
+                                            seg["end_time"], output_path,
+                                            progress_callback=_trim_progress)
                         except Exception as e:
                             logfile.write(f"  Trim failed: {e}\n")
                             continue

@@ -341,9 +341,11 @@
             <div class="trimmer">
                 <video id="trimVideo" controls preload="auto"></video>
                 <div class="trim-controls">
-                    <button class="btn btn-sm" onclick="onboard.setInPoint()">Set In (I)</button>
+                    <button class="btn btn-sm" onclick="onboard.setInPoint(0)" title="Set in-point to beginning">&#9664;| In</button>
+                    <button class="btn btn-sm" onclick="onboard.setInPoint()" title="Set in-point at current time (I)">Set In (I)</button>
                     <span class="time-display" id="inTime">In: --</span>
-                    <button class="btn btn-sm" onclick="onboard.setOutPoint()">Set Out (O)</button>
+                    <button class="btn btn-sm" onclick="onboard.setOutPoint()" title="Set out-point at current time (O)">Set Out (O)</button>
+                    <button class="btn btn-sm" onclick="onboard.setOutPoint(-1)" title="Set out-point to end">Out |&#9654;</button>
                     <span class="time-display" id="outTime">Out: --</span>
                     <input type="text" id="trialLabel" list="trialLabelSuggestions"
                         placeholder="Trial name, e.g. L1"

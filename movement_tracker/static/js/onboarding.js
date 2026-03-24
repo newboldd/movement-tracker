@@ -793,15 +793,27 @@ const onboard = (() => {
 
     // ── Step 4: Trimmer ──────────────────────────────────────
 
-    function setInPoint() {
+    function setInPoint(time) {
         const video = document.getElementById('trimVideo');
-        inPoint = video.currentTime;
+        if (time === 0) {
+            inPoint = 0;
+        } else if (time !== undefined && time !== null) {
+            inPoint = time;
+        } else {
+            inPoint = video.currentTime;
+        }
         updateTrimDisplay();
     }
 
-    function setOutPoint() {
+    function setOutPoint(time) {
         const video = document.getElementById('trimVideo');
-        outPoint = video.currentTime;
+        if (time === -1) {
+            outPoint = video.duration || 0;
+        } else if (time !== undefined && time !== null) {
+            outPoint = time;
+        } else {
+            outPoint = video.currentTime;
+        }
         updateTrimDisplay();
     }
 
