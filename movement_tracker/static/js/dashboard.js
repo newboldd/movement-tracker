@@ -169,7 +169,11 @@ function renderTable() {
             <td>${getActions(s)}</td>
             <td>${s.video_count}</td>
             <td>${s.has_mediapipe ? '&check;' : '&mdash;'}</td>
-            <td>${s.has_blur ? '&check;' : '&mdash;'}</td>
+            <td>${s.has_blur
+                ? '<span style="color:var(--green);">&check;</span>'
+                : s.has_faces
+                    ? '<a href="/deidentify?subject=' + s.id + '" class="btn btn-sm" style="padding:1px 6px;font-size:11px;text-decoration:none;">Deident</a>'
+                    : '&mdash;'}</td>
             <td>${s.has_labels ? '&check;' : '&mdash;'}</td>
             <td>${s.has_snapshots ? '&check;' : '&mdash;'}</td>
         </tr>
