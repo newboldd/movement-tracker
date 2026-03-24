@@ -856,7 +856,8 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
                                      radius: int, smooth: int = 0,
                                      forearm_radius: int = 10,
                                      forearm_extent: float = 0.7,
-                                     smooth2: int = 0) -> np.ndarray:
+                                     smooth2: int = 0,
+                                     **kwargs) -> np.ndarray:
     """Build hand protection mask from stored landmarks (matching frontend behavior).
 
     Draws circles at hand keypoints, applies morphological close (smooth),
@@ -875,13 +876,17 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
     hand_lms = [lm for lm in landmarks if lm.get("type") != "pose"]
     pose_lms = [lm for lm in landmarks if lm.get("type") == "pose"]
 
-    # Slider values are in image pixels — no scaling needed.
-    # The frontend converts to screen pixels via (value * canvasScale) for display,
-    # but the underlying value is in image coordinate space.
-    radius = max(1, int(radius))
-    smooth = max(0, int(smooth))
-    forearm_radius = max(1, int(forearm_radius))
-    smooth2 = max(0, int(smooth2))
+    # Slider values are in screen pixels (CSS px at typical canvas zoom).
+    # Convert to image pixels: value * (imageWidth / typicalCanvasWidth).
+    # The frontend draws at (value * canvasScale) screen px, where
+    # canvasScale ≈ canvasWidth / imageWidth. Both produce the same
+    # fractional coverage: value / imageWidth * (imageWidth / canvasWidth) = value / canvasWidth.
+    canvas_w = kwargs.get("canvas_w", 700)
+    scale_factor = max(1.0, w / canvas_w)
+    radius = max(1, int(radius * scale_factor))
+    smooth = max(0, int(smooth * scale_factor))
+    forearm_radius = max(1, int(forearm_radius * scale_factor))
+    smooth2 = max(0, int(smooth2 * scale_factor))
 
     # Interpolate midpoints along each finger segment for smoother coverage
     # MediaPipe joints: 0=wrist, 1-4=thumb, 5-8=index, 9-12=middle, 13-16=ring, 17-20=pinky

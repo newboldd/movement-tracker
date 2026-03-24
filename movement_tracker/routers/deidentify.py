@@ -101,6 +101,7 @@ def get_frame(
     side: str = Query("full"),
     blurred: bool = Query(False),
     preview: bool = Query(False),
+    canvas_w: int = Query(700, description="Frontend canvas width for scaling hand mask params"),
 ) -> Response:
     """Serve a single JPEG frame.
 
@@ -272,9 +273,11 @@ def get_frame(
                     lms_l = [lm for lm in hand_lm_data[frame_num] if lm["side"] == "left"]
                     lms_r = [lm for lm in hand_lm_data[frame_num] if lm["side"] == "right"]
                     hand_mask_l = _build_hand_mask_from_landmarks(lms_l, half_w, fh, active_radius, active_smooth,
-                                                                  forearm_radius_val, forearm_extent_val, hand_smooth2_val)
+                                                                  forearm_radius_val, forearm_extent_val, hand_smooth2_val,
+                                                                  canvas_w=canvas_w)
                     hand_mask_r = _build_hand_mask_from_landmarks(lms_r, fw - half_w, fh, active_radius, active_smooth,
-                                                                  forearm_radius_val, forearm_extent_val, hand_smooth2_val)
+                                                                  forearm_radius_val, forearm_extent_val, hand_smooth2_val,
+                                                                  canvas_w=canvas_w)
                 left = _apply_blur_with_mask(left, left_mask, hand_mask_l)
                 right = _apply_blur_with_mask(right, right_mask, hand_mask_r)
                 frame = np.concatenate([left, right], axis=1)
@@ -284,7 +287,8 @@ def get_frame(
                 if hand_active and frame_num in hand_lm_data:
                     hand_mask = _build_hand_mask_from_landmarks(
                         hand_lm_data[frame_num], fw, fh, active_radius, active_smooth,
-                        forearm_radius_val, forearm_extent_val, hand_smooth2_val)
+                        forearm_radius_val, forearm_extent_val, hand_smooth2_val,
+                        canvas_w=canvas_w)
                 frame = _apply_blur_with_mask(frame, blur_mask, hand_mask)
 
     # Stereo: crop to left or right half based on camera name
