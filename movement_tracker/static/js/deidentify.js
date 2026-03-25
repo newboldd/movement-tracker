@@ -1935,9 +1935,17 @@ const deid = (() => {
             );
             handLandmarksBulk = res.landmarks || {};
             hasDlcLabels = res.has_dlc || false;
-            // Show/hide DLC section
-            const dlcSec = document.getElementById('dlcSection');
-            if (dlcSec) dlcSec.style.display = hasDlcLabels ? 'block' : 'none';
+            // Disable wrist extent slider if no pose data (no elbow available)
+            const hasPose = res.has_pose || false;
+            const extentSlider = document.getElementById('handExtentSlider');
+            const extentLabel = document.getElementById('handExtentVal');
+            if (extentSlider) {
+                extentSlider.disabled = !hasPose;
+                extentSlider.style.opacity = hasPose ? '' : '0.4';
+            }
+            if (extentLabel && !hasPose) {
+                extentLabel.textContent = 'n/a';
+            }
         } catch (e) {
             handLandmarksBulk = {};
             hasDlcLabels = false;
