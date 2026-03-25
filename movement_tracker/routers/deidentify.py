@@ -590,10 +590,11 @@ def get_hand_landmarks_bulk(subject_id: int, trial_idx: int = Query(...)) -> dic
                     for f_idx, coord in enumerate(coords_list):
                         if coord is None:
                             continue
-                        global_f = start + f_idx
-                        if global_f > end:
-                            break
-                        key = str(global_f)
+                        # DLC coords are globally indexed (all trials concatenated)
+                        # Only include frames within this trial's range
+                        if f_idx < start or f_idx > end:
+                            continue
+                        key = str(f_idx)
                         if key not in result:
                             result[key] = []
                         result[key].append({
