@@ -670,7 +670,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
     if start_frame > 0 and start_frame < reported:
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
-    import os, subprocess
+    import os, subprocess, tempfile
 
     # Remove existing output file
     if os.path.exists(output_path):
@@ -683,27 +683,46 @@ def render_with_blur_specs(input_path: str, output_path: str,
         cap.release()
         raise RuntimeError("ffmpeg not found. Install FFmpeg or pip install imageio-ffmpeg")
 
-    # Reset to start of video (each trial has its own file at local frame 0)
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    cap.release()  # Release early — we'll reopen as needed
 
-    # Pipe processed frames directly to ffmpeg for H.264 encoding
-    out_cmd = [
-        ffmpeg, "-y",
-        "-f", "rawvideo", "-vcodec", "rawvideo",
-        "-s", f"{full_w}x{fh}", "-pix_fmt", "bgr24",
-        "-r", str(fps),
-        "-i", "-",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-        "-pix_fmt", "yuv420p", "-an",
-        output_path,
-    ]
+    # ── Find contiguous frame ranges that need blur processing ──
+    needs_blur = set()
+    for s in blur_specs:
+        for f in range(max(s["frame_start"], start_frame),
+                       min(s["frame_end"], start_frame + total - 1) + 1):
+            needs_blur.add(f)
 
-    proc = subprocess.Popen(
-        out_cmd, stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-    )
+    if not needs_blur:
+        # No blur needed — just stream-copy the original
+        result = subprocess.run([
+            ffmpeg, "-y", "-i", input_path,
+            "-c:v", "copy", "-an", output_path,
+        ], capture_output=True, timeout=600)
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg copy failed: {result.stderr[-300:]}")
+        if progress_callback:
+            progress_callback(100)
+        return {"n_frames": total, "is_stereo": is_stereo}
 
-    # Hand mask cache: reuse when landmarks haven't moved
+    # Build sorted list of contiguous ranges needing blur
+    sorted_frames = sorted(needs_blur)
+    blur_ranges = []
+    range_start = sorted_frames[0]
+    range_end = sorted_frames[0]
+    for f in sorted_frames[1:]:
+        if f == range_end + 1:
+            range_end = f
+        else:
+            blur_ranges.append((range_start, range_end))
+            range_start = f
+            range_end = f
+    blur_ranges.append((range_start, range_end))
+
+    blur_frame_count = sum(e - s + 1 for s, e in blur_ranges)
+    logger.info(f"Segment render: {len(blur_ranges)} blur ranges, "
+                f"{blur_frame_count}/{total} frames need processing")
+
+    # Hand mask cache
     _hand_cache = {}
     HAND_CACHE_THRESHOLD = 3.0
 
@@ -731,89 +750,180 @@ def render_with_blur_specs(input_path: str, output_path: str,
         _hand_cache[key] = {"lm_hash": new_hash, "mask": mask, "params": params}
         return mask
 
-    frames_written = 0
-    try:
-        for i in range(total):
-            global_frame = start_frame + i
-            ret, frame = cap.read()
-            if not ret:
+    def _process_frame(frame, global_frame):
+        """Apply blur to a single frame. Returns modified frame."""
+        active_specs = [s for s in blur_specs
+                        if s["frame_start"] <= global_frame <= s["frame_end"]]
+        if not active_specs:
+            return frame
+
+        frame = np.ascontiguousarray(frame, dtype=np.uint8)
+
+        hand_active = False
+        active_radius = hand_mask_radius
+        active_smooth = hand_smooth
+        for seg in hand_segments:
+            if seg.get("start", 0) <= global_frame <= seg.get("end", 0):
+                hand_active = True
+                active_radius = seg.get("radius", hand_mask_radius)
+                active_smooth = seg.get("smooth", hand_smooth)
                 break
 
-            # Collect active blur specs for this frame
-            active_specs = [s for s in blur_specs
-                            if s["frame_start"] <= global_frame <= s["frame_end"]]
+        if is_stereo:
+            left = frame[:, :half_w, :].copy()
+            right = frame[:, half_w:, :].copy()
 
-            if active_specs:
-                frame = np.ascontiguousarray(frame, dtype=np.uint8)
+            left_specs = [s for s in active_specs if s.get("side", "left") == "left"]
+            right_specs = [s for s in active_specs if s.get("side", "right") == "right"]
 
-                # Check if hand protection is active
-                hand_active = False
-                active_radius = hand_mask_radius
-                active_smooth = hand_smooth
-                for seg in hand_segments:
-                    if seg.get("start", 0) <= global_frame <= seg.get("end", 0):
-                        hand_active = True
-                        active_radius = seg.get("radius", hand_mask_radius)
-                        active_smooth = seg.get("smooth", hand_smooth)
-                        break
+            if left_specs:
+                left_mask = _build_blur_mask(left_specs, half_w, fh, global_frame, face_by_frame, "left")
+                hand_mask_l = np.zeros((fh, half_w), dtype=bool)
+                if hand_active and hand_lm_data and global_frame in hand_lm_data:
+                    lms_l = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "left"]
+                    hand_mask_l = _get_hand_mask_cached(
+                        "left", lms_l, half_w, fh, active_radius, active_smooth,
+                        forearm_radius, forearm_extent, hand_smooth2)
+                left = _apply_blur_roi(left, left_mask, hand_mask_l)
 
-                if is_stereo:
-                    left = frame[:, :half_w, :].copy()
-                    right = frame[:, half_w:, :].copy()
+            if right_specs:
+                right_mask = _build_blur_mask(right_specs, full_w - half_w, fh, global_frame, face_by_frame, "right")
+                hand_mask_r = np.zeros((fh, full_w - half_w), dtype=bool)
+                if hand_active and hand_lm_data and global_frame in hand_lm_data:
+                    lms_r = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "right"]
+                    hand_mask_r = _get_hand_mask_cached(
+                        "right", lms_r, full_w - half_w, fh, active_radius, active_smooth,
+                        forearm_radius, forearm_extent, hand_smooth2)
+                right = _apply_blur_roi(right, right_mask, hand_mask_r)
 
-                    left_specs = [s for s in active_specs if s.get("side", "left") == "left"]
-                    right_specs = [s for s in active_specs if s.get("side", "right") == "right"]
+            return np.concatenate([left, right], axis=1)
+        else:
+            blur_mask = _build_blur_mask(active_specs, full_w, fh, global_frame, face_by_frame, "full")
+            hand_mask = np.zeros((fh, full_w), dtype=bool)
+            if hand_active and hand_lm_data and global_frame in hand_lm_data:
+                hand_mask = _get_hand_mask_cached(
+                    "full", hand_lm_data[global_frame], full_w, fh, active_radius, active_smooth,
+                    forearm_radius, forearm_extent, hand_smooth2)
+            return _apply_blur_roi(frame, blur_mask, hand_mask)
 
-                    if left_specs:
-                        left_mask = _build_blur_mask(left_specs, half_w, fh, global_frame, face_by_frame, "left")
-                        hand_mask_l = np.zeros((fh, half_w), dtype=bool)
-                        if hand_active and hand_lm_data and global_frame in hand_lm_data:
-                            lms_l = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "left"]
-                            hand_mask_l = _get_hand_mask_cached(
-                                "left", lms_l, half_w, fh, active_radius, active_smooth,
-                                forearm_radius, forearm_extent, hand_smooth2)
-                        left = _apply_blur_roi(left, left_mask, hand_mask_l)
+    # ── Segment-based render: only re-encode frames that need blur ──
+    tmp_dir = tempfile.mkdtemp(prefix="deid_seg_")
+    segment_files = []  # list of (path, start_time, duration, needs_reencode)
 
-                    if right_specs:
-                        right_mask = _build_blur_mask(right_specs, full_w - half_w, fh, global_frame, face_by_frame, "right")
-                        hand_mask_r = np.zeros((fh, full_w - half_w), dtype=bool)
-                        if hand_active and hand_lm_data and global_frame in hand_lm_data:
-                            lms_r = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "right"]
-                            hand_mask_r = _get_hand_mask_cached(
-                                "right", lms_r, full_w - half_w, fh, active_radius, active_smooth,
-                                forearm_radius, forearm_extent, hand_smooth2)
-                        right = _apply_blur_roi(right, right_mask, hand_mask_r)
+    try:
+        # Build alternating clean/blur segments
+        prev_end = 0  # local frame index (0-based)
+        for br_start, br_end in blur_ranges:
+            local_start = br_start - start_frame
+            local_end = br_end - start_frame
 
-                    frame = np.concatenate([left, right], axis=1)
-                else:
-                    blur_mask = _build_blur_mask(active_specs, full_w, fh, global_frame, face_by_frame, "full")
-                    hand_mask = np.zeros((fh, full_w), dtype=bool)
-                    if hand_active and hand_lm_data and global_frame in hand_lm_data:
-                        hand_mask = _get_hand_mask_cached(
-                            "full", hand_lm_data[global_frame], full_w, fh, active_radius, active_smooth,
-                            forearm_radius, forearm_extent, hand_smooth2)
-                    frame = _apply_blur_roi(frame, blur_mask, hand_mask)
+            # Clean segment before this blur range (stream copy)
+            if local_start > prev_end:
+                clean_start_t = prev_end / fps
+                clean_dur = (local_start - prev_end) / fps
+                clean_path = os.path.join(tmp_dir, f"clean_{prev_end}.mp4")
+                result = subprocess.run([
+                    ffmpeg, "-y",
+                    "-ss", f"{clean_start_t:.6f}",
+                    "-i", input_path,
+                    "-t", f"{clean_dur:.6f}",
+                    "-c:v", "copy", "-an",
+                    clean_path,
+                ], capture_output=True, timeout=120)
+                if result.returncode == 0 and os.path.exists(clean_path) and os.path.getsize(clean_path) > 0:
+                    segment_files.append(clean_path)
 
-            # Write raw BGR frame to ffmpeg stdin
-            proc.stdin.write(frame.tobytes())
-            frames_written += 1
+            # Blur segment: decode, process, encode
+            blur_count = local_end - local_start + 1
+            blur_path = os.path.join(tmp_dir, f"blur_{local_start}.mp4")
 
-            if progress_callback and i % 10 == 0:
-                progress_callback(i / total * 100)
+            proc = subprocess.Popen([
+                ffmpeg, "-y",
+                "-f", "rawvideo", "-vcodec", "rawvideo",
+                "-s", f"{full_w}x{fh}", "-pix_fmt", "bgr24",
+                "-r", str(fps),
+                "-i", "-",
+                "-c:v", "libx264", "-preset", "slow", "-crf", "18",
+                "-pix_fmt", "yuv420p", "-an",
+                blur_path,
+            ], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+            cap2 = cv2.VideoCapture(input_path)
+            cap2.set(cv2.CAP_PROP_POS_FRAMES, local_start)
+            for fi in range(blur_count):
+                ret, frame = cap2.read()
+                if not ret:
+                    break
+                global_frame = start_frame + local_start + fi
+                frame = _process_frame(frame, global_frame)
+                proc.stdin.write(frame.tobytes())
+            cap2.release()
+
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+            proc.stderr.read()
+            proc.wait(timeout=300)
+
+            if proc.returncode == 0 and os.path.exists(blur_path) and os.path.getsize(blur_path) > 0:
+                segment_files.append(blur_path)
+
+            prev_end = local_end + 1
+
+            if progress_callback:
+                done_frames = local_end - start_frame + 1
+                progress_callback(done_frames / total * 90)  # reserve 10% for concat
+
+        # Final clean segment after last blur range
+        if prev_end < total:
+            clean_start_t = prev_end / fps
+            clean_dur = (total - prev_end) / fps
+            clean_path = os.path.join(tmp_dir, f"clean_{prev_end}.mp4")
+            result = subprocess.run([
+                ffmpeg, "-y",
+                "-ss", f"{clean_start_t:.6f}",
+                "-i", input_path,
+                "-t", f"{clean_dur:.6f}",
+                "-c:v", "copy", "-an",
+                clean_path,
+            ], capture_output=True, timeout=120)
+            if result.returncode == 0 and os.path.exists(clean_path) and os.path.getsize(clean_path) > 0:
+                segment_files.append(clean_path)
+
+        # Concatenate all segments
+        if len(segment_files) == 1:
+            import shutil
+            shutil.move(segment_files[0], output_path)
+        elif len(segment_files) > 1:
+            concat_list = os.path.join(tmp_dir, "concat.txt")
+            with open(concat_list, "w") as f:
+                for seg in segment_files:
+                    f.write(f"file '{seg}'\n")
+            result = subprocess.run([
+                ffmpeg, "-y", "-f", "concat", "-safe", "0",
+                "-i", concat_list,
+                "-c:v", "copy", "-an",
+                output_path,
+            ], capture_output=True, timeout=600)
+            if result.returncode != 0:
+                # Fallback: re-encode concat (handles codec mismatch between copy and ultrafast)
+                result = subprocess.run([
+                    ffmpeg, "-y", "-f", "concat", "-safe", "0",
+                    "-i", concat_list,
+                    "-c:v", "libx264", "-preset", "slow", "-crf", "18",
+                    "-pix_fmt", "yuv420p", "-an",
+                    output_path,
+                ], capture_output=True, timeout=600)
+                if result.returncode != 0:
+                    raise RuntimeError(f"ffmpeg concat failed: {result.stderr[-300:]}")
+        else:
+            raise RuntimeError("No segments produced")
 
     finally:
-        cap.release()
-        try:
-            proc.stdin.close()
-        except Exception:
-            pass
-        # Read stderr to prevent pipe buffer deadlock, then wait
-        stderr_bytes = proc.stderr.read() if proc.stderr else b""
-        proc.wait(timeout=600)
-
-    if proc.returncode != 0:
-        stderr = stderr_bytes.decode(errors="replace") if stderr_bytes else ""
-        raise RuntimeError(f"ffmpeg encoding failed: {stderr[:500]}")
+        # Cleanup temp files
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
     if progress_callback:
         progress_callback(100)
