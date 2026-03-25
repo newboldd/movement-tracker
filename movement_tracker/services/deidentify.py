@@ -1049,17 +1049,9 @@ def _apply_blur_with_mask(frame_half, blur_mask, hand_mask):
     result = (frame_half.astype(np.float32) * (1 - mask_3ch) +
               blurred.astype(np.float32) * mask_3ch).astype(np.uint8)
 
-    # Restore original pixels in hand protection area (feathering can bleed into it)
-    # Dilate the hand mask slightly to ensure full coverage matches frontend display
+    # Restore original pixels in hand protection area
     if hand_mask is not None and hand_mask.any():
-        # Dilate by the feather kernel radius to cover any bleed from edge feathering
-        dilate_r = FEATHER_KERNEL // 2
-        if dilate_r > 0:
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_r * 2 + 1, dilate_r * 2 + 1))
-            expanded_mask = cv2.dilate(hand_mask.astype(np.uint8), kernel, iterations=1).astype(bool)
-        else:
-            expanded_mask = hand_mask
-        result[expanded_mask] = frame_half[expanded_mask]
+        result[hand_mask] = frame_half[hand_mask]
 
     return result
 
@@ -1125,13 +1117,7 @@ def _apply_blur_roi(frame_half, blur_mask, hand_mask):
 
     # Restore original pixels in hand protection area
     if hand_mask is not None and hand_mask.any():
-        dilate_r = FEATHER_KERNEL // 2
-        if dilate_r > 0:
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_r * 2 + 1, dilate_r * 2 + 1))
-            expanded_mask = cv2.dilate(hand_mask.astype(np.uint8), kernel, iterations=1).astype(bool)
-        else:
-            expanded_mask = hand_mask
-        result[expanded_mask] = frame_half[expanded_mask]
+        result[hand_mask] = frame_half[hand_mask]
 
     return result
 
@@ -1165,12 +1151,6 @@ def _composite_with_preblurred(original, preblurred, blur_mask, hand_mask):
 
     # Restore original pixels in hand protection area
     if hand_mask is not None and hand_mask.any():
-        dilate_r = FEATHER_KERNEL // 2
-        if dilate_r > 0:
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_r * 2 + 1, dilate_r * 2 + 1))
-            expanded_mask = cv2.dilate(hand_mask.astype(np.uint8), kernel, iterations=1).astype(bool)
-        else:
-            expanded_mask = hand_mask
-        result[expanded_mask] = original[expanded_mask]
+        result[hand_mask] = original[hand_mask]
 
     return result
