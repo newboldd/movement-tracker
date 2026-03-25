@@ -1120,6 +1120,12 @@ def _apply_blur_roi(frame_half, blur_mask, hand_mask):
             roi_mask.astype(np.float32) / 255.0,
             (FEATHER_KERNEL, FEATHER_KERNEL), 5)
 
+        # Zero out feathered mask wherever hand protection is active
+        # This prevents blur from bleeding into the protected area
+        if hand_mask is not None and hand_mask.any():
+            roi_hand = hand_mask[y1:y2, x1:x2]
+            mask_f[roi_hand] = 0
+
         blurred_roi = cv2.GaussianBlur(roi, (BLUR_KERNEL_SIZE, BLUR_KERNEL_SIZE), BLUR_SIGMA)
 
         mask_3ch = mask_f[:, :, np.newaxis]
@@ -1127,10 +1133,6 @@ def _apply_blur_roi(frame_half, blur_mask, hand_mask):
                       blurred_roi.astype(np.float32) * mask_3ch).astype(np.uint8)
 
         result[y1:y2, x1:x2] = composited
-
-    # Restore original pixels in hand protection area
-    if hand_mask is not None and hand_mask.any():
-        result[hand_mask] = frame_half[hand_mask]
 
     return result
 
