@@ -172,6 +172,8 @@ CREATE TABLE IF NOT EXISTS blur_hand_settings (
     forearm_radius INTEGER DEFAULT 10,
     forearm_extent REAL DEFAULT 0.5,
     hand_smooth2 INTEGER DEFAULT 0,
+    hand_temporal INTEGER DEFAULT 0,
+    show_landmarks INTEGER DEFAULT 0,
     UNIQUE(subject_id, trial_idx)
 );
 """
@@ -478,6 +480,10 @@ def _migrate_add_blur_specs(conn):
         if "dlc_radius" not in columns:
             conn.execute("ALTER TABLE blur_hand_settings ADD COLUMN dlc_radius INTEGER DEFAULT 15")
             logger.info("Added dlc_radius column to blur_hand_settings")
+        if "hand_temporal" not in columns:
+            conn.execute("ALTER TABLE blur_hand_settings ADD COLUMN hand_temporal INTEGER DEFAULT 0")
+            conn.execute("ALTER TABLE blur_hand_settings ADD COLUMN show_landmarks INTEGER DEFAULT 0")
+            logger.info("Added hand_temporal/show_landmarks columns to blur_hand_settings")
 
 
 def _migrate_add_mp_crop_boxes(conn):

@@ -366,6 +366,8 @@ const deid = (() => {
             forearmExtent = hs.forearm_extent != null ? hs.forearm_extent : 0.5;
             handSmooth2 = hs.hand_smooth2 || 0;
             dlcRadius = hs.dlc_radius || 15;
+            handTemporalSmooth = hs.hand_temporal || 0;
+            handOverlayEnabled = hs.show_landmarks || false;
             document.getElementById('dlcRadiusSlider').value = dlcRadius;
             document.getElementById('dlcRadiusVal').textContent = dlcRadius;
             document.getElementById('handRadiusSlider').value = handMaskRadius;
@@ -377,6 +379,12 @@ const deid = (() => {
             document.getElementById('handExtentVal').textContent = forearmExtent.toFixed(1);
             document.getElementById('handSmooth2Slider').value = handSmooth2;
             document.getElementById('handSmooth2Val').textContent = handSmooth2;
+            const temporalSlider = document.getElementById('handTemporalSlider');
+            if (temporalSlider) { temporalSlider.value = handTemporalSmooth; }
+            const temporalVal = document.getElementById('handTemporalVal');
+            if (temporalVal) { temporalVal.textContent = handTemporalSmooth; }
+            const overlayToggle = document.getElementById('handOverlayToggle');
+            if (overlayToggle) { overlayToggle.checked = handOverlayEnabled; }
             if (hs.segments && hs.segments.length > 0) {
                 handProtectSegments = hs.segments.map(s => ({
                     id: nextHandSegId++,
@@ -1913,6 +1921,7 @@ const deid = (() => {
         } else {
             handLandmarks = [];
         }
+        saveHandSettings();
         render();
     }
 
@@ -2103,6 +2112,8 @@ const deid = (() => {
                 forearm_extent: forearmExtent,
                 hand_smooth2: handSmooth2,
                 dlc_radius: dlcRadius,
+                hand_temporal: handTemporalSmooth,
+                show_landmarks: handOverlayEnabled,
                 segments: handProtectSegments.map(s => ({
                     start: s.start, end: s.end, radius: s.radius,
                     smooth: s.smooth != null ? s.smooth : handSmooth,

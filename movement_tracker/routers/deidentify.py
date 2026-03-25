@@ -722,11 +722,14 @@ def get_hand_settings(subject_id: int, trial_idx: int = Query(0)) -> dict:
             "forearm_extent": row.get("forearm_extent", 0.5),
             "hand_smooth2": row.get("hand_smooth2", 0),
             "dlc_radius": row.get("dlc_radius", 15),
+            "hand_temporal": row.get("hand_temporal", 0),
+            "show_landmarks": bool(row.get("show_landmarks", 0)),
             "segments": segments,
         }
-    return {"enabled": True, "mask_radius": 30, "hand_smooth": 10,
+    return {"enabled": True, "mask_radius": 10, "hand_smooth": 10,
             "forearm_radius": 10, "forearm_extent": 0.5, "hand_smooth2": 0,
-            "dlc_radius": 15, "segments": []}
+            "dlc_radius": 15, "hand_temporal": 0, "show_landmarks": False,
+            "segments": []}
 
 
 @router.put("/{subject_id}/hand-settings")
@@ -744,6 +747,8 @@ def save_hand_settings(subject_id: int, body: dict = Body(...)) -> dict:
     forearm_extent = body.get("forearm_extent", 0.5)
     hand_smooth2 = body.get("hand_smooth2", 0)
     dlc_radius_val = body.get("dlc_radius", 15)
+    hand_temporal = body.get("hand_temporal", 0)
+    show_landmarks = 1 if body.get("show_landmarks", False) else 0
     segments = body.get("segments", [])
     segments_json = _json.dumps(segments) if segments else None
 
@@ -751,8 +756,9 @@ def save_hand_settings(subject_id: int, body: dict = Body(...)) -> dict:
         db.execute(
             """INSERT INTO blur_hand_settings
                (subject_id, trial_idx, hand_mask_enabled, hand_mask_radius, hand_smooth,
-                forearm_radius, forearm_extent, hand_smooth2, dlc_radius, segments_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                forearm_radius, forearm_extent, hand_smooth2, dlc_radius, hand_temporal,
+                show_landmarks, segments_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(subject_id, trial_idx)
                DO UPDATE SET hand_mask_enabled=excluded.hand_mask_enabled,
                              hand_mask_radius=excluded.hand_mask_radius,
@@ -761,9 +767,12 @@ def save_hand_settings(subject_id: int, body: dict = Body(...)) -> dict:
                              forearm_extent=excluded.forearm_extent,
                              hand_smooth2=excluded.hand_smooth2,
                              dlc_radius=excluded.dlc_radius,
+                             hand_temporal=excluded.hand_temporal,
+                             show_landmarks=excluded.show_landmarks,
                              segments_json=excluded.segments_json""",
             (subject_id, trial_idx, enabled, mask_radius, hand_smooth,
-             forearm_radius, forearm_extent, hand_smooth2, dlc_radius_val, segments_json),
+             forearm_radius, forearm_extent, hand_smooth2, dlc_radius_val,
+             hand_temporal, show_landmarks, segments_json),
         )
     return {"status": "ok"}
 
