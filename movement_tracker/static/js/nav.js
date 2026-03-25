@@ -59,7 +59,7 @@ const SUBJECT_PAGES = [
         h1.style.whiteSpace = 'nowrap';
     }
 
-    // Make nav compact and inline
+    // Make nav compact, inline, and push to the right
     const nav = header.querySelector('nav');
     if (nav) {
         nav.style.display = 'flex';
@@ -67,6 +67,7 @@ const SUBJECT_PAGES = [
         nav.style.alignItems = 'center';
         nav.style.flexShrink = '0';
         nav.style.margin = '0';
+        nav.style.marginLeft = 'auto';
         nav.style.padding = '0';
         nav.style.fontSize = '13px';
     }
