@@ -200,6 +200,7 @@ def get_frame(
         forearm_radius_val = 10
         forearm_extent_val = 0.4
         hand_smooth2_val = 5
+        dlc_radius_val = 15
         hand_segments = []
         if hs_row:
             hand_mask_radius = hs_row.get("hand_mask_radius", 10) or 10
@@ -207,6 +208,7 @@ def get_frame(
             forearm_radius_val = hs_row.get("forearm_radius", 10) or 10
             forearm_extent_val = hs_row.get("forearm_extent", 0.5) or 0.5
             hand_smooth2_val = hs_row.get("hand_smooth2", 0) or 0
+            dlc_radius_val = hs_row.get("dlc_radius", 15) or 15
             seg_json = hs_row.get("segments_json", "[]")
             try:
                 hand_segments = _json.loads(seg_json) if isinstance(seg_json, str) else (seg_json or [])
@@ -274,10 +276,10 @@ def get_frame(
                     lms_r = [lm for lm in hand_lm_data[frame_num] if lm["side"] == "right"]
                     hand_mask_l = _build_hand_mask_from_landmarks(lms_l, half_w, fh, active_radius, active_smooth,
                                                                   forearm_radius_val, forearm_extent_val, hand_smooth2_val,
-                                                                  canvas_w=canvas_w)
+                                                                  dlc_radius=dlc_radius_val, canvas_w=canvas_w)
                     hand_mask_r = _build_hand_mask_from_landmarks(lms_r, fw - half_w, fh, active_radius, active_smooth,
                                                                   forearm_radius_val, forearm_extent_val, hand_smooth2_val,
-                                                                  canvas_w=canvas_w)
+                                                                  dlc_radius=dlc_radius_val, canvas_w=canvas_w)
                 left = _apply_blur_roi(left, left_mask, hand_mask_l)
                 right = _apply_blur_roi(right, right_mask, hand_mask_r)
                 frame = np.concatenate([left, right], axis=1)
@@ -288,7 +290,7 @@ def get_frame(
                     hand_mask = _build_hand_mask_from_landmarks(
                         hand_lm_data[frame_num], fw, fh, active_radius, active_smooth,
                         forearm_radius_val, forearm_extent_val, hand_smooth2_val,
-                        canvas_w=canvas_w)
+                        dlc_radius=dlc_radius_val, canvas_w=canvas_w)
                 frame = _apply_blur_roi(frame, blur_mask, hand_mask)
 
     # Stereo: crop to left or right half based on camera name
@@ -565,7 +567,46 @@ def get_hand_landmarks_bulk(subject_id: int, trial_idx: int = Query(...)) -> dic
             if pts:
                 result[str(f)] = pts
 
-    return {"landmarks": result, "has_pose": pose_data is not None}
+    # DLC labels: thumb and index tip from best available version
+    # Priority: corrections > labels_v2 > labels_v1
+    has_dlc = False
+    try:
+        from ..services.dlc_predictions import get_dlc_predictions_for_session
+        dlc_data = get_dlc_predictions_for_session(subj["name"])
+        if dlc_data:
+            has_dlc = True
+            settings = get_settings()
+            cam_names = settings.camera_names
+            # DLC data: {camera: {bodypart: [[x,y]|null, ...]}}
+            for cam_idx, cam_name in enumerate(cam_names):
+                cam_data = dlc_data.get(cam_name, {})
+                side_label = "left" if (is_stereo and cam_idx == 0) else ("right" if is_stereo else "full")
+                for bp_name, coords_list in cam_data.items():
+                    if bp_name not in ("thumb", "index"):
+                        continue
+                    # DLC joint IDs: thumb=4 (tip), index=8 (tip) matching MediaPipe convention
+                    dlc_joint = 4 if bp_name == "thumb" else 8
+                    for f_idx, coord in enumerate(coords_list):
+                        if coord is None:
+                            continue
+                        global_f = start + f_idx
+                        if global_f > end:
+                            break
+                        key = str(global_f)
+                        if key not in result:
+                            result[key] = []
+                        result[key].append({
+                            "x": round(float(coord[0]), 1),
+                            "y": round(float(coord[1]), 1),
+                            "side": side_label,
+                            "type": "dlc",
+                            "joint": dlc_joint,
+                            "bodypart": bp_name,
+                        })
+    except Exception as e:
+        logger.debug(f"Could not load DLC labels for {subj['name']}: {e}")
+
+    return {"landmarks": result, "has_pose": pose_data is not None, "has_dlc": has_dlc}
 
 
 # ── Hand detection (single frame) ─────────────────────────────────────────
@@ -679,10 +720,12 @@ def get_hand_settings(subject_id: int, trial_idx: int = Query(0)) -> dict:
             "forearm_radius": row.get("forearm_radius", 10),
             "forearm_extent": row.get("forearm_extent", 0.5),
             "hand_smooth2": row.get("hand_smooth2", 0),
+            "dlc_radius": row.get("dlc_radius", 15),
             "segments": segments,
         }
     return {"enabled": True, "mask_radius": 30, "hand_smooth": 10,
-            "forearm_radius": 10, "forearm_extent": 0.5, "hand_smooth2": 0, "segments": []}
+            "forearm_radius": 10, "forearm_extent": 0.5, "hand_smooth2": 0,
+            "dlc_radius": 15, "segments": []}
 
 
 @router.put("/{subject_id}/hand-settings")
@@ -699,6 +742,7 @@ def save_hand_settings(subject_id: int, body: dict = Body(...)) -> dict:
     forearm_radius = body.get("forearm_radius", 10)
     forearm_extent = body.get("forearm_extent", 0.5)
     hand_smooth2 = body.get("hand_smooth2", 0)
+    dlc_radius_val = body.get("dlc_radius", 15)
     segments = body.get("segments", [])
     segments_json = _json.dumps(segments) if segments else None
 
@@ -706,8 +750,8 @@ def save_hand_settings(subject_id: int, body: dict = Body(...)) -> dict:
         db.execute(
             """INSERT INTO blur_hand_settings
                (subject_id, trial_idx, hand_mask_enabled, hand_mask_radius, hand_smooth,
-                forearm_radius, forearm_extent, hand_smooth2, segments_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                forearm_radius, forearm_extent, hand_smooth2, dlc_radius, segments_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(subject_id, trial_idx)
                DO UPDATE SET hand_mask_enabled=excluded.hand_mask_enabled,
                              hand_mask_radius=excluded.hand_mask_radius,
@@ -715,9 +759,10 @@ def save_hand_settings(subject_id: int, body: dict = Body(...)) -> dict:
                              forearm_radius=excluded.forearm_radius,
                              forearm_extent=excluded.forearm_extent,
                              hand_smooth2=excluded.hand_smooth2,
+                             dlc_radius=excluded.dlc_radius,
                              segments_json=excluded.segments_json""",
             (subject_id, trial_idx, enabled, mask_radius, hand_smooth,
-             forearm_radius, forearm_extent, hand_smooth2, segments_json),
+             forearm_radius, forearm_extent, hand_smooth2, dlc_radius_val, segments_json),
         )
     return {"status": "ok"}
 

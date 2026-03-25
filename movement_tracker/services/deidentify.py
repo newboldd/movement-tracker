@@ -598,6 +598,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
     forearm_radius = 10
     forearm_extent = 0.4
     hand_smooth2 = 5
+    dlc_radius_val = 15
     if hand_settings:
         import json as _json
         hand_mask_radius = hand_settings.get("hand_mask_radius") or hand_settings.get("mask_radius") or 10
@@ -605,6 +606,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
         forearm_radius = hand_settings.get("forearm_radius", 10)
         forearm_extent = hand_settings.get("forearm_extent", 0.7)
         hand_smooth2 = hand_settings.get("hand_smooth2", 0)
+        dlc_radius_val = hand_settings.get("dlc_radius", 15)
         seg_json = hand_settings.get("segments_json", "[]")
         try:
             hand_segments = _json.loads(seg_json) if isinstance(seg_json, str) else (seg_json or [])
@@ -703,14 +705,14 @@ def render_with_blur_specs(input_path: str, output_path: str,
         return max(max(abs(a[0]-b[0]), abs(a[1]-b[1]))
                    for a, b in zip(old_hash, new_hash)) > HAND_CACHE_THRESHOLD
 
-    def _get_hand_mask_cached(side_label, lms, w_side, h_side, r, sm, fa_r, fa_e, sm2):
+    def _get_hand_mask_cached(side_label, lms, w_side, h_side, r, sm, fa_r, fa_e, sm2, dlc_r=15):
         key = side_label
         new_hash = _lm_hash(lms)
-        params = (r, sm, fa_r, fa_e, sm2)
+        params = (r, sm, fa_r, fa_e, sm2, dlc_r)
         cached = _hand_cache.get(key)
         if cached and cached["params"] == params and not _lm_moved(cached["lm_hash"], new_hash):
             return cached["mask"]
-        mask = _build_hand_mask_from_landmarks(lms, w_side, h_side, r, sm, fa_r, fa_e, sm2)
+        mask = _build_hand_mask_from_landmarks(lms, w_side, h_side, r, sm, fa_r, fa_e, sm2, dlc_radius=dlc_r)
         _hand_cache[key] = {"lm_hash": new_hash, "mask": mask, "params": params}
         return mask
 
@@ -766,7 +768,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
                             lms_l = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "left"]
                             hand_mask_l = _get_hand_mask_cached(
                                 "left", lms_l, half_w, fh, active_radius, active_smooth,
-                                forearm_radius, forearm_extent, hand_smooth2)
+                                forearm_radius, forearm_extent, hand_smooth2, dlc_radius_val)
                         left = _apply_blur_roi(left, left_mask, hand_mask_l)
 
                     if right_specs:
@@ -776,7 +778,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
                             lms_r = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "right"]
                             hand_mask_r = _get_hand_mask_cached(
                                 "right", lms_r, full_w - half_w, fh, active_radius, active_smooth,
-                                forearm_radius, forearm_extent, hand_smooth2)
+                                forearm_radius, forearm_extent, hand_smooth2, dlc_radius_val)
                         right = _apply_blur_roi(right, right_mask, hand_mask_r)
 
                     frame = np.concatenate([left, right], axis=1)
@@ -786,7 +788,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
                     if hand_active and hand_lm_data and global_frame in hand_lm_data:
                         hand_mask = _get_hand_mask_cached(
                             "full", hand_lm_data[global_frame], full_w, fh, active_radius, active_smooth,
-                            forearm_radius, forearm_extent, hand_smooth2)
+                            forearm_radius, forearm_extent, hand_smooth2, dlc_radius_val)
                     frame = _apply_blur_roi(frame, blur_mask, hand_mask)
 
             # Write raw BGR frame to ffmpeg stdin
@@ -884,6 +886,7 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
                                      forearm_radius: int = 10,
                                      forearm_extent: float = 0.7,
                                      smooth2: int = 0,
+                                     dlc_radius: int = 15,
                                      **kwargs) -> np.ndarray:
     """Build hand protection mask from stored landmarks (matching frontend behavior).
 
@@ -900,7 +903,8 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
     if not landmarks:
         return mask > 0
 
-    hand_lms = [lm for lm in landmarks if lm.get("type") != "pose"]
+    dlc_lms = [lm for lm in landmarks if lm.get("type") == "dlc"]
+    hand_lms = [lm for lm in landmarks if lm.get("type") not in ("pose", "dlc")]
     pose_lms = [lm for lm in landmarks if lm.get("type") == "pose"]
 
     # Slider values are in screen pixels (CSS px at typical canvas zoom).
@@ -1013,6 +1017,12 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
                 break
         else:
             mask = (blurred2 > 0).astype(np.uint8) * 255
+
+    # Add DLC fingertip circles AFTER all smoothing (precise, no morphological close)
+    if dlc_lms and dlc_radius > 0:
+        for lm in dlc_lms:
+            cx, cy = int(round(lm["x"])), int(round(lm["y"]))
+            cv2.circle(mask, (cx, cy), dlc_radius, 255, -1)
 
     return mask > 0
 

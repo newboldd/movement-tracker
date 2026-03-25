@@ -43,6 +43,8 @@ const deid = (() => {
     let handSmooth = 7;  // morphological close on hand circles
     let handSmooth2 = 5;  // morphological close after joining forearm
     let handMaskEnabled = true;
+    let dlcRadius = 15;  // separate radius for DLC thumb/index markers
+    let hasDlcLabels = false;
 
     // Canvas
     let canvas, ctx;
@@ -363,6 +365,9 @@ const deid = (() => {
             forearmRadius = hs.forearm_radius || 10;
             forearmExtent = hs.forearm_extent != null ? hs.forearm_extent : 0.5;
             handSmooth2 = hs.hand_smooth2 || 0;
+            dlcRadius = hs.dlc_radius || 15;
+            document.getElementById('dlcRadiusSlider').value = dlcRadius;
+            document.getElementById('dlcRadiusVal').textContent = dlcRadius;
             document.getElementById('handRadiusSlider').value = handMaskRadius;
             document.getElementById('handRadiusVal').textContent = handMaskRadius;
             document.getElementById('handSmoothSlider').value = handSmooth;
@@ -606,14 +611,17 @@ const deid = (() => {
 
     // ── Build smoothed hand protection mask ──
     function _buildHandMask(landmarks, radiusPx, forearmPx, smoothPx, smooth2Px, w, h) {
-        // Step 1: Draw hand circles only
+        // Separate DLC landmarks (excluded from smoothing)
+        const dlcLms = landmarks.filter(l => l.type === 'dlc');
+        const nonDlcLandmarks = landmarks.filter(l => l.type !== 'dlc');
+
+        // Step 1: Draw hand circles only (no DLC, no pose)
         const c1 = document.createElement('canvas');
         c1.width = w; c1.height = h;
         const ctx1 = c1.getContext('2d');
         ctx1.fillStyle = '#fff';
 
         // Build interpolated hand points: add midpoints along each finger segment
-        // MediaPipe hand joints: 0=wrist, 1-4=thumb, 5-8=index, 9-12=middle, 13-16=ring, 17-20=pinky
         const fingerChains = [
             [0, 1, 2, 3, 4],     // thumb: wrist→CMC→MCP→IP→TIP
             [0, 5, 6, 7, 8],     // index: wrist→MCP→PIP→DIP→TIP
@@ -621,7 +629,7 @@ const deid = (() => {
             [0, 13, 14, 15, 16], // ring
             [0, 17, 18, 19, 20], // pinky
         ];
-        const handLms = landmarks.filter(l => l.type !== 'pose');
+        const handLms = nonDlcLandmarks.filter(l => l.type !== 'pose');
         const byJoint = {};
         for (const lm of handLms) byJoint[lm.joint] = lm;
 
@@ -704,7 +712,21 @@ const deid = (() => {
         }
 
         // Step 4: Second smooth — on combined hand+forearm (smooths the join)
-        return _morphClose(handSmoothed, smooth2Px);
+        let finalMask = _morphClose(handSmoothed, smooth2Px);
+
+        // Step 5: Add DLC fingertip circles (no smoothing — precise markers)
+        if (dlcLms.length > 0) {
+            const dlcPx = dlcRadius * scale;
+            const fCtx = finalMask.getContext('2d');
+            fCtx.fillStyle = '#fff';
+            for (const lm of dlcLms) {
+                fCtx.beginPath();
+                fCtx.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, dlcPx, 0, Math.PI * 2);
+                fCtx.fill();
+            }
+        }
+
+        return finalMask;
     }
 
     // ── Preview blur mask (shows exactly what will be blurred) ──
@@ -1895,8 +1917,13 @@ const deid = (() => {
                 `/api/deidentify/${subjectId}/hand-landmarks-bulk?trial_idx=${currentTrialIdx}`
             );
             handLandmarksBulk = res.landmarks || {};
+            hasDlcLabels = res.has_dlc || false;
+            // Show/hide DLC section
+            const dlcSec = document.getElementById('dlcSection');
+            if (dlcSec) dlcSec.style.display = hasDlcLabels ? 'block' : 'none';
         } catch (e) {
             handLandmarksBulk = {};
+            hasDlcLabels = false;
         }
     }
 
@@ -2014,6 +2041,13 @@ const deid = (() => {
         renderTimeline();
     }
 
+    function updateDlcRadius(val) {
+        dlcRadius = parseInt(val);
+        document.getElementById('dlcRadiusVal').textContent = dlcRadius;
+        saveHandSettings();
+        render();
+    }
+
     function updateForearmRadius(val) {
         forearmRadius = parseInt(val);
         document.getElementById('handForearmVal').textContent = forearmRadius;
@@ -2062,6 +2096,7 @@ const deid = (() => {
                 forearm_radius: forearmRadius,
                 forearm_extent: forearmExtent,
                 hand_smooth2: handSmooth2,
+                dlc_radius: dlcRadius,
                 segments: handProtectSegments.map(s => ({
                     start: s.start, end: s.end, radius: s.radius,
                     smooth: s.smooth != null ? s.smooth : handSmooth,
@@ -2645,6 +2680,7 @@ const deid = (() => {
         updateHandSmooth,
         updateHandSmooth2,
         updateHandTemporalSmooth,
+        updateDlcRadius,
         goToMediapipe,
         renderTrial,
         undo,
