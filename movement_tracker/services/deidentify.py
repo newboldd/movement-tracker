@@ -1134,6 +1134,11 @@ def _apply_blur_roi(frame_half, blur_mask, hand_mask):
 
         result[y1:y2, x1:x2] = composited
 
+    # Final safety: unconditionally restore original pixels in hand protection area.
+    # This catches any edge cases from feathering, rounding, or slight misalignment.
+    if hand_mask is not None and hand_mask.any():
+        result[hand_mask] = frame_half[hand_mask]
+
     return result
 
 
