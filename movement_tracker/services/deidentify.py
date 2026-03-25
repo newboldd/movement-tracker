@@ -705,14 +705,14 @@ def render_with_blur_specs(input_path: str, output_path: str,
         return max(max(abs(a[0]-b[0]), abs(a[1]-b[1]))
                    for a, b in zip(old_hash, new_hash)) > HAND_CACHE_THRESHOLD
 
-    def _get_hand_mask_cached(side_label, lms, w_side, h_side, r, sm, fa_r, fa_e, sm2, dlc_r=15):
+    def _get_hand_mask_cached(side_label, lms, w_side, h_side, r, sm, fa_r, fa_e, sm2):
         key = side_label
         new_hash = _lm_hash(lms)
-        params = (r, sm, fa_r, fa_e, sm2, dlc_r)
+        params = (r, sm, fa_r, fa_e, sm2)
         cached = _hand_cache.get(key)
         if cached and cached["params"] == params and not _lm_moved(cached["lm_hash"], new_hash):
             return cached["mask"]
-        mask = _build_hand_mask_from_landmarks(lms, w_side, h_side, r, sm, fa_r, fa_e, sm2, dlc_radius=dlc_r)
+        mask = _build_hand_mask_from_landmarks(lms, w_side, h_side, r, sm, fa_r, fa_e, sm2)
         _hand_cache[key] = {"lm_hash": new_hash, "mask": mask, "params": params}
         return mask
 
@@ -768,7 +768,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
                             lms_l = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "left"]
                             hand_mask_l = _get_hand_mask_cached(
                                 "left", lms_l, half_w, fh, active_radius, active_smooth,
-                                forearm_radius, forearm_extent, hand_smooth2, dlc_radius_val)
+                                forearm_radius, forearm_extent, hand_smooth2)
                         left = _apply_blur_roi(left, left_mask, hand_mask_l)
 
                     if right_specs:
@@ -778,7 +778,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
                             lms_r = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "right"]
                             hand_mask_r = _get_hand_mask_cached(
                                 "right", lms_r, full_w - half_w, fh, active_radius, active_smooth,
-                                forearm_radius, forearm_extent, hand_smooth2, dlc_radius_val)
+                                forearm_radius, forearm_extent, hand_smooth2)
                         right = _apply_blur_roi(right, right_mask, hand_mask_r)
 
                     frame = np.concatenate([left, right], axis=1)
@@ -886,7 +886,6 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
                                      forearm_radius: int = 10,
                                      forearm_extent: float = 0.7,
                                      smooth2: int = 0,
-                                     dlc_radius: int = 15,
                                      **kwargs) -> np.ndarray:
     """Build hand protection mask from stored landmarks (matching frontend behavior).
 

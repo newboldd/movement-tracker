@@ -43,7 +43,7 @@ const deid = (() => {
     let handSmooth = 7;  // morphological close on hand circles
     let handSmooth2 = 5;  // morphological close after joining forearm
     let handMaskEnabled = true;
-    let dlcRadius = 15;  // separate radius for DLC thumb/index markers
+    // dlcRadius removed — all hand keypoints use the same marker size
     let hasDlcLabels = false;
 
     // Canvas
@@ -365,11 +365,8 @@ const deid = (() => {
             forearmRadius = hs.forearm_radius || 10;
             forearmExtent = hs.forearm_extent != null ? hs.forearm_extent : 0.5;
             handSmooth2 = hs.hand_smooth2 || 0;
-            dlcRadius = hs.dlc_radius || 15;
             handTemporalSmooth = hs.hand_temporal || 0;
             handOverlayEnabled = hs.show_landmarks || false;
-            document.getElementById('dlcRadiusSlider').value = dlcRadius;
-            document.getElementById('dlcRadiusVal').textContent = dlcRadius;
             document.getElementById('handRadiusSlider').value = handMaskRadius;
             document.getElementById('handRadiusVal').textContent = handMaskRadius;
             document.getElementById('handSmoothSlider').value = handSmooth;
@@ -2061,13 +2058,6 @@ const deid = (() => {
         renderTimeline();
     }
 
-    function updateDlcRadius(val) {
-        dlcRadius = parseInt(val);
-        document.getElementById('dlcRadiusVal').textContent = dlcRadius;
-        saveHandSettings();
-        render();
-    }
-
     function updateForearmRadius(val) {
         forearmRadius = parseInt(val);
         document.getElementById('handForearmVal').textContent = forearmRadius;
@@ -2116,7 +2106,7 @@ const deid = (() => {
                 forearm_radius: forearmRadius,
                 forearm_extent: forearmExtent,
                 hand_smooth2: handSmooth2,
-                dlc_radius: dlcRadius,
+                // dlc_radius removed — unified marker size
                 hand_temporal: handTemporalSmooth,
                 show_landmarks: handOverlayEnabled,
                 segments: handProtectSegments.map(s => ({

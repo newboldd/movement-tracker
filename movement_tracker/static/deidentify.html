@@ -236,15 +236,7 @@
                                oninput="deid.updateHandTemporalSmooth(this.value)">
                         <span class="val" id="handTemporalVal">0</span>
                     </div>
-                    <div id="dlcSection" style="display:none;margin-top:8px;padding-top:6px;border-top:1px solid var(--border);">
-                        <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px;">DLC fingertip markers</label>
-                        <div class="slider-row">
-                            <label>DLC size</label>
-                            <input type="range" id="dlcRadiusSlider" min="1" max="40" value="15"
-                                   oninput="deid.updateDlcRadius(this.value)">
-                            <span class="val" id="dlcRadiusVal">15</span>
-                        </div>
-                    </div>
+                    <!-- DLC slider removed: all hand keypoints use unified marker size -->
                     <div id="handHelpText" style="font-size:10px;color:var(--text-muted);margin-top:4px;">
                         Drag on the timeline hand row to create protection segments.
                     </div>
