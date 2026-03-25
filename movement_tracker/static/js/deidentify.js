@@ -1663,7 +1663,8 @@ const deid = (() => {
 
             _autoCreateFaceSpots();
             renderSpotList();
-            scheduleSave();
+            // Only save if new spots were created (autoCreate skips if spots exist)
+            if (blurSpots.some(s => s.spot_type === 'face')) scheduleSave();
             render();
             renderTimeline();
         } catch (e) {
@@ -1676,6 +1677,10 @@ const deid = (() => {
     // ── Auto-create blur spots from face detections ──
     function _autoCreateFaceSpots() {
         if (!faceDetections.length || !trialMeta) return;
+
+        // If user already has saved face spots for this trial, don't overwrite them
+        const existingFaceSpots = blurSpots.filter(s => s.spot_type === 'face');
+        if (existingFaceSpots.length > 0) return;
 
         // Find the most common face position per side (cluster by center)
         const clusters = {}; // key: side → [{cx, cy, w, h, count, firstFrame, lastFrame}]
