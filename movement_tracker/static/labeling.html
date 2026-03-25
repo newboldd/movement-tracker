@@ -108,6 +108,19 @@
                 </div>
             </div>
 
+            <!-- Model Visibility (MediaPipe page only) -->
+            <div id="mpModelVisSection" style="display:none;margin-bottom:16px;">
+                <h3 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">Display</h3>
+                <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:4px;">
+                    <input type="checkbox" id="showHandsToggle" checked onchange="labeler.toggleModelVis('hands', this.checked)">
+                    Hand keypoints
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:4px;">
+                    <input type="checkbox" id="showPoseToggle" checked onchange="labeler.toggleModelVis('pose', this.checked)">
+                    Pose keypoints
+                </label>
+            </div>
+
             <!-- MediaPipe Region (Label/Refine modes) -->
             <div id="mpCropSection" style="display:none;margin-bottom:16px;">
                 <!-- Hand Detection -->
@@ -247,7 +260,7 @@
 
     <script src="/static/js/nav.js"></script>
     <script src="/static/js/api.js?v=10"></script>
-    <script src="/static/js/labeler.js?v=50"></script>
+    <script src="/static/js/labeler.js?v=51"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {
