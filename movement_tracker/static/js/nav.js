@@ -1,11 +1,26 @@
-/* Global: track most recently viewed subject across all pages.
-   Any page that loads a subject should call setLastSubject(id).
-   Any page that needs a default subject should call getLastSubject(). */
+/* ── Cross-page navigation state ──────────────────────────────────
+   Subject-specific pages share: subject, trial index, frame number, camera side.
+   Any page that loads a subject should call setNavState({...}).
+   Any page that needs defaults should call getNavState(). */
 function setLastSubject(id) {
     if (id) localStorage.setItem('mt_lastSubjectId', String(id));
 }
 function getLastSubject() {
     return parseInt(localStorage.getItem('mt_lastSubjectId')) || null;
+}
+function setNavState(state) {
+    if (state.subjectId) localStorage.setItem('mt_lastSubjectId', String(state.subjectId));
+    if (state.trialIdx != null) sessionStorage.setItem('mt_trialIdx', String(state.trialIdx));
+    if (state.frame != null) sessionStorage.setItem('mt_frame', String(state.frame));
+    if (state.side) sessionStorage.setItem('mt_side', state.side);
+}
+function getNavState() {
+    return {
+        subjectId: parseInt(localStorage.getItem('mt_lastSubjectId')) || null,
+        trialIdx: parseInt(sessionStorage.getItem('mt_trialIdx')) ?? null,
+        frame: parseInt(sessionStorage.getItem('mt_frame')) ?? null,
+        side: sessionStorage.getItem('mt_side') || null,
+    };
 }
 
 /* Update nav links to include last viewed subject where applicable. */

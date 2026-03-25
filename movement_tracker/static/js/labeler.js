@@ -381,6 +381,7 @@ const labeler = (() => {
             // Persist subject, mode, and session ID for cross-page navigation
             sessionStorage.setItem('dlc_lastSubjectId', String(currentSubjectId));
             if (typeof setLastSubject === 'function') setLastSubject(currentSubjectId);
+            if (typeof setNavState === 'function') setNavState({ subjectId: currentSubjectId });
             sessionStorage.setItem(`dlc_labelTab_${currentSubjectId}`, currentSessionType());
             sessionStorage.setItem('dlc_lastSessionId', String(sessionId));
             // Update nav links with current subject/session context
@@ -622,7 +623,23 @@ const labeler = (() => {
             const isModeSwitch = sessionStorage.getItem('dlc_modeSwitch') === '1';
             sessionStorage.removeItem('dlc_modeSwitch');
             const navRestored = isModeSwitch && restoreNavState();
-            await goToFrame(navRestored ? currentFrame : 0);
+            // Cross-page nav state: restore frame/side if subject matches and not a mode switch
+            let crossPageRestored = false;
+            if (!navRestored && typeof getNavState === 'function') {
+                const nav = getNavState();
+                if (nav.subjectId === currentSubjectId) {
+                    if (nav.frame != null && nav.frame >= 0 && nav.frame < totalFrames) {
+                        currentFrame = nav.frame;
+                        crossPageRestored = true;
+                    }
+                    if (nav.side && cameraNames.includes(nav.side)) {
+                        currentSide = nav.side;
+                        const _camLabel = document.getElementById('cameraLabel');
+                        if (_camLabel) _camLabel.textContent = currentSide;
+                    }
+                }
+            }
+            await goToFrame((navRestored || crossPageRestored) ? currentFrame : 0);
 
         } catch (e) {
             alert('Error loading session: ' + e.message);
@@ -773,6 +790,7 @@ const labeler = (() => {
     async function goToFrame(frame) {
         if (frame < 0 || frame >= totalFrames) return;
         currentFrame = frame;
+        if (typeof setNavState === 'function') setNavState({ frame: currentFrame, trialIdx: getTrialForFrame(currentFrame) });
         distAutoScroll = true; // frame navigation re-enables auto-scroll
         _updateMpButtonText();
 
@@ -2961,6 +2979,7 @@ const labeler = (() => {
         }
 
         currentSide = activeCams[newIdx];
+        if (typeof setNavState === 'function') setNavState({ side: currentSide });
         const _camLabel = document.getElementById('cameraLabel');
         if (_camLabel) _camLabel.textContent = currentSide;
 

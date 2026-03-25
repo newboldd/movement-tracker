@@ -88,20 +88,35 @@ const osc = (() => {
             xZoomMin = null; xZoomMax = null; render();  // reset zoom
         });
 
-        // Auto-select from URL, sessionStorage, or first subject
+        // Auto-select from URL, nav state, or first subject
         const params = new URLSearchParams(window.location.search);
         const urlSubj = params.get('subject');
-        const savedSubject = sessionStorage.getItem('dlc_lastSubjectId');
-        if (urlSubj) { sel.value = urlSubj; loadSubject(parseInt(urlSubj)); }
-        else if (savedSubject && subjects.some(s => String(s.id) === savedSubject)) {
-            sel.value = savedSubject; loadSubject(parseInt(savedSubject));
+        const nav = typeof getNavState === 'function' ? getNavState() : {};
+        const savedSubject = urlSubj || (nav.subjectId ? String(nav.subjectId) : null)
+            || sessionStorage.getItem('dlc_lastSubjectId');
+        let initSid = null;
+        if (savedSubject && subjects.some(s => String(s.id) === savedSubject)) {
+            sel.value = savedSubject; initSid = parseInt(savedSubject);
         }
-        else if (subjects.length >= 1) { sel.value = subjects[0].id; loadSubject(subjects[0].id); }
+        else if (subjects.length >= 1) { sel.value = subjects[0].id; initSid = subjects[0].id; }
+
+        if (initSid) {
+            await loadSubject(initSid);
+            // Restore trial from nav state if subject matches
+            if (nav.subjectId === initSid && nav.trialIdx != null) {
+                const trialIdx = nav.trialIdx;
+                // trialIdx -1 = "All", or 0..trialNames.length-1
+                if (trialIdx >= -1 && trialIdx < trialNames.length) {
+                    selectTrial(trialIdx);
+                }
+            }
+        }
     }
 
     async function loadSubject(sid) {
         subjectId = sid;
         sessionStorage.setItem('dlc_lastSubjectId', String(sid));
+        if (typeof setNavState === 'function') setNavState({ subjectId: sid });
         traceData = null;
         movements = null;
 
@@ -142,6 +157,7 @@ const osc = (() => {
 
     function selectTrial(idx) {
         selectedTrial = idx;
+        if (typeof setNavState === 'function') setNavState({ trialIdx: idx });
         xZoomMin = null; xZoomMax = null;
         document.querySelectorAll('.trial-btn').forEach((b, i) => {
             b.classList.toggle('active', i === (idx + 1));

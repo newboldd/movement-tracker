@@ -92,13 +92,13 @@
             sel.appendChild(opt);
         });
 
-        // Restore from URL, sessionStorage, or default to first subject with videos
+        // Restore from URL, nav state, or default to first subject with videos
         const params = new URLSearchParams(window.location.search);
         const subParam = params.get('subject');
-        const savedSubject = sessionStorage.getItem('dlc_lastSubjectId');
-        if (subParam) {
-            sel.value = subParam;
-        } else if (savedSubject && allSubjects.some(s => String(s.id) === savedSubject)) {
+        const nav = typeof getNavState === 'function' ? getNavState() : {};
+        const savedSubject = subParam || (nav.subjectId ? String(nav.subjectId) : null)
+            || sessionStorage.getItem('dlc_lastSubjectId');
+        if (savedSubject && allSubjects.some(s => String(s.id) === savedSubject)) {
             sel.value = savedSubject;
         } else {
             const first = allSubjects.find(s => s.video_count > 0);
@@ -108,13 +108,25 @@
         setupControls();
         setupCanvasEvents();
 
-        if (sel.value) loadSubject(parseInt(sel.value));
+        if (sel.value) {
+            await loadSubject(parseInt(sel.value));
+            // Restore trial/frame if nav state subject matches
+            if (nav.subjectId === parseInt(sel.value)) {
+                if (nav.trialIdx != null && nav.trialIdx >= 0 && nav.trialIdx < trials.length) {
+                    await loadTrial(nav.trialIdx);
+                    if (nav.frame != null && nav.frame >= 0 && trialMeta && nav.frame < trialMeta.n_frames) {
+                        goToFrame(nav.frame);
+                    }
+                }
+            }
+        }
     }
 
     // ── Subject / Trial loading ──────────────────────────────
     async function loadSubject(sid) {
         subjectId = sid;
         sessionStorage.setItem('dlc_lastSubjectId', String(sid));
+        if (typeof setNavState === 'function') setNavState({ subjectId: sid });
         const subj = allSubjects.find(s => s.id === sid);
         subjectName = subj ? subj.name : '';
         // Per-subject camera mode
@@ -206,6 +218,7 @@
     async function loadTrial(idx) {
         if (idx < 0 || idx >= trials.length) return;
         currentTrialIdx = idx;
+        if (typeof setNavState === 'function') setNavState({ trialIdx: idx, frame: currentFrame });
         trialMeta = trials[idx];
         // Use camera_mode setting; trialMeta.is_stereo is authoritative from server
         isStereo = cameraMode === 'stereo' && trialMeta.is_stereo !== false;
@@ -413,6 +426,7 @@
     function goToFrame(n) {
         if (!trialMeta) return;
         currentFrame = Math.max(0, Math.min(n, trialMeta.n_frames - 1));
+        if (typeof setNavState === 'function') setNavState({ frame: currentFrame });
         $('frameDisplay').textContent = currentFrame;
         $('timelineSlider').value = currentFrame;
         // Seek then render — never render before seeked or the previous decoded

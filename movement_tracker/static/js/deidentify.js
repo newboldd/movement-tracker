@@ -182,17 +182,28 @@ const deid = (() => {
             renderTimeline();
         });
 
-        // Auto-select subject from URL param, sessionStorage, or if only one
+        // Auto-select subject from URL param, nav state, or first with videos
         const params = new URLSearchParams(window.location.search);
         const urlSubject = params.get('subject');
-        const savedSubject = sessionStorage.getItem('dlc_lastSubjectId');
-        if (urlSubject) {
-            sel.value = urlSubject;
-            loadSubject(parseInt(urlSubject));
-        } else if (savedSubject && subjects.some(s => String(s.id) === savedSubject)) {
+        const nav = typeof getNavState === 'function' ? getNavState() : {};
+        const savedSubject = urlSubject || (nav.subjectId ? String(nav.subjectId) : null)
+            || sessionStorage.getItem('dlc_lastSubjectId');
+        if (savedSubject && subjects.some(s => String(s.id) === savedSubject)) {
             sel.value = savedSubject;
-            loadSubject(parseInt(savedSubject));
-        } else if (subjects.length === 1) {
+            await loadSubject(parseInt(savedSubject));
+            // Restore trial/frame from nav state
+            if (nav.trialIdx != null && nav.trialIdx >= 0 && nav.trialIdx < trials.length) {
+                await selectTrial(nav.trialIdx);
+                if (nav.frame != null && trialMeta && nav.frame >= trialMeta.start_frame && nav.frame <= trialMeta.end_frame) {
+                    await loadFrame(nav.frame);
+                }
+            }
+            if (nav.side && cameraNames.includes(nav.side)) {
+                currentSide = nav.side;
+                const btn = document.getElementById('sideToggle');
+                if (btn) btn.textContent = currentSide;
+            }
+        } else if (subjects.length >= 1) {
             sel.value = subjects[0].id;
             loadSubject(subjects[0].id);
         }
@@ -202,7 +213,7 @@ const deid = (() => {
     async function loadSubject(sid) {
         subjectId = sid;
         sessionStorage.setItem('dlc_lastSubjectId', String(sid));
-        if (typeof setLastSubject === 'function') setLastSubject(sid);
+        if (typeof setNavState === 'function') setNavState({ subjectId: sid });
         faceDetections = [];
         blurSpots = [];
         selectedSpotId = null;
@@ -291,6 +302,7 @@ const deid = (() => {
         currentTrialIdx = idx;
         trialMeta = trials[idx];
         currentFrame = trialMeta.start_frame;
+        if (typeof setNavState === 'function') setNavState({ trialIdx: idx, frame: currentFrame });
         totalFrames = trialMeta.frame_count;
         fps = trialMeta.fps || 30;
         handLandmarks = [];
@@ -393,6 +405,7 @@ const deid = (() => {
     // ── Frame loading ──
     async function loadFrame(frameNum) {
         currentFrame = frameNum;
+        if (typeof setNavState === 'function') setNavState({ frame: frameNum, side: currentSide });
         let url = `/api/deidentify/${subjectId}/frame?trial_idx=${currentTrialIdx}&frame_num=${frameNum}&side=${encodeURIComponent(currentSide)}`;
         if (viewMode === 'deidentified') url += '&blurred=true';
         else if (viewMode === 'preview') url += `&preview=true&canvas_w=${canvas ? canvas.width : 700}`;

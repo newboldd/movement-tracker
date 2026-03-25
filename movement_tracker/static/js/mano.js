@@ -123,10 +123,10 @@ const manoViewer = (() => {
             sel.appendChild(opt);
         });
 
-        const savedSubject = sessionStorage.getItem('dlc_lastSubjectId');
-        if (subjectParam) {
-            sel.value = subjectParam;
-        } else if (savedSubject && allSubjects.some(s => String(s.id) === savedSubject)) {
+        const nav = typeof getNavState === 'function' ? getNavState() : {};
+        const savedSubject = subjectParam || (nav.subjectId ? String(nav.subjectId) : null)
+            || sessionStorage.getItem('dlc_lastSubjectId');
+        if (savedSubject && allSubjects.some(s => String(s.id) === savedSubject)) {
             sel.value = savedSubject;
         } else if (allSubjects.length) {
             sel.value = allSubjects[0].id;
@@ -175,13 +175,32 @@ const manoViewer = (() => {
             render();
         });
 
-        // Load initial subject
-        if (sel.value) loadSubject(parseInt(sel.value));
+        // Load initial subject and restore trial/frame from nav state
+        if (sel.value) {
+            const nav = typeof getNavState === 'function' ? getNavState() : {};
+            await loadSubject(parseInt(sel.value));
+            if (nav.subjectId === parseInt(sel.value)) {
+                if (nav.trialIdx != null && nav.trialIdx >= 0 && nav.trialIdx < trials.length) {
+                    $('trialSelect').value = nav.trialIdx;
+                    await loadTrial(nav.trialIdx);
+                    if (nav.frame != null && trialData && nav.frame >= 0 && nav.frame < trialData.n_frames) {
+                        goToFrame(nav.frame);
+                    }
+                }
+                if (nav.side && cameraNames.includes(nav.side) && cameraMode === 'stereo') {
+                    currentSide = nav.side;
+                    $('sideToggle').textContent = currentSide;
+                    computeAutoCrop();
+                    render();
+                }
+            }
+        }
     }
 
     async function loadSubject(sid) {
         subjectId = sid;
         sessionStorage.setItem('dlc_lastSubjectId', String(sid));
+        if (typeof setNavState === 'function') setNavState({ subjectId: sid });
         const subj = allSubjects.find(s => s.id === sid);
         subjectName = subj ? subj.name : '';
         // Per-subject camera mode
@@ -217,6 +236,7 @@ const manoViewer = (() => {
         if (idx < 0 || idx >= trials.length) return;
         const trial = trials[idx];
         currentTrialIdx = idx;
+        if (typeof setNavState === 'function') setNavState({ trialIdx: idx, frame: currentFrame });
 
         $('trialName').textContent = trial.trial_stem;
         $('totalFrames').textContent = trial.n_frames;
@@ -462,6 +482,7 @@ const manoViewer = (() => {
     function goToFrame(n) {
         if (!trialData) return;
         currentFrame = Math.max(0, Math.min(n, trialData.n_frames - 1));
+        if (typeof setNavState === 'function') setNavState({ frame: currentFrame });
 
         $('frameDisplay').textContent = currentFrame;
 

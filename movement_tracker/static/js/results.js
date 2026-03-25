@@ -1208,6 +1208,7 @@ document.getElementById('subjectSelect').addEventListener('change', (e) => {
     currentSubjectId = e.target.value;
     sessionStorage.setItem('dlc_lastSubjectId', String(currentSubjectId));
     if (typeof setLastSubject === 'function') setLastSubject(currentSubjectId);
+    if (typeof setNavState === 'function') setNavState({ subjectId: parseInt(currentSubjectId) });
     cachedTraces = null;
     cachedMovements = null;
     cachedSequenceAssignments = null;
@@ -1284,13 +1285,16 @@ loadSubjects().then(() => {
     // 1. Determine which subject to show
     let subjectId = initSubject;
     if (!subjectId) {
-        // No subject in URL — check sessionStorage for last-opened subject
-        subjectId = sessionStorage.getItem('dlc_lastSubjectId') || null;
+        // No subject in URL — check nav state, then sessionStorage
+        const _nav = typeof getNavState === 'function' ? getNavState() : {};
+        subjectId = (_nav.subjectId ? String(_nav.subjectId) : null)
+            || sessionStorage.getItem('dlc_lastSubjectId') || null;
     }
     if (subjectId) {
         document.getElementById('subjectSelect').value = subjectId;
         currentSubjectId = subjectId;
         sessionStorage.setItem('dlc_lastSubjectId', String(subjectId));
+        if (typeof setNavState === 'function') setNavState({ subjectId: parseInt(subjectId) });
         updateNavLinks();
     }
 
