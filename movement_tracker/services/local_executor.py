@@ -17,7 +17,7 @@ from .dlc_wrapper import (
     cmd_create_and_train,
     cmd_analyze_videos,
 )
-from .mediapipe_prelabel import run_mediapipe
+from .mediapipe_prelabel import run_mediapipe, run_pose_prelabels
 from .remote_preprocess_script import run_blur_subject
 
 logger = logging.getLogger(__name__)
@@ -279,6 +279,57 @@ class LocalExecutor:
 
         # Start thread
         thread = threading.Thread(target=run_mediapipe_job, daemon=True)
+        thread.start()
+
+    def execute_pose(self, subject_name: str, job_id: int, log_path: str):
+        """Execute Pose detection locally."""
+        logger.info(f"Starting Pose detection for {subject_name}")
+
+        def run_pose_job():
+            try:
+                os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+                with open(log_path, "w") as logfile:
+                    def progress_callback(pct: float):
+                        logfile.write(f"Processing: {pct:.1f}%\n")
+                        logfile.flush()
+                        with get_db_ctx() as db:
+                            db.execute(
+                                "UPDATE jobs SET progress_pct = ? WHERE id = ?",
+                                (pct, job_id),
+                            )
+
+                    result = run_pose_prelabels(subject_name, progress_callback=progress_callback)
+                    logfile.write(f"Pose detection completed: {result}\n")
+
+                with get_db_ctx() as db:
+                    db.execute(
+                        """UPDATE jobs SET status = 'completed', progress_pct = 100,
+                           finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                        (job_id,),
+                    )
+                logger.info(f"Pose detection for {subject_name} completed")
+
+            except Exception as e:
+                logger.exception(f"Pose detection for {subject_name} failed")
+                with open(log_path, "a") as logfile:
+                    logfile.write(f"\nError: {e}\n")
+
+                with get_db_ctx() as db:
+                    db.execute(
+                        """UPDATE jobs SET status = 'failed', error_msg = ?,
+                           finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                        (str(e), job_id),
+                    )
+
+        with get_db_ctx() as db:
+            db.execute(
+                """UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                (job_id,),
+            )
+
+        thread = threading.Thread(target=run_pose_job, daemon=True)
         thread.start()
 
     def execute_blur(self, subject_names: list[str], job_id: int, log_path: str):

@@ -117,6 +117,11 @@ def _has_mediapipe(dlc_path: Path) -> bool:
     return (dlc_path / "mediapipe_prelabels.npz").exists()
 
 
+def _has_pose(dlc_path: Path) -> bool:
+    """Check if pose prelabels exist for this subject."""
+    return (dlc_path / "pose_prelabels.npz").exists()
+
+
 def _has_deidentified(dlc_path: Path) -> bool:
     """Check if face blur has been completed for this subject."""
     return (dlc_path / ".deidentified").exists()

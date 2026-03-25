@@ -21,10 +21,12 @@ RESOURCE_MAP = {
     "mediapipe": "cpu",
     "blur": "cpu",
     "mediapipe+blur": "cpu",
+    "pose": "cpu",
 }
 
 STEP_DEFINITIONS = [
-    {"name": "mediapipe", "resource": "cpu", "label": "MediaPipe"},
+    {"name": "mediapipe", "resource": "cpu", "label": "MediaPipe (Hands)"},
+    {"name": "pose", "resource": "cpu", "label": "Pose Detection"},
     {"name": "blur", "resource": "cpu", "label": "Face Blur"},
     {"name": "mediapipe+blur", "resource": "cpu", "label": "MediaPipe + Blur"},
     {"name": "train", "resource": "gpu", "label": "Train"},
@@ -417,10 +419,12 @@ class QueueManager:
             # Route based on execution target
             if execution_target in ("local-cpu", "local-gpu"):
                 # Local execution
-                if job_type in ("mediapipe", "blur", "mediapipe+blur"):
+                if job_type in ("mediapipe", "blur", "mediapipe+blur", "pose"):
                     # CPU lane: preprocessing
                     if job_type == "mediapipe":
                         local_executor.execute_mediapipe(subject_names[0], job_id, log_path)
+                    elif job_type == "pose":
+                        local_executor.execute_pose(subject_names[0], job_id, log_path)
                     elif job_type == "blur":
                         local_executor.execute_blur(subject_names, job_id, log_path)
                     elif job_type == "mediapipe+blur":

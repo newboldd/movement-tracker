@@ -21,13 +21,14 @@ from ..services.dlc_wrapper import (
 from ..services.jobs import registry, parse_dlc_training_progress
 from ..services.remote import remote_train_monitor
 from ..services.video import get_subject_videos
-from ..services.mediapipe_prelabel import run_mediapipe
+from ..services.mediapipe_prelabel import run_mediapipe, run_pose_prelabels
 
 router = APIRouter(prefix="/api/subjects", tags=["pipeline"])
 
 # Valid pipeline steps in order
 VALID_STEPS = [
     "mediapipe",
+    "pose",
     "deidentify",
     "create_training_dataset",
     "train",
@@ -109,6 +110,11 @@ def run_step(subject_id: int, req: RunStepRequest) -> dict:
     if req.step == "mediapipe":
         # MediaPipe prelabeling runs inline in a thread (no DLC needed)
         _do_mediapipe(subject_name, job["id"])
+        return {"job_id": job["id"], "status": "running"}
+
+    if req.step == "pose":
+        # Pose detection runs inline in a thread (no DLC needed)
+        _do_pose(subject_name, job["id"])
         return {"job_id": job["id"], "status": "running"}
 
     if req.step == "deidentify":
@@ -312,6 +318,58 @@ def _do_mediapipe(subject_name: str, job_id: int):
                 )
                 db.execute(
                     "UPDATE subjects SET stage = 'prelabeled', updated_at = CURRENT_TIMESTAMP WHERE id = (SELECT subject_id FROM jobs WHERE id = ?)",
+                    (job_id,),
+                )
+        except InterruptedError:
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'cancelled',
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (job_id,),
+                )
+        except Exception as e:
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'failed', error_msg = ?,
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (str(e), job_id),
+                )
+        finally:
+            registry.unregister_cancel_event(job_id)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+
+def _do_pose(subject_name: str, job_id: int):
+    """Run Pose detection in a background thread."""
+    import threading
+
+    cancel_event = registry.register_cancel_event(job_id)
+
+    def _run():
+        try:
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (job_id,),
+                )
+
+            def progress_cb(pct):
+                if cancel_event.is_set():
+                    raise InterruptedError("Job cancelled")
+                with get_db_ctx() as db:
+                    db.execute(
+                        "UPDATE jobs SET progress_pct = ? WHERE id = ?",
+                        (pct, job_id),
+                    )
+
+            run_pose_prelabels(subject_name, progress_callback=progress_cb)
+
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'completed', progress_pct = 100,
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
                     (job_id,),
                 )
         except InterruptedError:

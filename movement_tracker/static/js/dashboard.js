@@ -173,6 +173,7 @@ function renderTable() {
             <td>${getActions(s)}</td>
             <td>${s.video_count}</td>
             <td>${s.has_mediapipe ? '&check;' : '&mdash;'}</td>
+            <td>${s.has_pose ? '&check;' : '&mdash;'}</td>
             <td>${s.has_blur
                 ? '<span style="color:var(--green);">&check;</span>'
                 : s.has_faces
@@ -331,6 +332,7 @@ async function showDetail(subjectId) {
                 <h3>Pipeline Steps</h3>
                 <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;">
                     <button class="btn btn-sm" onclick="runStep(${detail.id}, 'mediapipe')">Run MediaPipe</button>
+                    <button class="btn btn-sm" onclick="runStep(${detail.id}, 'pose')">Run Pose</button>
                     <button class="btn btn-sm" onclick="runStep(${detail.id}, 'deidentify')">Blur Faces</button>
                     <button class="btn btn-sm btn-primary" onclick="runStep(${detail.id}, 'train')">Train</button>
                     <button class="btn btn-sm" onclick="runStep(${detail.id}, 'analyze_v1')">Analyze v1</button>
