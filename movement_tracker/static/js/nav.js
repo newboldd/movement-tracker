@@ -133,9 +133,10 @@ const SUBJECT_PAGES = [
             white-space: nowrap;
         }
         .nav-trial-btn.active {
-            background: var(--blue);
-            color: #fff;
+            background: rgba(33, 150, 243, 0.15);
+            color: var(--text);
             border-color: var(--blue);
+            font-weight: 600;
         }
         .nav-trial-btn:hover:not(.active) {
             background: var(--hover);
@@ -191,16 +192,21 @@ const SUBJECT_PAGES = [
         if (!localTrials) return;
         // Move local trial buttons into nav
         localTrials.style.display = 'none';
-        const observer = new MutationObserver(() => {
+        const _rebuildNavTrials = () => {
             trialDiv.innerHTML = '';
             localTrials.querySelectorAll('.trial-btn').forEach(btn => {
                 const clone = btn.cloneNode(true);
                 clone.className = 'nav-trial-btn' + (btn.classList.contains('active') ? ' active' : '');
+                // Preserve inline colors (e.g. red/green for deident status)
+                if (btn.style.borderColor) clone.style.borderColor = btn.style.borderColor;
+                if (btn.style.color) clone.style.color = btn.style.color;
+                if (btn.style.background) clone.style.background = btn.style.background;
                 clone.addEventListener('click', () => btn.click());
                 trialDiv.appendChild(clone);
             });
-        });
-        observer.observe(localTrials, { childList: true, subtree: true, attributes: true });
+        };
+        const observer = new MutationObserver(_rebuildNavTrials);
+        observer.observe(localTrials, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style'] });
     }
 
     // Move page-specific buttons into the nav page slot
