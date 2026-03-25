@@ -22,11 +22,13 @@ RESOURCE_MAP = {
     "blur": "cpu",
     "mediapipe+blur": "cpu",
     "pose": "cpu",
+    "deidentify": "cpu",
 }
 
 STEP_DEFINITIONS = [
     {"name": "mediapipe", "resource": "cpu", "label": "MediaPipe (Hands)"},
     {"name": "pose", "resource": "cpu", "label": "Pose Detection"},
+    {"name": "deidentify", "resource": "cpu", "label": "Deidentify (Render)"},
     {"name": "blur", "resource": "cpu", "label": "Face Blur"},
     {"name": "mediapipe+blur", "resource": "cpu", "label": "MediaPipe + Blur"},
     {"name": "train", "resource": "gpu", "label": "Train"},
@@ -427,6 +429,8 @@ class QueueManager:
                         local_executor.execute_pose(subject_names[0], job_id, log_path)
                     elif job_type == "blur":
                         local_executor.execute_blur(subject_names, job_id, log_path)
+                    elif job_type == "deidentify":
+                        local_executor.execute_deidentify(subject_names[0], job_id, log_path)
                     elif job_type == "mediapipe+blur":
                         # Run both sequentially
                         local_executor.execute_mediapipe(subject_names[0], job_id, log_path)

@@ -332,6 +332,157 @@ class LocalExecutor:
         thread = threading.Thread(target=run_pose_job, daemon=True)
         thread.start()
 
+    def execute_deidentify(self, subject_name: str, job_id: int, log_path: str,
+                           trial_idx: int | None = None):
+        """Execute deidentify render locally (all trials or a specific trial)."""
+        logger.info(f"Starting deidentify render for {subject_name}")
+
+        def run_deid_job():
+            try:
+                os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                from .deidentify import render_with_blur_specs
+                from .video import build_trial_map
+                from ..config import get_settings
+                import json as _json
+                from pathlib import Path
+
+                settings = get_settings()
+
+                with get_db_ctx() as db:
+                    subj = db.execute(
+                        "SELECT * FROM subjects WHERE name = ?", (subject_name,)
+                    ).fetchone()
+                    if not subj:
+                        raise ValueError(f"Subject not found: {subject_name}")
+
+                    all_specs = db.execute(
+                        "SELECT * FROM blur_specs WHERE subject_id = ?", (subj["id"],)
+                    ).fetchall()
+                    all_hand = db.execute(
+                        "SELECT * FROM blur_hand_settings WHERE subject_id = ?", (subj["id"],)
+                    ).fetchall()
+
+                camera_mode = subj.get("camera_mode") or "stereo"
+                trials = build_trial_map(subject_name, camera_mode=camera_mode)
+
+                specs_by_trial = {}
+                for s in all_specs:
+                    ti = s["trial_idx"]
+                    if ti not in specs_by_trial:
+                        specs_by_trial[ti] = []
+                    specs_by_trial[ti].append(dict(s))
+
+                hand_by_trial = {}
+                for hs in all_hand:
+                    hand_by_trial[hs["trial_idx"]] = dict(hs)
+
+                output_dir = settings.video_path
+                deident_dir = Path(str(output_dir)) / "deidentified"
+                deident_dir.mkdir(parents=True, exist_ok=True)
+
+                if trial_idx is not None:
+                    trial_indices = [trial_idx] if trial_idx in specs_by_trial else []
+                else:
+                    trial_indices = [i for i in range(len(trials)) if i in specs_by_trial]
+                n_trials = len(trial_indices)
+
+                with open(log_path, "w") as logfile:
+                    for ti_idx, trial_i in enumerate(trial_indices):
+                        trial = trials[trial_i]
+                        cam = trial.get("camera_name")
+                        if cam:
+                            output_name = f"{trial['trial_name']}_{cam}.mp4"
+                        else:
+                            output_name = f"{trial['trial_name']}.mp4"
+                        output_path = str(deident_dir / output_name)
+
+                        logfile.write(f"Rendering {output_name}...\n")
+                        logfile.flush()
+
+                        base_pct = ti_idx * (100.0 / max(n_trials, 1))
+                        span = 100.0 / max(n_trials, 1)
+
+                        def progress_cb(pct, _base=base_pct, _span=span):
+                            overall = _base + (pct / 100.0) * _span
+                            with get_db_ctx() as db:
+                                db.execute(
+                                    "UPDATE jobs SET progress_pct = ? WHERE id = ?",
+                                    (overall, job_id),
+                                )
+
+                        # Load face detections
+                        face_by_frame = {}
+                        with get_db_ctx() as db:
+                            face_rows = db.execute(
+                                "SELECT frame_num, x1, y1, x2, y2, side FROM face_detections WHERE subject_id = ? AND trial_idx = ?",
+                                (subj["id"], trial_i),
+                            ).fetchall()
+                        for fd in face_rows:
+                            fn = fd["frame_num"]
+                            if fn not in face_by_frame:
+                                face_by_frame[fn] = []
+                            face_by_frame[fn].append(dict(fd))
+
+                        hs = hand_by_trial.get(trial_i, {})
+                        segments = []
+                        seg_json = hs.get("segments_json")
+                        if seg_json:
+                            try:
+                                segments = _json.loads(seg_json)
+                            except (ValueError, TypeError):
+                                pass
+
+                        render_with_blur_specs(
+                            input_path=trial["video_path"],
+                            output_path=output_path,
+                            blur_specs=specs_by_trial.get(trial_i, []),
+                            face_by_frame=face_by_frame,
+                            start_frame=trial["start_frame"],
+                            total=trial["frame_count"],
+                            fps=trial.get("fps", 60),
+                            hand_mask_radius=hs.get("hand_mask_radius", 10),
+                            hand_smooth=hs.get("hand_smooth", 10),
+                            hand_segments=segments,
+                            forearm_radius=hs.get("forearm_radius", 10),
+                            forearm_extent=hs.get("forearm_extent", 0.5),
+                            hand_smooth2=hs.get("hand_smooth2", 0),
+                            dlc_radius=hs.get("dlc_radius", 15),
+                            subject_name=subject_name,
+                            progress_callback=progress_cb,
+                        )
+
+                        logfile.write(f"Done: {output_name}\n")
+                        logfile.flush()
+
+                with get_db_ctx() as db:
+                    db.execute(
+                        """UPDATE jobs SET status = 'completed', progress_pct = 100,
+                           finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                        (job_id,),
+                    )
+                logger.info(f"Deidentify render for {subject_name} completed")
+
+            except Exception as e:
+                logger.exception(f"Deidentify render for {subject_name} failed")
+                with open(log_path, "a") as logfile:
+                    logfile.write(f"\nError: {e}\n")
+                with get_db_ctx() as db:
+                    db.execute(
+                        """UPDATE jobs SET status = 'failed', error_msg = ?,
+                           finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                        (str(e), job_id),
+                    )
+
+        with get_db_ctx() as db:
+            db.execute(
+                """UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                (job_id,),
+            )
+
+        thread = threading.Thread(target=run_deid_job, daemon=True)
+        thread.start()
+
     def execute_blur(self, subject_names: list[str], job_id: int, log_path: str):
         """Execute face blur preprocessing locally.
 
