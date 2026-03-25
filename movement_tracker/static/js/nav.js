@@ -23,90 +23,111 @@ function getNavState() {
     };
 }
 
-// ── Subject-specific pages that should show the global selector ──
+// ── Subject-specific pages ──
 const SUBJECT_PAGES = [
     '/videos', '/mediapipe', '/mediapipe-select', '/deidentify',
     '/labeling', '/labeling-select', '/mano', '/results', '/oscillations',
 ];
 
-/* ── Inject global subject selector into the header ────────────── */
+/* ── Build unified single-line header ────────────────────────────
+   Target layout:
+   [Movement Tracker] [Dashboard|Videos|MediaPipe|...] | [Subject ▾] [←][→] [Trial1][Trial2]... | [page-specific]
+   Everything in one flex row.
+*/
 (function() {
     const path = window.location.pathname;
     const isSubjectPage = SUBJECT_PAGES.some(p => path.startsWith(p));
-    if (!isSubjectPage) return;
 
+    // Restyle header as single-line flex
     const header = document.querySelector('.header');
     if (!header) return;
+
+    header.style.display = 'flex';
+    header.style.alignItems = 'center';
+    header.style.flexWrap = 'nowrap';
+    header.style.gap = '12px';
+    header.style.padding = '0 16px';
+    header.style.height = '40px';
+    header.style.minHeight = '40px';
+
+    // Make h1 compact
     const h1 = header.querySelector('h1');
-    if (!h1) return;
+    if (h1) {
+        h1.style.margin = '0';
+        h1.style.flexShrink = '0';
+        h1.style.fontSize = '16px';
+        h1.style.whiteSpace = 'nowrap';
+    }
 
-    // Create selector container — insert right after the h1, before nav
-    const selectorDiv = document.createElement('div');
-    selectorDiv.id = 'globalSubjectSelector';
-    selectorDiv.style.cssText = 'display:flex;align-items:center;gap:8px;margin-left:16px;flex-shrink:0;';
+    // Make nav compact and inline
+    const nav = header.querySelector('nav');
+    if (nav) {
+        nav.style.display = 'flex';
+        nav.style.gap = '4px';
+        nav.style.alignItems = 'center';
+        nav.style.flexShrink = '0';
+        nav.style.margin = '0';
+        nav.style.padding = '0';
+        nav.style.fontSize = '13px';
+    }
 
-    // Subject dropdown
+    if (!isSubjectPage) return;
+
+    // ── Subject selector ──
+    const selContainer = document.createElement('div');
+    selContainer.id = 'navSubjectContainer';
+    selContainer.style.cssText = 'display:flex;align-items:center;gap:4px;margin-left:8px;flex-shrink:0;';
+
+    // Separator
+    const sep = document.createElement('span');
+    sep.style.cssText = 'color:var(--border);font-size:16px;margin:0 4px;';
+    sep.textContent = '|';
+    selContainer.appendChild(sep);
+
     const sel = document.createElement('select');
-    sel.id = 'globalSubjectSelect';
-    sel.style.cssText = 'padding:4px 8px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:13px;max-width:180px;';
+    sel.id = 'navSubjectSelect';
+    sel.style.cssText = 'padding:2px 6px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:12px;max-width:140px;';
+
+    const prevBtn = document.createElement('button');
+    prevBtn.className = 'btn btn-sm';
+    prevBtn.innerHTML = '&larr;';
+    prevBtn.title = 'Previous subject';
+    prevBtn.style.cssText = 'padding:1px 6px;font-size:12px;';
+
+    const nextBtn = document.createElement('button');
+    nextBtn.className = 'btn btn-sm';
+    nextBtn.innerHTML = '&rarr;';
+    nextBtn.title = 'Next subject';
+    nextBtn.style.cssText = 'padding:1px 6px;font-size:12px;';
+
+    selContainer.appendChild(sel);
+    selContainer.appendChild(prevBtn);
+    selContainer.appendChild(nextBtn);
 
     // Trial buttons container
     const trialDiv = document.createElement('div');
-    trialDiv.id = 'globalTrialBtns';
-    trialDiv.style.cssText = 'display:flex;gap:2px;flex-wrap:nowrap;overflow-x:auto;';
+    trialDiv.id = 'navTrialBtns';
+    trialDiv.style.cssText = 'display:flex;gap:2px;flex-wrap:nowrap;overflow-x:auto;margin-left:4px;';
+    selContainer.appendChild(trialDiv);
 
-    selectorDiv.appendChild(sel);
-    selectorDiv.appendChild(trialDiv);
+    // Page-specific slot (pages can append buttons here)
+    const pageSlot = document.createElement('div');
+    pageSlot.id = 'navPageSlot';
+    pageSlot.style.cssText = 'display:flex;gap:4px;align-items:center;margin-left:auto;flex-shrink:0;';
+    selContainer.appendChild(pageSlot);
 
-    // Insert after h1
-    h1.style.cssText = (h1.style.cssText || '') + ';flex-shrink:0;';
-    h1.insertAdjacentElement('afterend', selectorDiv);
+    // Insert after nav (or at end of header)
+    if (nav) {
+        nav.insertAdjacentElement('afterend', selContainer);
+    } else {
+        header.appendChild(selContainer);
+    }
 
-    // Make header flex
-    header.style.display = 'flex';
-    header.style.alignItems = 'center';
-
-    // Fetch subjects and populate
-    fetch('/api/subjects')
-        .then(r => r.json())
-        .then(subjects => {
-            sel.innerHTML = '<option value="">Subject...</option>';
-            subjects.forEach(s => {
-                const opt = document.createElement('option');
-                opt.value = s.id;
-                opt.textContent = s.name;
-                sel.appendChild(opt);
-            });
-
-            // Pre-select from nav state or URL
-            const params = new URLSearchParams(window.location.search);
-            const urlSubj = params.get('subject') || params.get('session');
-            const lastSubj = getLastSubject();
-            if (urlSubj) {
-                // Don't pre-select from URL session param — that's a session ID not subject ID
-                if (params.get('subject')) sel.value = params.get('subject');
-            } else if (lastSubj) {
-                sel.value = lastSubj;
-            }
-
-            // Load trials for selected subject
-            if (sel.value) _loadTrials(parseInt(sel.value), subjects);
-
-            sel.addEventListener('change', () => {
-                if (!sel.value) return;
-                const sid = parseInt(sel.value);
-                setLastSubject(sid);
-                _loadTrials(sid, subjects);
-                _navigateToSubject(sid);
-            });
-        })
-        .catch(() => {});
-
-    // Style for trial buttons
+    // Trial button style
     const style = document.createElement('style');
     style.textContent = `
-        .global-trial-btn {
-            padding: 2px 8px;
+        .nav-trial-btn {
+            padding: 1px 6px;
             font-size: 11px;
             border: 1px solid var(--border);
             border-radius: var(--radius);
@@ -115,30 +136,115 @@ const SUBJECT_PAGES = [
             cursor: pointer;
             white-space: nowrap;
         }
-        .global-trial-btn.active {
+        .nav-trial-btn.active {
             background: var(--blue);
             color: #fff;
             border-color: var(--blue);
         }
-        .global-trial-btn:hover:not(.active) {
+        .nav-trial-btn:hover:not(.active) {
             background: var(--hover);
         }
     `;
     document.head.appendChild(style);
 
-    function _loadTrials(subjectId, subjects) {
-        const subj = subjects.find(s => s.id === subjectId);
-        if (!subj) return;
+    // ── Sync with local page selectors ──
+    // Many pages have their own #subjectSelect. Hide it and sync.
+    let allSubjects = [];
 
-        // Use the video-tools probe to get trial list, or just clear trials
-        // Trials are page-specific — the global selector just shows subject
-        trialDiv.innerHTML = '';
+    // Wait for page JS to populate local selector, then mirror it
+    function _syncFromLocal() {
+        const localSel = document.getElementById('subjectSelect');
+        if (!localSel || localSel === sel) return;
+
+        // Hide local selector (nav has the visible one)
+        localSel.style.display = 'none';
+        // Hide any local topbar that contained subject/trial UI
+        const topbar = localSel.closest('.videos-topbar, .deid-topbar');
+        if (topbar) topbar.style.display = 'none';
+        // Hide prev/next buttons near the local selector
+        const localPrev = document.getElementById('prevSubjectBtn');
+        const localNext = document.getElementById('nextSubjectBtn');
+        if (localPrev) localPrev.style.display = 'none';
+        if (localNext) localNext.style.display = 'none';
+
+        // Copy options from local to nav
+        sel.innerHTML = localSel.innerHTML;
+        sel.value = localSel.value;
+
+        // When nav changes, update local and trigger its change event
+        sel.addEventListener('change', () => {
+            localSel.value = sel.value;
+            localSel.dispatchEvent(new Event('change'));
+            setLastSubject(parseInt(sel.value));
+        });
+
+        // When local changes (from page JS), sync nav
+        localSel.addEventListener('change', () => {
+            sel.value = localSel.value;
+        });
+
+        // Extract subjects from options for prev/next
+        allSubjects = Array.from(localSel.options)
+            .filter(o => o.value)
+            .map(o => ({ id: parseInt(o.value), name: o.textContent }));
+    }
+
+    // Also sync local trial buttons into nav
+    function _syncTrialBtns() {
+        const localTrials = document.getElementById('trialBtns');
+        if (!localTrials) return;
+        // Move local trial buttons into nav
+        localTrials.style.display = 'none';
+        const observer = new MutationObserver(() => {
+            trialDiv.innerHTML = '';
+            localTrials.querySelectorAll('.trial-btn').forEach(btn => {
+                const clone = btn.cloneNode(true);
+                clone.className = 'nav-trial-btn' + (btn.classList.contains('active') ? ' active' : '');
+                clone.addEventListener('click', () => btn.click());
+                trialDiv.appendChild(clone);
+            });
+        });
+        observer.observe(localTrials, { childList: true, subtree: true, attributes: true });
+    }
+
+    // Move page-specific buttons into the nav page slot
+    function _movePageButtons() {
+        const slot = document.getElementById('navPageSlot');
+        if (!slot) return;
+
+        // Videos page: move Browse button
+        const browseBtn = document.getElementById('browseBtn');
+        if (browseBtn) slot.appendChild(browseBtn);
+
+        // Deidentify page: move view mode buttons
+        document.querySelectorAll('#viewOriginal, #viewPreview, #viewDeidentified').forEach(btn => {
+            slot.appendChild(btn);
+        });
+    }
+
+    // Try syncing immediately, then retry after page JS init
+    _syncFromLocal();
+    _syncTrialBtns();
+    _movePageButtons();
+    setTimeout(() => { _syncFromLocal(); _syncTrialBtns(); _movePageButtons(); }, 500);
+    setTimeout(() => { _syncFromLocal(); _syncTrialBtns(); _movePageButtons(); }, 1500);
+
+    // Prev/next
+    prevBtn.addEventListener('click', () => _switchSubject(-1));
+    nextBtn.addEventListener('click', () => _switchSubject(1));
+
+    function _switchSubject(delta) {
+        const current = parseInt(sel.value);
+        if (!current || allSubjects.length === 0) return;
+        const idx = allSubjects.findIndex(s => s.id === current);
+        const newIdx = Math.max(0, Math.min(allSubjects.length - 1, idx + delta));
+        if (newIdx === idx) return;
+        sel.value = allSubjects[newIdx].id;
+        setLastSubject(allSubjects[newIdx].id);
+        _navigateToSubject(allSubjects[newIdx].id);
     }
 
     function _navigateToSubject(sid) {
-        const path = window.location.pathname;
-
-        // Each page has its own URL pattern for subject selection
         if (path.startsWith('/videos')) {
             window.location.href = '/videos?subject=' + sid;
         } else if (path.startsWith('/mediapipe') || path === '/mediapipe-select') {
