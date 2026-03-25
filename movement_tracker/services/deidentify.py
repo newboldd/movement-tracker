@@ -903,9 +903,24 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
     if not landmarks:
         return mask > 0
 
+    # Replace MediaPipe fingertips with DLC labels (more accurate)
     dlc_lms = [lm for lm in landmarks if lm.get("type") == "dlc"]
     hand_lms = [lm for lm in landmarks if lm.get("type") not in ("pose", "dlc")]
     pose_lms = [lm for lm in landmarks if lm.get("type") == "pose"]
+
+    if dlc_lms:
+        dlc_by_joint = {lm["joint"]: lm for lm in dlc_lms}
+        # Replace MP joints 4 (thumb tip) and 8 (index tip) with DLC coords
+        hand_lms = [
+            {**lm, "x": dlc_by_joint[lm["joint"]]["x"], "y": dlc_by_joint[lm["joint"]]["y"]}
+            if lm["joint"] in dlc_by_joint else lm
+            for lm in hand_lms
+        ]
+        # Add any DLC joints not already present
+        existing_joints = {lm["joint"] for lm in hand_lms}
+        for j, dlc in dlc_by_joint.items():
+            if j not in existing_joints:
+                hand_lms.append({**dlc, "type": "hand"})
 
     # Slider values are in screen pixels (CSS px at typical canvas zoom).
     # Convert to image pixels: value * (imageWidth / typicalCanvasWidth).
@@ -1017,12 +1032,6 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
                 break
         else:
             mask = (blurred2 > 0).astype(np.uint8) * 255
-
-    # Add DLC fingertip circles AFTER all smoothing (precise, no morphological close)
-    if dlc_lms and dlc_radius > 0:
-        for lm in dlc_lms:
-            cx, cy = int(round(lm["x"])), int(round(lm["y"]))
-            cv2.circle(mask, (cx, cy), dlc_radius, 255, -1)
 
     return mask > 0
 

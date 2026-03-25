@@ -611,11 +611,29 @@ const deid = (() => {
 
     // ── Build smoothed hand protection mask ──
     function _buildHandMask(landmarks, radiusPx, forearmPx, smoothPx, smooth2Px, w, h) {
-        // Separate DLC landmarks (excluded from smoothing)
+        // Replace MediaPipe fingertips with DLC labels when available
+        // DLC thumb=joint 4, index=joint 8 — same as MediaPipe convention
         const dlcLms = landmarks.filter(l => l.type === 'dlc');
-        const nonDlcLandmarks = landmarks.filter(l => l.type !== 'dlc');
+        let mergedLandmarks = landmarks.filter(l => l.type !== 'dlc');
+        if (dlcLms.length > 0) {
+            const dlcByJoint = {};
+            for (const lm of dlcLms) dlcByJoint[lm.joint] = lm;
+            // Replace MP joints 4 and 8 with DLC versions
+            mergedLandmarks = mergedLandmarks.map(lm => {
+                if (lm.type === 'hand' && dlcByJoint[lm.joint]) {
+                    return { ...lm, x: dlcByJoint[lm.joint].x, y: dlcByJoint[lm.joint].y };
+                }
+                return lm;
+            });
+            // Add DLC joints that don't have a MediaPipe equivalent
+            for (const [j, dlc] of Object.entries(dlcByJoint)) {
+                if (!mergedLandmarks.some(l => l.type === 'hand' && l.joint === parseInt(j))) {
+                    mergedLandmarks.push({ ...dlc, type: 'hand' });
+                }
+            }
+        }
 
-        // Step 1: Draw hand circles only (no DLC, no pose)
+        // Step 1: Draw hand circles only (no pose)
         const c1 = document.createElement('canvas');
         c1.width = w; c1.height = h;
         const ctx1 = c1.getContext('2d');
@@ -629,7 +647,7 @@ const deid = (() => {
             [0, 13, 14, 15, 16], // ring
             [0, 17, 18, 19, 20], // pinky
         ];
-        const handLms = nonDlcLandmarks.filter(l => l.type !== 'pose');
+        const handLms = mergedLandmarks.filter(l => l.type !== 'pose');
         const byJoint = {};
         for (const lm of handLms) byJoint[lm.joint] = lm;
 
@@ -713,18 +731,6 @@ const deid = (() => {
 
         // Step 4: Second smooth — on combined hand+forearm (smooths the join)
         let finalMask = _morphClose(handSmoothed, smooth2Px);
-
-        // Step 5: Add DLC fingertip circles (no smoothing — precise markers)
-        if (dlcLms.length > 0) {
-            const dlcPx = dlcRadius * scale;
-            const fCtx = finalMask.getContext('2d');
-            fCtx.fillStyle = '#fff';
-            for (const lm of dlcLms) {
-                fCtx.beginPath();
-                fCtx.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, dlcPx, 0, Math.PI * 2);
-                fCtx.fill();
-            }
-        }
 
         return finalMask;
     }
