@@ -117,9 +117,9 @@ const SUBJECT_PAGES = [
     pageSlot.style.cssText = 'display:flex;gap:4px;align-items:center;margin-left:auto;flex-shrink:0;';
     selContainer.appendChild(pageSlot);
 
-    // Insert after nav (or at end of header)
+    // Insert after h1, before nav (subject selector on left, nav links on right)
     if (nav) {
-        nav.insertAdjacentElement('afterend', selContainer);
+        nav.insertAdjacentElement('beforebegin', selContainer);
     } else {
         header.appendChild(selContainer);
     }
