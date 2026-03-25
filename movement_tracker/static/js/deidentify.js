@@ -77,6 +77,58 @@ const deid = (() => {
     let nextHandSegId = 1;
     let selectedHandSegId = null;
 
+    // Undo/redo stack
+    const MAX_UNDO = 50;
+    let undoStack = [];
+    let redoStack = [];
+
+    function _snapshotState() {
+        return {
+            blurSpots: blurSpots.map(s => ({ ...s })),
+            handProtectSegments: handProtectSegments.map(s => ({ ...s })),
+            selectedSpotId,
+            selectedHandSegId,
+        };
+    }
+
+    function _pushUndo() {
+        undoStack.push(_snapshotState());
+        if (undoStack.length > MAX_UNDO) undoStack.shift();
+        redoStack = []; // clear redo on new action
+    }
+
+    function undo() {
+        if (undoStack.length === 0) return;
+        redoStack.push(_snapshotState());
+        const state = undoStack.pop();
+        blurSpots = state.blurSpots;
+        handProtectSegments = state.handProtectSegments;
+        selectedSpotId = state.selectedSpotId;
+        selectedHandSegId = state.selectedHandSegId;
+        renderSpotList();
+        updateSpotControls();
+        scheduleSave();
+        _saveHandSettings();
+        render();
+        renderTimeline();
+    }
+
+    function redo() {
+        if (redoStack.length === 0) return;
+        undoStack.push(_snapshotState());
+        const state = redoStack.pop();
+        blurSpots = state.blurSpots;
+        handProtectSegments = state.handProtectSegments;
+        selectedSpotId = state.selectedSpotId;
+        selectedHandSegId = state.selectedHandSegId;
+        renderSpotList();
+        updateSpotControls();
+        scheduleSave();
+        _saveHandSettings();
+        render();
+        renderTimeline();
+    }
+
     // Debounce save timer
     let saveTimer = null;
 
@@ -987,6 +1039,7 @@ const deid = (() => {
     function onCanvasClick(e) {
         // Don't handle clicks after a pan drag
         if (panning) return;
+        _pushUndo(); // snapshot before any spot creation/selection
 
         const rect = canvas.getBoundingClientRect();
         const cx = e.clientX - rect.left;
@@ -1168,6 +1221,7 @@ const deid = (() => {
                 e.preventDefault();
                 const spot = blurSpots.find(s => s.id === hit.spotId);
                 if (spot) {
+                    _pushUndo(); // snapshot before drag
                     spotDrag = {
                         spotId: hit.spotId,
                         handle: hit.handle,
@@ -1279,6 +1333,13 @@ const deid = (() => {
     // ── Keyboard ──
     function onKeyDown(e) {
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+
+        if ((e.key === 'z' || e.key === 'Z') && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            if (e.shiftKey) redo();
+            else undo();
+            return;
+        }
 
         if (e.key === 'ArrowRight' || e.key === 'd') {
             e.preventDefault();
@@ -1607,6 +1668,7 @@ const deid = (() => {
         }
 
         // Remove existing auto-generated face spots for this trial
+        _pushUndo();
         blurSpots = blurSpots.filter(s => s.spot_type !== 'face');
 
         // Create a blur spot for each significant cluster
@@ -1689,6 +1751,7 @@ const deid = (() => {
     }
 
     function deleteSpot(id) {
+        _pushUndo();
         blurSpots = blurSpots.filter(s => s.id !== id);
         if (selectedSpotId === id) {
             selectedSpotId = null;
@@ -1748,6 +1811,7 @@ const deid = (() => {
     // ── Copy custom spots from other camera ──
     function copyFromOtherCamera() {
         if (cameraMode === 'single' || cameraNames.length < 2) return;
+        _pushUndo();
 
         const curSide = _sideLabel();
         const otherSide = curSide === 'left' ? 'right' : 'left';
@@ -1996,6 +2060,7 @@ const deid = (() => {
 
     function deleteSelectedHandSeg() {
         if (!selectedHandSegId) return;
+        _pushUndo();
         handProtectSegments = handProtectSegments.filter(s => s.id !== selectedHandSegId);
         selectedHandSegId = null;
         saveHandSettings();
@@ -2376,6 +2441,7 @@ const deid = (() => {
         e.preventDefault();
 
         if (hit.type === 'spot') {
+            _pushUndo(); // snapshot before timeline drag
             tlDragSpot = hit.spot;
             tlDragEdge = hit.edge;
             tlDragStartX = e.clientX;
@@ -2384,6 +2450,7 @@ const deid = (() => {
             renderSpotList();
             updateSpotControls();
         } else if (hit.type === 'hand') {
+            _pushUndo(); // snapshot before hand segment drag
             tlDragSpot = hit.seg;
             tlDragEdge = hit.edge;
             tlDragStartX = e.clientX;
@@ -2402,6 +2469,7 @@ const deid = (() => {
             if (!L) return;
             const { x: mx } = _tlMouseToCanvas(e);
             tlDragCreateFrame = _tlXToFrame(mx, L);
+            _pushUndo(); // snapshot before new hand segment
             tlDragSpot = 'newhand';
             tlDragEdge = 'create';
             tlDragStartX = e.clientX;
@@ -2566,5 +2634,7 @@ const deid = (() => {
         updateHandTemporalSmooth,
         goToMediapipe,
         renderTrial,
+        undo,
+        redo,
     };
 })();
