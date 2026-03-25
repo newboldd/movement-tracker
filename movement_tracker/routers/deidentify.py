@@ -782,34 +782,183 @@ def save_hand_settings(subject_id: int, body: dict = Body(...)) -> dict:
 
 @router.post("/{subject_id}/render")
 def render_deidentified(subject_id: int, body: dict = Body(default={})) -> dict:
-    """Render deidentified video(s) via the job queue (CPU lane).
+    """Render deidentified video(s) using saved blur specs.
 
     Body: { trial_idx: int (optional) }
-    If trial_idx is provided, only that trial is rendered.
-    Otherwise renders all trials with blur specs.
-
-    Routes through the queue manager so jobs appear on the Processing page.
-    Returns {job_id, queue_id} for SSE tracking.
+    Creates a background job with immediate SSE tracking.
+    Also visible on the Processing page via jobs table.
+    Returns {job_id} for SSE tracking.
     """
-    from ..services.queue_manager import queue_manager
+    from ..services.deidentify import render_with_blur_specs
+    import os, json as _json, threading
+    from pathlib import Path
 
     with get_db_ctx() as db:
         subj = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
         if not subj:
             raise HTTPException(404, "Subject not found")
 
+        all_specs = db.execute(
+            "SELECT * FROM blur_specs WHERE subject_id = ?", (subject_id,),
+        ).fetchall()
+
+        all_hand_settings = db.execute(
+            "SELECT * FROM blur_hand_settings WHERE subject_id = ?", (subject_id,),
+        ).fetchall()
+
     subject_name = subj["name"]
+    camera_mode = subj.get("camera_mode") or "stereo"
+    trials = build_trial_map(subject_name, camera_mode=camera_mode)
 
-    # Queue through the queue manager (CPU lane)
-    queue_id = queue_manager.enqueue(
-        job_type="deidentify",
-        subject_ids=[subject_id],
-        execution_target="local-cpu",
-    )
+    specs_by_trial = {}
+    for s in all_specs:
+        ti = s["trial_idx"]
+        if ti not in specs_by_trial:
+            specs_by_trial[ti] = []
+        specs_by_trial[ti].append(dict(s))
 
-    # Get the job_id from the queue entry
+    hand_by_trial = {}
+    for hs in all_hand_settings:
+        hand_by_trial[hs["trial_idx"]] = dict(hs)
+
+    settings = get_settings()
+
+    # Create job record for SSE tracking + Processing page visibility
     with get_db_ctx() as db:
-        qe = db.execute("SELECT job_id FROM job_queue WHERE id = ?", (queue_id,)).fetchone()
-        job_id = qe["job_id"] if qe else None
+        log_dir = settings.dlc_path / ".logs"
+        log_dir.mkdir(exist_ok=True)
+        log_path = str(log_dir / f"job_deidentify_{subject_id}.log")
 
-    return {"status": "ok", "job_id": job_id, "queue_id": queue_id}
+        db.execute(
+            """INSERT INTO jobs (subject_id, job_type, status, log_path)
+               VALUES (?, 'deidentify', 'pending', ?)""",
+            (subject_id, log_path),
+        )
+        job = db.execute(
+            "SELECT * FROM jobs WHERE subject_id = ? ORDER BY id DESC LIMIT 1",
+            (subject_id,),
+        ).fetchone()
+
+    job_id = job["id"]
+    cancel_event = registry.register_cancel_event(job_id)
+
+    def _run():
+        try:
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (job_id,),
+                )
+
+            output_dir = settings.video_path
+            deident_dir = Path(str(output_dir)) / "deidentified"
+            deident_dir.mkdir(parents=True, exist_ok=True)
+
+            requested_trial = body.get("trial_idx") if body else None
+            if requested_trial is not None:
+                trials_to_render = [requested_trial] if requested_trial in specs_by_trial else []
+            else:
+                trials_to_render = [i for i in range(len(trials)) if i in specs_by_trial]
+            n_trials = len(trials_to_render)
+
+            for ti_idx, trial_i in enumerate(trials_to_render):
+                if cancel_event.is_set():
+                    raise InterruptedError("Job cancelled")
+
+                trial = trials[trial_i]
+                cam = trial.get("camera_name")
+                if cam:
+                    output_name = f"{trial['trial_name']}_{cam}.mp4"
+                else:
+                    output_name = f"{trial['trial_name']}.mp4"
+                output_path = str(deident_dir / output_name)
+
+                base_pct = ti_idx * (100.0 / max(n_trials, 1))
+                span = 100.0 / max(n_trials, 1)
+
+                def progress_cb(pct, _base=base_pct, _span=span):
+                    if cancel_event.is_set():
+                        raise InterruptedError("Job cancelled")
+                    overall = _base + (pct / 100.0) * _span
+                    with get_db_ctx() as db:
+                        db.execute(
+                            "UPDATE jobs SET progress_pct = ? WHERE id = ?",
+                            (overall, job_id),
+                        )
+
+                source_path = trial["video_path"]
+
+                # Load face detections
+                with get_db_ctx() as db:
+                    face_rows = db.execute(
+                        "SELECT frame_num, x1, y1, x2, y2, side FROM face_detections WHERE subject_id = ? AND trial_idx = ?",
+                        (subject_id, trial_i),
+                    ).fetchall()
+                face_by_frame = {}
+                for fd in face_rows:
+                    fn = fd["frame_num"]
+                    if fn not in face_by_frame:
+                        face_by_frame[fn] = []
+                    face_by_frame[fn].append(dict(fd))
+
+                # Hand settings
+                hs = hand_by_trial.get(trial_i, {})
+                segments = []
+                seg_json = hs.get("segments_json")
+                if seg_json:
+                    try:
+                        segments = _json.loads(seg_json) if isinstance(seg_json, str) else (seg_json or [])
+                    except (ValueError, TypeError):
+                        pass
+
+                render_with_blur_specs(
+                    input_path=source_path,
+                    output_path=output_path,
+                    blur_specs=specs_by_trial.get(trial_i, []),
+                    face_by_frame=face_by_frame,
+                    start_frame=trial["start_frame"],
+                    total=trial["frame_count"],
+                    fps=trial.get("fps", 60),
+                    hand_mask_radius=hs.get("hand_mask_radius", 10),
+                    hand_smooth=hs.get("hand_smooth", 10),
+                    hand_segments=segments,
+                    forearm_radius=hs.get("forearm_radius", 10),
+                    forearm_extent=hs.get("forearm_extent", 0.5),
+                    hand_smooth2=hs.get("hand_smooth2", 0),
+                    subject_name=subject_name,
+                    progress_callback=progress_cb,
+                )
+
+            # Mark complete
+            dlc_path = settings.dlc_path / subject_name
+            dlc_path.mkdir(parents=True, exist_ok=True)
+            (dlc_path / ".deidentified").write_text("")
+
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'completed', progress_pct = 100,
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (job_id,),
+                )
+
+        except InterruptedError:
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'cancelled',
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (job_id,),
+                )
+        except Exception as e:
+            logger.exception(f"Deidentify job {job_id} failed")
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'failed', error_msg = ?,
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (str(e), job_id),
+                )
+        finally:
+            registry.unregister_cancel_event(job_id)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+    return {"status": "ok", "job_id": job_id}
