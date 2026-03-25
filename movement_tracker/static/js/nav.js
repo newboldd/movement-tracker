@@ -72,7 +72,7 @@ const SUBJECT_PAGES = [
     // ── Subject selector ──
     const selContainer = document.createElement('div');
     selContainer.id = 'navSubjectContainer';
-    selContainer.style.cssText = 'display:flex;align-items:center;gap:4px;margin-left:8px;flex-shrink:0;';
+    selContainer.style.cssText = 'display:flex;align-items:center;gap:6px;margin-left:8px;flex-shrink:0;';
 
     // Separator
     const sep = document.createElement('span');
@@ -103,7 +103,7 @@ const SUBJECT_PAGES = [
     // Trial buttons container
     const trialDiv = document.createElement('div');
     trialDiv.id = 'navTrialBtns';
-    trialDiv.style.cssText = 'display:flex;gap:2px;flex-wrap:nowrap;overflow-x:auto;margin-left:4px;';
+    trialDiv.style.cssText = 'display:flex;gap:3px;flex-wrap:nowrap;overflow-x:auto;margin-left:10px;margin-right:10px;';
     selContainer.appendChild(trialDiv);
 
     // Page-specific slot (pages can append buttons here)
