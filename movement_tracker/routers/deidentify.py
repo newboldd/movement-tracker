@@ -71,6 +71,7 @@ def get_trials(subject_id: int) -> dict:
             "end_frame": t["end_frame"],
             "frame_count": t["frame_count"],
             "fps": t["fps"],
+            "frame_offset": t.get("frame_offset", 0),
             "is_stereo": is_stereo,
             "frame_width": fw // 2 if is_stereo else fw,
             "frame_height": fh,

@@ -1482,9 +1482,10 @@ const deid = (() => {
             }
         }
 
-        // Seek to current frame position
-        const localFrame = currentFrame - trialMeta.start_frame;
-        const startTime = localFrame / fps;
+        // Seek to current frame position (subtract frame_offset for browser seek)
+        const frameOffset = trialMeta.frame_offset || 0;
+        const localFrame = currentFrame - trialMeta.start_frame - frameOffset;
+        const startTime = Math.max(0, localFrame / fps);
         videoEl.currentTime = startTime;
         videoPlaying = true;
 
@@ -1517,8 +1518,12 @@ const deid = (() => {
         // Get the actual media time for frame sync
         const mediaTime = (metadata && metadata.mediaTime != null)
             ? metadata.mediaTime : videoEl.currentTime;
+        // frame_offset: OpenCV sees extra pre-roll frames the browser skips.
+        // Browser frame 0 = OpenCV frame (frame_offset). So:
+        // currentFrame = start + localBrowserFrame + frame_offset
+        const frameOffset = trialMeta.frame_offset || 0;
         const localFrame = Math.floor(mediaTime * fps);
-        currentFrame = trialMeta.start_frame + Math.min(localFrame, totalFrames - 1);
+        currentFrame = trialMeta.start_frame + Math.min(localFrame + frameOffset, totalFrames - 1);
 
         if (currentFrame >= trialMeta.end_frame) {
             playing = false;
