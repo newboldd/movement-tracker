@@ -2700,7 +2700,6 @@ const deid = (() => {
         updateHandSmooth,
         updateHandSmooth2,
         updateHandTemporalSmooth,
-        updateDlcRadius,
         goToMediapipe,
         renderTrial,
         undo,
