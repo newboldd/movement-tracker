@@ -743,16 +743,14 @@ def render_with_blur_specs(input_path: str, output_path: str,
             if active_specs:
                 frame = np.ascontiguousarray(frame, dtype=np.uint8)
 
-                # Check if hand protection is active
-                hand_active = False
-                active_radius = hand_mask_radius
-                active_smooth = hand_smooth
-                for seg in hand_segments:
-                    if seg.get("start", 0) <= global_frame <= seg.get("end", 0):
-                        hand_active = True
-                        active_radius = seg.get("radius", hand_mask_radius)
-                        active_smooth = seg.get("smooth", hand_smooth)
-                        break
+                # Check hand protection per-side (segments can be camera-specific)
+                def _hand_active_for_side(side_label):
+                    for seg in hand_segments:
+                        seg_side = seg.get("side", "full")
+                        if (seg_side == side_label or seg_side == "full") and \
+                           seg.get("start", 0) <= global_frame <= seg.get("end", 0):
+                            return True, seg.get("radius", hand_mask_radius), seg.get("smooth", hand_smooth)
+                    return False, hand_mask_radius, hand_smooth
 
                 if is_stereo:
                     left = frame[:, :half_w, :].copy()
@@ -764,20 +762,22 @@ def render_with_blur_specs(input_path: str, output_path: str,
                     if left_specs:
                         left_mask = _build_blur_mask(left_specs, half_w, fh, global_frame, face_by_frame, "left")
                         hand_mask_l = np.zeros((fh, half_w), dtype=bool)
-                        if hand_active and hand_lm_data and global_frame in hand_lm_data:
+                        hand_active_l, active_radius_l, active_smooth_l = _hand_active_for_side("left")
+                        if hand_active_l and hand_lm_data and global_frame in hand_lm_data:
                             lms_l = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "left"]
                             hand_mask_l = _get_hand_mask_cached(
-                                "left", lms_l, half_w, fh, active_radius, active_smooth,
+                                "left", lms_l, half_w, fh, active_radius_l, active_smooth_l,
                                 forearm_radius, forearm_extent, hand_smooth2)
                         left = _apply_blur_roi(left, left_mask, hand_mask_l)
 
                     if right_specs:
                         right_mask = _build_blur_mask(right_specs, full_w - half_w, fh, global_frame, face_by_frame, "right")
                         hand_mask_r = np.zeros((fh, full_w - half_w), dtype=bool)
-                        if hand_active and hand_lm_data and global_frame in hand_lm_data:
+                        hand_active_r, active_radius_r, active_smooth_r = _hand_active_for_side("right")
+                        if hand_active_r and hand_lm_data and global_frame in hand_lm_data:
                             lms_r = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "right"]
                             hand_mask_r = _get_hand_mask_cached(
-                                "right", lms_r, full_w - half_w, fh, active_radius, active_smooth,
+                                "right", lms_r, full_w - half_w, fh, active_radius_r, active_smooth_r,
                                 forearm_radius, forearm_extent, hand_smooth2)
                         right = _apply_blur_roi(right, right_mask, hand_mask_r)
 
@@ -785,9 +785,10 @@ def render_with_blur_specs(input_path: str, output_path: str,
                 else:
                     blur_mask = _build_blur_mask(active_specs, full_w, fh, global_frame, face_by_frame, "full")
                     hand_mask = np.zeros((fh, full_w), dtype=bool)
-                    if hand_active and hand_lm_data and global_frame in hand_lm_data:
+                    hand_active_f, active_radius_f, active_smooth_f = _hand_active_for_side("full")
+                    if hand_active_f and hand_lm_data and global_frame in hand_lm_data:
                         hand_mask = _get_hand_mask_cached(
-                            "full", hand_lm_data[global_frame], full_w, fh, active_radius, active_smooth,
+                            "full", hand_lm_data[global_frame], full_w, fh, active_radius_f, active_smooth_f,
                             forearm_radius, forearm_extent, hand_smooth2, dlc_radius_val)
                     frame = _apply_blur_roi(frame, blur_mask, hand_mask)
 

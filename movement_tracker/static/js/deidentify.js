@@ -33,7 +33,7 @@ const deid = (() => {
     let viewMode = 'original';
 
     // Hand overlay
-    let handOverlayEnabled = false;
+    let handOverlayEnabled = true;
     let handLandmarks = [];   // [{x, y, side}] for current frame (after smoothing)
     let handLandmarksBulk = {}; // {frameNum: [{x, y, side}]} all frames
     let handTemporalSmooth = 0; // temporal smoothing window (frames each direction)
@@ -444,7 +444,8 @@ const deid = (() => {
             return;
         }
 
-        if (!hasUserZoom) fitImage();
+        // Fit on first load only (scale 1 = never zoomed)
+        if (scale === 1 && offsetX === 0 && offsetY === 0) fitImage();
 
         // Update display
         const localFrame = frameNum - (trialMeta ? trialMeta.start_frame : 0);
@@ -452,7 +453,10 @@ const deid = (() => {
             `Frame: ${localFrame} / ${totalFrames - 1}`;
 
         // Load hand landmarks from bulk cache with temporal smoothing
-        const inProtectSeg = handProtectSegments.some(s => frameNum >= s.start && frameNum <= s.end);
+        const curSideForProtect = _sideLabel();
+        const inProtectSeg = handProtectSegments.some(s =>
+            frameNum >= s.start && frameNum <= s.end &&
+            (!s.side || s.side === curSideForProtect || s.side === 'full'));
         const needHands = hasMediapipe && (handOverlayEnabled || inProtectSeg);
         if (needHands) {
             await _loadBulkLandmarks();
@@ -895,7 +899,8 @@ const deid = (() => {
             (lm.side || 'full') === curSideLabel || (lm.side || 'full') === 'full'
         );
         const activeSeg = handProtectSegments.find(s =>
-            currentFrame >= s.start && currentFrame <= s.end
+            currentFrame >= s.start && currentFrame <= s.end &&
+            (!s.side || s.side === curSideLabel || s.side === 'full')
         );
         const handProtectActive = activeSeg && visibleLandmarks.length > 0;
         const activeProtectRadius = activeSeg ? (activeSeg.radius || handMaskRadius) : handMaskRadius;
@@ -2400,8 +2405,10 @@ const deid = (() => {
                 }
             }
 
-            // Protection segment bars (multiple, draggable)
-            for (const seg of handProtectSegments) {
+            // Protection segment bars (multiple, draggable) — filtered by current camera
+            const curSide = _sideLabel();
+            const visibleSegs = handProtectSegments.filter(s => !s.side || s.side === curSide || s.side === 'full');
+            for (const seg of visibleSegs) {
                 const hx1 = _frameToTlX(seg.start, L);
                 const hx2 = _frameToTlX(seg.end, L);
                 const hw = Math.max(3, hx2 - hx1);
@@ -2497,9 +2504,11 @@ const deid = (() => {
         }
         if (customSpots.length > 0) y += gap;
 
-        // Hit test hand protection segments
+        // Hit test hand protection segments (filtered by current camera)
+        const hitSide = _sideLabel();
+        const hitSegs = handProtectSegments.filter(s => !s.side || s.side === hitSide || s.side === 'full');
         if (handCoverage.length > 0 || hasMediapipe) {
-            for (const seg of handProtectSegments) {
+            for (const seg of hitSegs) {
                 const hx1 = _frameToTlX(seg.start, L);
                 const hx2 = _frameToTlX(seg.end, L);
 
@@ -2580,7 +2589,7 @@ const deid = (() => {
                 if (existing) {
                     existing.start = s; existing.end = en;
                 } else {
-                    handProtectSegments.push({ id: -1, start: s, end: en, radius: handMaskRadius, smooth: handSmooth });
+                    handProtectSegments.push({ id: -1, start: s, end: en, radius: handMaskRadius, smooth: handSmooth, side: _sideLabel() });
                 }
                 renderTimeline();
                 return;
