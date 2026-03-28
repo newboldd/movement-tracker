@@ -36,9 +36,75 @@ async function loadSubjects() {
         renderDiagnosisGroups();
         populateStageFilter();
         loadJobs();
+        // Load sparkline distance previews (non-blocking)
+        loadSparklines();
     } catch (e) {
         document.getElementById('subjectTableBody').innerHTML =
             `<tr><td colspan="9" style="text-align:center;color:var(--red)">${e.message}</td></tr>`;
+    }
+}
+
+async function loadSparklines() {
+    try {
+        const data = await API.get('/api/results/preview-distances');
+        const previews = data.previews || {};
+
+        for (const [sid, info] of Object.entries(previews)) {
+            const canvas = document.getElementById(`spark_${sid}`);
+            if (!canvas) continue;
+
+            const ctx = canvas.getContext('2d');
+            const dpr = window.devicePixelRatio || 1;
+            const w = canvas.clientWidth;
+            const h = canvas.clientHeight;
+            canvas.width = w * dpr;
+            canvas.height = h * dpr;
+            ctx.scale(dpr, dpr);
+
+            const values = info.values || [];
+            if (values.length < 2) continue;
+
+            // Fixed y range: 0-200mm
+            const yMin = 0, yMax = 200;
+
+            // Draw line
+            ctx.strokeStyle = '#4a9eff';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            let started = false;
+            for (let i = 0; i < values.length; i++) {
+                if (values[i] == null) { started = false; continue; }
+                const x = (i / (values.length - 1)) * w;
+                const y = h - ((values[i] - yMin) / (yMax - yMin)) * h;
+                const cy = Math.max(0, Math.min(h, y));
+                if (!started) { ctx.moveTo(x, cy); started = true; }
+                else ctx.lineTo(x, cy);
+            }
+            ctx.stroke();
+        }
+
+        // Gray out canvases with no data
+        subjects.forEach(s => {
+            if (!previews[String(s.id)]) {
+                const canvas = document.getElementById(`spark_${s.id}`);
+                if (canvas) {
+                    const ctx = canvas.getContext('2d');
+                    const w = canvas.clientWidth;
+                    const h = canvas.clientHeight;
+                    const dpr = window.devicePixelRatio || 1;
+                    canvas.width = w * dpr;
+                    canvas.height = h * dpr;
+                    ctx.scale(dpr, dpr);
+                    ctx.fillStyle = 'var(--text-muted)';
+                    ctx.font = '10px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillStyle = '#666';
+                    ctx.fillText('No distance data', w / 2, h / 2 + 3);
+                }
+            }
+        });
+    } catch (e) {
+        console.log('Sparkline load failed:', e);
     }
 }
 
@@ -86,13 +152,16 @@ function renderDiagnosisGroups() {
                 const stageColor = `badge-${s.stage}`;
                 html += `
                     <div style="padding: 8px; background: var(--bg); border-radius: 4px; border: 1px solid var(--border);">
-                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
                             <span style="font-weight:600;font-size:13px;">${s.name}</span>
                             <div style="display:flex;align-items:center;gap:4px;">
                                 ${(s.has_blur || !s.has_faces) ? '<span style="color:var(--green);font-size:11px;" title="Deidentified">Deident</span>' : ''}
                                 <span class="badge ${stageColor}" style="font-size:11px;">${stageLabel(s.stage)}</span>
                             </div>
                         </div>
+                        <canvas id="spark_${s.id}" width="240" height="60"
+                                style="width:100%;height:60px;cursor:pointer;display:block;margin-bottom:4px;"
+                                onclick="sessionStorage.setItem('dlc_lastSubjectId','${s.id}');window.location.href='/results?subject=${s.id}&tab=individual&from=dashboard'"></canvas>
                         <div style="display:flex;gap:4px;flex-wrap:wrap;">
                             ${s.video_count > 0 ? `<button class="btn btn-sm" style="white-space:nowrap;" onclick="window.location.href='/videos?subject=${s.id}'">Video</button>` : ''}
                             <button class="btn btn-sm" style="white-space:nowrap;" onclick="openLabeling(${s.id})">DLC</button>

@@ -279,6 +279,68 @@ def _linreg_slope(x: list[float], y: list[float]) -> float | None:
 
 # ── API endpoints ───────────────────────────────────────────────────────
 
+@router.get("/preview-distances")
+def get_preview_distances() -> dict:
+    """Return 10-second distance preview for all subjects (for dashboard sparklines).
+
+    For each subject with distance data, returns the first 10s of trial 1,
+    offset by 500ms before the first event if available.
+    Fixed y-range: 0-200mm.
+    """
+    with get_db_ctx() as db:
+        subjects = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
+
+    previews = {}
+    for subj in subjects:
+        try:
+            distances, trials, source = _load_distances_and_trials(subj["name"])
+            if not distances or not trials:
+                continue
+
+            trial = trials[0]
+            fps = trial.get("fps", 60)
+            start = trial["start_frame"]
+            end = trial["end_frame"]
+            window_frames = int(10 * fps)  # 10 seconds
+
+            # Check for saved events — offset to 500ms before first event
+            offset_start = start
+            try:
+                with get_db_ctx() as db2:
+                    events = db2.execute(
+                        "SELECT frame_num FROM subject_events WHERE subject_id = ? AND frame_num >= ? AND frame_num <= ? ORDER BY frame_num LIMIT 1",
+                        (subj["id"], start, end),
+                    ).fetchone()
+                if events:
+                    event_frame = events["frame_num"]
+                    offset_start = max(start, event_frame - int(0.5 * fps))
+            except Exception:
+                pass
+
+            # Extract 10s window
+            win_end = min(offset_start + window_frames, end + 1, len(distances))
+            segment = distances[offset_start:win_end]
+
+            # Downsample to ~200 points max for lightweight transfer
+            if len(segment) > 200:
+                step = len(segment) // 200
+                segment = segment[::step]
+
+            # Convert None to null-safe format
+            values = [round(d, 1) if d is not None else None for d in segment]
+
+            previews[str(subj["id"])] = {
+                "values": values,
+                "fps": fps,
+                "source": source,
+                "trial_name": trial["trial_name"],
+            }
+        except Exception:
+            continue
+
+    return {"previews": previews}
+
+
 @router.get("/{subject_id}/traces")
 def get_traces(subject_id: int) -> dict:
     """Distance and velocity traces split by trial for the Distances tab."""
