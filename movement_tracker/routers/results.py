@@ -279,14 +279,21 @@ def _linreg_slope(x: list[float], y: list[float]) -> float | None:
 
 # ── API endpoints ───────────────────────────────────────────────────────
 
+_preview_cache = {"data": None, "time": 0}
+_PREVIEW_CACHE_TTL = 300  # 5 minutes
+
+
 @router.get("/preview-distances")
 def get_preview_distances() -> dict:
     """Return 10-second distance preview for all subjects (for dashboard sparklines).
 
-    For each subject with distance data, returns the first 10s of trial 1,
-    offset by 500ms before the first event if available.
-    Fixed y-range: 0-200mm.
+    Cached in memory for 5 minutes. Cache is invalidated by any MediaPipe/DLC run.
     """
+    import time as _time
+    now = _time.time()
+    if _preview_cache["data"] and (now - _preview_cache["time"]) < _PREVIEW_CACHE_TTL:
+        return _preview_cache["data"]
+
     with get_db_ctx() as db:
         subjects = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
 
@@ -325,7 +332,16 @@ def get_preview_distances() -> dict:
         except Exception:
             continue
 
-    return {"previews": previews}
+    result = {"previews": previews}
+    _preview_cache["data"] = result
+    _preview_cache["time"] = now
+    return result
+
+
+def invalidate_preview_cache():
+    """Call after MediaPipe/DLC runs to force dashboard sparkline refresh."""
+    _preview_cache["data"] = None
+    _preview_cache["time"] = 0
 
 
 @router.get("/{subject_id}/traces")
