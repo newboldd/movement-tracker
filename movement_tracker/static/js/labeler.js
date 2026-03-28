@@ -753,7 +753,10 @@ const labeler = (() => {
             imgW = sw;
             imgH = vh;
             if (!hasUserZoom && !mpCropMode) {
-                if (isFinal && !isEvents && finalCropBoxes) {
+                if (isMediaPipePage) {
+                    fitImage();
+                    hasUserZoom = true;
+                } else if (isFinal && !isEvents && finalCropBoxes) {
                     zoomToCropBox();
                     hasUserZoom = true;
                 } else if (isFinal && !isEvents) {
@@ -809,7 +812,10 @@ const labeler = (() => {
                 imgW = currentImage.width;
                 imgH = currentImage.height;
                 if (!hasUserZoom && !mpCropMode) {
-                    if (isFinal && !isEvents && finalCropBoxes) {
+                    if (isMediaPipePage) {
+                        fitImage();
+                        hasUserZoom = true;
+                    } else if (isFinal && !isEvents && finalCropBoxes) {
                         // Final mode: zoom to crop box, then lock
                         zoomToCropBox();
                         hasUserZoom = true;
