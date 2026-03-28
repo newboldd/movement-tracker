@@ -1682,6 +1682,11 @@ const labeler = (() => {
     }
 
     async function rerunMediapipe() {
+        // Auto-save crop box if currently editing
+        if (mpCropMode && mpCropEditBox) {
+            await saveMpCrop();
+        }
+
         const ti = _getCurrentTrialIdx();
 
         // Gather crops for ALL cameras
