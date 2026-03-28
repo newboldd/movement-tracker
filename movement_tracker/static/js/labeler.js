@@ -127,6 +127,7 @@ const labeler = (() => {
     let mpCropMode = false;            // bounding box editing active
     let mpCropBoxes = {};              // {trialIdx: {cam: {x1, y1, x2, y2}}} loaded from DB
     let mpCropEditBox = null;          // current editing box {x1, y1, x2, y2} (unsaved)
+    let mpCropPreviousBox = null;      // saved box shown in blue for reference while editing
     let mpCropDragHandle = null;       // which handle is being dragged
     let mpCropDragStart = null;        // {mx, my, box: {...}} at drag start
     let mpCropAdjusted = {};           // {cam: bool} whether user manually dragged each camera's box
@@ -1406,6 +1407,21 @@ const labeler = (() => {
         const s2 = imageToScreen(box.x2, box.y2);
         const sx1 = s1.x, sy1 = s1.y, sx2 = s2.x, sy2 = s2.y;
 
+        // Draw previous/saved box in blue for reference (before dimming)
+        if (mpCropPreviousBox) {
+            const p1 = imageToScreen(mpCropPreviousBox.x1, mpCropPreviousBox.y1);
+            const p2 = imageToScreen(mpCropPreviousBox.x2, mpCropPreviousBox.y2);
+            ctx.strokeStyle = 'rgba(33,150,243,0.6)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([8, 4]);
+            ctx.strokeRect(p1.x, p1.y, p2.x - p1.x, p2.y - p1.y);
+            ctx.setLineDash([]);
+            // Label
+            ctx.fillStyle = 'rgba(33,150,243,0.7)';
+            ctx.font = '11px sans-serif';
+            ctx.fillText('previous', p1.x + 4, p1.y - 4);
+        }
+
         // Dim outside the crop box
         ctx.fillStyle = 'rgba(0,0,0,0.45)';
         // Top
@@ -1591,8 +1607,10 @@ const labeler = (() => {
                 const saved = mpCropBoxes[ti] && mpCropBoxes[ti][cam];
                 mpCropAdjusted[cam] = !!saved;  // DB-saved counts as adjusted
             }
-            // Initialize edit box from saved (DB) or default (10% inset)
+            // Store previous box for blue reference display
             const saved = mpCropBoxes[ti] && mpCropBoxes[ti][currentSide];
+            mpCropPreviousBox = saved ? { ...saved } : null;
+            // Default new edit box to the saved position (or 10% inset if none)
             mpCropEditBox = saved ? { ...saved } : _defaultCropBox();
             if (actionsEl) actionsEl.style.display = 'flex';
             // Lock zoom so frame navigation doesn't shift the view
@@ -1600,6 +1618,7 @@ const labeler = (() => {
             _updateMpCamStatus();
         } else {
             mpCropEditBox = null;
+            mpCropPreviousBox = null;
             mpCropDragHandle = null;
             mpCropDragStart = null;
             if (actionsEl) actionsEl.style.display = 'none';
@@ -2992,6 +3011,7 @@ const labeler = (() => {
         if (mpCropMode) {
             // Load saved box for new camera, or use 10% inset default
             const saved = mpCropBoxes[ti] && mpCropBoxes[ti][currentSide];
+            mpCropPreviousBox = saved ? { ...saved } : null;
             mpCropEditBox = saved ? { ...saved } : _defaultCropBox();
             mpCropDragHandle = null;
             mpCropDragStart = null;
