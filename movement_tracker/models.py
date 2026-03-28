@@ -38,6 +38,18 @@ class SubjectUpdate(BaseModel):
     camera_name: Optional[str] = None
     no_face_videos: Optional[List[str]] = None
     diagnosis: Optional[str] = None
+    # Clinical data
+    age: Optional[int] = None
+    sex: Optional[str] = None
+    laterality: Optional[str] = None
+    disease_duration: Optional[float] = None
+    levodopa: Optional[str] = None
+    last_dose: Optional[str] = None
+    dbs: Optional[str] = None
+    fluctuations: Optional[str] = None
+    tremor: Optional[str] = None
+    dysmetria: Optional[str] = None
+    myoclonus: Optional[str] = None
 
 
 class SubjectResponse(BaseModel):

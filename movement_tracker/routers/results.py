@@ -297,36 +297,23 @@ def get_preview_distances() -> dict:
             if not distances or not trials:
                 continue
 
-            trial = trials[0]
+            # Use the last trial, final 10 seconds
+            trial = trials[-1]
             fps = trial.get("fps", 60)
             start = trial["start_frame"]
             end = trial["end_frame"]
-            window_frames = int(10 * fps)  # 10 seconds
+            window_frames = int(10 * fps)
 
-            # Check for saved events — offset to 500ms before first event
-            offset_start = start
-            try:
-                with get_db_ctx() as db2:
-                    events = db2.execute(
-                        "SELECT frame_num FROM subject_events WHERE subject_id = ? AND frame_num >= ? AND frame_num <= ? ORDER BY frame_num LIMIT 1",
-                        (subj["id"], start, end),
-                    ).fetchone()
-                if events:
-                    event_frame = events["frame_num"]
-                    offset_start = max(start, event_frame - int(0.5 * fps))
-            except Exception:
-                pass
-
-            # Extract 10s window
-            win_end = min(offset_start + window_frames, end + 1, len(distances))
-            segment = distances[offset_start:win_end]
+            # Final 10 seconds of the last trial
+            win_start = max(start, end + 1 - window_frames)
+            win_end = min(end + 1, len(distances))
+            segment = distances[win_start:win_end]
 
             # Downsample to ~200 points max for lightweight transfer
             if len(segment) > 200:
                 step = len(segment) // 200
                 segment = segment[::step]
 
-            # Convert None to null-safe format
             values = [round(d, 1) if d is not None else None for d in segment]
 
             previews[str(subj["id"])] = {

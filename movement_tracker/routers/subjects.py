@@ -238,6 +238,21 @@ def update_subject(subject_id: int, req: SubjectUpdate) -> dict:
                 "UPDATE subjects SET diagnosis = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (req.diagnosis, subject_id),
             )
+
+        # Clinical data fields — update any that are provided
+        clinical_fields = [
+            "age", "sex", "laterality", "disease_duration",
+            "levodopa", "last_dose", "dbs", "fluctuations",
+            "tremor", "dysmetria", "myoclonus",
+        ]
+        for field in clinical_fields:
+            val = getattr(req, field, None)
+            if val is not None:
+                db.execute(
+                    f"UPDATE subjects SET {field} = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (val, subject_id),
+                )
+
         row = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
     return _subject_row_to_response(row)
 
@@ -418,6 +433,56 @@ def get_subject(subject_id: int) -> dict:
     resp["segments"] = segments
     resp["jobs"] = jobs
     resp["label_sessions"] = sessions
+
+    # Per-trial feature status for checkmark chart
+    settings = get_settings()
+    subject_name = row["name"]
+    dlc_path = settings.dlc_path / subject_name
+    video_path = settings.video_path
+    no_face_list = []
+    if row.get("no_face_videos"):
+        try:
+            no_face_list = json.loads(row["no_face_videos"])
+        except (ValueError, TypeError):
+            no_face_list = []
+
+    trial_status = []
+    for trial_name in trials:
+        status = {}
+        # Deidentified: check if deidentified video exists
+        deident_dir = Path(str(video_path)) / "deidentified"
+        status["deident"] = (deident_dir / f"{trial_name}.mp4").exists()
+        # MP hand: check mediapipe_prelabels.npz exists (subject-level, not per-trial)
+        status["mp_hands"] = (dlc_path / "mediapipe_prelabels.npz").exists()
+        # MP pose: check pose_prelabels.npz exists
+        status["mp_pose"] = (dlc_path / "pose_prelabels.npz").exists()
+        # DLC training: check labeled-data directory has frames
+        labeled = dlc_path / "labeled-data"
+        status["dlc_train"] = labeled.exists() and any(labeled.iterdir()) if labeled.exists() else False
+        # DLC analysis: check for v1 predictions
+        status["dlc_analysis"] = any(
+            (dlc_path / d).exists() for d in ["labels_v1", "labels_v2"]
+        )
+        # DLC refinement: check for refine session
+        status["dlc_refine"] = any(
+            s["session_type"] == "refine" for s in sessions
+        )
+        # DLC corrections: check for corrections session or corrections dir
+        status["dlc_corrections"] = (dlc_path / "corrections").exists()
+        # Events: check subject_events table
+        has_events = db.execute(
+            "SELECT COUNT(*) as c FROM subject_events WHERE subject_id = ?",
+            (subject_id,),
+        ).fetchone()["c"] > 0
+        status["events"] = has_events
+        # MANO: placeholder (check for MANO output)
+        status["mano"] = (dlc_path / "mano_output").exists() if (dlc_path / "mano_output").exists() else False
+        # Has faces: derived from no_face_videos
+        status["has_faces"] = trial_name not in no_face_list
+
+        trial_status.append({"name": trial_name, "status": status})
+
+    resp["trial_status"] = trial_status
     return resp
 
 

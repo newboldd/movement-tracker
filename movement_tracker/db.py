@@ -23,6 +23,17 @@ CREATE TABLE IF NOT EXISTS subjects (
     dlc_dir TEXT,
     video_pattern TEXT,
     diagnosis TEXT DEFAULT 'Control',
+    age INTEGER,
+    sex TEXT,
+    laterality TEXT,
+    disease_duration REAL,
+    levodopa TEXT,
+    last_dose TEXT,
+    dbs TEXT,
+    fluctuations TEXT,
+    tremor TEXT,
+    dysmetria TEXT,
+    myoclonus TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -354,6 +365,29 @@ def _migrate_add_camera_mode(conn):
         logger.info("Added camera_mode column to subjects table")
 
 
+def _migrate_add_clinical_fields(conn):
+    """Add clinical data columns to subjects table if missing."""
+    columns = _get_table_columns(conn, "subjects")
+    clinical_cols = {
+        "age": "INTEGER",
+        "sex": "TEXT",
+        "laterality": "TEXT",
+        "disease_duration": "REAL",
+        "levodopa": "TEXT",
+        "last_dose": "TEXT",
+        "dbs": "TEXT",
+        "fluctuations": "TEXT",
+        "tremor": "TEXT",
+        "dysmetria": "TEXT",
+        "myoclonus": "TEXT",
+    }
+    for col, dtype in clinical_cols.items():
+        if col not in columns:
+            conn.execute(f"ALTER TABLE subjects ADD COLUMN {col} {dtype}")
+    if any(c not in columns for c in clinical_cols):
+        logger.info("Added clinical data columns to subjects table")
+
+
 def _migrate_add_frame_offset(conn):
     """Add frame_offset column to segments table if missing."""
     tables = [r["name"] for r in conn.execute(
@@ -562,6 +596,7 @@ def init_db():
         _migrate_relative_dlc_dir(conn)
         _migrate_add_diagnosis(conn)
         _migrate_add_camera_mode(conn)
+        _migrate_add_clinical_fields(conn)
         conn.commit()
 
     if "job_queue" in tables:

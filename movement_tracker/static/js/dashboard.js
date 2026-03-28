@@ -351,66 +351,138 @@ async function showDetail(subjectId) {
         const panel = document.getElementById('detailPanel');
         document.getElementById('detailName').textContent = detail.name;
 
+        const selStyle = 'padding:2px 6px;font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);width:100%;';
+        const inputStyle = 'padding:2px 6px;font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);width:60px;';
+
+        // Helper for editable clinical field
+        function clinField(label, field, value, type) {
+            const v = value || '';
+            if (type === 'number') {
+                return `<div class="info-row"><span class="label">${label}</span><input type="number" value="${v}" style="${inputStyle}" onchange="updateClinical(${detail.id},'${field}',this.value)"></div>`;
+            } else if (type === 'select') {
+                return ''; // handled separately
+            }
+            return `<div class="info-row"><span class="label">${label}</span><input type="text" value="${v}" style="${inputStyle}width:100px;" onchange="updateClinical(${detail.id},'${field}',this.value)"></div>`;
+        }
+
+        function selectField(label, field, value, options) {
+            const opts = options.map(o => `<option value="${o}"${o === (value || '') ? ' selected' : ''}>${o}</option>`).join('');
+            return `<div class="info-row"><span class="label">${label}</span><select style="${selStyle}width:auto;" onchange="updateClinical(${detail.id},'${field}',this.value)">${opts}</select></div>`;
+        }
+
+        function yesNoField(label, field, value) {
+            return selectField(label, field, value, ['', 'Yes', 'No']);
+        }
+
+        // ── Trial checkmark chart ──
+        const trialStatus = detail.trial_status || [];
+        const features = [
+            { key: 'deident', label: 'Deident' },
+            { key: 'mp_hands', label: 'MP Hands' },
+            { key: 'mp_pose', label: 'MP Pose' },
+            { key: 'dlc_train', label: 'DLC Train' },
+            { key: 'dlc_analysis', label: 'DLC Analyze' },
+            { key: 'dlc_refine', label: 'DLC Refine' },
+            { key: 'dlc_corrections', label: 'Corrections' },
+            { key: 'events', label: 'Events' },
+            { key: 'mano', label: 'MANO' },
+        ];
+        let trialChart = '';
+        if (trialStatus.length > 0) {
+            // Short trial labels (e.g. "L1" from "Con07_L1")
+            const shortNames = trialStatus.map(t => {
+                const parts = t.name.split('_');
+                return parts.length > 1 ? parts.slice(1).join('_') : t.name;
+            });
+            trialChart = `<table style="font-size:11px;border-collapse:collapse;width:100%;">
+                <tr><td></td>${shortNames.map(n => `<td style="text-align:center;padding:1px 4px;font-weight:600;">${n}</td>`).join('')}</tr>
+                ${features.map(f => `<tr>
+                    <td style="padding:1px 4px;color:var(--text-muted);white-space:nowrap;">${f.label}</td>
+                    ${trialStatus.map(t => {
+                        const val = t.status[f.key];
+                        return `<td style="text-align:center;padding:1px 4px;">${val ? '<span style="color:var(--green);">&#10003;</span>' : '<span style="color:var(--text-muted);">&#8212;</span>'}</td>`;
+                    }).join('')}
+                </tr>`).join('')}
+            </table>`;
+        }
+
         document.getElementById('detailContent').innerHTML = `
-            <div class="detail-section">
-                <h3>Info</h3>
-                <div class="info-row"><span class="label">Stage</span><span class="badge badge-${detail.stage}">${detail.stage.replace(/_/g, ' ')}</span></div>
-                <div class="info-row"><span class="label">Iteration</span><span>${detail.iteration}</span></div>
-                <div class="info-row"><span class="label">Diagnosis</span><span>
-                    <select id="diagnosisSelect" onchange="onDiagnosisSelectChange(${detail.id}, this)" style="padding:2px 6px;font-size:13px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);">
-                        ${diagnosisGroups.map(dg => `<option value="${dg}"${dg === (detail.diagnosis || 'Control') ? ' selected' : ''}>${dg}</option>`).join('')}
-                        <option value="__new__">+ New Group…</option>
-                    </select>
-                </span></div>
-                <div class="info-row"><span class="label">Video Type</span><span>
-                    <select onchange="updateSubjectCameraMode(${detail.id}, this.value)" style="padding:2px 6px;font-size:13px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);">
-                        <option value="single"${(detail.camera_mode || 'stereo') === 'single' ? ' selected' : ''}>Single Camera</option>
-                        <option value="stereo"${(detail.camera_mode || 'stereo') === 'stereo' ? ' selected' : ''}>Stereo</option>
-                        <option value="multicam"${(detail.camera_mode || 'stereo') === 'multicam' ? ' selected' : ''}>Multi-Camera</option>
-                    </select>
-                </span></div>
-                <div class="info-row"><span class="label">DLC Dir</span><span style="font-size:11px;word-break:break-all">${detail.dlc_dir || 'N/A'}</span></div>
-                <div class="info-row"><span class="label">Camera</span><span>
-                    ${detail.camera_name
-                        ? `<select id="cameraSelect" onchange="updateSubjectCamera(${detail.id}, this.value)" style="padding:2px 6px;font-size:13px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;">
+                <!-- Column 1: Clinical -->
+                <div class="detail-section">
+                    <h3>Clinical</h3>
+                    ${clinField('Age', 'age', detail.age, 'number')}
+                    ${selectField('Sex', 'sex', detail.sex, ['', 'M', 'F', 'Other'])}
+                    ${selectField('Laterality', 'laterality', detail.laterality, ['', 'Right', 'Left', 'Bilateral'])}
+                    ${clinField('Disease Duration', 'disease_duration', detail.disease_duration, 'number')}
+                    ${clinField('Levodopa', 'levodopa', detail.levodopa)}
+                    ${clinField('Last Dose', 'last_dose', detail.last_dose)}
+                    ${selectField('DBS', 'dbs', detail.dbs, ['', 'Yes', 'No'])}
+                    ${yesNoField('Fluctuations', 'fluctuations', detail.fluctuations)}
+                    ${yesNoField('Tremor', 'tremor', detail.tremor)}
+                    ${yesNoField('Dysmetria', 'dysmetria', detail.dysmetria)}
+                    ${yesNoField('Myoclonus', 'myoclonus', detail.myoclonus)}
+                    <div style="margin-top:8px;">
+                        <a class="btn btn-sm" href="/onboarding?subject=${detail.id}" style="text-decoration:none;width:100%;display:block;text-align:center;">Edit Subject</a>
+                    </div>
+                </div>
+
+                <!-- Column 2: Trials checkmark chart -->
+                <div class="detail-section">
+                    <h3>Trials</h3>
+                    ${trialChart || '<span style="font-size:12px;color:var(--text-muted);">No videos found</span>'}
+                </div>
+
+                <!-- Column 3: Controls -->
+                <div class="detail-section">
+                    <h3>Controls</h3>
+                    <div class="info-row"><span class="label">Group</span>
+                        <select id="diagnosisSelect" onchange="onDiagnosisSelectChange(${detail.id}, this)" style="${selStyle}width:auto;">
+                            ${diagnosisGroups.map(dg => `<option value="${dg}"${dg === (detail.diagnosis || 'Control') ? ' selected' : ''}>${dg}</option>`).join('')}
+                            <option value="__new__">+ New…</option>
+                        </select>
+                    </div>
+                    <div class="info-row"><span class="label">Video Type</span>
+                        <select onchange="updateSubjectCameraMode(${detail.id}, this.value)" style="${selStyle}width:auto;">
+                            <option value="single"${(detail.camera_mode || 'stereo') === 'single' ? ' selected' : ''}>Single</option>
+                            <option value="stereo"${(detail.camera_mode || 'stereo') === 'stereo' ? ' selected' : ''}>Stereo</option>
+                            <option value="multicam"${(detail.camera_mode || 'stereo') === 'multicam' ? ' selected' : ''}>Multicam</option>
+                        </select>
+                    </div>
+                    <div class="info-row"><span class="label">Camera</span>
+                        <select id="cameraSelect" onchange="updateSubjectCamera(${detail.id}, this.value)" style="${selStyle}width:auto;">
                             <option value="">None</option>
                             ${calibrationNames.map(n => `<option value="${n}"${n === detail.camera_name ? ' selected' : ''}>${n}</option>`).join('')}
-                          </select>`
-                        : `<span style="background:var(--red);color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;">None</span>
-                           <select id="cameraSelect" onchange="updateSubjectCamera(${detail.id}, this.value)" style="margin-left:6px;padding:2px 6px;font-size:13px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);">
-                            <option value="">-- Assign --</option>
-                            ${calibrationNames.map(n => `<option value="${n}">${n}</option>`).join('')}
-                          </select>`
-                    }
-                </span></div>
-            </div>
-            <div class="detail-section">
-                <h3>Trials</h3>
-                ${detail.trials.length > 0
-                    ? detail.trials.map(t => `<div class="info-row"><span>${t}</span></div>`).join('')
-                    : '<div class="info-row"><span class="label">No videos found</span></div>'
-                }
-            </div>
-            <div class="detail-section" style="grid-column: 1 / -1;">
-                <h3>Actions</h3>
-                <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;">
-                    <a class="btn btn-sm" href="/onboarding?subject=${detail.id}" style="text-decoration:none;">Edit Subject</a>
+                        </select>
+                    </div>
+                    <div style="margin-top:12px;">
+                        <h3 style="margin-bottom:6px;">Pipeline</h3>
+                        <div style="display:flex;gap:4px;flex-wrap:wrap;">
+                            <button class="btn btn-sm" onclick="runStep(${detail.id}, 'mediapipe')">MediaPipe</button>
+                            <button class="btn btn-sm" onclick="runStep(${detail.id}, 'pose')">Pose</button>
+                            <button class="btn btn-sm" onclick="runStep(${detail.id}, 'deidentify')">Blur</button>
+                            <button class="btn btn-sm btn-primary" onclick="runStep(${detail.id}, 'train')">Train</button>
+                            <button class="btn btn-sm" onclick="runStep(${detail.id}, 'analyze_v1')">v1</button>
+                            <button class="btn btn-sm" onclick="runStep(${detail.id}, 'analyze_v2')">v2</button>
+                        </div>
+                    </div>
+                    <div style="margin-top:8px;">
+                        <button class="btn btn-sm btn-danger" onclick="removeSubject(${detail.id}, '${detail.name}')" style="width:100%;">Remove Subject</button>
+                    </div>
                 </div>
             </div>
-            <div class="detail-section" style="grid-column: 1 / -1;">
-                <h3>Pipeline Steps</h3>
-                <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;">
-                    <button class="btn btn-sm" onclick="runStep(${detail.id}, 'mediapipe')">Run MediaPipe</button>
-                    <button class="btn btn-sm" onclick="runStep(${detail.id}, 'pose')">Run Pose</button>
-                    <button class="btn btn-sm" onclick="runStep(${detail.id}, 'deidentify')">Blur Faces</button>
-                    <button class="btn btn-sm btn-primary" onclick="runStep(${detail.id}, 'train')">Train</button>
-                    <button class="btn btn-sm" onclick="runStep(${detail.id}, 'analyze_v1')">Analyze v1</button>
-                    <button class="btn btn-sm" onclick="runStep(${detail.id}, 'analyze_v2')">Analyze v2</button>
-                    <button class="btn btn-sm btn-danger" onclick="removeSubject(${detail.id}, '${detail.name}')" style="margin-left:auto;">Remove</button>
+
+            <!-- Distance Trace (full width) -->
+            <div class="detail-section" style="margin-top:12px;">
+                <h3>Distance Trace</h3>
+                <div id="detailDistancePlots" style="min-height:60px;">
+                    <span style="font-size:12px;color:var(--text-muted);">Loading…</span>
                 </div>
             </div>
+
+            <!-- Recent Jobs (full width, under distance) -->
             ${detail.jobs.length > 0 ? `
-            <div class="detail-section" style="grid-column: 1 / -1;">
+            <div class="detail-section" style="margin-top:8px;">
                 <h3>Recent Jobs</h3>
                 ${detail.jobs.slice(0, 5).map(j => `
                     <div class="info-row">
@@ -419,12 +491,6 @@ async function showDetail(subjectId) {
                     </div>
                 `).join('')}
             </div>` : ''}
-            <div class="detail-section" style="grid-column: 1 / -1;">
-                <h3>Distance Trace</h3>
-                <div id="detailDistancePlots" style="min-height:60px;">
-                    <span style="font-size:12px;color:var(--text-muted);">Loading…</span>
-                </div>
-            </div>
         `;
 
         panel.classList.add('active');
@@ -434,6 +500,20 @@ async function showDetail(subjectId) {
         _loadDetailDistances(subjectId);
     } catch (e) {
         alert('Error loading subject: ' + e.message);
+    }
+}
+
+async function updateClinical(subjectId, field, value) {
+    try {
+        const body = {};
+        if (field === 'age' || field === 'disease_duration') {
+            body[field] = value ? Number(value) : null;
+        } else {
+            body[field] = value || null;
+        }
+        await API.patch(`/api/subjects/${subjectId}`, body);
+    } catch (e) {
+        console.error('Failed to update clinical field:', e);
     }
 }
 
