@@ -34,6 +34,12 @@ CREATE TABLE IF NOT EXISTS subjects (
     tremor TEXT,
     dysmetria TEXT,
     myoclonus TEXT,
+    handedness TEXT,
+    other_meds TEXT,
+    video_date TEXT,
+    saa_flag INTEGER DEFAULT 0,
+    skin_biopsy_flag INTEGER DEFAULT 0,
+    sinemet_schedule TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
