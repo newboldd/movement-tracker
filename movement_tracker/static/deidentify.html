@@ -160,9 +160,9 @@
             <select id="subjectSelect"></select>
             <div id="trialBtns"></div>
             <div style="display:flex;gap:2px;margin-left:auto;">
-                <button class="btn btn-sm" id="viewOriginal" onclick="deid.setViewMode('original')" title="Original video with overlays" style="background:var(--blue);color:#fff;">Original</button>
+                <button class="btn btn-sm" id="viewOriginal" onclick="deid.setViewMode('original')" title="Original video with mask overlays" style="background:var(--blue);color:#fff;">Masks</button>
                 <button class="btn btn-sm" id="viewPreview" onclick="deid.setViewMode('preview')" title="Preview blur areas (P)">Preview</button>
-                <button class="btn btn-sm" id="viewDeidentified" onclick="deid.setViewMode('deidentified')" title="Show rendered deidentified video" disabled>Deidentified</button>
+                <button class="btn btn-sm" id="viewDeidentified" onclick="deid.setViewMode('deidentified')" title="Show rendered blurred video" disabled>Blurred</button>
             </div>
             <span id="statusMsg"></span>
         </div>
@@ -246,7 +246,7 @@
                 </div>
 
                 <!-- Render -->
-                <div class="section">
+                <div class="section" id="renderSection">
                     <h3>Render</h3>
                     <button class="btn btn-sm btn-success" id="renderBtn" onclick="deid.renderTrial()" style="width:100%;">
                         Render Trial

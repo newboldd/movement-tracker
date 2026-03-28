@@ -305,6 +305,13 @@ const deid = (() => {
         trialMeta = trials[idx];
         currentFrame = trialMeta.start_frame;
         if (typeof setNavState === 'function') setNavState({ trialIdx: idx, frame: currentFrame });
+
+        // Fall back to 'original' if current view mode requires blurred video that doesn't exist
+        if (viewMode === 'deidentified' && (!trialMeta || !trialMeta.has_blurred)) {
+            viewMode = 'original';
+        }
+        _updateViewButtons();
+        _updateSidebarState();
         totalFrames = trialMeta.frame_count;
         fps = trialMeta.fps || 30;
         handLandmarks = [];
@@ -505,16 +512,24 @@ const deid = (() => {
         if (deidBtn) {
             deidBtn.disabled = !trialMeta || !trialMeta.has_blurred;
             deidBtn.title = (!trialMeta || !trialMeta.has_blurred)
-                ? 'Render first to enable' : 'Show deidentified video';
+                ? 'Render first to enable' : 'Show blurred video';
         }
     }
 
     function _updateSidebarState() {
         const sidebar = document.querySelector('.deid-sidebar');
         if (!sidebar) return;
-        if (viewMode === 'deidentified') {
+        if (viewMode === 'deidentified' || viewMode === 'preview') {
             sidebar.style.opacity = '0.4';
             sidebar.style.pointerEvents = 'none';
+            // Keep render button active in preview mode
+            if (viewMode === 'preview') {
+                const renderSection = document.getElementById('renderSection');
+                if (renderSection) {
+                    renderSection.style.opacity = '';
+                    renderSection.style.pointerEvents = '';
+                }
+            }
         } else {
             sidebar.style.opacity = '';
             sidebar.style.pointerEvents = '';
