@@ -205,13 +205,9 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
             logger.warning(f"Could not get video info for {video_path}: {e}")
             actual_frame_count = expected_frame_count
 
-        # If video has fewer frames than expected, assume missing frames are at START
-        frame_offset = max(0, expected_frame_count - actual_frame_count)
-        if frame_offset > 0:
-            logger.info(
-                f"{video_name}: expected {expected_frame_count} frames, actual {actual_frame_count} "
-                f"→ applying start offset {frame_offset}"
-            )
+        # Store landmarks at OpenCV frame indices (no offset).
+        # Offset compensation for browser playback happens at display time.
+        frame_offset = 0
 
         cap = cv2.VideoCapture(video_path)
         ret, frame0 = cap.read()
@@ -758,8 +754,9 @@ def run_mediapipe_cropped(
     actual_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     n_frames = min(frame_count, actual_frames) if actual_frames > 0 else frame_count
 
-    # Handle frame offset (same logic as run_mediapipe)
-    frame_offset = max(0, frame_count - n_frames)
+    # Don't apply frame_offset here — landmarks are stored at OpenCV frame indices.
+    # The offset compensation (for pre-roll frames browsers skip) happens at display time.
+    frame_offset = 0
 
     # Run MediaPipe on cropped frames with 2-hand tracking
     mp_hands = mp_lib.solutions.hands
