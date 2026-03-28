@@ -470,10 +470,11 @@ def get_subject(subject_id: int) -> dict:
         # DLC corrections: check for corrections session or corrections dir
         status["dlc_corrections"] = (dlc_path / "corrections").exists()
         # Events: check subject_events table
-        has_events = db.execute(
-            "SELECT COUNT(*) as c FROM subject_events WHERE subject_id = ?",
-            (subject_id,),
-        ).fetchone()["c"] > 0
+        with get_db_ctx() as db2:
+            has_events = db2.execute(
+                "SELECT COUNT(*) as c FROM subject_events WHERE subject_id = ?",
+                (subject_id,),
+            ).fetchone()["c"] > 0
         status["events"] = has_events
         # MANO: placeholder (check for MANO output)
         status["mano"] = (dlc_path / "mano_output").exists() if (dlc_path / "mano_output").exists() else False
