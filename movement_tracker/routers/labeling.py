@@ -344,6 +344,41 @@ def get_mediapipe(session_id: int) -> dict:
                 remapped["run_history"] = data["run_history"]
             return remapped
 
+    # Include Apple Vision hand landmarks if available
+    import numpy as np
+    settings = get_settings()
+    vision_path = settings.dlc_path / subj["name"] / "vision_prelabels.npz"
+    if vision_path.exists():
+        try:
+            vdata = np.load(str(vision_path))
+            THUMB_TIP, INDEX_TIP = 4, 8
+
+            def _to_list(arr):
+                result = []
+                for i in range(len(arr)):
+                    if np.isnan(arr[i, 0]):
+                        result.append(None)
+                    else:
+                        result.append([float(arr[i, 0]), float(arr[i, 1])])
+                return result
+
+            cam_names = settings.camera_names
+            if len(cam_names) >= 1:
+                vos = vdata["OS_landmarks"]
+                data[f"vision_{cam_names[0]}"] = {
+                    "thumb": _to_list(vos[:, THUMB_TIP]),
+                    "index": _to_list(vos[:, INDEX_TIP]),
+                }
+            if len(cam_names) >= 2:
+                vod = vdata["OD_landmarks"]
+                data[f"vision_{cam_names[1]}"] = {
+                    "thumb": _to_list(vod[:, THUMB_TIP]),
+                    "index": _to_list(vod[:, INDEX_TIP]),
+                }
+            data["has_vision"] = True
+        except Exception as e:
+            logger.debug(f"Could not load Vision data for {subj['name']}: {e}")
+
     return data
 
 
@@ -1848,6 +1883,99 @@ def run_pose(session_id: int) -> dict:
                     )
 
             run_pose_prelabels(subject_name, progress_callback=progress_cb)
+
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'completed', progress_pct = 100,
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (job_id,),
+                )
+        except InterruptedError:
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'cancelled',
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (job_id,),
+                )
+        except Exception as e:
+            with get_db_ctx() as db:
+                db.execute(
+                    """UPDATE jobs SET status = 'failed', error_msg = ?,
+                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                    (str(e), job_id),
+                )
+        finally:
+            registry.unregister_cancel_event(job_id)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+    return {"status": "ok", "job_id": job_id}
+
+
+@router.post("/sessions/{session_id}/run-vision")
+def run_vision(session_id: int) -> dict:
+    """Run Apple Vision hand pose on all videos for a subject (macOS only).
+
+    Creates a background job. Results saved to vision_prelabels.npz.
+    """
+    from ..services.vision_prelabel import is_available, run_vision_hands
+
+    if not is_available():
+        raise HTTPException(400, "Apple Vision framework not available (macOS only)")
+
+    import threading
+    from ..services.jobs import registry
+
+    with get_db_ctx() as db:
+        session = db.execute(
+            "SELECT * FROM label_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not session:
+            raise HTTPException(404, "Session not found")
+        subj = db.execute(
+            "SELECT * FROM subjects WHERE id = ?", (session["subject_id"],)
+        ).fetchone()
+
+    subject_name = subj["name"]
+    subject_id = subj["id"]
+    settings = get_settings()
+
+    with get_db_ctx() as db:
+        log_dir = settings.dlc_path / ".logs"
+        log_dir.mkdir(exist_ok=True)
+        log_path = str(log_dir / f"job_vision_{subject_id}.log")
+
+        db.execute(
+            """INSERT INTO jobs (subject_id, job_type, status, log_path)
+               VALUES (?, 'vision', 'pending', ?)""",
+            (subject_id, log_path),
+        )
+        job = db.execute(
+            "SELECT * FROM jobs WHERE subject_id = ? ORDER BY id DESC LIMIT 1",
+            (subject_id,),
+        ).fetchone()
+
+    job_id = job["id"]
+    cancel_event = registry.register_cancel_event(job_id)
+
+    def _run():
+        try:
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (job_id,),
+                )
+
+            def progress_cb(pct):
+                if cancel_event.is_set():
+                    raise InterruptedError("Job cancelled")
+                with get_db_ctx() as db:
+                    db.execute(
+                        "UPDATE jobs SET progress_pct = ? WHERE id = ?",
+                        (pct, job_id),
+                    )
+
+            run_vision_hands(subject_name, progress_callback=progress_cb)
 
             with get_db_ctx() as db:
                 db.execute(

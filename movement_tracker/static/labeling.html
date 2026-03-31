@@ -119,6 +119,10 @@
                     <input type="checkbox" id="showPoseToggle" checked onchange="labeler.toggleModelVis('pose', this.checked)">
                     Pose keypoints
                 </label>
+                <label id="showVisionLabel" style="display:none;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:4px;">
+                    <input type="checkbox" id="showVisionToggle" checked onchange="labeler.toggleModelVis('vision', this.checked)">
+                    Vision keypoints
+                </label>
             </div>
 
             <!-- MediaPipe Region (Label/Refine modes) -->
@@ -145,6 +149,15 @@
                 <div style="padding-left:2px;">
                     <button class="btn btn-sm" id="mpRunPoseBtn" onclick="labeler.runPose()" style="width:100%;">Detect Pose (all trials)</button>
                     <div id="mpPoseStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
+                </div>
+
+                <!-- Apple Vision (macOS only) -->
+                <div id="visionSection" style="display:none;">
+                    <h3 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;margin-top:12px;">Apple Vision</h3>
+                    <div style="padding-left:2px;">
+                        <button class="btn btn-sm" id="visionRunBtn" onclick="labeler.runVision()" style="width:100%;">Detect Hands (all trials)</button>
+                        <div id="visionStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
+                    </div>
                 </div>
             </div>
 
@@ -260,7 +273,7 @@
 
     <script src="/static/js/nav.js"></script>
     <script src="/static/js/api.js?v=10"></script>
-    <script src="/static/js/labeler.js?v=51"></script>
+    <script src="/static/js/labeler.js?v=52"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

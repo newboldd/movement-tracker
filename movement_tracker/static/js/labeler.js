@@ -132,6 +132,7 @@ const labeler = (() => {
     let mpCropDragStart = null;        // {mx, my, box: {...}} at drag start
     let mpCropAdjusted = {};           // {cam: bool} whether user manually dragged each camera's box
     let mpHasMediapipe = {};           // {trialIdx: bool} whether mediapipe labels exist per trial
+    let modelVis = { hands: true, pose: true, vision: true };  // model visibility toggles
     let mpRunVisible = { current: true };  // {current: bool, 1: bool, 2: bool, ...} toggle visibility
 
     // Frame display mode: 'frame' | 'time' | 'both'
@@ -466,6 +467,12 @@ const labeler = (() => {
                 if (mpCropSection) mpCropSection.style.display = 'block';
                 if (modeSwitcher) modeSwitcher.style.display = 'none';
                 if (actionsSection) actionsSection.style.display = 'none';
+                // Show model visibility section
+                const mvs = document.getElementById('mpModelVisSection');
+                if (mvs) mvs.style.display = 'block';
+                // Show Vision section (always show on macOS — button fails gracefully if not available)
+                const vs = document.getElementById('visionSection');
+                if (vs) vs.style.display = 'block';
                 // Update session type label
                 const typeLabel = document.getElementById('sessionTypeLabel');
                 if (typeLabel) typeLabel.textContent = 'MediaPipe:';
@@ -538,6 +545,11 @@ const labeler = (() => {
                     if (mpData && Object.keys(mpData).length > 0) {
                         mpLabels = mpData;
                         distances = mpData.distances || null;
+                        // Show Vision toggle if data available
+                        if (mpData.has_vision) {
+                            const vl = document.getElementById('showVisionLabel');
+                            if (vl) vl.style.display = 'flex';
+                        }
                     }
                 } catch (e) {
                     console.log('No MediaPipe prelabels available');
@@ -775,6 +787,7 @@ const labeler = (() => {
         }
 
         drawLabelsOverlay();
+        if (isMediaPipePage) drawVisionOverlay();
         if (mpCropMode && mpCropEditBox) drawMpCropOverlay();
         videoFrameMode = true;
         return true;
@@ -1274,6 +1287,7 @@ const labeler = (() => {
         }
 
         drawLabelsOverlay();
+        if (isMediaPipePage) drawVisionOverlay();
         if (mpCropMode && mpCropEditBox) drawMpCropOverlay();
     }
 
@@ -1392,6 +1406,53 @@ const labeler = (() => {
             if (isGhost) ctx.setLineDash([4, 4]);
             ctx.stroke();
             ctx.setLineDash([]);
+        }
+    }
+
+    // ── Vision keypoint overlay (purple diamonds) ──
+    function drawVisionOverlay() {
+        if (!modelVis.vision || !mpLabels || !mpLabels.has_vision) return;
+        const visionKey = `vision_${currentSide}`;
+        const vData = mpLabels[visionKey];
+        if (!vData) return;
+
+        const thumb = vData.thumb ? vData.thumb[currentFrame] : null;
+        const index = vData.index ? vData.index[currentFrame] : null;
+
+        const r = 5;
+        ctx.fillStyle = 'rgba(180,80,255,0.8)';  // purple
+
+        if (thumb) {
+            const sx = thumb[0] * scale + offsetX;
+            const sy = thumb[1] * scale + offsetY;
+            // Diamond shape
+            ctx.beginPath();
+            ctx.moveTo(sx, sy - r);
+            ctx.lineTo(sx + r, sy);
+            ctx.lineTo(sx, sy + r);
+            ctx.lineTo(sx - r, sy);
+            ctx.closePath();
+            ctx.fill();
+            // Label
+            ctx.fillStyle = 'rgba(180,80,255,0.6)';
+            ctx.font = '9px sans-serif';
+            ctx.fillText('VT', sx + r + 2, sy + 3);
+            ctx.fillStyle = 'rgba(180,80,255,0.8)';
+        }
+
+        if (index) {
+            const sx = index[0] * scale + offsetX;
+            const sy = index[1] * scale + offsetY;
+            ctx.beginPath();
+            ctx.moveTo(sx, sy - r);
+            ctx.lineTo(sx + r, sy);
+            ctx.lineTo(sx, sy + r);
+            ctx.lineTo(sx - r, sy);
+            ctx.closePath();
+            ctx.fill();
+            ctx.fillStyle = 'rgba(180,80,255,0.6)';
+            ctx.font = '9px sans-serif';
+            ctx.fillText('VI', sx + r + 2, sy + 3);
         }
     }
 
@@ -1778,6 +1839,66 @@ const labeler = (() => {
                     evtSource.close();
                     if (statusEl) statusEl.textContent = 'Pose detection complete.';
                     if (btn) btn.disabled = false;
+                } else if (data.status === 'failed') {
+                    evtSource.close();
+                    if (statusEl) statusEl.textContent = 'Error: ' + (data.error_msg || 'unknown');
+                    if (btn) btn.disabled = false;
+                } else if (data.status === 'cancelled') {
+                    evtSource.close();
+                    if (statusEl) statusEl.textContent = 'Cancelled.';
+                    if (btn) btn.disabled = false;
+                }
+            };
+            evtSource.onerror = () => {
+                evtSource.close();
+                if (statusEl) statusEl.textContent = 'Connection lost.';
+                if (btn) btn.disabled = false;
+            };
+        } catch (err) {
+            if (statusEl) statusEl.textContent = 'Error: ' + (err.message || err);
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    function toggleModelVis(model, visible) {
+        modelVis[model] = visible;
+        render();
+    }
+
+    async function runVision() {
+        const statusEl = document.getElementById('visionStatus');
+        const btn = document.getElementById('visionRunBtn');
+        if (statusEl) statusEl.textContent = 'Running Vision Hand Detection...';
+        if (btn) btn.disabled = true;
+
+        try {
+            const result = await API.post(`/api/labeling/sessions/${sessionId}/run-vision`);
+            const jobId = result.job_id;
+            if (!jobId) throw new Error('No job_id returned');
+
+            const evtSource = new EventSource(`/api/jobs/${jobId}/stream`);
+            evtSource.onmessage = async (event) => {
+                const data = JSON.parse(event.data);
+                if (data.status === 'running') {
+                    const pct = data.progress_pct ? Math.round(data.progress_pct) : 0;
+                    if (statusEl) statusEl.textContent = `Running Vision... ${pct}%`;
+                } else if (data.status === 'completed') {
+                    evtSource.close();
+                    if (statusEl) statusEl.textContent = 'Vision detection complete. Reloading...';
+                    if (btn) btn.disabled = false;
+                    // Reload MP data which now includes vision
+                    const mpData = await API.get(`/api/labeling/sessions/${sessionId}/mediapipe`);
+                    if (mpData && Object.keys(mpData).length > 0) {
+                        mpLabels = mpData;
+                        if (mpData.distances) distances = mpData.distances;
+                    }
+                    // Show vision toggle if data available
+                    if (mpData.has_vision) {
+                        const vl = document.getElementById('showVisionLabel');
+                        if (vl) vl.style.display = 'flex';
+                    }
+                    render();
+                    if (statusEl) statusEl.textContent = 'Vision detection complete.';
                 } else if (data.status === 'failed') {
                     evtSource.close();
                     if (statusEl) statusEl.textContent = 'Error: ' + (data.error_msg || 'unknown');
@@ -3188,6 +3309,7 @@ const labeler = (() => {
         }
 
         drawLabelsOverlay();
+        if (isMediaPipePage) drawVisionOverlay();
         if (mpCropMode && mpCropEditBox) drawMpCropOverlay();
         updateFrameDisplay();
 
@@ -5234,7 +5356,7 @@ const labeler = (() => {
         // Video export
         getExportContext,
         // MediaPipe crop box
-        toggleMpCrop, saveMpCrop, cancelMpCrop, rerunMediapipe, clearMpHistory, runPose,
+        toggleMpCrop, saveMpCrop, cancelMpCrop, rerunMediapipe, clearMpHistory, runPose, runVision, toggleModelVis,
         // Refine flow (within corrections mode)
         startRefineFlow,
     };
