@@ -239,11 +239,19 @@ def update_subject(subject_id: int, req: SubjectUpdate) -> dict:
                 (req.diagnosis, subject_id),
             )
 
+        if req.group_label is not None:
+            db.execute(
+                "UPDATE subjects SET group_label = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (req.group_label, subject_id),
+            )
+
         # Clinical data fields — update any that are provided
         clinical_fields = [
             "age", "sex", "laterality", "disease_duration",
             "levodopa", "last_dose", "dbs", "fluctuations",
             "tremor", "dysmetria", "myoclonus",
+            "handedness", "other_meds", "video_date",
+            "saa_flag", "skin_biopsy_flag", "sinemet_schedule",
         ]
         for field in clinical_fields:
             val = getattr(req, field, None)
@@ -522,15 +530,14 @@ def auto_assign_diagnosis() -> dict:
         assignments = {}
 
         for subject in subjects:
-            new_diagnosis = infer_diagnosis(subject["name"])
-            assignments[subject["name"]] = new_diagnosis
+            new_group = infer_diagnosis(subject["name"])
+            assignments[subject["name"]] = new_group
 
-            if subject["diagnosis"] != new_diagnosis:
-                db.execute(
-                    "UPDATE subjects SET diagnosis = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (new_diagnosis, subject["id"]),
-                )
-                updated += 1
+            db.execute(
+                "UPDATE subjects SET group_label = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (new_group, subject["id"]),
+            )
+            updated += 1
 
     return {
         "updated": updated,

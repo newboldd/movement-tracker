@@ -50,6 +50,13 @@ class SubjectUpdate(BaseModel):
     tremor: Optional[str] = None
     dysmetria: Optional[str] = None
     myoclonus: Optional[str] = None
+    handedness: Optional[str] = None
+    other_meds: Optional[str] = None
+    video_date: Optional[str] = None
+    saa_flag: Optional[int] = None
+    skin_biopsy_flag: Optional[int] = None
+    sinemet_schedule: Optional[str] = None
+    group_label: Optional[str] = None
 
 
 class SubjectResponse(BaseModel):

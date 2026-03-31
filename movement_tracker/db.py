@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS subjects (
     saa_flag INTEGER DEFAULT 0,
     skin_biopsy_flag INTEGER DEFAULT 0,
     sinemet_schedule TEXT,
+    group_label TEXT DEFAULT 'Other',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -386,6 +387,13 @@ def _migrate_add_clinical_fields(conn):
         "tremor": "TEXT",
         "dysmetria": "TEXT",
         "myoclonus": "TEXT",
+        "handedness": "TEXT",
+        "other_meds": "TEXT",
+        "video_date": "TEXT",
+        "saa_flag": "INTEGER DEFAULT 0",
+        "skin_biopsy_flag": "INTEGER DEFAULT 0",
+        "sinemet_schedule": "TEXT",
+        "group_label": "TEXT DEFAULT 'Other'",
     }
     for col, dtype in clinical_cols.items():
         if col not in columns:

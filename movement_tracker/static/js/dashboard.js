@@ -46,9 +46,26 @@ async function loadSubjects() {
 
 async function loadSparklines() {
     try {
+        // Load from file cache (instant if cached)
         const data = await API.get('/api/results/preview-distances');
-        const previews = data.previews || {};
+        _drawSparklines(data.previews || {});
 
+        // Background refresh: check for updates without blocking
+        API.post('/api/results/preview-distances/refresh').then(res => {
+            if (res.updated > 0) {
+                // Some previews were updated — reload from cache
+                API.get('/api/results/preview-distances').then(fresh => {
+                    _drawSparklines(fresh.previews || {});
+                });
+            }
+        }).catch(() => {});  // silently ignore refresh errors
+    } catch (e) {
+        console.log('Sparkline load failed:', e);
+    }
+}
+
+function _drawSparklines(previews) {
+    try {
         for (const [sid, info] of Object.entries(previews)) {
             const canvas = document.getElementById(`spark_${sid}`);
             if (!canvas) continue;
@@ -104,7 +121,7 @@ async function loadSparklines() {
             }
         });
     } catch (e) {
-        console.log('Sparkline load failed:', e);
+        console.log('Sparkline draw failed:', e);
     }
 }
 
@@ -128,11 +145,11 @@ function renderDiagnosisGroups() {
     });
 
     filtered.forEach(s => {
-        const diagnosis = s.diagnosis || "Control";
-        if (!grouped[diagnosis]) {
-            grouped[diagnosis] = [];
+        const group = s.group_label || s.diagnosis || "Control";
+        if (!grouped[group]) {
+            grouped[group] = [];
         }
-        grouped[diagnosis].push(s);
+        grouped[group].push(s);
     });
 
     let html = '<div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; width: 100%;">';
@@ -291,13 +308,13 @@ async function updateSubjectCamera(subjectId, cameraName) {
     }
 }
 
-async function updateSubjectDiagnosis(subjectId, diagnosis) {
+async function updateSubjectDiagnosis(subjectId, group) {
     try {
-        await API.patch(`/api/subjects/${subjectId}`, { diagnosis: diagnosis });
+        await API.patch(`/api/subjects/${subjectId}`, { group_label: group });
         // Refresh the subjects list to update the grouped view
         await loadSubjects();
     } catch (e) {
-        alert('Error updating diagnosis: ' + e.message);
+        alert('Error updating group: ' + e.message);
     }
 }
 
@@ -438,7 +455,7 @@ async function showDetail(subjectId) {
                     <h3>Controls</h3>
                     <div class="info-row"><span class="label">Group</span>
                         <select id="diagnosisSelect" onchange="onDiagnosisSelectChange(${detail.id}, this)" style="${selStyle}width:auto;">
-                            ${diagnosisGroups.map(dg => `<option value="${dg}"${dg === (detail.diagnosis || 'Control') ? ' selected' : ''}>${dg}</option>`).join('')}
+                            ${diagnosisGroups.map(dg => `<option value="${dg}"${dg === (detail.group_label || detail.diagnosis || 'Control') ? ' selected' : ''}>${dg}</option>`).join('')}
                             <option value="__new__">+ New…</option>
                         </select>
                     </div>

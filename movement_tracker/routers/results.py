@@ -279,69 +279,173 @@ def _linreg_slope(x: list[float], y: list[float]) -> float | None:
 
 # ── API endpoints ───────────────────────────────────────────────────────
 
-_preview_cache = {"data": None, "time": 0}
-_PREVIEW_CACHE_TTL = 300  # 5 minutes
+def _preview_cache_path():
+    """Path to the preview distances JSON cache file."""
+    from .subjects import get_settings
+    settings = get_settings()
+    return settings.dlc_path.parent / ".preview_distances.json"
+
+
+def _compute_preview_for_subject(subj_name: str, subj_id: int) -> dict | None:
+    """Compute 10-second distance preview for one subject."""
+    try:
+        distances, trials, source = _load_distances_and_trials(subj_name)
+        if not distances or not trials:
+            return None
+
+        trial = trials[-1]
+        fps = trial.get("fps", 60)
+        start = trial["start_frame"]
+        end = trial["end_frame"]
+        window_frames = int(10 * fps)
+
+        win_start = max(start, end + 1 - window_frames)
+        win_end = min(end + 1, len(distances))
+        segment = distances[win_start:win_end]
+
+        if len(segment) > 200:
+            step = len(segment) // 200
+            segment = segment[::step]
+
+        values = [round(d, 1) if d is not None else None for d in segment]
+
+        return {
+            "values": values,
+            "fps": fps,
+            "source": source,
+            "trial_name": trial["trial_name"],
+        }
+    except Exception:
+        return None
 
 
 @router.get("/preview-distances")
 def get_preview_distances() -> dict:
-    """Return 10-second distance preview for all subjects (for dashboard sparklines).
+    """Return 10-second distance preview for all subjects.
 
-    Cached in memory for 5 minutes. Cache is invalidated by any MediaPipe/DLC run.
+    Loads instantly from a JSON cache file. If no cache exists, computes
+    all previews and writes the file. Returns the cached data immediately.
     """
-    import time as _time
-    now = _time.time()
-    if _preview_cache["data"] and (now - _preview_cache["time"]) < _PREVIEW_CACHE_TTL:
-        return _preview_cache["data"]
+    import json as _json
+
+    cache_path = _preview_cache_path()
+
+    # Try loading from file cache (instant)
+    if cache_path.exists():
+        try:
+            with open(cache_path) as f:
+                return _json.load(f)
+        except Exception:
+            pass
+
+    # No cache — compute all and write file
+    return _rebuild_preview_cache()
+
+
+@router.post("/preview-distances/refresh")
+def refresh_preview_distances() -> dict:
+    """Recompute preview distances and update the cache file.
+
+    Called in the background by the dashboard after loading the cached version.
+    Checks each subject's npz mtime against the cached value to skip unchanged ones.
+    """
+    import json as _json, os
+
+    cache_path = _preview_cache_path()
+
+    # Load existing cache to compare mtimes
+    old_cache = {}
+    if cache_path.exists():
+        try:
+            with open(cache_path) as f:
+                old_data = _json.load(f)
+                old_cache = old_data.get("previews", {})
+        except Exception:
+            pass
+
+    with get_db_ctx() as db:
+        subjects = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
+
+    from ..config import get_settings
+    settings = get_settings()
+    previews = {}
+    updated_count = 0
+
+    for subj in subjects:
+        sid = str(subj["id"])
+        name = subj["name"]
+
+        # Check npz mtime
+        npz_path = settings.dlc_path / name / "mediapipe_prelabels.npz"
+        current_mtime = os.path.getmtime(str(npz_path)) if npz_path.exists() else 0
+
+        # If mtime matches cached value, reuse cached preview
+        old_entry = old_cache.get(sid)
+        if old_entry and old_entry.get("_mtime") == current_mtime:
+            previews[sid] = old_entry
+            continue
+
+        # Recompute
+        preview = _compute_preview_for_subject(name, subj["id"])
+        if preview:
+            preview["_mtime"] = current_mtime
+            previews[sid] = preview
+            updated_count += 1
+
+    result = {"previews": previews}
+
+    # Write cache file
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(cache_path), "w") as f:
+            _json.dump(result, f)
+    except Exception:
+        pass
+
+    return {"status": "ok", "total": len(previews), "updated": updated_count}
+
+
+def _rebuild_preview_cache() -> dict:
+    """Full rebuild of preview cache — used on first load when no cache file exists."""
+    import json as _json, os
+    from ..config import get_settings
+
+    settings = get_settings()
+    cache_path = _preview_cache_path()
 
     with get_db_ctx() as db:
         subjects = db.execute("SELECT id, name FROM subjects ORDER BY name").fetchall()
 
     previews = {}
     for subj in subjects:
-        try:
-            distances, trials, source = _load_distances_and_trials(subj["name"])
-            if not distances or not trials:
-                continue
+        npz_path = settings.dlc_path / subj["name"] / "mediapipe_prelabels.npz"
+        mtime = os.path.getmtime(str(npz_path)) if npz_path.exists() else 0
 
-            # Use the last trial, final 10 seconds
-            trial = trials[-1]
-            fps = trial.get("fps", 60)
-            start = trial["start_frame"]
-            end = trial["end_frame"]
-            window_frames = int(10 * fps)
-
-            # Final 10 seconds of the last trial
-            win_start = max(start, end + 1 - window_frames)
-            win_end = min(end + 1, len(distances))
-            segment = distances[win_start:win_end]
-
-            # Downsample to ~200 points max for lightweight transfer
-            if len(segment) > 200:
-                step = len(segment) // 200
-                segment = segment[::step]
-
-            values = [round(d, 1) if d is not None else None for d in segment]
-
-            previews[str(subj["id"])] = {
-                "values": values,
-                "fps": fps,
-                "source": source,
-                "trial_name": trial["trial_name"],
-            }
-        except Exception:
-            continue
+        preview = _compute_preview_for_subject(subj["name"], subj["id"])
+        if preview:
+            preview["_mtime"] = mtime
+            previews[str(subj["id"])] = preview
 
     result = {"previews": previews}
-    _preview_cache["data"] = result
-    _preview_cache["time"] = now
+
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(cache_path), "w") as f:
+            _json.dump(result, f)
+    except Exception:
+        pass
+
     return result
 
 
 def invalidate_preview_cache():
-    """Call after MediaPipe/DLC runs to force dashboard sparkline refresh."""
-    _preview_cache["data"] = None
-    _preview_cache["time"] = 0
+    """Delete cache file to force full rebuild on next dashboard load."""
+    try:
+        path = _preview_cache_path()
+        if path.exists():
+            path.unlink()
+    except Exception:
+        pass
 
 
 @router.get("/{subject_id}/traces")
@@ -412,7 +516,7 @@ def get_group_comparison(include_auto: bool = Query(False)) -> dict:
     """Aggregated per-subject statistics grouped by diagnosis."""
     with get_db_ctx() as db:
         subjects = db.execute(
-            "SELECT * FROM subjects ORDER BY diagnosis, name"
+            "SELECT * FROM subjects ORDER BY group_label, name"
         ).fetchall()
 
     PARAM_KEYS = [
@@ -424,7 +528,7 @@ def get_group_comparison(include_auto: bool = Query(False)) -> dict:
     results = []
     for subj in subjects:
         subject_name = subj["name"]
-        diagnosis = subj["diagnosis"] or "Control"
+        diagnosis = subj.get("group_label") or subj.get("diagnosis") or "Control"
 
         try:
             distances, trials, _src = _load_distances_and_trials(subject_name)
