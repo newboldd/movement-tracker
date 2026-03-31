@@ -566,7 +566,7 @@ const labeler = (() => {
                         ? 'block' : 'none';
                 }
 
-                try {
+                if (!isMediaPipePage) try {
                     const dlcData = await API.get(`/api/labeling/sessions/${sessionId}/dlc_predictions`);
                     if (dlcData && Object.keys(dlcData).length > 0) {
                         dlcLabels = dlcData;
