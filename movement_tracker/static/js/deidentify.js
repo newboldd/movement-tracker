@@ -62,6 +62,7 @@ const deid = (() => {
     // Pan state
     let panning = false;
     let panStart = null;
+    let didDrag = false;  // true if mouse moved during a mousedown — suppresses click
 
     // Spot drag state (for on-canvas resize/move)
     let spotDrag = null; // {spotId, handle, startMx, startMy, origSpot}
@@ -1103,8 +1104,8 @@ const deid = (() => {
 
     // ── Canvas click ──
     function onCanvasClick(e) {
-        // Don't handle clicks after a pan drag
-        if (panning) return;
+        // Don't handle clicks after a pan/drag
+        if (panning || didDrag) { didDrag = false; return; }
         _pushUndo(); // snapshot before any spot creation/selection
 
         const rect = canvas.getBoundingClientRect();
@@ -1274,6 +1275,7 @@ const deid = (() => {
     }
 
     function onMouseDown(e) {
+        didDrag = false;
         if (e.button === 0 && viewMode === 'original') {
             const rect = canvas.getBoundingClientRect();
             const mx = e.clientX - rect.left;
@@ -1322,6 +1324,9 @@ const deid = (() => {
     }
 
     function onMouseMove(e) {
+        // Any movement during a mousedown = suppress click
+        if (e.buttons > 0) didDrag = true;
+
         // Spot dragging
         if (spotDrag) {
             const rect = canvas.getBoundingClientRect();
