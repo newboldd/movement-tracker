@@ -398,8 +398,11 @@ const deid = (() => {
                     radius: s.radius || handMaskRadius,
                     smooth: s.smooth != null ? s.smooth : handSmooth,
                 }));
+            } else if ('segments' in hs) {
+                // User intentionally cleared all segments — keep empty
+                handProtectSegments = [];
             } else if (hasMediapipe && trialMeta) {
-                // Default: hand protection on for the whole video
+                // No segments key = never configured — apply default
                 handProtectSegments = [{
                     id: nextHandSegId++,
                     start: trialMeta.start_frame,
@@ -409,7 +412,7 @@ const deid = (() => {
                 }];
             }
         } catch (e) {
-            // No saved settings — create default hand protection if MP available
+            // No saved settings at all — create default hand protection if MP available
             if (hasMediapipe && trialMeta) {
                 handProtectSegments = [{
                     id: nextHandSegId++,

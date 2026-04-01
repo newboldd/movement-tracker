@@ -633,8 +633,9 @@ const analyzeViewer = (() => {
         const mpLandmarks = trialData.mediapipe?.[side]?.landmarks;
         const viLandmarks = trialData.vision?.[side]?.landmarks;
 
-        // For stereo right camera, offset coordinates by -midline
-        const xOff = isStereo ? (isLeft ? 0 : -midline) : 0;
+        // Landmarks are stored in per-camera-half coords (0-1920 for stereo)
+        // No offset needed — the video crop handles the coordinate mapping
+        const xOff = 0;
 
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
@@ -763,8 +764,8 @@ const analyzeViewer = (() => {
         const isLeft = currentSide === cameraNames[0];
         const side = currentSide;
 
-        // For stereo right camera, offset by -midline
-        const xOff = isStereo ? (isLeft ? 0 : -midline) : 0;
+        // Landmarks are in per-camera-half coords — no offset needed
+        const xOff = 0;
 
         // Get keypoints for current frame and side
         const mpPts = trialData.mediapipe?.[side]?.landmarks?.[fn];
