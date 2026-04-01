@@ -22,7 +22,14 @@
                     <a href="/remote">Job Queue</a>
                 </div>
             </span>
-            <a href="/results">Results</a>
+            <span class="nav-dropdown">
+                <a href="/results">Results</a>
+                <div class="nav-dropdown-menu">
+                    <a href="/results">Individual</a>
+                    <a href="/results?tab=group">Group Comparison</a>
+                    <a href="/oscillations">Oscillations</a>
+                </div>
+            </span>
             <a href="/settings">Settings</a>
         </nav>
     </div>
@@ -76,11 +83,7 @@
             <div class="detail-grid" id="detailContent"></div>
         </div>
 
-        <!-- Running jobs -->
-        <div class="card" id="jobsCard" style="display:none;">
-            <h2>Running Jobs</h2>
-            <div id="jobsList"></div>
-        </div>
+        <!-- Running jobs (removed — use Job Queue nav link) -->
     </div>
 
     <!-- Batch Preprocess Modal -->

@@ -19,8 +19,8 @@
                 <button class="btn btn-sm" id="nextSubjectBtn" title="Next subject">&rarr;</button>
             </div>
             <!-- Tab Switcher -->
-            <div id="tabSwitcher" style="display:flex;gap:4px;align-items:center;">
-                <span style="font-size:12px;color:var(--text-muted);margin-right:4px;">Tab:</span>
+            <!-- Tab buttons hidden — navigation via Results dropdown menu -->
+            <div id="tabSwitcher" style="display:none;">
                 <button class="btn btn-sm active" data-tab="distances">Individual</button>
                 <button class="btn btn-sm" data-tab="group">Group Comparison</button>
             </div>
@@ -38,7 +38,14 @@
                     <a href="/remote">Job Queue</a>
                 </div>
             </span>
-            <a href="/results" class="active">Results</a>
+            <span class="nav-dropdown">
+                <a href="/results" class="active">Results</a>
+                <div class="nav-dropdown-menu">
+                    <a href="/results" class="active">Individual</a>
+                    <a href="/results?tab=group">Group Comparison</a>
+                    <a href="/oscillations">Oscillations</a>
+                </div>
+            </span>
             <a href="/settings">Settings</a>
         </nav>
     </div>
