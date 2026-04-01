@@ -785,174 +785,42 @@ def render_deidentified(subject_id: int, body: dict = Body(default={})) -> dict:
     """Render deidentified video(s) using saved blur specs.
 
     Body: { trial_idx: int (optional) }
-    Creates a background job with immediate SSE tracking.
-    Also visible on the Processing page via jobs table.
-    Returns {job_id} for SSE tracking.
+    Routes through the queue manager so jobs queue up and appear on
+    both the Deidentify page and the Processing page.
+    Returns {job_id, queue_id} for SSE tracking.
     """
-    from ..services.deidentify import render_with_blur_specs
-    import os, json as _json, threading
-    from pathlib import Path
+    from ..services.queue_manager import queue_manager
 
     with get_db_ctx() as db:
         subj = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
         if not subj:
             raise HTTPException(404, "Subject not found")
 
-        all_specs = db.execute(
-            "SELECT * FROM blur_specs WHERE subject_id = ?", (subject_id,),
-        ).fetchall()
-
-        all_hand_settings = db.execute(
-            "SELECT * FROM blur_hand_settings WHERE subject_id = ?", (subject_id,),
-        ).fetchall()
-
     subject_name = subj["name"]
-    camera_mode = subj.get("camera_mode") or "stereo"
-    trials = build_trial_map(subject_name, camera_mode=camera_mode)
-
-    specs_by_trial = {}
-    for s in all_specs:
-        ti = s["trial_idx"]
-        if ti not in specs_by_trial:
-            specs_by_trial[ti] = []
-        specs_by_trial[ti].append(dict(s))
-
-    hand_by_trial = {}
-    for hs in all_hand_settings:
-        hand_by_trial[hs["trial_idx"]] = dict(hs)
-
     settings = get_settings()
 
-    # Create job record for SSE tracking + Processing page visibility
+    # Create job record upfront so the frontend can track via SSE immediately
     with get_db_ctx() as db:
         log_dir = settings.dlc_path / ".logs"
         log_dir.mkdir(exist_ok=True)
         log_path = str(log_dir / f"job_deidentify_{subject_id}.log")
-
         db.execute(
             """INSERT INTO jobs (subject_id, job_type, status, log_path)
-               VALUES (?, 'deidentify', 'pending', ?)""",
+               VALUES (?, 'deidentify', 'queued', ?)""",
             (subject_id, log_path),
         )
         job = db.execute(
-            "SELECT * FROM jobs WHERE subject_id = ? ORDER BY id DESC LIMIT 1",
+            "SELECT id FROM jobs WHERE subject_id = ? AND job_type = 'deidentify' ORDER BY id DESC LIMIT 1",
             (subject_id,),
         ).fetchone()
-
     job_id = job["id"]
-    cancel_event = registry.register_cancel_event(job_id)
 
-    def _run():
-        try:
-            with get_db_ctx() as db:
-                db.execute(
-                    "UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (job_id,),
-                )
+    # Enqueue via queue manager — jobs appear on Processing page and queue behind others
+    result = queue_manager.enqueue(
+        "deidentify",
+        [subject_id],
+        [subject_name],
+        execution_target="local-cpu",
+    )
 
-            output_dir = settings.video_path
-            deident_dir = Path(str(output_dir)) / "deidentified"
-            deident_dir.mkdir(parents=True, exist_ok=True)
-
-            requested_trial = body.get("trial_idx") if body else None
-            if requested_trial is not None:
-                trials_to_render = [requested_trial] if requested_trial in specs_by_trial else []
-            else:
-                trials_to_render = [i for i in range(len(trials)) if i in specs_by_trial]
-            n_trials = len(trials_to_render)
-
-            for ti_idx, trial_i in enumerate(trials_to_render):
-                if cancel_event.is_set():
-                    raise InterruptedError("Job cancelled")
-
-                trial = trials[trial_i]
-                cam = trial.get("camera_name")
-                if cam:
-                    output_name = f"{trial['trial_name']}_{cam}.mp4"
-                else:
-                    output_name = f"{trial['trial_name']}.mp4"
-                output_path = str(deident_dir / output_name)
-
-                base_pct = ti_idx * (100.0 / max(n_trials, 1))
-                span = 100.0 / max(n_trials, 1)
-
-                def progress_cb(pct, _base=base_pct, _span=span):
-                    if cancel_event.is_set():
-                        raise InterruptedError("Job cancelled")
-                    overall = _base + (pct / 100.0) * _span
-                    with get_db_ctx() as db:
-                        db.execute(
-                            "UPDATE jobs SET progress_pct = ? WHERE id = ?",
-                            (overall, job_id),
-                        )
-
-                source_path = trial["video_path"]
-
-                # Load face detections
-                with get_db_ctx() as db:
-                    face_rows = db.execute(
-                        "SELECT frame_num, x1, y1, x2, y2, side FROM face_detections WHERE subject_id = ? AND trial_idx = ?",
-                        (subject_id, trial_i),
-                    ).fetchall()
-                face_by_frame = {}
-                for fd in face_rows:
-                    fn = fd["frame_num"]
-                    if fn not in face_by_frame:
-                        face_by_frame[fn] = []
-                    face_by_frame[fn].append(dict(fd))
-
-                # Hand settings
-                hs = hand_by_trial.get(trial_i, {})
-                segments = []
-                seg_json = hs.get("segments_json")
-                if seg_json:
-                    try:
-                        segments = _json.loads(seg_json) if isinstance(seg_json, str) else (seg_json or [])
-                    except (ValueError, TypeError):
-                        pass
-
-                render_with_blur_specs(
-                    input_path=source_path,
-                    output_path=output_path,
-                    blur_specs=specs_by_trial.get(trial_i, []),
-                    hand_settings=hs,
-                    face_detections=[dict(r) for r in face_rows],
-                    subject_name=subject_name,
-                    start_frame=trial["start_frame"],
-                    frame_count=trial["frame_count"],
-                    progress_callback=progress_cb,
-                )
-
-            # Mark complete
-            dlc_path = settings.dlc_path / subject_name
-            dlc_path.mkdir(parents=True, exist_ok=True)
-            (dlc_path / ".deidentified").write_text("")
-
-            with get_db_ctx() as db:
-                db.execute(
-                    """UPDATE jobs SET status = 'completed', progress_pct = 100,
-                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
-                    (job_id,),
-                )
-
-        except InterruptedError:
-            with get_db_ctx() as db:
-                db.execute(
-                    """UPDATE jobs SET status = 'cancelled',
-                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
-                    (job_id,),
-                )
-        except Exception as e:
-            logger.exception(f"Deidentify job {job_id} failed")
-            with get_db_ctx() as db:
-                db.execute(
-                    """UPDATE jobs SET status = 'failed', error_msg = ?,
-                       finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
-                    (str(e), job_id),
-                )
-        finally:
-            registry.unregister_cancel_event(job_id)
-
-    threading.Thread(target=_run, daemon=True).start()
-
-    return {"status": "ok", "job_id": job_id}
+    return {"job_id": job_id, "queue_id": result.get("queue_id"), "status": "queued"}
