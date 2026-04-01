@@ -128,28 +128,27 @@
                 <button class="btn btn-sm" id="resetZoomBtn" title="Reset zoom (Z)">Reset Zoom</button>
             </div>
 
-            <!-- Layers -->
-            <div class="sidebar-section">Layers</div>
-            <label class="layer-toggle">
-                <input type="checkbox" id="showVideo" checked>
-                <span class="layer-swatch" style="background:#888;"></span> Video
-            </label>
-            <label class="layer-toggle">
-                <input type="checkbox" id="showMP" checked>
-                <span class="layer-swatch" style="background:cyan;"></span> MediaPipe
-            </label>
-            <label class="layer-toggle">
-                <input type="checkbox" id="showVision">
-                <span class="layer-swatch" style="background:#ffcc00;"></span> Vision
-            </label>
-            <label class="layer-toggle">
-                <input type="checkbox" id="showDLC">
-                <span class="layer-swatch" style="background:#f44;"></span> DLC
-            </label>
-            <label class="layer-toggle">
-                <input type="checkbox" id="showSkeleton" checked>
-                <span class="layer-swatch" style="background:#aaa;"></span> Skeleton
-            </label>
+            <!-- Models (only shows sources with data) -->
+            <div class="sidebar-section">Models</div>
+            <div id="modelToggles">
+                <label class="layer-toggle" id="mpToggleRow" style="display:none;">
+                    <input type="checkbox" id="showMP" checked>
+                    <span class="layer-swatch" style="background:cyan;"></span> MediaPipe
+                </label>
+                <label class="layer-toggle" id="visionToggleRow" style="display:none;">
+                    <input type="checkbox" id="showVision">
+                    <span class="layer-swatch" style="background:#ffcc00;"></span> Vision
+                </label>
+                <label class="layer-toggle" id="dlcToggleRow" style="display:none;">
+                    <input type="checkbox" id="showDLC">
+                    <span class="layer-swatch" style="background:#f44;"></span> DLC
+                </label>
+                <label class="layer-toggle">
+                    <input type="checkbox" id="showSkeleton" checked>
+                    <span class="layer-swatch" style="background:#aaa;"></span> Skeleton
+                </label>
+            </div>
+            <input type="hidden" id="showVideo" value="on">
 
             <!-- Fingers -->
             <div class="sidebar-section">Fingers</div>
@@ -162,9 +161,7 @@
                 <label class="finger-toggle"><input type="checkbox" data-finger="pinky" checked> Pinky</label>
             </div>
 
-            <!-- Distance -->
-            <div class="sidebar-section">Distance</div>
-            <select id="distanceSelect" style="width:100%;padding:4px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:11px;"></select>
+            <!-- Distance selector moved to above the plot -->
 
             <!-- Run Detection -->
             <div class="sidebar-section">Run Detection</div>
@@ -197,8 +194,16 @@
                 </div>
             </div>
             <div class="controls-bar">
-                <span>Frame: <strong id="frameDisplay">0</strong> / <span id="totalFrames">0</span></span>
-                <span>Trial: <strong id="trialName">-</strong></span>
+                <span id="distanceReadout" style="color:var(--accent);font-weight:600;">Distance: — mm</span>
+                <span>Frame <strong id="frameDisplay">0</strong> &nbsp; <span id="timeDisplay" style="color:var(--text-muted);">0.00s</span></span>
+                <span id="trialName" style="color:var(--text-muted);">-</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;padding:2px 8px;background:var(--bg-card);border-top:1px solid var(--border);">
+                <select id="distanceSelect" style="padding:2px 6px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:11px;flex:0 0 auto;"></select>
+                <span id="yRangeLabel" style="font-size:10px;color:var(--text-muted);margin-left:auto;">Y:</span>
+                <input type="number" id="yMinInput" style="width:50px;padding:1px 4px;font-size:10px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);" placeholder="auto">
+                <span style="font-size:10px;color:var(--text-muted);">–</span>
+                <input type="number" id="yMaxInput" style="width:50px;padding:1px 4px;font-size:10px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);" placeholder="auto">
             </div>
             <canvas id="distanceCanvas"></canvas>
         </div>
