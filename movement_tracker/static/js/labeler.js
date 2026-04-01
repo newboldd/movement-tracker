@@ -464,10 +464,14 @@ const labeler = (() => {
             const actionsSection = mainCommitBtn ? mainCommitBtn.parentElement : null;
 
             if (isMediaPipePage) {
-                // MediaPipe page: show MP controls, hide DLC-specific UI
+                // Analyze page: show MP controls, hide DLC-specific UI
                 if (mpCropSection) mpCropSection.style.display = 'block';
                 if (modeSwitcher) modeSwitcher.style.display = 'none';
                 if (actionsSection) actionsSection.style.display = 'none';
+                // Hide label navigation buttons (DLC-only)
+                const prevLabelBtn = document.getElementById('prevLabelBtn');
+                const nextLabelBtn = document.getElementById('nextLabelBtn');
+                if (prevLabelBtn) prevLabelBtn.parentElement.style.display = 'none';
                 // Show model visibility section
                 const mvs = document.getElementById('mpModelVisSection');
                 if (mvs) mvs.style.display = 'block';
@@ -476,10 +480,11 @@ const labeler = (() => {
                 if (vs) vs.style.display = 'block';
                 // Update session type label
                 const typeLabel = document.getElementById('sessionTypeLabel');
-                if (typeLabel) typeLabel.textContent = 'MediaPipe:';
+                if (typeLabel) typeLabel.textContent = 'Analyze:';
                 // Set active nav link
                 document.querySelectorAll('nav a').forEach(a => {
-                    a.classList.toggle('active', a.getAttribute('href') === '/mediapipe-select');
+                    a.classList.toggle('active',
+                        a.getAttribute('href') === '/mediapipe-select' || a.getAttribute('href') === '/analyze-select');
                 });
                 // Slightly enlarge distance trace for comparison
                 const distContainer = document.getElementById('distanceTraceContainer');
@@ -3753,8 +3758,8 @@ const labeler = (() => {
             });
         }
 
-        // Committed label dots (filled circles, dimmer)
-        committedLabels.forEach((lbl, key) => {
+        // Committed label dots (filled circles, dimmer) — DLC page only
+        if (!isMediaPipePage) committedLabels.forEach((lbl, key) => {
             const [frameStr, side] = key.split('_');
             const frame = parseInt(frameStr);
             const yBase = labelY[side];
@@ -3775,8 +3780,8 @@ const labeler = (() => {
             });
         });
 
-        // Unsaved label dots (open circles with stroke, on top)
-        labels.forEach((lbl, key) => {
+        // Unsaved label dots (open circles with stroke, on top) — DLC page only
+        if (!isMediaPipePage) labels.forEach((lbl, key) => {
             const [frameStr, side] = key.split('_');
             const frame = parseInt(frameStr);
             const yBase = labelY[side];
