@@ -421,7 +421,7 @@ class QueueManager:
             # Route based on execution target
             if execution_target in ("local-cpu", "local-gpu"):
                 # Local execution
-                if job_type in ("mediapipe", "blur", "mediapipe+blur", "pose"):
+                if job_type in ("mediapipe", "blur", "mediapipe+blur", "pose", "deidentify"):
                     # CPU lane: preprocessing
                     if job_type == "mediapipe":
                         local_executor.execute_mediapipe(subject_names[0], job_id, log_path)
