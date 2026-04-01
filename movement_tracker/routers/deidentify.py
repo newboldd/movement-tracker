@@ -797,30 +797,29 @@ def render_deidentified(subject_id: int, body: dict = Body(default={})) -> dict:
             raise HTTPException(404, "Subject not found")
 
     subject_name = subj["name"]
-    settings = get_settings()
 
-    # Create job record upfront so the frontend can track via SSE immediately
-    with get_db_ctx() as db:
-        log_dir = settings.dlc_path / ".logs"
-        log_dir.mkdir(exist_ok=True)
-        log_path = str(log_dir / f"job_deidentify_{subject_id}.log")
-        db.execute(
-            """INSERT INTO jobs (subject_id, job_type, status, log_path)
-               VALUES (?, 'deidentify', 'queued', ?)""",
-            (subject_id, log_path),
-        )
-        job = db.execute(
-            "SELECT id FROM jobs WHERE subject_id = ? AND job_type = 'deidentify' ORDER BY id DESC LIMIT 1",
-            (subject_id,),
-        ).fetchone()
-    job_id = job["id"]
-
-    # Enqueue via queue manager — jobs appear on Processing page and queue behind others
+    # Enqueue via queue manager — it creates the job record when it starts.
+    # The frontend polls for the job_id.
     result = queue_manager.enqueue(
         "deidentify",
         [subject_id],
         [subject_name],
         execution_target="local-cpu",
     )
+
+    # Wait briefly for the queue manager to create the job record
+    import time
+    job_id = None
+    for _ in range(10):
+        with get_db_ctx() as db:
+            job = db.execute(
+                """SELECT id FROM jobs WHERE subject_id = ? AND job_type = 'deidentify'
+                   ORDER BY id DESC LIMIT 1""",
+                (subject_id,),
+            ).fetchone()
+            if job:
+                job_id = job["id"]
+                break
+        time.sleep(0.2)
 
     return {"job_id": job_id, "queue_id": result.get("queue_id"), "status": "queued"}
