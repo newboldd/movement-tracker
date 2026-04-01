@@ -106,17 +106,19 @@ def _assign_hands_to_tracks(hands, scores, prev_wrists, tracks, conf, frame_idx)
         prev_wrists[ti] = hands[hi][WRIST].copy()
 
 
-def _pick_tapping_track(tracks, video_name=""):
-    """Choose the track whose thumb–index distance oscillates more.
+def _pick_tapping_track(tracks, video_name="", trial_name=""):
+    """Choose the tapping hand track.
 
-    Computes the standard deviation of the Euclidean distance between
-    thumb tip and index tip over the middle 50 % of frames for each
-    track.  The track with the higher std-dev is selected as the
-    tapping hand.
+    Strategy:
+    1. If trial name indicates L/R hand AND both tracks have data,
+       pick the track whose wrist is on the expected side of the frame.
+       (Left-hand trials → tapping hand is on the RIGHT side of camera view.)
+    2. Otherwise, fall back to choosing the track with more oscillation.
 
     Args:
         tracks: (n_frames, 2, 21, 2) array.
         video_name: for logging.
+        trial_name: e.g. "MSA01_L1" — used to infer which hand is tapping.
 
     Returns:
         Track index (0 or 1).
@@ -129,29 +131,56 @@ def _pick_tapping_track(tracks, video_name=""):
 
     oscs = []
     counts = []
+    mean_x = []
     for t_idx in range(2):
         thumb = tracks[start:end, t_idx, THUMB_TIP]
         index = tracks[start:end, t_idx, INDEX_TIP]
+        wrist = tracks[start:end, t_idx, WRIST]
         valid = ~np.isnan(thumb[:, 0]) & ~np.isnan(index[:, 0])
         n_valid = int(np.sum(valid))
         counts.append(n_valid)
         if n_valid < 10:
             oscs.append(0.0)
+            mean_x.append(float('nan'))
             continue
         dist = np.linalg.norm(thumb[valid] - index[valid], axis=1)
         oscs.append(float(np.std(dist)))
+        wrist_valid = ~np.isnan(wrist[:, 0])
+        mean_x.append(float(np.mean(wrist[wrist_valid, 0])) if np.sum(wrist_valid) > 0 else float('nan'))
+
+    # Determine expected hand side from trial name
+    # "_L" trials = left hand tapping = appears on RIGHT side of camera view (higher x)
+    # "_R" trials = right hand tapping = appears on LEFT side of camera view (lower x)
+    expect_right_side = None  # None = unknown
+    if trial_name:
+        tn_upper = trial_name.upper()
+        if "_L" in tn_upper:
+            expect_right_side = True   # left hand → right side of camera view
+        elif "_R" in tn_upper:
+            expect_right_side = False  # right hand → left side of camera view
 
     chosen = int(np.argmax(oscs))
 
-    # If only one track has data, use it regardless of oscillation
+    # If only one track has data, use it
     if counts[0] >= 10 and counts[1] < 10:
         chosen = 0
     elif counts[1] >= 10 and counts[0] < 10:
         chosen = 1
+    elif expect_right_side is not None and counts[0] >= 10 and counts[1] >= 10:
+        # Both tracks have data — use spatial position to disambiguate
+        if not np.isnan(mean_x[0]) and not np.isnan(mean_x[1]):
+            if expect_right_side:
+                # Pick the track with higher mean x (right side of frame)
+                chosen = 0 if mean_x[0] > mean_x[1] else 1
+            else:
+                # Pick the track with lower mean x (left side of frame)
+                chosen = 0 if mean_x[0] < mean_x[1] else 1
 
     logger.info(
-        f"{video_name}: track0 osc={oscs[0]:.1f} ({counts[0]} pts), "
-        f"track1 osc={oscs[1]:.1f} ({counts[1]} pts) → selected track {chosen}"
+        f"{video_name}: track0 osc={oscs[0]:.1f} x={mean_x[0]:.0f} ({counts[0]} pts), "
+        f"track1 osc={oscs[1]:.1f} x={mean_x[1]:.0f} ({counts[1]} pts) "
+        f"→ selected track {chosen}"
+        + (f" (trial hint: {'right' if expect_right_side else 'left'} side)" if expect_right_side is not None else "")
     )
     return chosen
 
@@ -271,8 +300,9 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
         det_R.close()
 
         # Select the tapping hand for each camera based on oscillation
-        os_idx = _pick_tapping_track(os_tracks, f"{video_name}/OS")
-        od_idx = _pick_tapping_track(od_tracks, f"{video_name}/OD")
+        trial_name = trial.get("trial_name", video_name)
+        os_idx = _pick_tapping_track(os_tracks, f"{video_name}/OS", trial_name=trial_name)
+        od_idx = _pick_tapping_track(od_tracks, f"{video_name}/OD", trial_name=trial_name)
 
         # Copy selected tracks into the global output arrays
         for local_frame in range(actual_frame_count):
@@ -819,8 +849,9 @@ def run_mediapipe_cropped(
     cap.release()
     detector.close()
 
-    # Pick the tapping hand
-    track_idx = _pick_tapping_track(tracks, f"{subject_name}/{camera_key}/cropped")
+    # Pick the tapping hand — use video filename as trial name hint
+    trial_hint = os.path.splitext(os.path.basename(video_path))[0]
+    track_idx = _pick_tapping_track(tracks, f"{subject_name}/{camera_key}/cropped", trial_name=trial_hint)
 
     # Load existing npz and merge
     npz_path = settings.dlc_path / subject_name / "mediapipe_prelabels.npz"

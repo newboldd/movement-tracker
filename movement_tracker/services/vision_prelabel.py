@@ -110,6 +110,40 @@ def _detect_hands_single_frame(image_bgr: np.ndarray) -> list[dict]:
     return hands
 
 
+def _pick_best_hand(hands, trial_name, frame_width):
+    """Pick the best hand from multiple detections using trial name hint.
+
+    For L trials (left hand tapping), the tapping hand appears on the RIGHT
+    side of the camera view (higher x). For R trials, LEFT side (lower x).
+    Falls back to highest confidence if trial name doesn't indicate a side.
+    """
+    if len(hands) == 1:
+        return hands[0]
+
+    # Determine expected side from trial name
+    expect_right = None
+    if trial_name:
+        tn = trial_name.upper()
+        if "_L" in tn:
+            expect_right = True
+        elif "_R" in tn:
+            expect_right = False
+
+    if expect_right is not None:
+        # Compute mean x for each hand detection
+        def mean_x(h):
+            xs = [x for _, (x, _, _) in h.items() if not np.isnan(x)]
+            return np.mean(xs) if xs else frame_width / 2
+
+        if expect_right:
+            return max(hands, key=lambda h: mean_x(h))
+        else:
+            return min(hands, key=lambda h: mean_x(h))
+
+    # Fallback: highest total confidence
+    return max(hands, key=lambda h: sum(c for _, _, c in h.values()))
+
+
 def run_vision_hands(
     subject_name: str,
     progress_callback: Optional[Callable] = None,
@@ -140,6 +174,7 @@ def run_vision_hands(
 
     for trial in trials:
         video_path = trial["video_path"]
+        trial_name = trial.get("trial_name", "")
         n_frames = trial["frame_count"]
 
         cap = cv2.VideoCapture(video_path)
@@ -168,7 +203,7 @@ def run_vision_hands(
 
             hands_l = _detect_hands_single_frame(left)
             if hands_l:
-                best = max(hands_l, key=lambda h: sum(c for _, _, c in h.values()))
+                best = _pick_best_hand(hands_l, trial_name, half_w)
                 for j, (x, y, c) in best.items():
                     os_lm[i, j, 0] = x
                     os_lm[i, j, 1] = y
@@ -178,7 +213,7 @@ def run_vision_hands(
             if right is not None:
                 hands_r = _detect_hands_single_frame(right)
                 if hands_r:
-                    best = max(hands_r, key=lambda h: sum(c for _, _, c in h.values()))
+                    best = _pick_best_hand(hands_r, trial_name, fw - half_w)
                     for j, (x, y, c) in best.items():
                         od_lm[i, j, 0] = x
                         od_lm[i, j, 1] = y
