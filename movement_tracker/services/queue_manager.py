@@ -210,15 +210,32 @@ class QueueManager:
                     logger.info(f"Queue item {item['id']}: underlying job {job_id} was {new_status}")
                     continue
                 if job and job["status"] in ("running", "pending"):
-                    # Underlying job still alive (app.py recovery resumed it) — keep queue running
-                    resource = item.get("resource", "gpu")
-                    with self._lock:
-                        if resource == "gpu":
-                            self._running_gpu = item["id"]
-                        else:
-                            self._running_cpu = item["id"]
-                    logger.info(f"Queue item {item['id']}: underlying job {job_id} still running, re-tracking")
-                    continue
+                    exec_target = item.get("execution_target", "remote")
+                    if exec_target.startswith("local"):
+                        # Local jobs: thread is dead after restart — mark as failed
+                        with get_db_ctx() as db:
+                            db.execute(
+                                "UPDATE jobs SET status = 'failed', error_msg = 'Server restarted', "
+                                "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                                (job_id,),
+                            )
+                            db.execute(
+                                "UPDATE job_queue SET status = 'failed', error_msg = 'Server restarted (local job lost)', "
+                                "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                                (item["id"],),
+                            )
+                        logger.info(f"Queue item {item['id']}: local job {job_id} lost on restart, marked failed")
+                        continue
+                    else:
+                        # Remote job: might still be alive on the remote host — re-track
+                        resource = item.get("resource", "gpu")
+                        with self._lock:
+                            if resource == "gpu":
+                                self._running_gpu = item["id"]
+                            else:
+                                self._running_cpu = item["id"]
+                        logger.info(f"Queue item {item['id']}: remote job {job_id} still running, re-tracking")
+                        continue
 
             # If we can't determine state, mark failed
             with get_db_ctx() as db:
