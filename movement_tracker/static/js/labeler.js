@@ -133,7 +133,8 @@ const labeler = (() => {
     let mpCropAdjusted = {};           // {cam: bool} whether user manually dragged each camera's box
     let mpHasMediapipe = {};           // {trialIdx: bool} whether mediapipe labels exist per trial
     let modelVis = { hands: true, pose: true, vision: true };  // model visibility toggles
-    let mpRunVisible = { current: true };  // {current: bool, 1: bool, 2: bool, ...} toggle visibility
+    let distSourceVisible = { mediapipe: true, vision: true, dlc: true };  // toggle per source
+    let distSources = {};  // {vision: [...], dlc: [...]} — loaded from API
 
     // Frame display mode: 'frame' | 'time' | 'both'
     let frameDisplayMode = 'frame';
@@ -545,6 +546,11 @@ const labeler = (() => {
                     if (mpData && Object.keys(mpData).length > 0) {
                         mpLabels = mpData;
                         distances = mpData.distances || null;
+                        // Store additional distance sources
+                        distSources = {};
+                        if (mpData.vision_distances) distSources.vision = mpData.vision_distances;
+                        if (mpData.dlc_distances) distSources.dlc = mpData.dlc_distances;
+                        _buildDistLegend(mpData.available_sources || []);
                         // Show Vision toggle if data available
                         if (mpData.has_vision) {
                             const vl = document.getElementById('showVisionLabel');
@@ -558,13 +564,7 @@ const labeler = (() => {
                 // Compute per-trial mediapipe availability for Run vs Re-run button text
                 _computeMpHasMediapipe();
 
-                // Show "Clear history" button if run history exists (MediaPipe page only)
-                const clearHistBtn = document.getElementById('mpClearHistoryBtn');
-                if (clearHistBtn) {
-                    clearHistBtn.style.display =
-                        (isMediaPipePage && mpLabels && mpLabels.run_history && mpLabels.run_history.length > 0)
-                        ? 'block' : 'none';
-                }
+                // Clear history button removed — now using multi-source legend
 
                 if (!isMediaPipePage) try {
                     const dlcData = await API.get(`/api/labeling/sessions/${sessionId}/dlc_predictions`);
@@ -4089,26 +4089,13 @@ const labeler = (() => {
         return best;
     }
 
-    let _distLegendAreas = [];  // populated by renderDistanceTrace legend drawing
+    // Legend checkboxes are HTML elements, no canvas hit areas needed
 
     function onDistTraceMouseDown(e) {
         if (!distances || totalFrames === 0) return;
         e.preventDefault();
 
-        // Check if click is on a legend toggle entry
-        if (_distLegendAreas.length > 0) {
-            const rect = distCanvas.getBoundingClientRect();
-            const mx = e.clientX - rect.left;
-            const my = e.clientY - rect.top;
-            for (const area of _distLegendAreas) {
-                if (mx >= area.x && mx <= area.x + area.w && my >= area.y && my <= area.y + area.h) {
-                    // Toggle visibility
-                    mpRunVisible[area.key] = mpRunVisible[area.key] === false ? true : false;
-                    renderDistanceTrace();
-                    return;
-                }
-            }
-        }
+        // Legend checkboxes are now HTML elements above the chart — no canvas click handling needed
 
         // In events mode, check if mousedown is on an event marker → start drag
         const hitMarker = _findNearestEventMarker(e.clientX);
@@ -4212,6 +4199,30 @@ const labeler = (() => {
         renderDistanceTrace();
     }
 
+    function _buildDistLegend(sources) {
+        const container = document.getElementById('distLegend');
+        if (!container) return;
+        container.innerHTML = '';
+        if (!sources || sources.length === 0) return;
+        sources.forEach(src => {
+            const label = document.createElement('label');
+            label.style.cssText = 'display:inline-flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;margin-right:10px;';
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = distSourceVisible[src.key] !== false;
+            cb.addEventListener('change', () => {
+                distSourceVisible[src.key] = cb.checked;
+                renderDistanceTrace();
+            });
+            const swatch = document.createElement('span');
+            swatch.style.cssText = `display:inline-block;width:12px;height:3px;background:${src.color};border-radius:1px;`;
+            label.appendChild(cb);
+            label.appendChild(swatch);
+            label.appendChild(document.createTextNode(src.label));
+            container.appendChild(label);
+        });
+    }
+
     function renderDistanceTrace() {
         if (!distCanvas || !distCtx || !distances) return;
 
@@ -4280,37 +4291,28 @@ const labeler = (() => {
             }
         }
 
-        // Draw run history lines (toggleable, behind current)
-        const historyColors = [
-            'rgba(255, 140, 0, 0.6)',    // orange
-            'rgba(0, 200, 100, 0.6)',    // green
-            'rgba(200, 80, 200, 0.6)',   // purple
-            'rgba(255, 80, 80, 0.6)',    // red
-            'rgba(100, 200, 255, 0.6)',  // cyan
-        ];
-        if (mpLabels && mpLabels.run_history) {
-            mpLabels.run_history.forEach((run, ri) => {
-                if (mpRunVisible[run.run] === false) return;
-                const runDist = run.distances;
-                if (!runDist) return;
-                distCtx.beginPath();
-                let s = false;
-                for (let f = Math.max(0, vStart - 1); f < vEnd + 1 && f < runDist.length; f++) {
-                    const d = runDist[f];
-                    if (d === null || d === undefined) { s = false; continue; }
-                    const x = fToX(f);
-                    const y = dToY(d);
-                    if (!s) { distCtx.moveTo(x, y); s = true; }
-                    else distCtx.lineTo(x, y);
-                }
-                distCtx.strokeStyle = historyColors[ri % historyColors.length];
-                distCtx.lineWidth = 1.5;
-                distCtx.stroke();
-            });
+        // Draw additional distance sources (Vision, DLC) behind MediaPipe
+        const sourceColors = { vision: '#ff9800', dlc: '#4caf50' };
+        for (const [srcKey, srcDist] of Object.entries(distSources)) {
+            if (distSourceVisible[srcKey] === false) continue;
+            if (!srcDist) continue;
+            distCtx.beginPath();
+            let s = false;
+            for (let f = Math.max(0, vStart - 1); f < vEnd + 1 && f < srcDist.length; f++) {
+                const d = srcDist[f];
+                if (d === null || d === undefined) { s = false; continue; }
+                const x = fToX(f);
+                const y = dToY(d);
+                if (!s) { distCtx.moveTo(x, y); s = true; }
+                else distCtx.lineTo(x, y);
+            }
+            distCtx.strokeStyle = sourceColors[srcKey] || '#888';
+            distCtx.lineWidth = 1.5;
+            distCtx.stroke();
         }
 
-        // Draw current distance line (toggleable)
-        if (mpRunVisible.current !== false) {
+        // Draw MediaPipe distance line (toggleable)
+        if (distSourceVisible.mediapipe !== false) {
             distCtx.beginPath();
             let started = false;
             for (let f = Math.max(0, vStart - 1); f < vEnd + 1 && f < distances.length; f++) {
@@ -4454,36 +4456,7 @@ const labeler = (() => {
             }
         }
 
-        // Run history legend (top-right, clickable toggles)
-        if (mpLabels && mpLabels.run_history && mpLabels.run_history.length > 0) {
-            const legendX = w - padR - 90;
-            let legendY = padT + 4;
-            distCtx.font = '10px sans-serif';
-            distCtx.textAlign = 'left';
-            // Store legend hit areas for click handling
-            _distLegendAreas = [];
-
-            // Current run entry
-            const curVisible = mpRunVisible.current !== false;
-            distCtx.fillStyle = curVisible ? 'rgba(74, 158, 255, 0.9)' : 'rgba(74, 158, 255, 0.2)';
-            distCtx.fillRect(legendX, legendY - 4, 12, 2);
-            distCtx.fillStyle = curVisible ? '#ccc' : '#555';
-            distCtx.fillText('Current', legendX + 16, legendY);
-            _distLegendAreas.push({ key: 'current', x: legendX - 4, y: legendY - 10, w: 90, h: 14 });
-            legendY += 14;
-
-            // History run entries
-            mpLabels.run_history.forEach((run, ri) => {
-                const vis = mpRunVisible[run.run] !== false;
-                const color = historyColors[ri % historyColors.length];
-                distCtx.fillStyle = vis ? color : color.replace(/[\d.]+\)$/, '0.15)');
-                distCtx.fillRect(legendX, legendY - 4, 12, 2);
-                distCtx.fillStyle = vis ? '#aaa' : '#555';
-                distCtx.fillText(`Run ${run.run}`, legendX + 16, legendY);
-                _distLegendAreas.push({ key: run.run, x: legendX - 4, y: legendY - 10, w: 90, h: 14 });
-                legendY += 14;
-            });
-        }
+        // Legend is now HTML checkboxes above the chart (built by _buildDistLegend)
 
         // Scrollbar
         const sbY = h - 3;
@@ -5356,7 +5329,7 @@ const labeler = (() => {
         // Video export
         getExportContext,
         // MediaPipe crop box
-        toggleMpCrop, saveMpCrop, cancelMpCrop, rerunMediapipe, clearMpHistory, runPose, runVision, toggleModelVis,
+        toggleMpCrop, saveMpCrop, cancelMpCrop, rerunMediapipe, runPose, runVision, toggleModelVis,
         // Refine flow (within corrections mode)
         startRefineFlow,
     };

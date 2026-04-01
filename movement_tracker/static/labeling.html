@@ -141,7 +141,6 @@
                     </div>
                     <button class="btn btn-sm" id="mpRerunBtn" onclick="labeler.rerunMediapipe()" style="width:100%;margin-top:6px;">Detect Hands (this trial)</button>
                     <div id="mpRerunStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
-                    <button class="btn btn-sm" id="mpClearHistoryBtn" onclick="labeler.clearMpHistory()" style="width:100%;display:none;margin-top:4px;font-size:11px;">Clear run history</button>
                 </div>
 
                 <!-- Pose Detection -->
@@ -254,7 +253,10 @@
 
             <!-- Distance trace -->
             <div class="distance-trace-container" id="distanceTraceContainer" style="display:none;">
-                <span class="distance-trace-label">3D Distance (mm)</span>
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <span class="distance-trace-label" style="margin:0;">Distance (mm)</span>
+                    <div id="distLegend" style="display:inline-flex;align-items:center;gap:4px;"></div>
+                </div>
                 <canvas id="distanceTraceCanvas"></canvas>
             </div>
 
@@ -273,7 +275,7 @@
 
     <script src="/static/js/nav.js"></script>
     <script src="/static/js/api.js?v=10"></script>
-    <script src="/static/js/labeler.js?v=52"></script>
+    <script src="/static/js/labeler.js?v=53"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

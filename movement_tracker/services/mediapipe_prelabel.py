@@ -631,23 +631,37 @@ def get_mediapipe_for_session(subject_name: str) -> dict | None:
 
     response["distances"] = _dist_to_list(data["distances"])
 
-    # Include run history for comparison
-    run_history = []
-    run_keys = sorted(
-        (int(k.split("_")[-1]), k) for k in data if k.startswith("distances_run_")
-    )
-    for run_num, key in run_keys:
-        entry = {"run": run_num, "distances": _dist_to_list(data[key])}
-        crop_key = f"crop_run_{run_num}"
-        if crop_key in data:
-            try:
-                import json as _json
-                entry["crop"] = _json.loads(str(data[crop_key]))
-            except (ValueError, TypeError):
-                pass
-        run_history.append(entry)
-    if run_history:
-        response["run_history"] = run_history
+    # Include all available distance sources for the legend
+    available_sources = [{"key": "mediapipe", "label": "MediaPipe", "color": "#4a9eff"}]
+
+    # Vision distances (compute from vision_prelabels.npz if available)
+    vision_path = settings.dlc_path / subject_name / "vision_prelabels.npz"
+    if vision_path.exists():
+        try:
+            v_data = np.load(str(vision_path))
+            v_os = v_data["OS_landmarks"]
+            v_od = v_data.get("OD_landmarks")
+            calib = get_calibration_for_subject(subject_name)
+            if calib is not None and v_od is not None:
+                v_dist = _compute_distances(v_os, v_od, calib)
+            else:
+                v_dist = _compute_2d_distances(v_os)
+            response["vision_distances"] = _dist_to_list(v_dist)
+            available_sources.append({"key": "vision", "label": "Apple Vision", "color": "#ff9800"})
+        except Exception:
+            pass
+
+    # DLC distances (from dlc predictions if available)
+    try:
+        from .dlc_predictions import load_dlc_predictions
+        dlc_data = load_dlc_predictions(subject_name)
+        if dlc_data and "distances" in dlc_data:
+            response["dlc_distances"] = _dist_to_list(dlc_data["distances"])
+            available_sources.append({"key": "dlc", "label": "DLC", "color": "#4caf50"})
+    except Exception:
+        pass
+
+    response["available_sources"] = available_sources
 
     return response
 
