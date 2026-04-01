@@ -110,37 +110,14 @@ def _detect_hands_single_frame(image_bgr: np.ndarray) -> list[dict]:
     return hands
 
 
-def _pick_best_hand(hands, trial_name, frame_width):
-    """Pick the best hand from multiple detections using trial name hint.
+def _pick_best_hand_single_frame_single_frame(hands):
+    """Pick best hand from a single frame — highest confidence.
 
-    For L trials (left hand tapping), the tapping hand appears on the RIGHT
-    side of the camera view (higher x). For R trials, LEFT side (lower x).
-    Falls back to highest confidence if trial name doesn't indicate a side.
+    The per-trial tapping hand selection happens after all frames are
+    processed, using power in the distance trace (see run_vision_hands).
     """
     if len(hands) == 1:
         return hands[0]
-
-    # Determine expected side from trial name
-    expect_right = None
-    if trial_name:
-        tn = trial_name.upper()
-        if "_L" in tn:
-            expect_right = True
-        elif "_R" in tn:
-            expect_right = False
-
-    if expect_right is not None:
-        # Compute mean x for each hand detection
-        def mean_x(h):
-            xs = [x for _, (x, _, _) in h.items() if not np.isnan(x)]
-            return np.mean(xs) if xs else frame_width / 2
-
-        if expect_right:
-            return max(hands, key=lambda h: mean_x(h))
-        else:
-            return min(hands, key=lambda h: mean_x(h))
-
-    # Fallback: highest total confidence
     return max(hands, key=lambda h: sum(c for _, _, c in h.values()))
 
 
@@ -169,6 +146,8 @@ def run_vision_hands(
     all_od = []
     all_conf_os = []
     all_conf_od = []
+    all_os_tracks = []
+    all_od_tracks = []
     total_all = sum(t["frame_count"] for t in trials)
     frames_done = 0
 
@@ -183,10 +162,11 @@ def run_vision_hands(
         is_stereo = (fw / fh) > 1.7 if fh > 0 else False
         half_w = fw // 2 if is_stereo else fw
 
-        os_lm = np.full((n_frames, N_JOINTS, 2), np.nan)
-        od_lm = np.full((n_frames, N_JOINTS, 2), np.nan)
-        os_conf = np.full(n_frames, np.nan)
-        od_conf = np.full(n_frames, np.nan)
+        # Track up to 2 hands per camera, pick tapping hand after trial
+        os_tracks = np.full((n_frames, 2, N_JOINTS, 2), np.nan)
+        od_tracks = np.full((n_frames, 2, N_JOINTS, 2), np.nan)
+        os_conf_tracks = np.full((n_frames, 2), np.nan)
+        od_conf_tracks = np.full((n_frames, 2), np.nan)
 
         for i in range(n_frames):
             ret, frame = cap.read()
@@ -202,40 +182,52 @@ def run_vision_hands(
                 right = None
 
             hands_l = _detect_hands_single_frame(left)
-            if hands_l:
-                best = _pick_best_hand(hands_l, trial_name, half_w)
-                for j, (x, y, c) in best.items():
-                    os_lm[i, j, 0] = x
-                    os_lm[i, j, 1] = y
-                os_conf[i] = np.mean([c for _, _, c in best.values()])
+            for hi, hand in enumerate(hands_l[:2]):
+                for j, (x, y, c) in hand.items():
+                    os_tracks[i, hi, j, 0] = x
+                    os_tracks[i, hi, j, 1] = y
+                os_conf_tracks[i, hi] = np.mean([c for _, _, c in hand.values()])
 
-            # OD (right) side
             if right is not None:
                 hands_r = _detect_hands_single_frame(right)
-                if hands_r:
-                    best = _pick_best_hand(hands_r, trial_name, fw - half_w)
-                    for j, (x, y, c) in best.items():
-                        od_lm[i, j, 0] = x
-                        od_lm[i, j, 1] = y
-                    od_conf[i] = np.mean([c for _, _, c in best.values()])
+                for hi, hand in enumerate(hands_r[:2]):
+                    for j, (x, y, c) in hand.items():
+                        od_tracks[i, hi, j, 0] = x
+                        od_tracks[i, hi, j, 1] = y
+                    od_conf_tracks[i, hi] = np.mean([c for _, _, c in hand.values()])
 
             frames_done += 1
             if progress_callback and i % 10 == 0:
                 progress_callback(frames_done / total_all * 100)
 
         cap.release()
+
+        # Pick tapping hand using power in distance trace (same as MediaPipe)
+        from .mediapipe_prelabel import _pick_tapping_track
+        os_idx = _pick_tapping_track(os_tracks, f"{subject_name}/vision/OS", trial_name=trial_name)
+        od_idx = _pick_tapping_track(od_tracks, f"{subject_name}/vision/OD", trial_name=trial_name)
+
+        os_lm = os_tracks[:, os_idx, :, :]
+        od_lm = od_tracks[:, od_idx, :, :]
+        os_conf = os_conf_tracks[:, os_idx]
+        od_conf = od_conf_tracks[:, od_idx]
+
         all_os.append(os_lm)
         all_od.append(od_lm)
         all_conf_os.append(os_conf)
         all_conf_od.append(od_conf)
+        all_os_tracks.append(os_tracks)
+        all_od_tracks.append(od_tracks)
 
     OS_landmarks = np.concatenate(all_os, axis=0)
     OD_landmarks = np.concatenate(all_od, axis=0)
     conf_OS = np.concatenate(all_conf_os)
     conf_OD = np.concatenate(all_conf_od)
+    OS_all = np.concatenate(all_os_tracks, axis=0)
+    OD_all = np.concatenate(all_od_tracks, axis=0)
     total = OS_landmarks.shape[0]
 
-    # Save
+    # Save — includes all tracks so hand selection can be changed later
     out_dir = settings.dlc_path / subject_name
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "vision_prelabels.npz"
@@ -244,6 +236,8 @@ def run_vision_hands(
         str(out_path),
         OS_landmarks=OS_landmarks,
         OD_landmarks=OD_landmarks,
+        OS_all_tracks=OS_all,        # (N, 2, 21, 2) — both hands
+        OD_all_tracks=OD_all,
         confidence_OS=conf_OS,
         confidence_OD=conf_OD,
         total_frames=np.array(total),

@@ -107,80 +107,90 @@ def _assign_hands_to_tracks(hands, scores, prev_wrists, tracks, conf, frame_idx)
 
 
 def _pick_tapping_track(tracks, video_name="", trial_name=""):
-    """Choose the tapping hand track.
+    """Choose the tapping hand track based on power in the distance trace.
 
-    Strategy:
-    1. If trial name indicates L/R hand AND both tracks have data,
-       pick the track whose wrist is on the expected side of the frame.
-       (Left-hand trials → tapping hand is on the RIGHT side of camera view.)
-    2. Otherwise, fall back to choosing the track with more oscillation.
+    Power = mean(velocity × amplitude) of thumb-index oscillation.
+    The tapping hand has rhythmic open-close movements producing high power;
+    the resting hand has low-amplitude drift producing low power.
 
     Args:
         tracks: (n_frames, 2, 21, 2) array.
         video_name: for logging.
-        trial_name: e.g. "MSA01_L1" — used to infer which hand is tapping.
+        trial_name: unused (kept for API compatibility).
 
     Returns:
         Track index (0 or 1).
     """
     n = tracks.shape[0]
-    start = n // 4
-    end = 3 * n // 4
-    if end <= start:
-        start, end = 0, n
-
-    oscs = []
+    # Use full trace for power calculation (not just middle 50%)
+    powers = []
     counts = []
-    mean_x = []
     for t_idx in range(2):
-        thumb = tracks[start:end, t_idx, THUMB_TIP]
-        index = tracks[start:end, t_idx, INDEX_TIP]
-        wrist = tracks[start:end, t_idx, WRIST]
+        thumb = tracks[:, t_idx, THUMB_TIP]
+        index = tracks[:, t_idx, INDEX_TIP]
         valid = ~np.isnan(thumb[:, 0]) & ~np.isnan(index[:, 0])
         n_valid = int(np.sum(valid))
         counts.append(n_valid)
-        if n_valid < 10:
-            oscs.append(0.0)
-            mean_x.append(float('nan'))
+        if n_valid < 20:
+            powers.append(0.0)
             continue
-        dist = np.linalg.norm(thumb[valid] - index[valid], axis=1)
-        oscs.append(float(np.std(dist)))
-        wrist_valid = ~np.isnan(wrist[:, 0])
-        mean_x.append(float(np.mean(wrist[wrist_valid, 0])) if np.sum(wrist_valid) > 0 else float('nan'))
 
-    # Determine expected hand side from trial name
-    # "_L" trials = left hand tapping = appears on RIGHT side of camera view (higher x)
-    # "_R" trials = right hand tapping = appears on LEFT side of camera view (lower x)
-    expect_right_side = None  # None = unknown
-    if trial_name:
-        tn_upper = trial_name.upper()
-        if "_L" in tn_upper:
-            expect_right_side = True   # left hand → right side of camera view
-        elif "_R" in tn_upper:
-            expect_right_side = False  # right hand → left side of camera view
+        dist = np.linalg.norm(thumb - index, axis=1)
+        # Fill NaN gaps with linear interpolation for velocity calc
+        valid_idx = np.where(valid)[0]
+        dist_clean = np.interp(np.arange(n), valid_idx, dist[valid_idx])
 
-    chosen = int(np.argmax(oscs))
+        # Velocity (frame-to-frame change in distance)
+        vel = np.abs(np.diff(dist_clean))
+
+        # Find peaks (local maxima in distance = open position)
+        # Simple peak detection: frame where dist > both neighbors
+        peaks = []
+        troughs = []
+        for i in range(1, len(dist_clean) - 1):
+            if dist_clean[i] > dist_clean[i-1] and dist_clean[i] > dist_clean[i+1]:
+                peaks.append(i)
+            elif dist_clean[i] < dist_clean[i-1] and dist_clean[i] < dist_clean[i+1]:
+                troughs.append(i)
+
+        if len(peaks) < 3 or len(troughs) < 3:
+            # Not enough oscillation — use std as fallback
+            powers.append(float(np.std(dist_clean)))
+            continue
+
+        # Compute amplitude for each peak (distance from nearest preceding trough)
+        amplitudes = []
+        for pk in peaks:
+            preceding = [t for t in troughs if t < pk]
+            if preceding:
+                amp = dist_clean[pk] - dist_clean[preceding[-1]]
+                if amp > 0:
+                    amplitudes.append(amp)
+
+        if not amplitudes:
+            powers.append(float(np.std(dist_clean)))
+            continue
+
+        # Power = mean amplitude × mean velocity at peaks
+        mean_amp = float(np.mean(amplitudes))
+        # Peak velocities: velocity at each peak frame
+        peak_vels = [vel[min(pk, len(vel)-1)] for pk in peaks]
+        mean_peak_vel = float(np.mean(peak_vels))
+        power = mean_amp * mean_peak_vel
+        powers.append(power)
+
+    chosen = int(np.argmax(powers))
 
     # If only one track has data, use it
-    if counts[0] >= 10 and counts[1] < 10:
+    if counts[0] >= 20 and counts[1] < 20:
         chosen = 0
-    elif counts[1] >= 10 and counts[0] < 10:
+    elif counts[1] >= 20 and counts[0] < 20:
         chosen = 1
-    elif expect_right_side is not None and counts[0] >= 10 and counts[1] >= 10:
-        # Both tracks have data — use spatial position to disambiguate
-        if not np.isnan(mean_x[0]) and not np.isnan(mean_x[1]):
-            if expect_right_side:
-                # Pick the track with higher mean x (right side of frame)
-                chosen = 0 if mean_x[0] > mean_x[1] else 1
-            else:
-                # Pick the track with lower mean x (left side of frame)
-                chosen = 0 if mean_x[0] < mean_x[1] else 1
 
     logger.info(
-        f"{video_name}: track0 osc={oscs[0]:.1f} x={mean_x[0]:.0f} ({counts[0]} pts), "
-        f"track1 osc={oscs[1]:.1f} x={mean_x[1]:.0f} ({counts[1]} pts) "
+        f"{video_name}: track0 power={powers[0]:.1f} ({counts[0]} pts), "
+        f"track1 power={powers[1]:.1f} ({counts[1]} pts) "
         f"→ selected track {chosen}"
-        + (f" (trial hint: {'right' if expect_right_side else 'left'} side)" if expect_right_side is not None else "")
     )
     return chosen
 
@@ -214,6 +224,9 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
     # Allocate arrays: all 21 joints per camera, shape (total_frames, 21, 2)
     OS_landmarks = np.full((total_frames, N_JOINTS, 2), np.nan)
     OD_landmarks = np.full((total_frames, N_JOINTS, 2), np.nan)
+    # All tracks: (total_frames, 2, 21, 2) — both hands saved for later re-selection
+    OS_all_tracks = np.full((total_frames, 2, N_JOINTS, 2), np.nan)
+    OD_all_tracks = np.full((total_frames, 2, N_JOINTS, 2), np.nan)
     confidence_OS = np.full(total_frames, np.nan)
     confidence_OD = np.full(total_frames, np.nan)
 
@@ -304,12 +317,14 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
         os_idx = _pick_tapping_track(os_tracks, f"{video_name}/OS", trial_name=trial_name)
         od_idx = _pick_tapping_track(od_tracks, f"{video_name}/OD", trial_name=trial_name)
 
-        # Copy selected tracks into the global output arrays
+        # Copy selected tracks + all tracks into the global output arrays
         for local_frame in range(actual_frame_count):
             global_frame = start_frame + frame_offset + local_frame
             if global_frame < total_frames:
                 OS_landmarks[global_frame] = os_tracks[local_frame, os_idx]
                 OD_landmarks[global_frame] = od_tracks[local_frame, od_idx]
+                OS_all_tracks[global_frame] = os_tracks[local_frame]
+                OD_all_tracks[global_frame] = od_tracks[local_frame]
                 confidence_OS[global_frame] = os_conf[local_frame, os_idx]
                 confidence_OD[global_frame] = od_conf[local_frame, od_idx]
 
@@ -335,6 +350,8 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
         npz_path,
         OS_landmarks=OS_landmarks,
         OD_landmarks=OD_landmarks,
+        OS_all_tracks=OS_all_tracks,    # (N, 2, 21, 2) — both hands for re-selection
+        OD_all_tracks=OD_all_tracks,
         confidence_OS=confidence_OS,
         confidence_OD=confidence_OD,
         distances=distances,
