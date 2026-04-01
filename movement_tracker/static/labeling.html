@@ -253,10 +253,7 @@
 
             <!-- Distance trace -->
             <div class="distance-trace-container" id="distanceTraceContainer" style="display:none;">
-                <div style="display:flex;align-items:center;gap:8px;">
-                    <span class="distance-trace-label" style="margin:0;">Distance (mm)</span>
-                    <div id="distLegend" style="display:inline-flex;align-items:center;gap:4px;"></div>
-                </div>
+                <div id="distLegend" style="display:flex;align-items:center;gap:6px;padding-left:2px;min-height:16px;"></div>
                 <canvas id="distanceTraceCanvas"></canvas>
             </div>
 
@@ -275,7 +272,7 @@
 
     <script src="/static/js/nav.js"></script>
     <script src="/static/js/api.js?v=10"></script>
-    <script src="/static/js/labeler.js?v=53"></script>
+    <script src="/static/js/labeler.js?v=54"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {
