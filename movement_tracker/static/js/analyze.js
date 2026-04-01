@@ -212,7 +212,12 @@ const analyzeViewer = (() => {
         trials.forEach((t, i) => {
             const btn = document.createElement('button');
             btn.className = 'trial-btn';
-            btn.textContent = t.trial_stem || t.trial_name || `Trial ${i}`;
+            // Strip subject name prefix: "Con01_R1" → "R1"
+            let label = t.trial_name || `Trial ${i}`;
+            if (subjectName && label.startsWith(subjectName + '_')) {
+                label = label.slice(subjectName.length + 1);
+            }
+            btn.textContent = label;
             btn.title = t.trial_name || '';
             btn.addEventListener('click', () => loadTrial(i));
             trialBtns.appendChild(btn);
