@@ -10,8 +10,8 @@
     <div class="header">
         <h1><a href="/">Movement Tracker</a></h1>
         <nav>
-            <a href="/" class="active">Dashboard</a>
-            <a href="/videos">Videos</a>
+            <a href="/subjects" class="active">Subjects</a>
+            <a href="/videos" class="nav-browse">Browse Videos</a>
             <a href="/analyze">Analyze</a>
             <a href="/deidentify">Deidentify</a>
             <a href="/labeling-select">DLC</a>
@@ -52,14 +52,6 @@
             <div style="display: flex; gap: 8px;">
                 <button class="btn btn-sm" onclick="syncSubjects()">Sync from disk</button>
                 <a href="/onboarding" class="btn btn-sm btn-primary" style="text-decoration:none;">+ Add Subject</a>
-            </div>
-        </div>
-
-        <!-- Videos panel -->
-        <div class="card" style="padding: 16px;">
-            <h2 style="margin: 0 0 12px 0;">Videos</h2>
-            <div id="videosPanel" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
-                <span style="color:var(--text-muted);font-size:13px;">Loading…</span>
             </div>
         </div>
 

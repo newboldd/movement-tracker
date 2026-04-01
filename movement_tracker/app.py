@@ -460,7 +460,25 @@ def startup():
 
 @app.get("/")
 def index():
-    """Serve the dashboard page."""
+    """Smart landing page: videos browser if no subjects, dashboard otherwise."""
+    from .db import get_db_ctx
+    from fastapi.responses import RedirectResponse
+    try:
+        with get_db_ctx() as db:
+            count = db.execute(
+                "SELECT COUNT(*) as n FROM subjects WHERE name != 'Example'"
+            ).fetchone()
+            if count and count["n"] > 0:
+                return FileResponse(str(STATIC_DIR / "index.html"))
+    except Exception:
+        pass
+    # No subjects (or only Example) — redirect to video browser
+    return RedirectResponse(url="/videos", status_code=302)
+
+
+@app.get("/subjects")
+def subjects_page():
+    """Serve the dashboard/subjects page directly (no redirect logic)."""
     return FileResponse(str(STATIC_DIR / "index.html"))
 
 
