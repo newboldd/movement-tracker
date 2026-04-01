@@ -410,34 +410,22 @@ class LocalExecutor:
                                     (overall, job_id),
                                 )
 
-                        # Load face detections
-                        face_by_frame = {}
+                        # Load face detections as raw rows
                         with get_db_ctx() as db:
                             face_rows = db.execute(
                                 "SELECT frame_num, x1, y1, x2, y2, side FROM face_detections WHERE subject_id = ? AND trial_idx = ?",
                                 (subj["id"], trial_i),
                             ).fetchall()
-                        for fd in face_rows:
-                            fn = fd["frame_num"]
-                            if fn not in face_by_frame:
-                                face_by_frame[fn] = []
-                            face_by_frame[fn].append(dict(fd))
+                        face_list = [dict(fd) for fd in face_rows]
 
                         hs = hand_by_trial.get(trial_i, {})
-                        segments = []
-                        seg_json = hs.get("segments_json")
-                        if seg_json:
-                            try:
-                                segments = _json.loads(seg_json)
-                            except (ValueError, TypeError):
-                                pass
 
                         render_with_blur_specs(
                             input_path=trial["video_path"],
                             output_path=output_path,
                             blur_specs=specs_by_trial.get(trial_i, []),
                             hand_settings=hs,
-                            face_detections=face_by_frame,
+                            face_detections=face_list,
                             subject_name=subject_name,
                             start_frame=trial["start_frame"],
                             frame_count=trial["frame_count"],
