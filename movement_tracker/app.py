@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 
 from .config import get_settings
 from .db import init_db
-from .routers import subjects, labeling, pipeline, jobs, results, settings, filebrowser, video_tools, batch, remote_jobs, mano, export, camera_setups, updater, deidentify
+from .routers import subjects, labeling, pipeline, jobs, results, settings, filebrowser, video_tools, batch, remote_jobs, mano, export, camera_setups, updater, deidentify, analyze
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -53,6 +53,7 @@ app.include_router(export.router)
 app.include_router(camera_setups.router)
 app.include_router(updater.router)
 app.include_router(deidentify.router)
+app.include_router(analyze.router)
 
 # Mount static files
 STATIC_DIR = Path(__file__).parent / "static"
@@ -481,6 +482,12 @@ def deidentify_page():
     return FileResponse(str(STATIC_DIR / "deidentify.html"))
 
 
+@app.get("/analyze")
+def analyze_page():
+    """Serve the Analyze page (keypoint viewer + distance comparison)."""
+    return FileResponse(str(STATIC_DIR / "analyze.html"))
+
+
 @app.get("/mano")
 def mano_page():
     """Serve the MANO viewer page."""
@@ -622,48 +629,11 @@ def labeling_select_page(subject: Optional[int] = None, mode: Optional[str] = No
 
 @app.get("/mediapipe-select")
 def mediapipe_select_page(subject: Optional[int] = None):
-    """Smart redirect to MediaPipe page. Always uses 'initial' session type."""
+    """Redirect to the new Analyze page."""
     from fastapi.responses import RedirectResponse
-    from .db import get_db_ctx
-
-    def _get_or_create_mp_session(db, sid: int) -> Optional[int]:
-        existing = db.execute(
-            """SELECT ls.id FROM label_sessions ls
-               WHERE ls.subject_id = ? AND ls.session_type = 'initial' AND ls.status = 'active'
-               ORDER BY ls.id DESC LIMIT 1""",
-            (sid,),
-        ).fetchone()
-        if existing:
-            return existing["id"]
-        db.execute(
-            "INSERT INTO label_sessions (subject_id, session_type) VALUES (?, 'initial')",
-            (sid,),
-        )
-        db.commit()
-        row = db.execute(
-            "SELECT id FROM label_sessions WHERE subject_id = ? ORDER BY created_at DESC LIMIT 1",
-            (sid,),
-        ).fetchone()
-        return row["id"] if row else None
-
-    with get_db_ctx() as db:
-        if subject is not None:
-            row = db.execute("SELECT * FROM subjects WHERE id = ?", (subject,)).fetchone()
-            if not row:
-                return RedirectResponse(url="/", status_code=302)
-            sid = _get_or_create_mp_session(db, subject)
-            if sid:
-                return RedirectResponse(url=f"/mediapipe?session={sid}", status_code=302)
-            return RedirectResponse(url="/", status_code=302)
-
-        # No subject — find most recent or first subject
-        first = db.execute("SELECT * FROM subjects ORDER BY id LIMIT 1").fetchone()
-        if not first:
-            return RedirectResponse(url="/", status_code=302)
-        sid = _get_or_create_mp_session(db, first["id"])
-        if sid:
-            return RedirectResponse(url=f"/mediapipe?session={sid}", status_code=302)
-        return RedirectResponse(url="/", status_code=302)
+    if subject:
+        return RedirectResponse(url=f"/analyze?subject={subject}", status_code=302)
+    return RedirectResponse(url="/analyze", status_code=302)
 
 
 @app.get("/results")

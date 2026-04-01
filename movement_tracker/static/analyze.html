@@ -31,11 +31,11 @@
         .finger-toggle input { margin: 0; }
 
         /* ── Main content area ── */
-        .mano-main {
+        .analyze-main {
             flex: 1; display: flex; flex-direction: column;
             overflow: hidden; padding: 8px;
         }
-        .mano-viewports {
+        .analyze-viewports {
             flex: 1; position: relative; min-height: 0;
             background: #111; border-radius: 4px; overflow: hidden;
         }
@@ -44,13 +44,6 @@
         }
         .canvas-wrap canvas {
             display: block; width: 100%; height: 100%;
-        }
-        .three-wrap {
-            position: absolute; inset: 0;
-            pointer-events: none; /* pass clicks through to video by default */
-        }
-        .three-wrap.interactive {
-            pointer-events: auto; /* enabled when 3D is visible */
         }
 
         /* ── Controls bar ── */
@@ -82,7 +75,7 @@
         <div style="display:flex;align-items:center;gap:16px;">
             <h1 style="margin:0;"><a href="/" style="font-size:18px;">Movement Tracker</a></h1>
             <div style="display:flex;align-items:center;gap:8px;">
-                <span style="font-size:18px;font-weight:600;">MANO</span>
+                <span style="font-size:18px;font-weight:600;">Analyze</span>
                 <select id="subjectSelect" class="subject-select"></select>
                 <button class="btn btn-sm" id="prevSubjectBtn" title="Previous subject">&larr;</button>
                 <button class="btn btn-sm" id="nextSubjectBtn" title="Next subject">&rarr;</button>
@@ -90,10 +83,10 @@
         </div>
         <nav>            <a href="/">Dashboard</a>
             <a href="/videos">Videos</a>
-            <a href="/analyze">Analyze</a>
+            <a href="/analyze" class="active">Analyze</a>
             <a href="/deidentify">Deidentify</a>
             <a href="/labeling-select">DLC</a>
-            <a href="/mano" class="active">MANO</a>
+            <a href="/mano">MANO</a>
             <a href="/results" id="resultsLink">Results</a>
 
             <a href="/remote">Processing</a>
@@ -130,7 +123,6 @@
             <div style="display:flex;gap:4px;margin-bottom:6px;">
                 <button class="btn btn-sm" id="sideToggle" title="Toggle camera (E)">OS</button>
                 <button class="btn btn-sm" id="resetZoomBtn" title="Reset zoom (Z)">Reset Zoom</button>
-                <button class="btn btn-sm" id="snapCamBtn" title="Reset 3D view to camera (C)">Snap</button>
             </div>
 
             <!-- Layers -->
@@ -140,17 +132,12 @@
                 <span class="layer-swatch" style="background:#888;"></span> Video
             </label>
             <label class="layer-toggle">
-                <input type="checkbox" id="show3D" checked>
-                <span class="layer-swatch" style="background:#7c4dff;"></span> 3D Model
-            </label>
-            <hr style="border:none;border-top:1px solid var(--border);margin:4px 0;">
-            <label class="layer-toggle">
-                <input type="checkbox" id="showMano" checked>
-                <span class="layer-swatch" style="background:lime;"></span> MANO
-            </label>
-            <label class="layer-toggle">
-                <input type="checkbox" id="showMP">
+                <input type="checkbox" id="showMP" checked>
                 <span class="layer-swatch" style="background:cyan;"></span> MediaPipe
+            </label>
+            <label class="layer-toggle">
+                <input type="checkbox" id="showVision">
+                <span class="layer-swatch" style="background:#ffcc00;"></span> Vision
             </label>
             <label class="layer-toggle">
                 <input type="checkbox" id="showDLC">
@@ -159,10 +146,6 @@
             <label class="layer-toggle">
                 <input type="checkbox" id="showSkeleton" checked>
                 <span class="layer-swatch" style="background:#aaa;"></span> Skeleton
-            </label>
-            <label class="layer-toggle">
-                <input type="checkbox" id="showHeatmap">
-                <span class="layer-swatch" style="background:#ff6600;"></span> Heatmap
             </label>
 
             <!-- Fingers -->
@@ -176,67 +159,37 @@
                 <label class="finger-toggle"><input type="checkbox" data-finger="pinky" checked> Pinky</label>
             </div>
 
-            <!-- Heatmap joint -->
-            <div id="heatmapControls" style="display:none;margin-top:8px;">
-                <div class="sidebar-section">Heatmap Joint</div>
-                <select id="jointSelect" style="width:100%;padding:4px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:11px;"></select>
-            </div>
-
             <!-- Distance -->
             <div class="sidebar-section">Distance</div>
             <select id="distanceSelect" style="width:100%;padding:4px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:11px;"></select>
-
-            <!-- Export -->
-            <div class="sidebar-section" style="margin-top:16px;">Export</div>
-            <button class="btn btn-sm" id="exportVideoBtn" style="width:100%;">Export Video</button>
 
             <!-- Shortcuts -->
             <div class="sidebar-section" style="margin-top:16px;">Shortcuts</div>
             <div style="font-size:10px;color:var(--text-muted);line-height:1.6;">
                 <b>A/&larr;</b> prev frame &nbsp; <b>S/&rarr;</b> next frame<br>
                 <b>Space</b> play/pause &nbsp; <b>E</b> toggle camera<br>
-                <b>Z</b> reset zoom &nbsp; <b>C</b> snap camera<br>
-                <b>Scroll</b> zoom
+                <b>Z</b> reset zoom &nbsp; <b>Scroll</b> zoom
             </div>
         </div>
 
         <!-- Main content -->
-        <div class="mano-main">
-            <div class="mano-viewports">
+        <div class="analyze-main">
+            <div class="analyze-viewports">
                 <div class="canvas-wrap">
                     <canvas id="videoCanvas"></canvas>
                     <video id="videoEl" style="display:none;" muted></video>
                 </div>
-                <div class="three-wrap" id="threejsContainer"></div>
             </div>
             <div class="controls-bar">
                 <span>Frame: <strong id="frameDisplay">0</strong> / <span id="totalFrames">0</span></span>
                 <span>Trial: <strong id="trialName">-</strong></span>
-                <span>Err: <strong id="fitError">-</strong></span>
             </div>
             <canvas id="distanceCanvas"></canvas>
         </div>
     </div>
 
     <script src="/static/js/nav.js"></script>
-    <script type="importmap">
-    {
-        "imports": {
-            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
-        }
-    }
-    </script>
-    <script src="/static/js/mano.js?v=17" type="module"></script>
-    <script src="/static/js/video-export.js?v=1"></script>
-    <script>
-        document.getElementById('exportVideoBtn').addEventListener('click', () => {
-            if (window.manoViewer && window.manoViewer.getExportContext) {
-                VideoExport.open(window.manoViewer.getExportContext());
-            } else {
-                alert('Viewer not ready — load a trial first.');
-            }
-        });
-    </script>
+    <script src="/static/js/api.js?v=1"></script>
+    <script src="/static/js/analyze.js?v=1"></script>
 </body>
 </html>
