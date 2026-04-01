@@ -304,3 +304,68 @@ const SUBJECT_PAGES = [
         if (cfg.show_tutorials === false) tutLink.style.display = 'none';
     }).catch(() => {});
 })();
+
+/* ── Live Job Queue in nav dropdown ──────────────────────────── */
+(function() {
+    const panel = document.getElementById('navJobsPanel');
+    const dot = document.getElementById('navJobDot');
+    if (!panel || !dot) return;
+
+    let _lastHtml = '';
+
+    async function _pollJobs() {
+        try {
+            const data = await fetch('/api/queue/status').then(r => r.json());
+            const running = data.running || [];
+            const cpuQueue = data.cpu_queue || [];
+            const gpuQueue = data.gpu_queue || [];
+
+            const hasActive = running.length > 0 || cpuQueue.length > 0 || gpuQueue.length > 0;
+            dot.style.display = hasActive ? 'inline-block' : 'none';
+
+            function _jobRow(item) {
+                const st = item.status || 'queued';
+                const name = item.subject_ids ? JSON.parse(item.subject_ids).join(', ') : '?';
+                const type = (item.job_type || '').replace(/_/g, ' ');
+                const pct = item.progress_pct ? Math.round(item.progress_pct) + '%' : '';
+                const dotCls = st === 'running' ? 'running' : 'queued';
+                const qid = item.id;
+                const jid = item.job_id || '';
+                return `<div class="job-item">
+                    <span class="job-dot ${dotCls}"></span>
+                    <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:90px;">${name}</span>
+                    <span style="color:var(--text-muted);font-size:10px;">${type} ${pct}</span>
+                    <span class="job-actions">
+                        ${jid ? `<button onclick="event.stopPropagation();fetch('/api/queue/${qid}/cancel',{method:'POST'}).then(()=>window._navPollJobs())" title="Cancel">×</button>` : ''}
+                        ${jid ? `<button onclick="event.stopPropagation();window.open('/remote?job=${jid}','_blank')" title="Log">log</button>` : ''}
+                    </span>
+                </div>`;
+            }
+
+            const cpuItems = [...running.filter(r => r.resource === 'cpu'), ...cpuQueue];
+            const gpuItems = [...running.filter(r => r.resource === 'gpu'), ...gpuQueue];
+
+            let html = '<div class="jobs-grid">';
+            html += '<div><h4>CPU</h4>';
+            if (cpuItems.length === 0) html += '<div class="empty-msg">Empty</div>';
+            else cpuItems.forEach(item => { html += _jobRow(item); });
+            html += '</div>';
+            html += '<div><h4>GPU</h4>';
+            if (gpuItems.length === 0) html += '<div class="empty-msg">Empty</div>';
+            else gpuItems.forEach(item => { html += _jobRow(item); });
+            html += '</div></div>';
+            html += `<div style="text-align:center;margin-top:6px;"><a href="/remote" style="font-size:11px;color:var(--blue);">Open Job Queue</a></div>`;
+
+            if (html !== _lastHtml) {
+                panel.innerHTML = html;
+                _lastHtml = html;
+            }
+        } catch (e) {
+            // Silently ignore polling errors
+        }
+    }
+
+    window._navPollJobs = _pollJobs;
+    _pollJobs();
+    setInterval(_pollJobs, 3000);
+})();

@@ -145,6 +145,80 @@ body {
     color: var(--blue);
 }
 
+/* Flashing job status dot */
+.nav-job-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #4CAF50;
+    margin-right: 4px;
+    animation: job-pulse 1.5s ease-in-out infinite;
+}
+@keyframes job-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}
+
+/* Wider jobs dropdown with side-by-side queues */
+.nav-jobs-dropdown {
+    min-width: 360px !important;
+    padding: 8px 12px !important;
+    right: 0;
+    left: auto !important;
+}
+.nav-jobs-dropdown .jobs-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+.nav-jobs-dropdown h4 {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin: 0 0 6px 0;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.nav-jobs-dropdown .job-item {
+    font-size: 12px;
+    padding: 4px 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.nav-jobs-dropdown .job-item .job-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.nav-jobs-dropdown .job-dot.running { background: #4CAF50; }
+.nav-jobs-dropdown .job-dot.queued { background: #FF9800; }
+.nav-jobs-dropdown .job-dot.failed { background: #F44336; }
+.nav-jobs-dropdown .job-actions {
+    margin-left: auto;
+    display: flex;
+    gap: 4px;
+}
+.nav-jobs-dropdown .job-actions button {
+    font-size: 10px;
+    padding: 1px 5px;
+    cursor: pointer;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-muted);
+}
+.nav-jobs-dropdown .job-actions button:hover {
+    color: var(--text);
+    border-color: var(--text-muted);
+}
+.nav-jobs-dropdown .empty-msg {
+    font-size: 11px;
+    color: var(--text-muted);
+    padding: 4px 0;
+}
+
 .container {
     max-width: 1400px;
     margin: 0 auto;

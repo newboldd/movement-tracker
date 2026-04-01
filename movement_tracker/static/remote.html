@@ -184,13 +184,12 @@
             <a href="/videos" class="nav-browse">Browse Videos</a>
             <a href="/subjects">Subjects</a>
             <span class="nav-dropdown">
-                <a href="/analyze" class="active">Analyze</a>
+                <a href="/analyze">Analyze</a>
                 <div class="nav-dropdown-menu">
                     <a href="/deidentify">Deidentify</a>
                     <a href="/analyze">Detect</a>
                     <a href="/labeling-select">DLC</a>
                     <a href="/mano">MANO</a>
-                    <a href="/remote" class="active">Job Queue</a>
                 </div>
             </span>
             <span class="nav-dropdown">
@@ -199,6 +198,12 @@
                     <a href="/results">Individual</a>
                     <a href="/results?tab=group">Group Comparison</a>
                     <a href="/oscillations">Oscillations</a>
+                </div>
+            </span>
+            <span class="nav-dropdown" id="navJobQueue">
+                <a href="/remote"><span id="navJobDot" class="nav-job-dot" style="display:none;"></span>Jobs</a>
+                <div class="nav-dropdown-menu nav-jobs-dropdown" id="navJobsPanel">
+                    <div style="padding:8px 12px;font-size:11px;color:var(--text-muted);">Loading...</div>
                 </div>
             </span>
             <a href="/settings">Settings</a>
