@@ -166,6 +166,19 @@
             <div class="sidebar-section">Distance</div>
             <select id="distanceSelect" style="width:100%;padding:4px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:11px;"></select>
 
+            <!-- Run Detection -->
+            <div class="sidebar-section">Run Detection</div>
+            <button class="btn btn-sm" id="runMPBtn" onclick="analyzeViewer.runMediapipe()" style="width:100%;margin-bottom:4px;">
+                Detect Hands (MediaPipe)
+            </button>
+            <button class="btn btn-sm" id="runVisionBtn" onclick="analyzeViewer.runVision()" style="width:100%;margin-bottom:4px;">
+                Detect Hands (Vision)
+            </button>
+            <button class="btn btn-sm" id="runPoseBtn" onclick="analyzeViewer.runPose()" style="width:100%;margin-bottom:4px;">
+                Detect Pose
+            </button>
+            <div id="detectionStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
+
             <!-- Shortcuts -->
             <div class="sidebar-section" style="margin-top:16px;">Shortcuts</div>
             <div style="font-size:10px;color:var(--text-muted);line-height:1.6;">

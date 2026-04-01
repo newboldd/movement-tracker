@@ -482,3 +482,152 @@ def get_trial_video(subject_id: int, trial_idx: int,
             video_path = str(nf_path)
 
     return FileResponse(video_path, media_type="video/mp4")
+
+
+# ── Run detection models ─────────────────────────────────────────────────
+
+@router.post("/{subject_id}/run-mediapipe")
+def run_mediapipe(subject_id: int) -> dict:
+    """Run MediaPipe hand detection on all trials. Creates a background job."""
+    import threading
+    from ..services.jobs import registry
+    from ..services.mediapipe_prelabel import run_mediapipe_all
+
+    subj_name = _subject_name(subject_id)
+    settings = get_settings()
+
+    with get_db_ctx() as db:
+        log_dir = settings.dlc_path / ".logs"
+        log_dir.mkdir(exist_ok=True)
+        log_path = str(log_dir / f"job_mediapipe_{subject_id}.log")
+        db.execute(
+            "INSERT INTO jobs (subject_id, job_type, status, log_path) VALUES (?, 'mediapipe', 'pending', ?)",
+            (subject_id, log_path),
+        )
+        job = db.execute(
+            "SELECT id FROM jobs WHERE subject_id = ? ORDER BY id DESC LIMIT 1", (subject_id,)
+        ).fetchone()
+
+    job_id = job["id"]
+    cancel = registry.register_cancel_event(job_id)
+
+    def _run():
+        try:
+            with get_db_ctx() as db:
+                db.execute("UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+            def progress(pct):
+                if cancel.is_set(): raise InterruptedError
+                with get_db_ctx() as db:
+                    db.execute("UPDATE jobs SET progress_pct = ? WHERE id = ?", (pct, job_id))
+            run_mediapipe_all(subj_name, progress_callback=progress)
+            with get_db_ctx() as db:
+                db.execute("UPDATE jobs SET status = 'completed', progress_pct = 100, finished_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+        except InterruptedError:
+            with get_db_ctx() as db:
+                db.execute("UPDATE jobs SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+        except Exception as e:
+            with get_db_ctx() as db:
+                db.execute("UPDATE jobs SET status = 'failed', error_msg = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?", (str(e), job_id))
+        finally:
+            registry.unregister_cancel_event(job_id)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"job_id": job_id, "status": "running"}
+
+
+@router.post("/{subject_id}/run-vision")
+def run_vision(subject_id: int) -> dict:
+    """Run Apple Vision hand detection on all trials. Creates a background job."""
+    import threading
+    from ..services.jobs import registry
+
+    subj_name = _subject_name(subject_id)
+    settings = get_settings()
+
+    with get_db_ctx() as db:
+        log_dir = settings.dlc_path / ".logs"
+        log_dir.mkdir(exist_ok=True)
+        log_path = str(log_dir / f"job_vision_{subject_id}.log")
+        db.execute(
+            "INSERT INTO jobs (subject_id, job_type, status, log_path) VALUES (?, 'vision', 'pending', ?)",
+            (subject_id, log_path),
+        )
+        job = db.execute(
+            "SELECT id FROM jobs WHERE subject_id = ? ORDER BY id DESC LIMIT 1", (subject_id,)
+        ).fetchone()
+
+    job_id = job["id"]
+    cancel = registry.register_cancel_event(job_id)
+
+    def _run():
+        try:
+            from ..services.vision_prelabel import run_vision_hands
+            with get_db_ctx() as db:
+                db.execute("UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+            def progress(pct):
+                if cancel.is_set(): raise InterruptedError
+                with get_db_ctx() as db:
+                    db.execute("UPDATE jobs SET progress_pct = ? WHERE id = ?", (pct, job_id))
+            run_vision_hands(subj_name, progress_callback=progress)
+            with get_db_ctx() as db:
+                db.execute("UPDATE jobs SET status = 'completed', progress_pct = 100, finished_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+        except InterruptedError:
+            with get_db_ctx() as db:
+                db.execute("UPDATE jobs SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+        except Exception as e:
+            with get_db_ctx() as db:
+                db.execute("UPDATE jobs SET status = 'failed', error_msg = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?", (str(e), job_id))
+        finally:
+            registry.unregister_cancel_event(job_id)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"job_id": job_id, "status": "running"}
+
+
+@router.post("/{subject_id}/run-pose")
+def run_pose(subject_id: int) -> dict:
+    """Run MediaPipe pose detection on all trials. Creates a background job."""
+    import threading
+    from ..services.jobs import registry
+    from ..services.mediapipe_prelabel import run_pose_prelabels
+
+    subj_name = _subject_name(subject_id)
+    settings = get_settings()
+
+    with get_db_ctx() as db:
+        log_dir = settings.dlc_path / ".logs"
+        log_dir.mkdir(exist_ok=True)
+        log_path = str(log_dir / f"job_pose_{subject_id}.log")
+        db.execute(
+            "INSERT INTO jobs (subject_id, job_type, status, log_path) VALUES (?, 'pose', 'pending', ?)",
+            (subject_id, log_path),
+        )
+        job = db.execute(
+            "SELECT id FROM jobs WHERE subject_id = ? ORDER BY id DESC LIMIT 1", (subject_id,)
+        ).fetchone()
+
+    job_id = job["id"]
+    cancel = registry.register_cancel_event(job_id)
+
+    def _run():
+        try:
+            with get_db_ctx() as db:
+                db.execute("UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+            def progress(pct):
+                if cancel.is_set(): raise InterruptedError
+                with get_db_ctx() as db:
+                    db.execute("UPDATE jobs SET progress_pct = ? WHERE id = ?", (pct, job_id))
+            run_pose_prelabels(subj_name, progress_callback=progress)
+            with get_db_ctx() as db:
+                db.execute("UPDATE jobs SET status = 'completed', progress_pct = 100, finished_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+        except InterruptedError:
+            with get_db_ctx() as db:
+                db.execute("UPDATE jobs SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+        except Exception as e:
+            with get_db_ctx() as db:
+                db.execute("UPDATE jobs SET status = 'failed', error_msg = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?", (str(e), job_id))
+        finally:
+            registry.unregister_cancel_event(job_id)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"job_id": job_id, "status": "running"}

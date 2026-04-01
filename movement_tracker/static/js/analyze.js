@@ -70,8 +70,8 @@ const analyzeViewer = (() => {
     // ── Helpers ───────────────────────────────────────────────
     const $ = id => document.getElementById(id);
 
-    async function api(url) {
-        const resp = await fetch(url);
+    async function api(url, opts) {
+        const resp = await fetch(url, opts);
         if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
         return resp.json();
     }
@@ -978,6 +978,57 @@ const analyzeViewer = (() => {
         renderDistanceTrace();
     }
 
+    // ── Run detection models ────────────────────────────────────
+    async function _runDetection(endpoint, btnId, label) {
+        const btn = $(btnId);
+        const status = $('detectionStatus');
+        if (btn) btn.disabled = true;
+        if (status) status.textContent = `Running ${label}...`;
+
+        try {
+            const result = await api(`/api/analyze/${subjectId}/${endpoint}`, { method: 'POST' });
+            const jobId = result.job_id;
+            if (!jobId) throw new Error('No job_id returned');
+
+            // Stream progress via SSE
+            const evtSource = new EventSource(`/api/jobs/${jobId}/stream`);
+            evtSource.onmessage = async (event) => {
+                const data = JSON.parse(event.data);
+                if (data.status === 'running') {
+                    const pct = data.progress_pct ? Math.round(data.progress_pct) : 0;
+                    if (status) status.textContent = `${label}... ${pct}%`;
+                } else if (data.status === 'completed') {
+                    evtSource.close();
+                    if (status) status.textContent = `${label} complete. Reloading...`;
+                    if (btn) btn.disabled = false;
+                    // Reload trial data to pick up new detections
+                    await loadTrial(currentTrialIdx);
+                    if (status) status.textContent = `${label} complete.`;
+                } else if (data.status === 'failed') {
+                    evtSource.close();
+                    if (status) status.textContent = `${label} failed: ${data.error_msg || 'unknown'}`;
+                    if (btn) btn.disabled = false;
+                } else if (data.status === 'cancelled') {
+                    evtSource.close();
+                    if (status) status.textContent = `${label} cancelled.`;
+                    if (btn) btn.disabled = false;
+                }
+            };
+            evtSource.onerror = () => {
+                evtSource.close();
+                if (status) status.textContent = 'Connection lost — check Processing page.';
+                if (btn) btn.disabled = false;
+            };
+        } catch (err) {
+            if (status) status.textContent = `Error: ${err.message || err}`;
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    function runMediapipe() { _runDetection('run-mediapipe', 'runMPBtn', 'MediaPipe Hands'); }
+    function runVision() { _runDetection('run-vision', 'runVisionBtn', 'Apple Vision Hands'); }
+    function runPose() { _runDetection('run-pose', 'runPoseBtn', 'Pose Detection'); }
+
     // ── Public API ───────────────────────────────────────────
     return {
         init,
@@ -987,6 +1038,9 @@ const analyzeViewer = (() => {
         setLayer,
         updateFingerVisibility,
         seekFrame,
+        runMediapipe,
+        runVision,
+        runPose,
     };
 })();
 
