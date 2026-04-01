@@ -50,17 +50,22 @@
                 <button class="btn btn-sm" id="modeEvents" onclick="switchMode('events')" title="Events mode">Events</button>
             </div>
         </div>
-        <nav>            <a href="/subjects">Subjects</a>
+        <nav>
+            <a href="/subjects">Subjects</a>
             <a href="/videos" class="nav-browse">Browse Videos</a>
-            <a href="/analyze">Analyze</a>
             <a href="/deidentify">Deidentify</a>
-            <a href="/labeling-select" class="active">DLC</a>
-            <a href="/mano">MANO</a>
-            <a href="/results" id="resultsLink">Results</a>
-
-            <a href="/remote">Processing</a>
+            <span class="nav-dropdown">
+                <a href="/analyze">Analyze</a>
+                <div class="nav-dropdown-menu">
+                    <a href="/analyze">Detect</a>
+                    <a href="/labeling-select">DLC</a>
+                    <a href="/mano">MANO</a>
+                    <a href="/remote">Job Queue</a>
+                </div>
+            </span>
+            <a href="/results">Results</a>
+            <a href="/oscillations">Oscillations</a>
             <a href="/settings">Settings</a>
-            <a href="/tutorials">Tutorials</a>
         </nav>
     </div>
 

@@ -172,8 +172,9 @@ if [ ! -f "$VENV_DIR/.installed" ] || [ "$REQUIREMENTS" -nt "$VENV_DIR/.installe
     print_header "Installing Python dependencies"
     echo "This may take several minutes on first run (DeepLabCut and friends are large)."
     echo ""
-    pip install --upgrade pip -q
-    pip install -r "$REQUIREMENTS"
+    which pip
+    /Users/newboldd/code/movement-tracker/.venv/bin/pip install --upgrade pip -q
+    /Users/newboldd/code/movement-tracker/.venv/bin/pip install -r "$REQUIREMENTS"
     touch "$VENV_DIR/.installed"
     echo ""
     echo "Dependencies installed."
