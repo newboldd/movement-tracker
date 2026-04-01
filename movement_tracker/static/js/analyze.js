@@ -238,8 +238,12 @@ const analyzeViewer = (() => {
         highlightTrialButton(idx);
         if (typeof setNavState === 'function') setNavState({ trialIdx: idx, frame: currentFrame });
 
-        $('trialName').textContent = trial.trial_stem || trial.trial_name || '';
-        $('totalFrames').textContent = trial.n_frames || '';
+        // Trial name: strip subject prefix for display
+        let displayTrial = trial.trial_name || '';
+        if (subjectName && displayTrial.startsWith(subjectName + '_')) {
+            displayTrial = displayTrial.slice(subjectName.length + 1);
+        }
+        $('trialName').textContent = displayTrial;
 
         // Load bulk data
         try {
@@ -290,6 +294,14 @@ const analyzeViewer = (() => {
             selectedMetric = distSel.options[0].value;
             distSel.value = selectedMetric;
         }
+
+        // Show/hide model toggles based on available data
+        const mpRow = $('mpToggleRow');
+        const visRow = $('visionToggleRow');
+        const dlcRow = $('dlcToggleRow');
+        if (mpRow) mpRow.style.display = (trialData.mediapipe && (trialData.mediapipe.OS || trialData.mediapipe.OD)) ? '' : 'none';
+        if (visRow) visRow.style.display = (trialData.vision && (trialData.vision.OS || trialData.vision.OD)) ? '' : 'none';
+        if (dlcRow) dlcRow.style.display = (trialData.dlc && (trialData.dlc.OS || trialData.dlc.OD)) ? '' : 'none';
 
         // Load video
         const trialIdx = trial.trial_idx != null ? trial.trial_idx : idx;
@@ -362,8 +374,15 @@ const analyzeViewer = (() => {
         // Distance selector
         $('distanceSelect').addEventListener('change', () => {
             selectedMetric = $('distanceSelect').value;
+            _updateFrameInfo();
             renderDistanceTrace();
         });
+
+        // Y-range inputs
+        const yMinInput = $('yMinInput');
+        const yMaxInput = $('yMaxInput');
+        if (yMinInput) yMinInput.addEventListener('change', renderDistanceTrace);
+        if (yMaxInput) yMaxInput.addEventListener('change', renderDistanceTrace);
 
         // Finger toggles
         document.querySelectorAll('#fingerToggles input').forEach(cb => {
@@ -433,13 +452,37 @@ const analyzeViewer = (() => {
     }
 
     // ── Frame navigation ─────────────────────────────────────
+    function _updateFrameInfo() {
+        $('frameDisplay').textContent = currentFrame;
+        // Timestamp
+        const timeEl = $('timeDisplay');
+        if (timeEl) timeEl.textContent = (currentFrame / (fps || 30)).toFixed(2) + 's';
+        // Current distance readout
+        const readout = $('distanceReadout');
+        if (readout && trialData && trialData.distances && selectedMetric) {
+            const metricData = trialData.distances[selectedMetric];
+            if (metricData) {
+                // Find the first available source's value
+                const side = currentSide;
+                for (const srcKey of ['mediapipe_' + side, 'vision_' + side, 'dlc_' + side]) {
+                    const arr = metricData[srcKey];
+                    if (arr && currentFrame < arr.length && arr[currentFrame] != null) {
+                        readout.textContent = `Distance: ${arr[currentFrame].toFixed(1)} mm`;
+                        return;
+                    }
+                }
+                readout.textContent = 'Distance: — mm';
+            }
+        }
+    }
+
     function goToFrame(n) {
         if (!trialData) return;
         currentFrame = Math.max(0, Math.min(n, trialData.n_frames - 1));
         if (typeof setNavState === 'function') setNavState({ frame: currentFrame });
         sessionStorage.setItem('analyze_lastFrame', String(currentFrame));
 
-        $('frameDisplay').textContent = currentFrame;
+        _updateFrameInfo();
 
         // Update distance trace
         renderDistanceTrace();
@@ -479,7 +522,7 @@ const analyzeViewer = (() => {
             const f = Math.floor(videoEl.currentTime * fps);
             if (f !== currentFrame && f >= 0 && f < trialData.n_frames) {
                 currentFrame = f;
-                $('frameDisplay').textContent = currentFrame;
+                _updateFrameInfo();
                 render();
                 // Update distance trace less frequently during playback
                 if (currentFrame % 5 === 0) renderDistanceTrace();
@@ -881,7 +924,7 @@ const analyzeViewer = (() => {
             }
         }
 
-        // Compute Y range
+        // Compute Y range (auto or user-specified)
         let yMin = Infinity, yMax = -Infinity;
         for (const s of series) {
             for (const v of s.data) {
@@ -895,6 +938,12 @@ const analyzeViewer = (() => {
         const yPad = (yMax - yMin) * 0.1 || 10;
         yMin = Math.max(0, yMin - yPad);
         yMax += yPad;
+
+        // Override with user-specified Y range if provided
+        const userYMin = parseFloat(($('yMinInput') || {}).value);
+        const userYMax = parseFloat(($('yMaxInput') || {}).value);
+        if (isFinite(userYMin)) yMin = userYMin;
+        if (isFinite(userYMax)) yMax = userYMax;
 
         // Plot area with left padding for labels
         const padLeft = 40;
