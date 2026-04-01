@@ -687,6 +687,13 @@ const deid = (() => {
             }
         }
 
+        // Extra midpoint between thumb MCP (joint 2) and index MCP (joint 5)
+        const thumbMCP = byJoint[2];
+        const indexMCP = byJoint[5];
+        if (thumbMCP && indexMCP) {
+            allPoints.push({ x: (thumbMCP.x + indexMCP.x) / 2, y: (thumbMCP.y + indexMCP.y) / 2, type: 'interp' });
+        }
+
         // Draw circles for all hand keypoints + interpolated midpoints
         for (const lm of allPoints) {
             ctx1.beginPath();

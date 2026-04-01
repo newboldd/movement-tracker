@@ -956,6 +956,17 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
                     "type": "interp",
                 })
 
+    # Extra midpoint between thumb MCP (joint 2) and index MCP (joint 5)
+    # Fills the gap in the web space between thumb and index finger
+    thumb_mcp = by_joint.get(2)
+    index_mcp = by_joint.get(5)
+    if thumb_mcp and index_mcp:
+        all_points.append({
+            "x": (thumb_mcp["x"] + index_mcp["x"]) / 2,
+            "y": (thumb_mcp["y"] + index_mcp["y"]) / 2,
+            "type": "interp",
+        })
+
     # Draw circles at each hand landmark + interpolated midpoints
     for lm in all_points:
         x, y = int(lm["x"]), int(lm["y"])
