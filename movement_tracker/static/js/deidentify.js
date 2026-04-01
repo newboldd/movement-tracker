@@ -41,7 +41,7 @@ const deid = (() => {
     let forearmRadius = 10;  // dilation around forearm triangle (separate from circle radius)
     let forearmExtent = 0.4; // 0=wrist, 1=elbow, >1=past elbow
     let handSmooth = 7;  // morphological close on hand circles
-    let handSmooth2 = 5;  // morphological close after joining forearm
+    let handSmooth2 = 0;  // unified: set to 0, only smooth (pre-forearm) is used
     let handMaskEnabled = true;
     // dlcRadius removed — all hand keypoints use the same marker size
     let hasDlcLabels = false;
@@ -398,8 +398,28 @@ const deid = (() => {
                     radius: s.radius || handMaskRadius,
                     smooth: s.smooth != null ? s.smooth : handSmooth,
                 }));
+            } else if (hasMediapipe && trialMeta) {
+                // Default: hand protection on for the whole video
+                handProtectSegments = [{
+                    id: nextHandSegId++,
+                    start: trialMeta.start_frame,
+                    end: trialMeta.end_frame,
+                    radius: handMaskRadius,
+                    smooth: handSmooth,
+                }];
             }
-        } catch (e) {}
+        } catch (e) {
+            // No saved settings — create default hand protection if MP available
+            if (hasMediapipe && trialMeta) {
+                handProtectSegments = [{
+                    id: nextHandSegId++,
+                    start: trialMeta.start_frame,
+                    end: trialMeta.end_frame,
+                    radius: handMaskRadius,
+                    smooth: handSmooth,
+                }];
+            }
+        }
 
         // Reset zoom for new trial
         hasUserZoom = false;
@@ -701,10 +721,7 @@ const deid = (() => {
             ctx1.fill();
         }
 
-        // Step 2: First smooth — on hand circles only (fills finger gaps)
-        let handSmoothed = _morphClose(c1, smoothPx);
-
-        // Step 3: Add forearm triangle onto smoothed hand mask
+        // Step 2: Add forearm triangle BEFORE smoothing (unified smooth)
         const pinkyMCP = landmarks.find(l => l.type === 'hand' && l.joint === 17);
         const thumbCMC = landmarks.find(l => l.type === 'hand' && l.joint === 1);
         const handWrist = landmarks.find(l => l.type === 'hand' && l.joint === 0);
@@ -729,40 +746,39 @@ const deid = (() => {
                 sy: offsetY + p.y * scale,
             }));
 
-            const sCtx = handSmoothed.getContext('2d');
-            sCtx.fillStyle = '#fff';
-            sCtx.strokeStyle = '#fff';
-            sCtx.lineCap = 'round';
+            ctx1.lineCap = 'round';
 
             // Filled triangle
-            sCtx.beginPath();
-            sCtx.moveTo(pts[0].sx, pts[0].sy);
-            sCtx.lineTo(pts[1].sx, pts[1].sy);
-            sCtx.lineTo(pts[2].sx, pts[2].sy);
-            sCtx.closePath();
-            sCtx.fill();
+            ctx1.beginPath();
+            ctx1.moveTo(pts[0].sx, pts[0].sy);
+            ctx1.lineTo(pts[1].sx, pts[1].sy);
+            ctx1.lineTo(pts[2].sx, pts[2].sy);
+            ctx1.closePath();
+            ctx1.fill();
 
             // Palm side (thumbCMC → elbow): dilate by circle radius
             if (radiusPx > 0) {
-                sCtx.lineWidth = radiusPx * 2;
-                sCtx.beginPath();
-                sCtx.moveTo(pts[2].sx, pts[2].sy);
-                sCtx.lineTo(pts[1].sx, pts[1].sy);
-                sCtx.stroke();
+                ctx1.strokeStyle = '#fff';
+                ctx1.lineWidth = radiusPx * 2;
+                ctx1.beginPath();
+                ctx1.moveTo(pts[2].sx, pts[2].sy);
+                ctx1.lineTo(pts[1].sx, pts[1].sy);
+                ctx1.stroke();
             }
 
             // Dorsal side (pinkyMCP → elbow): dilate by forearm slider
             if (forearmPx > 0) {
-                sCtx.lineWidth = forearmPx * 2;
-                sCtx.beginPath();
-                sCtx.moveTo(pts[0].sx, pts[0].sy);
-                sCtx.lineTo(pts[1].sx, pts[1].sy);
-                sCtx.stroke();
+                ctx1.strokeStyle = '#fff';
+                ctx1.lineWidth = forearmPx * 2;
+                ctx1.beginPath();
+                ctx1.moveTo(pts[0].sx, pts[0].sy);
+                ctx1.lineTo(pts[1].sx, pts[1].sy);
+                ctx1.stroke();
             }
         }
 
-        // Step 4: Second smooth — on combined hand+forearm (smooths the join)
-        let finalMask = _morphClose(handSmoothed, smooth2Px);
+        // Step 3: Unified smooth — on combined hand circles + forearm
+        let finalMask = _morphClose(c1, smoothPx);
 
         return finalMask;
     }
@@ -1212,8 +1228,8 @@ const deid = (() => {
                 height: 80,
                 offset_x: 0,
                 offset_y: 0,
-                frame_start: Math.max(trialMeta.start_frame, currentFrame - 30),
-                frame_end: Math.min(trialMeta.end_frame, currentFrame + 30),
+                frame_start: trialMeta.start_frame,
+                frame_end: trialMeta.end_frame,
                 side: _sideLabel(),
             };
             blurSpots.push(spot);
@@ -1763,13 +1779,13 @@ const deid = (() => {
                     spot_type: 'face',
                     x: Math.round(c.cx),
                     y: Math.round(c.cy),
-                    radius: Math.round(Math.max(c.w, c.h) / 2 * 1.2),
-                    width: Math.round(c.w * 1.2),
-                    height: Math.round(c.h * 1.2),
+                    radius: Math.round(Math.max(c.w, c.h) / 4),
+                    width: Math.round(c.w / 2),
+                    height: Math.round(c.h / 2),
                     offset_x: 0,
                     offset_y: 0,
-                    frame_start: c.firstFrame,
-                    frame_end: c.lastFrame,
+                    frame_start: trialMeta.start_frame,
+                    frame_end: trialMeta.end_frame,
                     side: side,
                 });
             }

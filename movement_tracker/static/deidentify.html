@@ -224,11 +224,12 @@
                                oninput="deid.updateHandSmooth(this.value)">
                         <span class="val" id="handSmoothVal">7</span>
                     </div>
-                    <div class="slider-row">
+                    <!-- Arm smooth removed — unified with Smooth slider -->
+                    <div class="slider-row" style="display:none;">
                         <label>Arm smooth</label>
-                        <input type="range" id="handSmooth2Slider" min="0" max="30" value="5"
+                        <input type="range" id="handSmooth2Slider" min="0" max="30" value="0"
                                oninput="deid.updateHandSmooth2(this.value)">
-                        <span class="val" id="handSmooth2Val">5</span>
+                        <span class="val" id="handSmooth2Val">0</span>
                     </div>
                     <div class="slider-row">
                         <label>Temporal</label>
