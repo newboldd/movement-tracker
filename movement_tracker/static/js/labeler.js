@@ -4445,7 +4445,7 @@ const labeler = (() => {
         distCtx.stroke();
 
         // Show value at current frame on primary trace
-        if (distances && mpRunVisible.current !== false) {
+        if (distances && distSourceVisible.mediapipe !== false) {
             const curD = distances[currentFrame];
             if (curD !== null && curD !== undefined) {
                 const y = dToY(curD);
