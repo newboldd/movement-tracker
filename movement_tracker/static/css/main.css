@@ -76,11 +76,11 @@ body {
     border-bottom-color: var(--blue);
 }
 
-/* "Browse Videos" link — set apart with a separator */
+/* "Browse Videos" link — set apart with a separator after it */
 .header nav a.nav-browse {
-    margin-left: 8px;
-    padding-left: 16px;
-    border-left: 1px solid var(--border);
+    margin-right: 8px;
+    padding-right: 16px;
+    border-right: 1px solid var(--border);
 }
 
 /* "Subjects" link — slightly bolder to stand out */
