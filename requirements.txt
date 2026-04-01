@@ -7,4 +7,5 @@ pandas>=1.3.0
 tables>=3.7.0
 pyyaml>=5.0
 mediapipe>=0.10.0,<0.10.19
+protobuf>=3.20,<5
 imageio-ffmpeg>=0.4.9
