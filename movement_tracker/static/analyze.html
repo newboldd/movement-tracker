@@ -7,6 +7,9 @@
     <link rel="stylesheet" href="/static/css/main.css?v=7">
     <style>
         body { overflow: hidden; }
+        .trial-btn { padding:3px 10px; border-radius:4px; border:1px solid var(--border); background:var(--bg); color:var(--text-muted); cursor:pointer; font-size:12px; font-family:inherit; transition:all 0.15s; }
+        .trial-btn:hover { border-color:var(--blue); color:var(--text); }
+        .trial-btn.active { background:var(--blue); border-color:var(--blue); color:#fff; }
 
         /* ── Layer toggle styling ── */
         .layer-toggle {
@@ -100,7 +103,7 @@
         <div class="labeling-sidebar">
             <!-- Trial selector -->
             <div class="sidebar-section">Trial</div>
-            <select id="trialSelect" style="width:100%;padding:4px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:12px;"></select>
+            <div id="trialBtns" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:4px;"></div>
 
             <!-- Navigation -->
             <div class="sidebar-section">Navigation</div>

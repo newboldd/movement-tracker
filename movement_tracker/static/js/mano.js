@@ -181,7 +181,6 @@ const manoViewer = (() => {
             await loadSubject(parseInt(sel.value));
             if (nav.subjectId === parseInt(sel.value)) {
                 if (nav.trialIdx != null && nav.trialIdx >= 0 && nav.trialIdx < trials.length) {
-                    $('trialSelect').value = nav.trialIdx;
                     await loadTrial(nav.trialIdx);
                     if (nav.frame != null && trialData && nav.frame >= 0 && nav.frame < trialData.n_frames) {
                         goToFrame(nav.frame);
@@ -212,30 +211,37 @@ const manoViewer = (() => {
             trials = [];
         }
 
-        const trialSel = $('trialSelect');
-        trialSel.innerHTML = '';
+        const trialBtns = $('trialBtns');
+        trialBtns.innerHTML = '';
         if (!trials.length) {
-            trialSel.innerHTML = '<option>No MANO data</option>';
+            trialBtns.innerHTML = '<span style="font-size:12px;color:var(--text-muted);">No MANO data</span>';
             trialData = null;
             render();
             return;
         }
 
         trials.forEach((t, i) => {
-            const opt = document.createElement('option');
-            opt.value = i;
-            opt.textContent = t.trial_stem;
-            trialSel.appendChild(opt);
+            const btn = document.createElement('button');
+            btn.className = 'trial-btn';
+            btn.textContent = t.trial_stem;
+            btn.title = t.trial_stem;
+            btn.addEventListener('click', () => loadTrial(i));
+            trialBtns.appendChild(btn);
         });
 
-        trialSel.addEventListener('change', () => loadTrial(parseInt(trialSel.value)));
         await loadTrial(0);
+    }
+
+    function highlightTrialButton(idx) {
+        const btns = $('trialBtns').querySelectorAll('.trial-btn');
+        btns.forEach((b, i) => b.classList.toggle('active', i === idx));
     }
 
     async function loadTrial(idx) {
         if (idx < 0 || idx >= trials.length) return;
         const trial = trials[idx];
         currentTrialIdx = idx;
+        highlightTrialButton(idx);
         if (typeof setNavState === 'function') setNavState({ trialIdx: idx, frame: currentFrame });
 
         $('trialName').textContent = trial.trial_stem;
