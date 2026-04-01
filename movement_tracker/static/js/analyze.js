@@ -347,7 +347,9 @@ const analyzeViewer = (() => {
         });
 
         // Layer toggles
-        $('showVideo').addEventListener('change', e => {
+        // showVideo is always true (checkbox removed) — keep listener for backward compat
+        const showVideoEl = $('showVideo');
+        if (showVideoEl && showVideoEl.type === 'checkbox') showVideoEl.addEventListener('change', e => {
             showVideo = e.target.checked;
             render();
         });
@@ -1010,7 +1012,7 @@ const analyzeViewer = (() => {
         switch (layer) {
             case 'video':
                 showVideo = visible;
-                $('showVideo').checked = visible;
+                if ($('showVideo') && $('showVideo').type === 'checkbox') $('showVideo').checked = visible;
                 break;
             case 'mediapipe':
                 showMediapipe = visible;
