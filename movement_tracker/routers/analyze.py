@@ -476,10 +476,13 @@ def get_trial_video(subject_id: int, trial_idx: int,
 
     # Prefer de-identified video if the setting is enabled
     if settings.prefer_deidentified:
-        p = Path(video_path)
-        nf_path = p.parent / (p.stem + "_nf" + p.suffix)
-        if nf_path.exists():
-            video_path = str(nf_path)
+        from ..services.video import _get_no_face_videos
+        stem = Path(video_path).stem
+        no_face = _get_no_face_videos(name)
+        if stem not in no_face:
+            deident = Path(video_path).parent / "deidentified" / Path(video_path).name
+            if deident.exists():
+                video_path = str(deident)
 
     return FileResponse(video_path, media_type="video/mp4")
 
@@ -491,7 +494,7 @@ def run_mediapipe(subject_id: int) -> dict:
     """Run MediaPipe hand detection on all trials. Creates a background job."""
     import threading
     from ..services.jobs import registry
-    from ..services.mediapipe_prelabel import run_mediapipe_all
+    from ..services.mediapipe_prelabel import run_mediapipe as run_mediapipe_all
 
     subj_name = _subject_name(subject_id)
     settings = get_settings()
