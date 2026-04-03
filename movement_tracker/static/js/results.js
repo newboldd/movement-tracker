@@ -1019,25 +1019,72 @@ async function loadGroup() {
     }
 }
 
-const GROUP_PARAMS = [
-    { key: 'mean_imi', label: 'Mean IMI (s)' },
-    { key: 'cv_imi', label: 'CV of IMI' },
-    { key: 'seq_imi', label: 'Sequence Effect: IMI' },
-    { key: 'frequency', label: 'Frequency (Hz)' },
-    { key: 'mean_amplitude', label: 'Mean Amplitude (mm)' },
-    { key: 'cv_amplitude', label: 'CV of Amplitude' },
-    { key: 'seq_amplitude', label: 'Sequence Effect: Amplitude' },
-    { key: 'mean_rel_amplitude', label: 'Mean Relative Amplitude' },
-    { key: 'mean_power', label: 'Mean Power (mm\u00b2/s)' },
-    { key: 'mean_peak_open_vel', label: 'Mean Peak Opening Vel. (mm/s)' },
-    { key: 'cv_peak_open_vel', label: 'CV Peak Opening Vel.' },
-    { key: 'mean_peak_close_vel', label: 'Mean Peak Closing Vel. (mm/s)' },
-    { key: 'cv_peak_close_vel', label: 'CV Peak Closing Vel.' },
-    { key: 'mean_mean_open_vel', label: 'Mean Avg Opening Vel. (mm/s)' },
-    { key: 'cv_mean_open_vel', label: 'CV Avg Opening Vel.' },
-    { key: 'mean_mean_close_vel', label: 'Mean Avg Closing Vel. (mm/s)' },
-    { key: 'cv_mean_close_vel', label: 'CV Avg Closing Vel.' },
+// Metrics organized as columns; rows = Mean, Variance (CV), Sequence Effect
+const GROUP_METRICS = [
+    {
+        name: 'IMI', id: 'imi', defaultOn: true,
+        mean: { key: 'mean_imi', unit: 's' },
+        cv: { key: 'cv_imi', unit: '' },
+        seq: { key: 'seq_imi', unit: '' },
+    },
+    {
+        name: 'Frequency', id: 'frequency', defaultOn: true,
+        mean: { key: 'frequency', unit: 'Hz' },
+        cv: null,
+        seq: null,
+    },
+    {
+        name: 'Amplitude', id: 'amplitude', defaultOn: true,
+        mean: { key: 'mean_amplitude', unit: 'mm' },
+        cv: { key: 'cv_amplitude', unit: '' },
+        seq: { key: 'seq_amplitude', unit: '' },
+    },
+    {
+        name: 'Rel. Amplitude', id: 'rel_amplitude', defaultOn: false,
+        mean: { key: 'mean_rel_amplitude', unit: '' },
+        cv: null,
+        seq: null,
+    },
+    {
+        name: 'Power', id: 'power', defaultOn: true,
+        mean: { key: 'mean_power', unit: 'mm\u00b2/s' },
+        cv: null,
+        seq: null,
+    },
+    {
+        name: 'Peak Open Vel', id: 'peak_open_vel', defaultOn: true,
+        mean: { key: 'mean_peak_open_vel', unit: 'mm/s' },
+        cv: { key: 'cv_peak_open_vel', unit: '' },
+        seq: null,
+    },
+    {
+        name: 'Peak Close Vel', id: 'peak_close_vel', defaultOn: true,
+        mean: { key: 'mean_peak_close_vel', unit: 'mm/s' },
+        cv: { key: 'cv_peak_close_vel', unit: '' },
+        seq: null,
+    },
+    {
+        name: 'Avg Open Vel', id: 'mean_open_vel', defaultOn: false,
+        mean: { key: 'mean_mean_open_vel', unit: 'mm/s' },
+        cv: { key: 'cv_mean_open_vel', unit: '' },
+        seq: null,
+    },
+    {
+        name: 'Avg Close Vel', id: 'mean_close_vel', defaultOn: false,
+        mean: { key: 'mean_mean_close_vel', unit: 'mm/s' },
+        cv: { key: 'cv_mean_close_vel', unit: '' },
+        seq: null,
+    },
 ];
+
+// Backward compat: flat list for any code that still references GROUP_PARAMS
+const GROUP_PARAMS = GROUP_METRICS.flatMap(m => {
+    const out = [];
+    if (m.mean) out.push({ key: m.mean.key, label: `${m.name} (${m.mean.unit || ''})`.trim() });
+    if (m.cv) out.push({ key: m.cv.key, label: `CV ${m.name}` });
+    if (m.seq) out.push({ key: m.seq.key, label: `Seq. Effect: ${m.name}` });
+    return out;
+});
 
 const GROUP_COLORS = {
     Control: '#4CAF50',
@@ -1046,26 +1093,89 @@ const GROUP_COLORS = {
     PSP: '#9C27B0',
 };
 
+let _groupMetricVisible = {};
+
 function renderGroupPlots() {
     const container = document.getElementById('groupPlots');
     const data = cachedGroup;
 
     if (!data || !data.subjects || data.subjects.length === 0) {
-        container.innerHTML = '<div class="results-no-data" style="grid-column:1/-1;">No group data available</div>';
+        container.innerHTML = '<div class="results-no-data">No group data available</div>';
         return;
     }
 
-    container.innerHTML = '';
+    // Initialize visibility from defaults
+    if (Object.keys(_groupMetricVisible).length === 0) {
+        GROUP_METRICS.forEach(m => { _groupMetricVisible[m.id] = m.defaultOn; });
+    }
 
-    GROUP_PARAMS.forEach(({ key, label }) => {
-        const div = document.createElement('div');
-        div.id = `grpPlot_${key}`;
-        div.style.height = '220px';
-        container.appendChild(div);
+    const visibleMetrics = GROUP_METRICS.filter(m => _groupMetricVisible[m.id]);
 
-        renderGroupBar(div.id, data, key, label);
+    // Build checkbox bar
+    let html = '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;align-items:center;">';
+    html += '<span style="font-size:12px;color:var(--text-muted);font-weight:600;">Show:</span>';
+    GROUP_METRICS.forEach(m => {
+        const checked = _groupMetricVisible[m.id] ? 'checked' : '';
+        html += `<label style="display:flex;align-items:center;gap:3px;font-size:11px;cursor:pointer;">
+            <input type="checkbox" ${checked} onchange="_toggleGroupMetric('${m.id}', this.checked)">
+            ${m.name}
+        </label>`;
+    });
+    html += '</div>';
+
+    // Scrollable grid: 3 rows (Mean, Variance, Sequence) × N metric columns
+    const ROW_DEFS = [
+        { label: 'Mean', field: 'mean', height: 200 },
+        { label: 'Variance', field: 'cv', height: 180 },
+        { label: 'Sequence Effect', field: 'seq', height: 180 },
+    ];
+
+    const colW = Math.max(200, Math.min(280, (container.clientWidth - 80) / visibleMetrics.length));
+
+    html += '<div style="overflow-x:auto;">';
+    html += `<div style="display:grid;grid-template-columns:60px repeat(${visibleMetrics.length}, ${colW}px);gap:0;">`;
+
+    ROW_DEFS.forEach((row, ri) => {
+        // Row label (first column)
+        html += `<div style="display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--text-muted);writing-mode:vertical-rl;text-orientation:mixed;transform:rotate(180deg);padding:4px;border-right:1px solid var(--border);${ri > 0 ? 'border-top:1px solid var(--border);' : ''}">${row.label}</div>`;
+
+        visibleMetrics.forEach((m, ci) => {
+            const spec = m[row.field];
+            const divId = `grpPlot_${m.id}_${row.field}`;
+            if (spec) {
+                const title = ri === 0 ? `<strong>${m.name}</strong>` : '';
+                html += `<div style="height:${row.height}px;${ri > 0 ? 'border-top:1px solid var(--border);' : ''}">
+                    ${ri === 0 ? `<div style="text-align:center;font-size:13px;font-weight:700;padding:4px 0 0;">${m.name}</div>` : ''}
+                    <div id="${divId}" style="height:${row.height - (ri === 0 ? 24 : 0)}px;"></div>
+                </div>`;
+            } else {
+                html += `<div style="display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:11px;opacity:0.4;height:${row.height}px;${ri > 0 ? 'border-top:1px solid var(--border);' : ''}">—</div>`;
+            }
+        });
+    });
+
+    html += '</div></div>';
+    container.innerHTML = html;
+
+    // Render each chart
+    ROW_DEFS.forEach(row => {
+        visibleMetrics.forEach(m => {
+            const spec = m[row.field];
+            if (!spec) return;
+            const divId = `grpPlot_${m.id}_${row.field}`;
+            const unit = spec.unit ? ` (${spec.unit})` : '';
+            renderGroupBar(divId, data, spec.key, '');
+        });
     });
 }
+
+function _toggleGroupMetric(id, checked) {
+    _groupMetricVisible[id] = checked;
+    renderGroupPlots();
+}
+
+// Expose for inline onclick
+window._toggleGroupMetric = _toggleGroupMetric;
 
 function renderGroupBar(divId, data, paramKey, paramLabel) {
     const groups = data.groups;
