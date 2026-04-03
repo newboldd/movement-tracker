@@ -61,7 +61,8 @@ def get_trials(subject_id: int) -> dict:
             deident_name = f"{t['trial_name']}_{cam}.mp4"
         else:
             deident_name = f"{t['trial_name']}.mp4"
-        has_blurred = (deident_dir / deident_name).exists()
+        deident_path = deident_dir / deident_name
+        has_blurred = deident_path.exists() and deident_path.stat().st_size > 10000  # >10KB = valid
 
         entry = {
             "trial_idx": i,

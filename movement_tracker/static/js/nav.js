@@ -354,7 +354,7 @@ const SUBJECT_PAGES = [
             if (gpuItems.length === 0) html += '<div class="empty-msg">Empty</div>';
             else gpuItems.forEach(item => { html += _jobRow(item); });
             html += '</div></div>';
-            html += `<div style="text-align:center;margin-top:6px;"><a href="/remote" style="font-size:11px;color:var(--blue);">Open Job Queue</a></div>`;
+            // No "Open Job Queue" link — redundant with nav dropdown
 
             if (html !== _lastHtml) {
                 panel.innerHTML = html;

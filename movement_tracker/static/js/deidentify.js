@@ -1350,8 +1350,12 @@ const deid = (() => {
     }
 
     function onMouseMove(e) {
-        // Any movement during a mousedown = suppress click
-        if (e.buttons > 0) didDrag = true;
+        // Movement during mousedown beyond threshold = suppress click
+        if (e.buttons > 0 && panStart) {
+            const dx = Math.abs(e.clientX - panStart.x);
+            const dy = Math.abs(e.clientY - panStart.y);
+            if (dx > 4 || dy > 4) didDrag = true;
+        }
 
         // Spot dragging
         if (spotDrag) {
@@ -1407,6 +1411,7 @@ const deid = (() => {
     function onMouseUp(e) {
         if (spotDrag) {
             spotDrag = null;
+            didDrag = true;  // suppress the click event that follows
             scheduleSave();
             renderSpotList();
             return;
