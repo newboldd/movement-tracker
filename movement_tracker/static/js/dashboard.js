@@ -132,6 +132,8 @@ function renderDiagnosisGroups() {
 
     document.getElementById('subjectCount').innerHTML =
         `Showing <strong>${filtered.length}</strong> of ${subjects.length} subjects`;
+    const totalEl = document.getElementById('totalSubjectCount');
+    if (totalEl) totalEl.textContent = `n = ${subjects.length}`;
 
     if (filtered.length === 0) {
         container.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:40px;">No subjects found</div>';

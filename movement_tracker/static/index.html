@@ -73,7 +73,10 @@
 
         <!-- Subjects grouped by diagnosis -->
         <div class="card" style="padding: 16px; overflow: visible;">
-            <h2 style="margin: 0 0 16px 0;">Subjects</h2>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin:0 0 16px 0;">
+                <h2 style="margin:0;">Subjects</h2>
+                <span id="totalSubjectCount" style="font-size:13px;color:var(--text-muted);"></span>
+            </div>
             <div id="subjectTableBody" style="min-height: 400px;">
                 <div style="text-align:center; padding:40px; color:var(--text-muted)">Loading...</div>
             </div>
