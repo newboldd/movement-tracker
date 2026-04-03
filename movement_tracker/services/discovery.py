@@ -127,6 +127,11 @@ def _has_deidentified(dlc_path: Path) -> bool:
     return (dlc_path / ".deidentified").exists()
 
 
+def _has_vision(dlc_path: Path) -> bool:
+    """Check if Apple Vision hand prelabels exist for this subject."""
+    return (dlc_path / "vision_prelabels.npz").exists()
+
+
 def _has_labels_v2(dlc_path: Path) -> bool:
     """Check if labels_v2 (refined DLC outputs) exist."""
     d = dlc_path / "labels_v2"

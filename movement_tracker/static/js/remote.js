@@ -151,6 +151,19 @@ async function loadSubjects() {
     }
 }
 
+// Map step names to subject property that indicates completion
+const STEP_DONE_MAP = {
+    mediapipe: 'has_mediapipe',
+    pose: 'has_pose',
+    deidentify: 'has_deident',
+    blur: 'has_blur',
+    vision: 'has_vision',
+    train: 'has_labels',
+    refine: 'has_labels',
+    analyze_v1: 'has_labels',
+    analyze_v2: 'has_labels',
+};
+
 function renderSubjectGrid() {
     const grid = document.getElementById('subjectGrid');
     if (subjects.length === 0) {
@@ -163,6 +176,20 @@ function renderSubjectGrid() {
             <span>${s.name}</span>
         </label>
     `).join('');
+    colorSubjectsByStep();
+}
+
+function colorSubjectsByStep() {
+    const step = document.getElementById('stepSelect')?.value;
+    if (!step) return;
+    const prop = STEP_DONE_MAP[step];
+    subjects.forEach(s => {
+        const label = document.getElementById('subj-' + s.id);
+        if (!label) return;
+        const done = prop ? !!s[prop] : false;
+        label.style.borderColor = done ? 'var(--green)' : '';
+        label.style.background = done ? 'rgba(76,175,80,0.08)' : '';
+    });
 }
 
 function toggleSubjectLabel(label) {
@@ -532,6 +559,7 @@ async function redownload() {
     // Update warning when step changes
     document.getElementById('stepSelect')?.addEventListener('change', () => {
         updateJobWarning();
+        colorSubjectsByStep();
     });
 
     // Load data

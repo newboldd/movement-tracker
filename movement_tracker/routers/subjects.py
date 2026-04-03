@@ -15,7 +15,7 @@ from ..models import (
 )
 from ..services.discovery import (
     scan_all_subjects, infer_stage, _find_videos, _find_deidentified_videos,
-    _has_snapshots, _has_labeled_data, _has_mediapipe, _has_pose, _has_deidentified,
+    _has_snapshots, _has_labeled_data, _has_mediapipe, _has_pose, _has_deidentified, _has_vision,
 )
 
 
@@ -149,6 +149,8 @@ def _subject_row_to_response(row: dict) -> dict:
         "has_labels": _has_labeled_data(dlc_path) if dlc_path and dlc_path.exists() else False,
         "has_mediapipe": _has_mediapipe(dlc_path) if dlc_path and dlc_path.exists() else False,
         "has_pose": _has_pose(dlc_path) if dlc_path and dlc_path.exists() else False,
+        "has_vision": _has_vision(dlc_path) if dlc_path and dlc_path.exists() else False,
+        "has_deident": _has_deidentified(dlc_path) if dlc_path and dlc_path.exists() else False,
         "has_blur": has_blur,
         "has_faces": _has_faces(row),
     }
