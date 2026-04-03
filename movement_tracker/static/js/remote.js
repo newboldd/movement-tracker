@@ -111,6 +111,21 @@ async function loadSteps() {
     }
 }
 
+// ── Update step availability based on execution target ───
+function updateStepAvailability() {
+    const target = getExecutionTarget();
+    const sel = document.getElementById('stepSelect');
+    if (!sel) return;
+    // Local-only steps (no remote support yet)
+    const localOnly = ['pose', 'deidentify', 'mediapipe'];
+    Array.from(sel.options).forEach(opt => {
+        const isLocal = localOnly.includes(opt.value);
+        const isRemote = target === 'remote';
+        opt.disabled = isLocal && isRemote;
+    });
+    updateJobWarning();
+}
+
 // ── Update warning based on step + target combination ───
 function updateJobWarning() {
     const executionTarget = getExecutionTarget();
