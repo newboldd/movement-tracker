@@ -315,7 +315,7 @@ const SUBJECT_PAGES = [
 
     async function _pollJobs() {
         try {
-            const data = await fetch('/api/queue/status').then(r => r.json());
+            const data = await fetch('/api/remote/queue').then(r => r.json());
             const running = data.running || [];
             const cpuQueue = data.cpu_queue || [];
             const gpuQueue = data.gpu_queue || [];

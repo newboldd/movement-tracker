@@ -53,6 +53,7 @@ body {
 
 .header nav {
     display: flex;
+    align-items: center;
     gap: 24px;
     margin-left: auto;
 }
@@ -92,7 +93,8 @@ body {
 /* Dropdown submenu in nav */
 .nav-dropdown {
     position: relative;
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
 }
 .nav-dropdown > a::after {
     content: ' \25BE';
