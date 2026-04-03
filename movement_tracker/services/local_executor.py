@@ -218,327 +218,67 @@ class LocalExecutor:
             env=env,
         )
 
-    def execute_mediapipe(self, subject_name: str, job_id: int, log_path: str):
-        """Execute MediaPipe preprocessing locally.
+    def _launch_worker(self, job_type: str, subject_name: str, job_id: int,
+                       log_path: str, extra_args: list[str] | None = None):
+        """Launch a worker subprocess for any CPU job type.
 
-        Args:
-            subject_name: Subject to process
-            job_id: Database job ID
-            log_path: Path to write logs
+        Uses the universal worker script (services/worker.py) which runs as a
+        separate process, survives app restarts (PID tracked in DB), and reports
+        progress via PROGRESS:N.N stdout lines.
         """
-        logger.info(f"Starting MediaPipe for {subject_name}")
+        import sys
+        from .worker import parse_worker_progress
+        from ..config import DATA_DIR
 
-        # Create a thread to run MediaPipe in the background
-        # This allows progress updates while the function runs
-        def run_mediapipe_job():
-            try:
-                os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
-                with open(log_path, "w") as logfile:
-                    def progress_callback(pct: float):
-                        logfile.write(f"Processing: {pct:.1f}%\n")
-                        logfile.flush()
-                        with get_db_ctx() as db:
-                            db.execute(
-                                "UPDATE jobs SET progress_pct = ? WHERE id = ?",
-                                (pct, job_id),
-                            )
+        python = sys.executable
+        cmd = [
+            python, "-m", "movement_tracker.services.worker",
+            "--job-type", job_type,
+            "--subject", subject_name,
+            "--job-id", str(job_id),
+            "--data-dir", str(DATA_DIR),
+        ]
+        if extra_args:
+            cmd.extend(extra_args)
 
-                    # Run MediaPipe directly
-                    result = run_mediapipe(subject_name, progress_callback=progress_callback)
-                    logfile.write(f"MediaPipe completed: {result}\n")
+        logger.info(f"Launching worker subprocess: {job_type} for {subject_name} (job {job_id})")
 
-                # Mark as complete
-                with get_db_ctx() as db:
-                    db.execute(
-                        """UPDATE jobs SET status = 'completed', progress_pct = 100,
-                           finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
-                        (job_id,),
-                    )
-                logger.info(f"MediaPipe for {subject_name} completed")
+        def on_complete(jid, returncode):
+            logger.info(f"Worker {job_type} for {subject_name} exited with code {returncode}")
 
-            except Exception as e:
-                logger.exception(f"MediaPipe for {subject_name} failed")
-                with open(log_path, "a") as logfile:
-                    logfile.write(f"\nError: {e}\n")
+        registry.launch(
+            job_id=job_id,
+            cmd=cmd,
+            log_path=log_path,
+            progress_parser=parse_worker_progress,
+            on_complete=on_complete,
+        )
 
-                with get_db_ctx() as db:
-                    db.execute(
-                        """UPDATE jobs SET status = 'failed', error_msg = ?,
-                           finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
-                        (str(e), job_id),
-                    )
-
-        # Update job to running
-        with get_db_ctx() as db:
-            db.execute(
-                """UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP
-                   WHERE id = ?""",
-                (job_id,),
-            )
-
-        # Start thread
-        thread = threading.Thread(target=run_mediapipe_job, daemon=True)
-        thread.start()
+    def execute_mediapipe(self, subject_name: str, job_id: int, log_path: str):
+        """Execute MediaPipe preprocessing as a subprocess."""
+        self._launch_worker("mediapipe", subject_name, job_id, log_path)
 
     def execute_pose(self, subject_name: str, job_id: int, log_path: str):
-        """Execute Pose detection locally."""
-        logger.info(f"Starting Pose detection for {subject_name}")
-
-        def run_pose_job():
-            try:
-                os.makedirs(os.path.dirname(log_path), exist_ok=True)
-
-                with open(log_path, "w") as logfile:
-                    def progress_callback(pct: float):
-                        logfile.write(f"Processing: {pct:.1f}%\n")
-                        logfile.flush()
-                        with get_db_ctx() as db:
-                            db.execute(
-                                "UPDATE jobs SET progress_pct = ? WHERE id = ?",
-                                (pct, job_id),
-                            )
-
-                    result = run_pose_prelabels(subject_name, progress_callback=progress_callback)
-                    logfile.write(f"Pose detection completed: {result}\n")
-
-                with get_db_ctx() as db:
-                    db.execute(
-                        """UPDATE jobs SET status = 'completed', progress_pct = 100,
-                           finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
-                        (job_id,),
-                    )
-                logger.info(f"Pose detection for {subject_name} completed")
-
-            except Exception as e:
-                logger.exception(f"Pose detection for {subject_name} failed")
-                with open(log_path, "a") as logfile:
-                    logfile.write(f"\nError: {e}\n")
-
-                with get_db_ctx() as db:
-                    db.execute(
-                        """UPDATE jobs SET status = 'failed', error_msg = ?,
-                           finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
-                        (str(e), job_id),
-                    )
-
-        with get_db_ctx() as db:
-            db.execute(
-                """UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP
-                   WHERE id = ?""",
-                (job_id,),
-            )
-
-        thread = threading.Thread(target=run_pose_job, daemon=True)
-        thread.start()
+        """Execute Pose detection as a subprocess."""
+        self._launch_worker("pose", subject_name, job_id, log_path)
 
     def execute_deidentify(self, subject_name: str, job_id: int, log_path: str,
                            trial_idx: int | None = None):
-        """Execute deidentify render locally (all trials or a specific trial)."""
-        logger.info(f"Starting deidentify render for {subject_name}")
-
-        def run_deid_job():
-            try:
-                os.makedirs(os.path.dirname(log_path), exist_ok=True)
-                from .deidentify import render_with_blur_specs
-                from .video import build_trial_map
-                from ..config import get_settings
-                import json as _json
-                from pathlib import Path
-
-                settings = get_settings()
-
-                with get_db_ctx() as db:
-                    subj = db.execute(
-                        "SELECT * FROM subjects WHERE name = ?", (subject_name,)
-                    ).fetchone()
-                    if not subj:
-                        raise ValueError(f"Subject not found: {subject_name}")
-
-                    all_specs = db.execute(
-                        "SELECT * FROM blur_specs WHERE subject_id = ?", (subj["id"],)
-                    ).fetchall()
-                    all_hand = db.execute(
-                        "SELECT * FROM blur_hand_settings WHERE subject_id = ?", (subj["id"],)
-                    ).fetchall()
-
-                camera_mode = subj.get("camera_mode") or "stereo"
-                trials = build_trial_map(subject_name, camera_mode=camera_mode)
-
-                specs_by_trial = {}
-                for s in all_specs:
-                    ti = s["trial_idx"]
-                    if ti not in specs_by_trial:
-                        specs_by_trial[ti] = []
-                    specs_by_trial[ti].append(dict(s))
-
-                hand_by_trial = {}
-                for hs in all_hand:
-                    hand_by_trial[hs["trial_idx"]] = dict(hs)
-
-                output_dir = settings.video_path
-                deident_dir = Path(str(output_dir)) / "deidentified"
-                deident_dir.mkdir(parents=True, exist_ok=True)
-
-                if trial_idx is not None:
-                    trial_indices = [trial_idx] if trial_idx in specs_by_trial else []
-                else:
-                    trial_indices = [i for i in range(len(trials)) if i in specs_by_trial]
-                n_trials = len(trial_indices)
-
-                with open(log_path, "w") as logfile:
-                    for ti_idx, trial_i in enumerate(trial_indices):
-                        trial = trials[trial_i]
-                        cam = trial.get("camera_name")
-                        if cam:
-                            output_name = f"{trial['trial_name']}_{cam}.mp4"
-                        else:
-                            output_name = f"{trial['trial_name']}.mp4"
-                        output_path = str(deident_dir / output_name)
-
-                        logfile.write(f"Rendering {output_name}...\n")
-                        logfile.flush()
-
-                        base_pct = ti_idx * (100.0 / max(n_trials, 1))
-                        span = 100.0 / max(n_trials, 1)
-
-                        def progress_cb(pct, _base=base_pct, _span=span):
-                            overall = _base + (pct / 100.0) * _span
-                            with get_db_ctx() as db:
-                                db.execute(
-                                    "UPDATE jobs SET progress_pct = ? WHERE id = ?",
-                                    (overall, job_id),
-                                )
-
-                        # Load face detections as raw rows
-                        with get_db_ctx() as db:
-                            face_rows = db.execute(
-                                "SELECT frame_num, x1, y1, x2, y2, side FROM face_detections WHERE subject_id = ? AND trial_idx = ?",
-                                (subj["id"], trial_i),
-                            ).fetchall()
-                        face_list = [dict(fd) for fd in face_rows]
-
-                        hs = hand_by_trial.get(trial_i, {})
-
-                        render_with_blur_specs(
-                            input_path=trial["video_path"],
-                            output_path=output_path,
-                            blur_specs=specs_by_trial.get(trial_i, []),
-                            hand_settings=hs,
-                            face_detections=face_list,
-                            subject_name=subject_name,
-                            start_frame=trial["start_frame"],
-                            frame_count=trial["frame_count"],
-                            progress_callback=progress_cb,
-                        )
-
-                        logfile.write(f"Done: {output_name}\n")
-                        logfile.flush()
-
-                with get_db_ctx() as db:
-                    db.execute(
-                        """UPDATE jobs SET status = 'completed', progress_pct = 100,
-                           finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
-                        (job_id,),
-                    )
-                logger.info(f"Deidentify render for {subject_name} completed")
-
-            except Exception as e:
-                logger.exception(f"Deidentify render for {subject_name} failed")
-                with open(log_path, "a") as logfile:
-                    logfile.write(f"\nError: {e}\n")
-                with get_db_ctx() as db:
-                    db.execute(
-                        """UPDATE jobs SET status = 'failed', error_msg = ?,
-                           finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
-                        (str(e), job_id),
-                    )
-
-        with get_db_ctx() as db:
-            db.execute(
-                """UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP
-                   WHERE id = ?""",
-                (job_id,),
-            )
-
-        thread = threading.Thread(target=run_deid_job, daemon=True)
-        thread.start()
+        """Execute deidentify render as a subprocess."""
+        extra = ["--trial-idx", str(trial_idx)] if trial_idx is not None else []
+        self._launch_worker("deidentify", subject_name, job_id, log_path, extra_args=extra)
 
     def execute_blur(self, subject_names: list[str], job_id: int, log_path: str):
-        """Execute face blur preprocessing locally.
+        """Execute face blur preprocessing as a subprocess (first subject only)."""
+        # Worker handles one subject at a time; for multi-subject blur,
+        # the queue manager should enqueue separate jobs per subject.
+        self._launch_worker("blur", subject_names[0], job_id, log_path)
 
-        Args:
-            subject_names: Subjects to blur
-            job_id: Database job ID
-            log_path: Path to write logs
-        """
-        logger.info(f"Starting blur for {', '.join(subject_names)}")
-
-        def run_blur_job():
-            try:
-                settings = get_settings()
-                os.makedirs(os.path.dirname(log_path), exist_ok=True)
-
-                with open(log_path, "w") as logfile:
-                    for i, subject_name in enumerate(subject_names):
-                        logfile.write(f"Processing {subject_name}...\n")
-                        logfile.flush()
-
-                        # Get videos for this subject
-                        from .mediapipe_prelabel import get_subject_videos
-                        videos = get_subject_videos(subject_name)
-
-                        progress_base = (i / len(subject_names)) * 100
-                        progress_span = (1 / len(subject_names)) * 100
-
-                        # Run blur - this doesn't have progress callback in current implementation
-                        # but we can estimate progress
-                        run_blur_subject(
-                            subject_name=subject_name,
-                            videos=videos,
-                            output_dir=str(settings.dlc_path),
-                            overrides_file=None,
-                        )
-
-                        progress = progress_base + progress_span
-                        with get_db_ctx() as db:
-                            db.execute(
-                                "UPDATE jobs SET progress_pct = ? WHERE id = ?",
-                                (progress, job_id),
-                            )
-
-                # Mark as complete
-                with get_db_ctx() as db:
-                    db.execute(
-                        """UPDATE jobs SET status = 'completed', progress_pct = 100,
-                           finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
-                        (job_id,),
-                    )
-                logger.info(f"Blur for {', '.join(subject_names)} completed")
-
-            except Exception as e:
-                logger.exception(f"Blur for {', '.join(subject_names)} failed")
-                with open(log_path, "a") as logfile:
-                    logfile.write(f"\nError: {e}\n")
-
-                with get_db_ctx() as db:
-                    db.execute(
-                        """UPDATE jobs SET status = 'failed', error_msg = ?,
-                           finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
-                        (str(e), job_id),
-                    )
-
-        # Update job to running
-        with get_db_ctx() as db:
-            db.execute(
-                """UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP
-                   WHERE id = ?""",
-                (job_id,),
-            )
-
-        # Start thread
-        thread = threading.Thread(target=run_blur_job, daemon=True)
-        thread.start()
+    def execute_vision(self, subject_name: str, job_id: int, log_path: str):
+        """Execute Apple Vision hand detection as a subprocess."""
+        self._launch_worker("vision", subject_name, job_id, log_path)
 
 
 # Singleton executor instance

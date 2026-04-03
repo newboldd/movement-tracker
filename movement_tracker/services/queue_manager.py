@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import signal
 import threading
 import time
 from pathlib import Path
@@ -10,6 +12,17 @@ from pathlib import Path
 from ..db import get_db_ctx
 
 logger = logging.getLogger(__name__)
+
+
+def _pid_alive(pid: int) -> bool:
+    """Check if a process with given PID is still running."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)  # signal 0 = existence check
+        return True
+    except (OSError, ProcessLookupError):
+        return False
 
 # Map job types to resource lanes
 RESOURCE_MAP = {
@@ -212,20 +225,40 @@ class QueueManager:
                 if job and job["status"] in ("running", "pending"):
                     exec_target = item.get("execution_target", "remote")
                     if exec_target.startswith("local"):
-                        # Local jobs: thread is dead after restart — mark as failed
-                        with get_db_ctx() as db:
-                            db.execute(
-                                "UPDATE jobs SET status = 'failed', error_msg = 'Server restarted', "
-                                "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
-                                (job_id,),
-                            )
-                            db.execute(
-                                "UPDATE job_queue SET status = 'failed', error_msg = 'Server restarted (local job lost)', "
-                                "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
-                                (item["id"],),
-                            )
-                        logger.info(f"Queue item {item['id']}: local job {job_id} lost on restart, marked failed")
-                        continue
+                        # Local jobs now run as subprocesses — check if PID is still alive
+                        pid = job.get("pid") if job else None
+                        if pid and _pid_alive(pid):
+                            # Subprocess survived! Re-track it and resume monitoring
+                            resource = item.get("resource", "cpu")
+                            with self._lock:
+                                if resource == "gpu":
+                                    self._running_gpu = item["id"]
+                                else:
+                                    self._running_cpu = item["id"]
+                            # Re-attach the registry monitor to the running process
+                            try:
+                                from .worker import parse_worker_progress
+                                registry.reattach(job_id, pid, job.get("log_path", ""),
+                                                  progress_parser=parse_worker_progress)
+                            except Exception as e:
+                                logger.warning(f"Could not reattach to PID {pid}: {e}")
+                            logger.info(f"Queue item {item['id']}: local subprocess {pid} still alive, re-tracking")
+                            continue
+                        else:
+                            # Process is dead — mark as failed
+                            with get_db_ctx() as db:
+                                db.execute(
+                                    "UPDATE jobs SET status = 'failed', error_msg = 'Server restarted (process exited)', "
+                                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                                    (job_id,),
+                                )
+                                db.execute(
+                                    "UPDATE job_queue SET status = 'failed', error_msg = 'Server restarted (process exited)', "
+                                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                                    (item["id"],),
+                                )
+                            logger.info(f"Queue item {item['id']}: local job {job_id} (PID {pid}) not alive, marked failed")
+                            continue
                     else:
                         # Remote job: might still be alive on the remote host — re-track
                         resource = item.get("resource", "gpu")

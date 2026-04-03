@@ -71,6 +71,59 @@ class JobRegistry:
 
         return proc.pid
 
+    def reattach(self, job_id: int, pid: int, log_path: str,
+                 progress_parser=None, on_complete=None):
+        """Re-attach to a running subprocess after app restart.
+
+        Opens the process by PID and starts monitoring it.
+        The log file is appended to (not overwritten).
+        """
+        import psutil  # type: ignore
+
+        try:
+            proc = psutil.Process(pid)
+            if not proc.is_running():
+                raise ProcessLookupError(f"PID {pid} not running")
+        except (ImportError, ProcessLookupError):
+            # psutil not available or process dead — try basic approach
+            # We can't get stdout from an existing process, but we can
+            # poll for completion by checking if PID is alive
+            logger.info(f"Reattach job {job_id}: monitoring PID {pid} by polling")
+            self._poll_pid(job_id, pid, on_complete)
+            return
+
+        logger.info(f"Reattach job {job_id}: monitoring PID {pid}")
+        self._poll_pid(job_id, pid, on_complete)
+
+    def _poll_pid(self, job_id: int, pid: int, on_complete=None):
+        """Monitor an existing process by polling its PID."""
+        def _poll():
+            import signal
+            while True:
+                try:
+                    os.kill(pid, 0)  # Check if alive
+                except (OSError, ProcessLookupError):
+                    # Process exited
+                    with get_db_ctx() as db:
+                        job = db.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                        if job and job["status"] == "running":
+                            # Worker updates DB directly, so check if it set a final status
+                            # If still "running" after process death → it crashed
+                            db.execute(
+                                """UPDATE jobs SET status = 'failed',
+                                   error_msg = 'Process exited unexpectedly',
+                                   finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                                (job_id,),
+                            )
+                    if on_complete:
+                        on_complete(job_id, 1)
+                    return
+                time.sleep(3)
+
+        thread = threading.Thread(target=_poll, daemon=True)
+        thread.start()
+        self._threads[job_id] = thread
+
     def _monitor(self, job_id, proc, log_path, progress_parser, on_complete):
         """Monitor subprocess output, update progress, write log."""
         try:
