@@ -1022,34 +1022,10 @@ async function loadGroup() {
 // Metrics organized as columns; rows = Mean, Variance (CV), Sequence Effect
 const GROUP_METRICS = [
     {
-        name: 'IMI', id: 'imi', defaultOn: true,
-        mean: { key: 'mean_imi', unit: 's' },
-        cv: { key: 'cv_imi', unit: '' },
-        seq: { key: 'seq_imi', unit: '' },
-    },
-    {
-        name: 'Frequency', id: 'frequency', defaultOn: true,
-        mean: { key: 'frequency', unit: 'Hz' },
-        cv: { key: 'cv_frequency', unit: '' },
-        seq: { key: 'seq_frequency', unit: '' },
-    },
-    {
         name: 'Amplitude', id: 'amplitude', defaultOn: true,
         mean: { key: 'mean_amplitude', unit: 'mm' },
         cv: { key: 'cv_amplitude', unit: '' },
         seq: { key: 'seq_amplitude', unit: '' },
-    },
-    {
-        name: 'Rel. Amplitude', id: 'rel_amplitude', defaultOn: false,
-        mean: { key: 'mean_rel_amplitude', unit: '' },
-        cv: { key: 'cv_rel_amplitude', unit: '' },
-        seq: { key: 'seq_rel_amplitude', unit: '' },
-    },
-    {
-        name: 'Power', id: 'power', defaultOn: true,
-        mean: { key: 'mean_power', unit: 'mm\u00b2/s' },
-        cv: { key: 'cv_power', unit: '' },
-        seq: { key: 'seq_power', unit: '' },
     },
     {
         name: 'Peak Open Vel', id: 'peak_open_vel', defaultOn: true,
@@ -1062,6 +1038,30 @@ const GROUP_METRICS = [
         mean: { key: 'mean_peak_close_vel', unit: 'mm/s' },
         cv: { key: 'cv_peak_close_vel', unit: '' },
         seq: { key: 'seq_peak_close_vel', unit: '' },
+    },
+    {
+        name: 'Power', id: 'power', defaultOn: true,
+        mean: { key: 'mean_power', unit: 'mm\u00b2/s' },
+        cv: { key: 'cv_power', unit: '' },
+        seq: { key: 'seq_power', unit: '' },
+    },
+    {
+        name: 'IMI', id: 'imi', defaultOn: true,
+        mean: { key: 'mean_imi', unit: 's' },
+        cv: { key: 'cv_imi', unit: '' },
+        seq: { key: 'seq_imi', unit: '' },
+    },
+    {
+        name: 'Frequency', id: 'frequency', defaultOn: false,
+        mean: { key: 'frequency', unit: 'Hz' },
+        cv: { key: 'cv_frequency', unit: '' },
+        seq: { key: 'seq_frequency', unit: '' },
+    },
+    {
+        name: 'Rel. Amplitude', id: 'rel_amplitude', defaultOn: false,
+        mean: { key: 'mean_rel_amplitude', unit: '' },
+        cv: { key: 'cv_rel_amplitude', unit: '' },
+        seq: { key: 'seq_rel_amplitude', unit: '' },
     },
     {
         name: 'Avg Open Vel', id: 'mean_open_vel', defaultOn: false,
