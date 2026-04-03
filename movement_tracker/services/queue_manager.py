@@ -501,6 +501,12 @@ class QueueManager:
                     # GPU lane: analyze on local GPU
                     local_executor.execute_analyze(subject_names[0], gpu_index, job_id, log_path)
 
+                # Wait for the subprocess to finish (registry._monitor thread)
+                # All local jobs now run as subprocesses tracked by the registry
+                monitor_thread = registry._threads.get(job_id)
+                if monitor_thread:
+                    monitor_thread.join()  # blocks until subprocess completes
+
             else:
                 # Remote execution (existing logic)
                 if job_type in ("mediapipe", "blur", "mediapipe+blur"):
