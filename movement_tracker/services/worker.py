@@ -130,19 +130,27 @@ def run_deidentify(subject_name: str, job_id: int, trial_idx: int | None = None)
             overall = _base + (pct / 100.0) * _span
             print(f"PROGRESS:{overall:.1f}", flush=True)
 
+        # Build hand_settings dict matching function signature
+        hand_settings_dict = {
+            "hand_mask_radius": hand_mask_radius,
+            "hand_smooth": hand_smooth,
+            "forearm_radius": forearm_radius,
+            "forearm_extent": forearm_extent,
+            "hand_smooth2": hand_smooth2,
+            "dlc_radius": dlc_radius,
+            "hand_temporal": hand_temporal,
+            "segments_json": json.dumps(hand_segments),
+        }
+
+        # Face detections as flat list (function converts to by-frame internally)
+        face_list = [dict(fd) for fd in face_rows]
+
         render_with_blur_specs(
             input_path=trial["video_path"],
             output_path=output_path,
             blur_specs=blur_specs,
-            face_by_frame=face_by_frame,
-            hand_mask_radius=hand_mask_radius,
-            hand_smooth=hand_smooth,
-            forearm_radius=forearm_radius,
-            forearm_extent=forearm_extent,
-            hand_smooth2=hand_smooth2,
-            dlc_radius=dlc_radius,
-            hand_temporal=hand_temporal,
-            hand_segments=hand_segments,
+            hand_settings=hand_settings_dict,
+            face_detections=face_list,
             subject_name=subject_name,
             start_frame=trial["start_frame"],
             progress_callback=progress_cb,
