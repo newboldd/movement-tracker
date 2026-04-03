@@ -1030,8 +1030,8 @@ const GROUP_METRICS = [
     {
         name: 'Frequency', id: 'frequency', defaultOn: true,
         mean: { key: 'frequency', unit: 'Hz' },
-        cv: null,
-        seq: null,
+        cv: { key: 'cv_frequency', unit: '' },
+        seq: { key: 'seq_frequency', unit: '' },
     },
     {
         name: 'Amplitude', id: 'amplitude', defaultOn: true,
@@ -1042,38 +1042,38 @@ const GROUP_METRICS = [
     {
         name: 'Rel. Amplitude', id: 'rel_amplitude', defaultOn: false,
         mean: { key: 'mean_rel_amplitude', unit: '' },
-        cv: null,
-        seq: null,
+        cv: { key: 'cv_rel_amplitude', unit: '' },
+        seq: { key: 'seq_rel_amplitude', unit: '' },
     },
     {
         name: 'Power', id: 'power', defaultOn: true,
         mean: { key: 'mean_power', unit: 'mm\u00b2/s' },
-        cv: null,
-        seq: null,
+        cv: { key: 'cv_power', unit: '' },
+        seq: { key: 'seq_power', unit: '' },
     },
     {
         name: 'Peak Open Vel', id: 'peak_open_vel', defaultOn: true,
         mean: { key: 'mean_peak_open_vel', unit: 'mm/s' },
         cv: { key: 'cv_peak_open_vel', unit: '' },
-        seq: null,
+        seq: { key: 'seq_peak_open_vel', unit: '' },
     },
     {
         name: 'Peak Close Vel', id: 'peak_close_vel', defaultOn: true,
         mean: { key: 'mean_peak_close_vel', unit: 'mm/s' },
         cv: { key: 'cv_peak_close_vel', unit: '' },
-        seq: null,
+        seq: { key: 'seq_peak_close_vel', unit: '' },
     },
     {
         name: 'Avg Open Vel', id: 'mean_open_vel', defaultOn: false,
         mean: { key: 'mean_mean_open_vel', unit: 'mm/s' },
         cv: { key: 'cv_mean_open_vel', unit: '' },
-        seq: null,
+        seq: { key: 'seq_mean_open_vel', unit: '' },
     },
     {
         name: 'Avg Close Vel', id: 'mean_close_vel', defaultOn: false,
         mean: { key: 'mean_mean_close_vel', unit: 'mm/s' },
         cv: { key: 'cv_mean_close_vel', unit: '' },
-        seq: null,
+        seq: { key: 'seq_mean_close_vel', unit: '' },
     },
 ];
 
@@ -1137,19 +1137,18 @@ function renderGroupPlots() {
 
     ROW_DEFS.forEach((row, ri) => {
         // Row label (first column)
-        html += `<div style="display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--text-muted);writing-mode:vertical-rl;text-orientation:mixed;transform:rotate(180deg);padding:4px;border-right:1px solid var(--border);${ri > 0 ? 'border-top:1px solid var(--border);' : ''}">${row.label}</div>`;
+        html += `<div style="display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--text-muted);writing-mode:vertical-rl;text-orientation:mixed;transform:rotate(180deg);padding:4px;">${row.label}</div>`;
 
         visibleMetrics.forEach((m, ci) => {
             const spec = m[row.field];
             const divId = `grpPlot_${m.id}_${row.field}`;
             if (spec) {
-                const title = ri === 0 ? `<strong>${m.name}</strong>` : '';
-                html += `<div style="height:${row.height}px;${ri > 0 ? 'border-top:1px solid var(--border);' : ''}">
+                html += `<div style="height:${row.height}px;">
                     ${ri === 0 ? `<div style="text-align:center;font-size:13px;font-weight:700;padding:4px 0 0;">${m.name}</div>` : ''}
                     <div id="${divId}" style="height:${row.height - (ri === 0 ? 24 : 0)}px;"></div>
                 </div>`;
             } else {
-                html += `<div style="display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:11px;opacity:0.4;height:${row.height}px;${ri > 0 ? 'border-top:1px solid var(--border);' : ''}">—</div>`;
+                html += `<div style="height:${row.height}px;"></div>`;
             }
         });
     });
