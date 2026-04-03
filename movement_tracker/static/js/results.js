@@ -267,6 +267,9 @@ function renderAllDistancePlots() {
         });
     }
 
+    // Ensure container has a valid width before rendering
+    const containerWidth = container.clientWidth || container.parentElement?.clientWidth || 1200;
+
     data.trials.forEach((trial, idx) => {
         // Wrapper for each trial (enables horizontal scrolling)
         const wrapper = document.createElement('div');
@@ -290,7 +293,6 @@ function renderAllDistancePlots() {
         // Compute plot width based on 20s per screen width
         const fps = trial.fps || 60;
         const durationSec = trial.distances.length / fps;
-        const containerWidth = container.clientWidth || 1200;
         const plotWidth = Math.max(containerWidth, (durationSec / 20) * containerWidth);
 
         // Set wrapper width to enable scrolling
@@ -395,7 +397,7 @@ function renderDistancePlot(divId, trial, yRange, width, overlayTraces, shapes) 
     const distTrace = {
         x: times,
         y: trial.distances,
-        type: 'scattergl',
+        type: 'scatter',
         mode: 'lines',
         name: 'Distance (mm)',
         line: { color: '#2196F3', width: 1.2 },
@@ -440,7 +442,7 @@ function renderVelocityPlot(divId, trial, yRange, width, overlayTraces, shapes) 
     const velTrace = {
         x: times,
         y: trial.velocities,
-        type: 'scattergl',
+        type: 'scatter',
         mode: 'lines',
         name: 'Velocity (mm/s)',
         line: { color: '#4CAF50', width: 1 },
