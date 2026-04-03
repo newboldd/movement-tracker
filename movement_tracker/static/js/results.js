@@ -1102,11 +1102,12 @@ function renderGroupBar(divId, data, paramKey, paramLabel) {
     const barTrace = {
         x: groupLabels.map((_, i) => i),
         y: groupMeans,
-        text: groupLabels,
+        customdata: groupLabels,
         type: 'bar',
+        textposition: 'none',
         marker: { color: groupLabels.map(g => GROUP_COLORS[g] || '#999'), opacity: 0.3 },
         error_y: { type: 'data', array: groupSems, visible: true, color: '#666', thickness: 1.5 },
-        hovertemplate: '%{text}<br>Mean: %{y:.3f}<extra></extra>',
+        hovertemplate: '%{customdata}<br>Mean: %{y:.3f}<extra></extra>',
         showlegend: false,
         width: 0.6,
     };
