@@ -1060,7 +1060,7 @@ function renderGroupPlots() {
     GROUP_PARAMS.forEach(({ key, label }) => {
         const div = document.createElement('div');
         div.id = `grpPlot_${key}`;
-        div.style.height = '320px';
+        div.style.height = '220px';
         container.appendChild(div);
 
         renderGroupBar(div.id, data, key, label);
@@ -1141,7 +1141,7 @@ function renderGroupBar(divId, data, paramKey, paramLabel) {
             dotColors.push(isAuto ? '#ffffff' : groupColor);
             dotLineColors.push(isAuto ? groupColor : '#333');
             dotLineWidths.push(isAuto ? 2 : (isHighlighted ? 2 : 0.5));
-            dotSizes.push(isHighlighted ? 12 : 8);
+            dotSizes.push(isHighlighted ? 10 : 6);
             dotOpacities.push(isHighlighted ? 1.0 : 0.7);
         });
     });
@@ -1163,17 +1163,18 @@ function renderGroupBar(divId, data, paramKey, paramLabel) {
     };
 
     const layout = {
-        title: { text: paramLabel, font: { size: 13, color: '#444' } },
-        margin: { t: 35, b: 40, l: 55, r: 20 },
+        title: { text: paramLabel, font: { size: 11, color: '#444' } },
+        margin: { t: 28, b: 30, l: 45, r: 10 },
         xaxis: {
             tickvals: groups.map((_, i) => i),
             ticktext: groups,
             color: '#666',
+            tickfont: { size: 10 },
         },
-        yaxis: { title: '', color: '#666', gridcolor: '#f0f0f0' },
+        yaxis: { title: '', color: '#666', gridcolor: '#f0f0f0', tickfont: { size: 9 } },
         plot_bgcolor: '#fff',
         paper_bgcolor: '#fff',
-        bargap: 0.4,
+        bargap: 0.5,
     };
 
     Plotly.newPlot(divId, [barTrace, dotTrace], layout, {
