@@ -1100,13 +1100,15 @@ function renderGroupBar(divId, data, paramKey, paramLabel) {
     });
 
     const barTrace = {
-        x: groupLabels,
+        x: groupLabels.map((_, i) => i),
         y: groupMeans,
+        text: groupLabels,
         type: 'bar',
-        marker: { color: groupLabels.map(g => GROUP_COLORS[g] || '#999'), opacity: 0.6 },
-        error_y: { type: 'data', array: groupSems, visible: true, color: '#666' },
-        hovertemplate: '%{x}<br>Mean: %{y:.3f}<extra></extra>',
+        marker: { color: groupLabels.map(g => GROUP_COLORS[g] || '#999'), opacity: 0.3 },
+        error_y: { type: 'data', array: groupSems, visible: true, color: '#666', thickness: 1.5 },
+        hovertemplate: '%{text}<br>Mean: %{y:.3f}<extra></extra>',
         showlegend: false,
+        width: 0.6,
     };
 
     // Individual dots with jitter — differentiate saved vs auto
