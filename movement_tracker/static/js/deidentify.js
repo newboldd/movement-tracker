@@ -580,10 +580,16 @@ const deid = (() => {
     // ── Go to MediaPipe page for this subject ──
     function goToMediapipe() {
         if (!subjectId) return;
-        // Preserve current frame and zoom state via session storage
         sessionStorage.setItem('deid_returnFrame', currentFrame);
         sessionStorage.setItem('deid_returnSubject', subjectId);
-        window.location.href = `/mediapipe-select?subject=${subjectId}`;
+        window.location.href = `/analyze?subject=${subjectId}`;
+    }
+
+    function goToAnalyze() {
+        if (!subjectId) return;
+        sessionStorage.setItem('deid_returnFrame', currentFrame);
+        sessionStorage.setItem('deid_returnSubject', subjectId);
+        window.location.href = `/analyze?subject=${subjectId}`;
     }
 
     // ── Side label mapping (stereo: left/right ↔ camera names) ──
@@ -2780,6 +2786,7 @@ const deid = (() => {
         updateHandSmooth2,
         updateHandTemporalSmooth,
         goToMediapipe,
+        goToAnalyze,
         renderTrial,
         undo,
         redo,

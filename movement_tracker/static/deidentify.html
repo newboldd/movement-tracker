@@ -258,8 +258,11 @@
                     <div id="handHelpText" style="font-size:10px;color:var(--text-muted);margin-top:4px;">
                         Drag on the timeline hand row to create protection segments.
                     </div>
+                    <button class="btn btn-sm" id="goAnalyzeBtn" onclick="deid.goToAnalyze()" style="width:100%;margin-top:6px;">
+                        Detect Hands (with bounding box)
+                    </button>
                     <div id="handDisabledMsg" style="display:none;font-size:11px;color:var(--text-muted);margin-top:4px;font-style:italic;">
-                        Run MediaPipe from the MediaPipe page to enable hand overlap protection.
+                        Run hand detection from the Analyze page to enable hand overlap protection.
                     </div>
                 </div>
 
