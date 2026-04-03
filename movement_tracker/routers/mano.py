@@ -158,13 +158,15 @@ def get_trial_video(subject_id: int, trial_idx: int,
             raise HTTPException(404, f"Camera index {camera} not found for trial {trial_idx}")
 
     # Prefer de-identified video if the setting is enabled
-    settings = get_settings()
     if settings.prefer_deidentified:
         from pathlib import Path
-        p = Path(video_path)
-        nf_path = p.parent / (p.stem + "_nf" + p.suffix)
-        if nf_path.exists():
-            video_path = str(nf_path)
+        from ..services.video import _get_no_face_videos
+        stem = Path(video_path).stem
+        no_face = _get_no_face_videos(name)
+        if stem not in no_face:
+            deident = Path(video_path).parent / "deidentified" / Path(video_path).name
+            if deident.exists():
+                video_path = str(deident)
 
     return FileResponse(video_path, media_type="video/mp4")
 
