@@ -80,12 +80,15 @@
         </div>
 
         <!-- Subject detail panel -->
-        <div id="detailPanel" class="detail-panel card">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-                <h2 id="detailName">Subject Detail</h2>
-                <button class="btn btn-sm" onclick="closeDetail()">Close</button>
+        <!-- Subject detail modal overlay -->
+        <div id="detailOverlay" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeDetail()">
+            <div id="detailPanel" class="card" style="max-width:1000px;width:90%;max-height:85vh;overflow-y:auto;margin:5vh auto;padding:20px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <h2 id="detailName">Subject Detail</h2>
+                    <button class="btn btn-sm" onclick="closeDetail()">Close</button>
+                </div>
+                <div class="detail-grid" id="detailContent"></div>
             </div>
-            <div class="detail-grid" id="detailContent"></div>
         </div>
 
         <!-- Running jobs (removed — use Job Queue nav link) -->

@@ -159,7 +159,7 @@ function renderDiagnosisGroups() {
         html += `
             <div style="background: var(--bg-card); border-radius: var(--radius); padding: 12px; border: 1px solid var(--border);">
                 <h3 style="margin: 0 0 12px 0; font-size: 14px; color: var(--text); display: flex; justify-content: space-between; align-items: center;">${diagnosis} <span style="font-weight: 400; font-size: 12px; color: var(--text-muted);">n=${groupSubjects.length}</span></h3>
-                <div style="display: flex; flex-direction: column; gap: 6px; max-height: 600px; overflow-y: auto;">
+                <div style="display: flex; flex-direction: column; gap: 6px;">
         `;
 
         if (groupSubjects.length === 0) {
@@ -511,8 +511,7 @@ async function showDetail(subjectId) {
             </div>` : ''}
         `;
 
-        panel.classList.add('active');
-        panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        document.getElementById('detailOverlay').style.display = 'flex';
 
         // Load and render distance traces
         _loadDetailDistances(subjectId);
@@ -536,7 +535,7 @@ async function updateClinical(subjectId, field, value) {
 }
 
 function closeDetail() {
-    document.getElementById('detailPanel').classList.remove('active');
+    document.getElementById('detailOverlay').style.display = 'none';
 }
 
 // ── Pipeline actions ─────────────────────────────────
