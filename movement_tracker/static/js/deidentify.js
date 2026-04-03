@@ -2236,7 +2236,26 @@ const deid = (() => {
             const result = await API.post(`/api/deidentify/${subjectId}/render`, {
                 trial_idx: currentTrialIdx,
             });
-            const jobId = result.job_id;
+            let jobId = result.job_id;
+
+            // If job_id not yet available (queue manager hasn't started it), poll
+            if (!jobId) {
+                status.textContent = `Queued ${trialName}... waiting to start`;
+                for (let attempt = 0; attempt < 30 && !jobId; attempt++) {
+                    await new Promise(r => setTimeout(r, 1000));
+                    try {
+                        const check = await API.get(`/api/jobs?status=running&status=pending&subject_id=${subjectId}&job_type=deidentify`);
+                        if (check && check.length > 0) {
+                            jobId = check[0].id;
+                        }
+                    } catch (e) {}
+                }
+                if (!jobId) {
+                    status.textContent = 'Job not started — check Processing page';
+                    btn.disabled = false;
+                    return;
+                }
+            }
 
             API.streamJob(jobId,
                 (data) => {

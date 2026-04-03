@@ -807,19 +807,26 @@ def render_deidentified(subject_id: int, body: dict = Body(default={})) -> dict:
         execution_target="local-cpu",
     )
 
-    # Wait briefly for the queue manager to create the job record
+    # Wait briefly for the queue manager to create a NEW job record
     import time
     job_id = None
-    for _ in range(10):
+    for _ in range(20):
         with get_db_ctx() as db:
             job = db.execute(
                 """SELECT id FROM jobs WHERE subject_id = ? AND job_type = 'deidentify'
+                   AND status IN ('pending', 'running')
                    ORDER BY id DESC LIMIT 1""",
                 (subject_id,),
             ).fetchone()
             if job:
                 job_id = job["id"]
                 break
-        time.sleep(0.2)
+        time.sleep(0.3)
 
-    return {"job_id": job_id, "queue_id": result.get("queue_id"), "status": "queued"}
+    # If still no pending/running job, check if queue item exists
+    queue_id = result.get("queue_id")
+    if not job_id and queue_id:
+        # Job hasn't been created yet — return queue_id for frontend to poll
+        return {"job_id": None, "queue_id": queue_id, "status": "queued"}
+
+    return {"job_id": job_id, "queue_id": queue_id, "status": "queued"}
