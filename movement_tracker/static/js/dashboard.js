@@ -183,7 +183,6 @@ function renderDiagnosisGroups() {
                                 onclick="sessionStorage.setItem('dlc_lastSubjectId','${s.id}');window.location.href='/results?subject=${s.id}&tab=individual&from=dashboard'"></canvas>
                         <div style="display:flex;gap:2px;flex-wrap:nowrap;">
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="showDetail(${s.id})">Info</button>
-                            ${s.has_faces && !s.has_deident ? `<button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;color:var(--red);" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/deidentify?subject=${s.id}'">Deident</button>` : ''}
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/analyze?subject=${s.id}'">Detect</button>
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="openLabeling(${s.id})">DLC</button>
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/mano?subject=${s.id}'">MANO</button>
