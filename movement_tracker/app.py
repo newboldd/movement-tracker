@@ -377,6 +377,12 @@ def _ensure_example_subject(settings):
         ).fetchone()
 
         if existing:
+            # Ensure group_label is set (may be 'Other' from older migration)
+            if existing.get("group_label") != "Control":
+                db.execute(
+                    "UPDATE subjects SET group_label = 'Control', diagnosis = 'Control' WHERE name = ?",
+                    (EXAMPLE_SUBJECT_NAME,),
+                )
             return
 
         # Create the subject
