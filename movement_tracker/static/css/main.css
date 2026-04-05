@@ -186,7 +186,7 @@ body {
     padding: 4px 0;
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 4px;
 }
 .nav-jobs-dropdown .job-item .job-dot {
     width: 6px;
@@ -198,7 +198,7 @@ body {
 .nav-jobs-dropdown .job-dot.queued { background: #FF9800; }
 .nav-jobs-dropdown .job-dot.failed { background: #F44336; }
 .nav-jobs-dropdown .job-actions {
-    margin-left: auto;
+    margin-left: 2px;
     display: flex;
     gap: 4px;
 }
