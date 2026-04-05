@@ -396,29 +396,32 @@ def _ensure_example_subject(settings):
     dest = video_dir / f"{EXAMPLE_SUBJECT_NAME}_R1.mp4"
     if not dest.exists():
         try:
+            # Use ffmpeg for proper H.264 encoding that browsers can play
+            import subprocess
+            from .services.ffmpeg import get_ffmpeg_path
+
             cap = cv2.VideoCapture(str(sample_video))
             fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            writer = cv2.VideoWriter(str(dest), fourcc, fps, (w, h))
-
-            cap.set(cv2.CAP_PROP_POS_FRAMES, EXAMPLE_TRIM_START_FRAME)
-            written = 0
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                writer.write(frame)
-                written += 1
-
             cap.release()
-            writer.release()
-            logger.info(
-                f"Created Example subject: trimmed {sample_video.name} "
-                f"from frame {EXAMPLE_TRIM_START_FRAME} ({written} frames) → {dest}"
-            )
+
+            start_time = EXAMPLE_TRIM_START_FRAME / fps
+            ffmpeg = get_ffmpeg_path()
+            result = subprocess.run([
+                ffmpeg, "-y",
+                "-ss", f"{start_time:.3f}",
+                "-i", str(sample_video),
+                "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                "-pix_fmt", "yuv420p", "-an",
+                str(dest),
+            ], capture_output=True, text=True, timeout=120)
+
+            if result.returncode == 0:
+                logger.info(
+                    f"Created Example subject: trimmed {sample_video.name} "
+                    f"from frame {EXAMPLE_TRIM_START_FRAME} → {dest}"
+                )
+            else:
+                raise RuntimeError(f"ffmpeg trim failed: {result.stderr[:200]}")
         except Exception as e:
             logger.warning(f"Could not trim Example video, copying full: {e}")
             import shutil
