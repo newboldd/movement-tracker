@@ -31,6 +31,7 @@ class SettingsUpdate(BaseModel):
     calibrations: Optional[Dict[str, str]] = None
     prefer_deidentified: Optional[bool] = None
     show_tutorials: Optional[bool] = None
+    show_example_subject: Optional[bool] = None
     diagnosis_groups: Optional[list[str]] = None
     event_types: Optional[list[dict]] = None
 

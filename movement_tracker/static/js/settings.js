@@ -255,7 +255,14 @@ async function saveSettings() {
         await API.put('/api/settings', data);
         const status = await API.get('/api/settings/status');
         renderStatus(status);
-        alert('Settings saved.');
+        // Brief visual confirmation instead of popup
+        const btn = document.querySelector('[onclick="saveSettings()"]');
+        if (btn) {
+            const orig = btn.textContent;
+            btn.textContent = 'Saved \u2713';
+            btn.style.background = 'var(--green, #4CAF50)';
+            setTimeout(() => { btn.textContent = orig; btn.style.background = ''; }, 1500);
+        }
     } catch (e) {
         alert('Error saving settings: ' + e.message);
     }
