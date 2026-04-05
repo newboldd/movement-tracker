@@ -132,29 +132,14 @@ echo "Using Python: $PYTHON ($($PYTHON --version))"
 # ── ffmpeg ────────────────────────────────────────────────────────────────
 
 if ! command -v ffmpeg &>/dev/null; then
-    print_header "Installing ffmpeg"
-    echo "ffmpeg is required for video trimming and face de-identification."
-    echo ""
+    print_header "Checking ffmpeg"
     if ! try_install ffmpeg ffmpeg ffmpeg; then
-        echo "Could not install ffmpeg automatically."
+        echo "ffmpeg not found on system PATH."
+        echo "A bundled version (imageio-ffmpeg) will be used instead."
         echo ""
-        if [ "$OS" = "Darwin" ]; then
-            echo "Install it with:"
-            echo "  brew install ffmpeg"
-            echo ""
-            echo "Homebrew: https://brew.sh"
-        else
-            echo "Install it with your package manager, e.g.:"
-            echo "  sudo apt install ffmpeg     (Debian/Ubuntu)"
-            echo "  sudo dnf install ffmpeg     (Fedora)"
-        fi
-        echo ""
-        echo "Or download from: https://ffmpeg.org/download.html"
-        echo ""
-        echo "Re-run this script after installing ffmpeg."
-        exit 1
+    else
+        echo "ffmpeg installed."
     fi
-    echo "ffmpeg installed."
 fi
 
 # ── Virtual environment ───────────────────────────────────────────────────
@@ -172,9 +157,8 @@ if [ ! -f "$VENV_DIR/.installed" ] || [ "$REQUIREMENTS" -nt "$VENV_DIR/.installe
     print_header "Installing Python dependencies"
     echo "This may take several minutes on first run (DeepLabCut and friends are large)."
     echo ""
-    which pip
-    /Users/newboldd/code/movement-tracker/.venv/bin/pip install --upgrade pip -q
-    /Users/newboldd/code/movement-tracker/.venv/bin/pip install -r "$REQUIREMENTS"
+    "$VENV_DIR/bin/pip" install --upgrade pip -q
+    "$VENV_DIR/bin/pip" install -r "$REQUIREMENTS"
     touch "$VENV_DIR/.installed"
     echo ""
     echo "Dependencies installed."
