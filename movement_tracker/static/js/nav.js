@@ -336,7 +336,7 @@ const SUBJECT_PAGES = [
                     <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:90px;">${name}</span>
                     <span style="color:var(--text-muted);font-size:10px;">${type} ${pct}</span>
                     <span class="job-actions">
-                        ${jid ? `<button onclick="event.stopPropagation();fetch('/api/queue/${qid}/cancel',{method:'POST'}).then(()=>window._navPollJobs())" title="Cancel" style="color:var(--red);font-weight:bold;">×</button>` : ''}
+                        <button onclick="event.stopPropagation();fetch('/api/queue/${qid}/cancel',{method:'POST'}).then(()=>window._navPollJobs())" title="Cancel" style="color:var(--red);font-weight:bold;">×</button>
                     </span>
                 </div>`;
             }
