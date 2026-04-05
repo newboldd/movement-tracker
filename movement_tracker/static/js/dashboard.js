@@ -174,7 +174,7 @@ function renderDiagnosisGroups() {
                         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
                             <span style="font-weight:600;font-size:13px;">${s.name}</span>
                             <div style="display:flex;align-items:center;gap:4px;">
-                                ${(s.has_blur || !s.has_faces) ? '<span style="color:var(--green);font-size:11px;" title="Deidentified">Deident</span>' : ''}
+                                ${(s.has_faces && !s.has_deident) ? `<a href="/deidentify?subject=${s.id}" onclick="sessionStorage.setItem('lastSubjectId','${s.id}')" style="color:var(--red);font-size:11px;text-decoration:none;cursor:pointer;" title="Needs deidentification">Deident</a>` : ''}
                                 <span class="badge ${stageColor}" style="font-size:11px;">${stageLabel(s.stage)}</span>
                             </div>
                         </div>
