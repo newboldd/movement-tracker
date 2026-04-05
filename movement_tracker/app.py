@@ -355,19 +355,15 @@ def _resume_pending_downloads(s, remote_cfg):
 EXAMPLE_SUBJECT_NAME = "Example"
 
 
-EXAMPLE_TRIM_START_FRAME = 273  # skip pre-roll frames in sample video
-
-
 def _ensure_example_subject(settings):
     """Create the built-in Example subject if sample data exists.
 
-    The Example subject uses the downloaded sample video (Con01_R1.mp4)
-    trimmed from frame 273 onwards. It's a Control subject that ships
-    with the app so new users have data to explore immediately.
+    Uses the downloaded sample video (Con01_R1.mp4) directly as Example_R1.mp4
+    via symlink (or copy on Windows). No re-encoding needed.
 
     Can be hidden via settings.show_example_subject = False.
     """
-    import cv2
+    import os
     from .config import DATA_DIR
     from .db import get_db_ctx
 
@@ -385,47 +381,24 @@ def _ensure_example_subject(settings):
 
         # Create the subject
         db.execute(
-            """INSERT INTO subjects (name, stage, dlc_dir, camera_mode, diagnosis)
-               VALUES (?, 'created', ?, 'stereo', 'Control')""",
+            """INSERT INTO subjects (name, stage, dlc_dir, camera_mode, diagnosis, group_label)
+               VALUES (?, 'created', ?, 'stereo', 'Control', 'Control')""",
             (EXAMPLE_SUBJECT_NAME, EXAMPLE_SUBJECT_NAME),
         )
 
-    # Trim sample video from frame 273 onwards using OpenCV
+    # Link sample video as Example_R1.mp4 (no re-encoding)
     video_dir = settings.video_path
     video_dir.mkdir(parents=True, exist_ok=True)
     dest = video_dir / f"{EXAMPLE_SUBJECT_NAME}_R1.mp4"
     if not dest.exists():
         try:
-            # Use ffmpeg for proper H.264 encoding that browsers can play
-            import subprocess
-            from .services.ffmpeg import get_ffmpeg_path
-
-            cap = cv2.VideoCapture(str(sample_video))
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-            cap.release()
-
-            start_time = EXAMPLE_TRIM_START_FRAME / fps
-            ffmpeg = get_ffmpeg_path()
-            result = subprocess.run([
-                ffmpeg, "-y",
-                "-ss", f"{start_time:.3f}",
-                "-i", str(sample_video),
-                "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-                "-pix_fmt", "yuv420p", "-an",
-                str(dest),
-            ], capture_output=True, text=True, timeout=120)
-
-            if result.returncode == 0:
-                logger.info(
-                    f"Created Example subject: trimmed {sample_video.name} "
-                    f"from frame {EXAMPLE_TRIM_START_FRAME} → {dest}"
-                )
-            else:
-                raise RuntimeError(f"ffmpeg trim failed: {result.stderr[:200]}")
-        except Exception as e:
-            logger.warning(f"Could not trim Example video, copying full: {e}")
+            os.symlink(str(sample_video.resolve()), str(dest))
+            logger.info(f"Created Example subject: symlinked {sample_video.name} → {dest}")
+        except (OSError, NotImplementedError):
+            # Windows without developer mode can't symlink — copy instead
             import shutil
             shutil.copy2(str(sample_video), str(dest))
+            logger.info(f"Created Example subject: copied {sample_video.name} → {dest}")
 
     # Create DLC directory
     dlc_dir = settings.dlc_path / EXAMPLE_SUBJECT_NAME
