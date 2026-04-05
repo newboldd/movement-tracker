@@ -32,6 +32,7 @@ RESOURCE_MAP = {
     "analyze_v1": "gpu",
     "analyze_v2": "gpu",
     "mediapipe": "cpu",
+    "vision": "cpu",
     "blur": "cpu",
     "mediapipe+blur": "cpu",
     "pose": "cpu",
@@ -40,6 +41,7 @@ RESOURCE_MAP = {
 
 STEP_DEFINITIONS = [
     {"name": "mediapipe", "resource": "cpu", "label": "MediaPipe (Hands)"},
+    {"name": "vision", "resource": "cpu", "label": "Vision (Hands)"},
     {"name": "pose", "resource": "cpu", "label": "Pose Detection"},
     {"name": "deidentify", "resource": "cpu", "label": "Deidentify (Render)"},
     {"name": "blur", "resource": "cpu", "label": "Face Blur"},
@@ -471,10 +473,12 @@ class QueueManager:
             # Route based on execution target
             if execution_target in ("local-cpu", "local-gpu"):
                 # Local execution
-                if job_type in ("mediapipe", "blur", "mediapipe+blur", "pose", "deidentify"):
+                if job_type in ("mediapipe", "vision", "blur", "mediapipe+blur", "pose", "deidentify"):
                     # CPU lane: preprocessing
                     if job_type == "mediapipe":
                         local_executor.execute_mediapipe(subject_names[0], job_id, log_path)
+                    elif job_type == "vision":
+                        local_executor.execute_vision(subject_names[0], job_id, log_path)
                     elif job_type == "pose":
                         local_executor.execute_pose(subject_names[0], job_id, log_path)
                     elif job_type == "blur":
