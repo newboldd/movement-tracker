@@ -150,8 +150,7 @@ def _subject_row_to_response(row: dict) -> dict:
         "has_mediapipe": _has_mediapipe(dlc_path) if dlc_path and dlc_path.exists() else False,
         "has_pose": _has_pose(dlc_path) if dlc_path and dlc_path.exists() else False,
         "has_vision": _has_vision(dlc_path) if dlc_path and dlc_path.exists() else False,
-        "has_deident": _has_deidentified(dlc_path) if dlc_path and dlc_path.exists() else False,
-        "has_blur": has_blur,
+        "has_deident": has_blur,  # True when all face-containing trials have deidentified videos
         "has_faces": _has_faces(row),
     }
     resp["no_face_videos"] = _parse_no_face_videos(row.get("no_face_videos"))
