@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import glob
+import os
 import re
 from pathlib import Path
 
@@ -56,8 +57,14 @@ def _find_videos(subject_name: str) -> list[str]:
     return [Path(v).name for v in videos]
 
 
+MIN_VALID_VIDEO_SIZE = 100_000  # 100KB — anything smaller is corrupt/partial
+
+
 def _find_deidentified_videos(subject_name: str) -> list[str]:
-    """Find deidentified videos for a subject in videos/deidentified/."""
+    """Find deidentified videos for a subject in videos/deidentified/.
+
+    Filters out files smaller than 100KB (corrupt/partial renders).
+    """
     settings = get_settings()
     deident_dir = settings.video_path / "deidentified"
     if not deident_dir.exists():
@@ -71,7 +78,8 @@ def _find_deidentified_videos(subject_name: str) -> list[str]:
             v for v in all_vids
             if Path(v).name.lower().startswith(prefix_lower)
         )
-    return [Path(v).name for v in videos]
+    # Filter out corrupt/partial files
+    return [Path(v).name for v in videos if os.path.getsize(v) >= MIN_VALID_VIDEO_SIZE]
 
 
 def _has_snapshots(dlc_path: Path) -> bool:
