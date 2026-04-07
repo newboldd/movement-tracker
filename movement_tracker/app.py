@@ -28,7 +28,7 @@ class NoCacheMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
         if request.url.path.startswith("/static") or request.url.path in (
-            "/", "/labeling", "/mediapipe", "/deidentify", "/mano", "/oscillations", "/results", "/settings", "/onboarding", "/remote", "/videos", "/calibration", "/tutorials", "/tutorial"
+            "/", "/labeling", "/mediapipe", "/deidentify", "/mano", "/oscillations", "/results", "/settings", "/onboarding", "/remote", "/videos", "/calibration", "/tutorials", "/tutorial", "/events"
         ):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return response
@@ -468,6 +468,16 @@ def subjects_page():
 def labeling_page():
     """Serve the labeling page."""
     return FileResponse(str(STATIC_DIR / "labeling.html"))
+
+
+@app.get("/events")
+def events_page(subject: Optional[int] = None):
+    """Redirect to the labeling page in events mode."""
+    from fastapi.responses import RedirectResponse
+    url = "/labeling-select?mode=events"
+    if subject is not None:
+        url += f"&subject={subject}"
+    return RedirectResponse(url=url, status_code=302)
 
 
 @app.get("/mediapipe")

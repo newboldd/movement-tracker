@@ -186,10 +186,11 @@
             <span class="nav-dropdown">
                 <a href="/analyze">Analyze</a>
                 <div class="nav-dropdown-menu">
-                    <a href="/deidentify">Deidentify</a>
                     <a href="/analyze">Detect</a>
                     <a href="/labeling-select">DLC</a>
                     <a href="/mano">MANO</a>
+                    <a href="/events">Events</a>
+                    <a href="/deidentify">Deidentify</a>
                 </div>
             </span>
             <span class="nav-dropdown">
@@ -257,6 +258,12 @@
             <div style="display:flex;justify-content:flex-end;">
                 <button class="btn btn-primary" onclick="submitJob()">Submit Processing Job</button>
             </div>
+        </div>
+
+        <!-- Local Jobs -->
+        <div class="card" id="localJobsCard" style="display:none;">
+            <h2>Local Jobs</h2>
+            <div id="localJobsLane"><span class="empty-state">No local jobs running.</span></div>
         </div>
 
         <!-- Queue -->

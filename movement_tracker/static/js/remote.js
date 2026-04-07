@@ -407,6 +407,57 @@ function renderLane(elementId, resource, state) {
     el.innerHTML = html;
 }
 
+// ── Local jobs (mediapipe, pose, deidentify, etc.) ──────────
+async function pollLocalJobs() {
+    try {
+        const jobs = await API.get('/api/jobs?status=running');
+        const card = document.getElementById('localJobsCard');
+        const lane = document.getElementById('localJobsLane');
+        if (!card || !lane) return;
+
+        if (jobs.length === 0) {
+            card.style.display = 'none';
+            return;
+        }
+
+        card.style.display = '';
+        let html = '';
+        for (const job of jobs) {
+            const name = job.subject_name || ('Subject ' + job.subject_id);
+            const type = (job.job_type || '').replace(/_/g, ' ');
+            const pct = job.progress_pct || 0;
+            html += `
+                <div class="queue-item" style="border-left: 3px solid var(--orange);">
+                    <span class="job-indicator job-running"></span>
+                    <span class="type">${type}</span>
+                    <span class="subjects">${name}</span>
+                    <div class="progress-bar" style="width:80px;">
+                        <div class="fill" style="width:${pct}%"></div>
+                    </div>
+                    <span style="font-size:11px;">${pct.toFixed(0)}%</span>
+                    <button class="btn btn-sm" onclick="viewJobLogLive(${job.id})">Log</button>
+                    <button class="btn btn-sm btn-danger" onclick="cancelLocalJob(${job.id})">Cancel</button>
+                </div>
+            `;
+        }
+        lane.innerHTML = html;
+    } catch (e) {
+        // ignore
+    }
+}
+
+async function cancelLocalJob(jobId) {
+    try {
+        await API.post(`/api/jobs/${jobId}/cancel`);
+        pollLocalJobs();
+    } catch (e) {
+        alert('Error cancelling job: ' + e.message);
+    }
+}
+
+pollLocalJobs();
+setInterval(pollLocalJobs, 3000);
+
 function parseSubjects(subjectIdsJson) {
     try {
         const arr = JSON.parse(subjectIdsJson);
