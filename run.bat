@@ -154,9 +154,19 @@ if not exist "!PORTABLE_DIR!\python.exe" (
 
     :: Enable pip in embeddable Python (uncomment 'import site' in python311._pth)
     powershell -Command "(Get-Content '!PORTABLE_DIR!\python311._pth') -replace '^#import site','import site' | Set-Content '!PORTABLE_DIR!\python311._pth'" 2>nul
+)
 
-    :: Install pip
-    echo Installing pip...
+:: Download pip as a standalone zip app (no .exe files created — avoids Group Policy blocks)
+set "PIP_PYZ=!PORTABLE_DIR!\pip.pyz"
+if not exist "!PIP_PYZ!" (
+    echo Downloading pip (standalone zip^)...
+    powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/pip/pip.pyz' -OutFile '!PIP_PYZ!' }" 2>nul
+)
+
+:: Also try traditional get-pip as fallback (in case pip.pyz is unavailable)
+if not exist "!PIP_PYZ!" (
+    echo Downloading pip (get-pip fallback^)...
+    set "GET_PIP=%TEMP%\get-pip.py"
     powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile '!GET_PIP!' }" 2>nul
     "!PORTABLE_DIR!\python.exe" "!GET_PIP!" --no-warn-script-location 2>nul
     del "!GET_PIP!" 2>nul
@@ -177,6 +187,16 @@ exit /b 1
 :found
 echo Using Python: %PYTHON%
 
+:: ── Determine pip command ───────────────────────────────────────
+:: Prefer pip.pyz (no .exe, avoids Group Policy blocks on locked-down machines)
+set "PIP_CMD="
+set "PIP_PYZ=%~dp0.python\pip.pyz"
+if exist "%PIP_PYZ%" (
+    set "PIP_CMD=%PYTHON% %PIP_PYZ%"
+) else (
+    set "PIP_CMD=%PYTHON% -m pip"
+)
+
 :: ── Check dependencies ─────────────────────────────────────────
 echo Checking dependencies...
 %PYTHON% -c "import uvicorn, fastapi, cv2, numpy, pandas, mediapipe" 2>nul
@@ -186,16 +206,23 @@ if errorlevel 1 (
     :: Strategy 1: offline wheels directory (for air-gapped / locked-down machines)
     if exist "%~dp0wheels" (
         echo Found local wheels directory, installing offline...
-        %PYTHON% -m pip install --no-index --find-links "%~dp0wheels" -r requirements.txt --no-build-isolation
+        %PIP_CMD% install --no-index --find-links "%~dp0wheels" -r requirements.txt --no-build-isolation
         if not errorlevel 1 goto :deps_ok
         echo Offline install failed, trying online...
     )
 
-    :: Strategy 2: standard pip install with --only-binary to avoid compiling
+    :: Strategy 2: pip.pyz with --only-binary (no .exe created, no compiling)
+    if exist "%PIP_PYZ%" (
+        %PYTHON% "%PIP_PYZ%" install --only-binary :all: --no-cache-dir -r requirements.txt
+        if not errorlevel 1 goto :deps_ok
+        echo pip.pyz binary-only install failed, trying with source builds...
+        %PYTHON% "%PIP_PYZ%" install --no-cache-dir -r requirements.txt
+        if not errorlevel 1 goto :deps_ok
+    )
+
+    :: Strategy 3: standard pip module (works when pip.exe isn't blocked)
     %PYTHON% -m pip install --only-binary :all: -r requirements.txt
     if not errorlevel 1 goto :deps_ok
-
-    :: Strategy 3: fall back to allowing source builds (original behavior)
     %PYTHON% -m pip install -r requirements.txt
     if not errorlevel 1 goto :deps_ok
 
