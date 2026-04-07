@@ -83,7 +83,14 @@ const manoViewer = (() => {
 
     async function api(url, options) {
         const resp = await fetch(url, options);
-        if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+        if (!resp.ok) {
+            let msg = `${resp.status} ${resp.statusText}`;
+            try {
+                const body = await resp.json();
+                if (body.detail) msg = body.detail;
+            } catch {}
+            throw new Error(msg);
+        }
         return resp.json();
     }
 
