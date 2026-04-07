@@ -119,6 +119,21 @@ def _compute_distances(joints_3d: np.ndarray) -> dict[str, list]:
     return distances
 
 
+def _compute_distances_2d(joints_2d: np.ndarray, prefix: str = "") -> dict[str, list]:
+    """Compute 2D pixel distance traces from (N,21,2) landmarks (fallback when no 3D)."""
+    distances = {}
+    for name, (ja, jb) in DISTANCE_OPTIONS.items():
+        n = joints_2d.shape[0]
+        dist = np.full(n, np.nan)
+        valid = ~np.isnan(joints_2d[:, ja, 0]) & ~np.isnan(joints_2d[:, jb, 0])
+        if valid.any():
+            dist[valid] = np.linalg.norm(
+                joints_2d[valid, ja, :] - joints_2d[valid, jb, :], axis=1
+            )
+        distances[prefix + name] = _array_to_list(dist)
+    return distances
+
+
 def _project_to_2d(joints_3d: np.ndarray, K, dist, R, T) -> np.ndarray:
     """Project (N,21,3) world-frame joints to (N,21,2) image coordinates.
 
@@ -404,6 +419,13 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     # ── Compute distances ──────────────────────────────────────
     distances_mano = _compute_distances(joints_3d) if has_mano else {}
     distances_mp = _compute_distances(mp_joints_3d)
+
+    # Fallback: if 3D distances are all empty (no calibration), compute 2D pixel distances
+    mp_has_3d = any(
+        any(v is not None for v in vals) for vals in distances_mp.values()
+    )
+    if not mp_has_3d:
+        distances_mp = _compute_distances_2d(mp_tracked_L, "2D ")
 
     # ── Assemble result ────────────────────────────────────────
     result: dict[str, Any] = {
