@@ -315,12 +315,25 @@ const SUBJECT_PAGES = [
 
     async function _pollJobs() {
         try {
-            const data = await fetch('/api/remote/queue').then(r => r.json());
+            /* Fetch remote queue and local running jobs in parallel */
+            const [data, localJobs] = await Promise.all([
+                fetch('/api/remote/queue').then(r => r.json()).catch(() => ({})),
+                fetch('/api/jobs?status=running').then(r => r.json()).catch(() => []),
+            ]);
             const running = data.running || [];
             const cpuQueue = data.cpu_queue || [];
             const gpuQueue = data.gpu_queue || [];
 
-            const hasActive = running.length > 0 || cpuQueue.length > 0 || gpuQueue.length > 0;
+            /* Collect remote job IDs so we don't duplicate local jobs already in the queue */
+            const remoteJobIds = new Set();
+            [...running, ...cpuQueue, ...gpuQueue].forEach(item => {
+                if (item.job_id) remoteJobIds.add(item.job_id);
+            });
+
+            /* Local-only jobs (mediapipe, pose, deidentify, etc. not managed by remote queue) */
+            const localOnly = localJobs.filter(j => !remoteJobIds.has(j.id));
+
+            const hasActive = running.length > 0 || cpuQueue.length > 0 || gpuQueue.length > 0 || localOnly.length > 0;
             dot.style.display = hasActive ? 'inline-block' : 'none';
 
             function _jobRow(item) {
@@ -341,19 +354,46 @@ const SUBJECT_PAGES = [
                 </div>`;
             }
 
+            function _localJobRow(job) {
+                const name = job.subject_name || ('Subject ' + job.subject_id);
+                const type = (job.job_type || '').replace(/_/g, ' ');
+                const pct = job.progress_pct ? Math.round(job.progress_pct) + '%' : '';
+                return `<div class="job-item">
+                    <span class="job-dot running"></span>
+                    <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:90px;">${name}</span>
+                    <span style="color:var(--text-muted);font-size:10px;">${type} ${pct}</span>
+                    <span class="job-actions">
+                        <button onclick="event.stopPropagation();fetch('/api/jobs/${job.id}/cancel',{method:'POST'}).then(()=>window._navPollJobs())" title="Cancel" style="color:var(--red);font-weight:bold;">×</button>
+                    </span>
+                </div>`;
+            }
+
             const cpuItems = [...running.filter(r => r.resource === 'cpu'), ...cpuQueue];
             const gpuItems = [...running.filter(r => r.resource === 'gpu'), ...gpuQueue];
 
-            let html = '<div class="jobs-grid">';
-            html += '<div><h4>CPU</h4>';
-            if (cpuItems.length === 0) html += '<div class="empty-msg">Empty</div>';
-            else cpuItems.forEach(item => { html += _jobRow(item); });
-            html += '</div>';
-            html += '<div><h4>GPU</h4>';
-            if (gpuItems.length === 0) html += '<div class="empty-msg">Empty</div>';
-            else gpuItems.forEach(item => { html += _jobRow(item); });
-            html += '</div></div>';
-            // No "Open Job Queue" link — redundant with nav dropdown
+            let html = '';
+
+            /* Local jobs section (mediapipe, pose, deidentify, etc.) */
+            if (localOnly.length > 0) {
+                html += '<div style="padding:4px 0;">';
+                html += '<h4 style="margin:0 0 4px 12px;">Local</h4>';
+                localOnly.forEach(job => { html += _localJobRow(job); });
+                html += '</div>';
+            }
+
+            /* Remote queue section */
+            const hasRemote = cpuItems.length > 0 || gpuItems.length > 0;
+            if (hasRemote || localOnly.length === 0) {
+                html += '<div class="jobs-grid">';
+                html += '<div><h4>CPU</h4>';
+                if (cpuItems.length === 0) html += '<div class="empty-msg">Empty</div>';
+                else cpuItems.forEach(item => { html += _jobRow(item); });
+                html += '</div>';
+                html += '<div><h4>GPU</h4>';
+                if (gpuItems.length === 0) html += '<div class="empty-msg">Empty</div>';
+                else gpuItems.forEach(item => { html += _jobRow(item); });
+                html += '</div></div>';
+            }
 
             if (html !== _lastHtml) {
                 panel.innerHTML = html;

@@ -20,15 +20,15 @@ def list_jobs(
 ) -> List[dict]:
     """List jobs, optionally filtered by subject or status."""
     with get_db_ctx() as db:
-        query = "SELECT * FROM jobs WHERE 1=1"
+        query = "SELECT j.*, s.name AS subject_name FROM jobs j LEFT JOIN subjects s ON j.subject_id = s.id WHERE 1=1"
         params = []
         if subject_id is not None:
-            query += " AND subject_id = ?"
+            query += " AND j.subject_id = ?"
             params.append(subject_id)
         if status is not None:
-            query += " AND status = ?"
+            query += " AND j.status = ?"
             params.append(status)
-        query += " ORDER BY created_at DESC"
+        query += " ORDER BY j.created_at DESC"
         jobs = db.execute(query, params).fetchall()
     return jobs
 
