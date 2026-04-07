@@ -360,8 +360,6 @@ async function applyUpdate() {
     const applyBtn = document.getElementById('updateApplyBtn');
     const checkBtn = document.getElementById('updateCheckBtn');
 
-    if (!confirm('Update Movement Tracker? The app will restart automatically.')) return;
-
     applyBtn.disabled = true;
     applyBtn.textContent = 'Updating...';
     checkBtn.disabled = true;
