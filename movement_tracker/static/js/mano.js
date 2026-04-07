@@ -81,8 +81,8 @@ const manoViewer = (() => {
     // ── Helpers ───────────────────────────────────────────────
     const $ = id => document.getElementById(id);
 
-    async function api(url) {
-        const resp = await fetch(url);
+    async function api(url, options) {
+        const resp = await fetch(url, options);
         if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
         return resp.json();
     }
@@ -252,19 +252,20 @@ const manoViewer = (() => {
         $('trialName').textContent = trial.trial_stem;
         $('totalFrames').textContent = trial.n_frames;
 
-        // Load bulk data
+        // Load bulk data (may fail if no calibration — still load video)
         try {
             trialData = await api(`/api/mano/${subjectId}/trial/${trial.trial_idx}/data`);
         } catch (e) {
             console.error('Failed to load trial data:', e);
             trialData = null;
-            return;
+            const statusEl = $('manoFitStatus');
+            if (statusEl) statusEl.innerHTML = `<span style="color:var(--red);">${e.message}</span>`;
         }
 
         // Populate distance selector
         const distSel = $('distanceSelect');
         distSel.innerHTML = '';
-        if (trialData.distance_options) {
+        if (trialData && trialData.distance_options) {
             for (const name of Object.keys(trialData.distance_options)) {
                 const opt = document.createElement('option');
                 opt.value = name;
@@ -282,6 +283,7 @@ const manoViewer = (() => {
         updateFitStatus();
 
         // Load video
+        const trialFps = (trialData && trialData.fps) || trial.fps || 30;
         videoEl.src = `/api/mano/${subjectId}/trial/${trial.trial_idx}/video`;
         videoEl.addEventListener('loadedmetadata', () => {
             vidW = videoEl.videoWidth;
@@ -289,9 +291,13 @@ const manoViewer = (() => {
             midline = cameraMode === 'stereo' ? vidW / 2 : vidW;
             sizeCanvases();
             computeAutoCrop();
-            snapToCamera(); // default view = snapped to calibration camera
+            if (trialData && trialData.calib) {
+                snapToCamera();
+            } else {
+                resetZoom();
+            }
             // Seek to midpoint of frame 0 — t=0 cannot be decoded by many codecs
-            videoEl.currentTime = 0.5 / trialData.fps;
+            videoEl.currentTime = 0.5 / trialFps;
             videoEl.addEventListener('seeked', () => {
                 render();
                 renderDistanceTrace();
@@ -495,8 +501,8 @@ const manoViewer = (() => {
 
     // ── Frame navigation ─────────────────────────────────────
     function goToFrame(n) {
-        if (!trialData) return;
-        currentFrame = Math.max(0, Math.min(n, trialData.n_frames - 1));
+        const nFrames = trialData?.n_frames || trials[currentTrialIdx]?.n_frames || 1;
+        currentFrame = Math.max(0, Math.min(n, nFrames - 1));
         if (typeof setNavState === 'function') setNavState({ frame: currentFrame });
 
         $('frameDisplay').textContent = currentFrame;
@@ -512,8 +518,9 @@ const manoViewer = (() => {
 
         // Seek then render — never call render() before seeked or the previous
         // decoded frame (or a blank) flashes before the new one arrives.
-        if (videoEl.readyState >= 2 && trialData.fps) {
-            const t = (currentFrame + 0.5) / trialData.fps;
+        const fps = trialData?.fps || trials[currentTrialIdx]?.fps || 30;
+        if (videoEl.readyState >= 2 && fps) {
+            const t = (currentFrame + 0.5) / fps;
             videoEl.currentTime = t;
             videoEl.addEventListener('seeked', render, { once: true });
         } else {

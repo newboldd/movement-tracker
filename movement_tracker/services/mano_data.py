@@ -298,26 +298,33 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         raise FileNotFoundError(
             f"Cannot determine frame count for {subject_name}/{trial_stem}")
 
-    # ── Load calibration ───────────────────────────────────────
+    # ── Load calibration (optional — needed for 3D but not 2D) ─
     calib = _load_trial_calibration(subject_name, trial_stem)
-    if calib is None:
-        raise FileNotFoundError(f"No calibration for {subject_name}")
+    has_calib = calib is not None
 
-    K1, K2 = calib["K1"], calib["K2"]
-    dist1, dist2 = calib["dist1"], calib["dist2"]
-    R, T = calib["R"], calib["T"]
+    if has_calib:
+        K1, K2 = calib["K1"], calib["K2"]
+        dist1, dist2 = calib["dist1"], calib["dist2"]
+        R, T = calib["R"], calib["T"]
+    else:
+        logger.warning(f"No calibration for {subject_name}/{trial_stem} — 3D disabled")
+        K1 = K2 = np.eye(3, dtype=np.float64)
+        dist1 = dist2 = np.zeros((5, 1), dtype=np.float64)
+        R = np.eye(3, dtype=np.float64)
+        T = np.zeros((3, 1), dtype=np.float64)
 
     R_eye = np.eye(3, dtype=np.float64)
     T_zero = np.zeros((3, 1), dtype=np.float64)
 
     # ── Project MANO 3D→2D (if available) ──────────────────────
-    if has_mano:
+    if has_mano and has_calib:
         mano_proj_L = _project_to_2d(joints_3d, K1, dist1, R_eye, T_zero)
         mano_proj_R = _project_to_2d(joints_3d, K2, dist2, R, T)
     else:
         mano_proj_L = np.full((N, 21, 2), np.nan)
         mano_proj_R = np.full((N, 21, 2), np.nan)
-        joints_3d = np.full((N, 21, 3), np.nan)
+        if not has_mano:
+            joints_3d = np.full((N, 21, 3), np.nan)
 
     # ── Load MediaPipe ─────────────────────────────────────────
     mp_tracked_L = np.full((N, 21, 2), np.nan)
@@ -350,12 +357,13 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
                 n = end - start_frame
                 mp_tracked_R[:n] = od_lm[start_frame:end]
 
-    # ── Triangulate MP to 3D ───────────────────────────────────
+    # ── Triangulate MP to 3D (requires calibration) ─────────────
     mp_joints_3d = np.full((N, 21, 3), np.nan)
-    for j in range(21):
-        pts_L = mp_tracked_L[:, j, :]  # (N, 2)
-        pts_R = mp_tracked_R[:, j, :]  # (N, 2)
-        mp_joints_3d[:, j, :] = triangulate_points(pts_L, pts_R, calib)
+    if has_calib:
+        for j in range(21):
+            pts_L = mp_tracked_L[:, j, :]  # (N, 2)
+            pts_R = mp_tracked_R[:, j, :]  # (N, 2)
+            mp_joints_3d[:, j, :] = triangulate_points(pts_L, pts_R, calib)
 
     # ── Load DLC predictions (thumb+index only) ────────────────
     dlc_thumb_OS = np.full((N, 2), np.nan)
