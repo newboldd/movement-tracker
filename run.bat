@@ -54,6 +54,10 @@ if "%~1"=="upgrade" (
         xcopy /E /I /Y /Q "!OLD!\.python" ".python" >nul
         echo   OK: .python\
     )
+    :: Also check AppData location from previous installs
+    if exist "%LOCALAPPDATA%\MovementTracker\python\python.exe" (
+        echo Found existing portable Python in AppData.
+    )
 
     echo.
     echo Migration complete! Starting Movement Tracker...
@@ -68,6 +72,15 @@ set "PYTHON="
 if exist ".venv\Scripts\python.exe" (
     set "PYTHON=.venv\Scripts\python.exe"
     goto :found
+)
+
+:: 1b. Check for portable Python in AppData (from previous run on locked-down machine)
+if exist "%LOCALAPPDATA%\MovementTracker\python\python.exe" (
+    "%LOCALAPPDATA%\MovementTracker\python\python.exe" -c "print('ok')" >nul 2>nul
+    if not errorlevel 1 (
+        set "PYTHON=%LOCALAPPDATA%\MovementTracker\python\python.exe"
+        goto :found
+    )
 )
 
 :: 2. Already in a conda env with uvicorn?
@@ -128,48 +141,98 @@ echo.
 echo Python not found. Attempting automatic install...
 echo.
 
-set "INSTALL_OK=0"
-
-:: 5a. Portable Python — download zip, extract locally (no install, no admin)
-echo Setting up portable Python...
-set "PORTABLE_DIR=%~dp0.python"
 set "PY_ZIP=%TEMP%\python-3.11-embed.zip"
-set "GET_PIP=%TEMP%\get-pip.py"
 
-if not exist "!PORTABLE_DIR!\python.exe" (
-    echo Downloading portable Python 3.11...
-    powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip' -OutFile '!PY_ZIP!' }" 2>nul
-    if not exist "!PY_ZIP!" (
+:: Try two locations for portable Python:
+::   1. %LOCALAPPDATA%\MovementTracker  (AppLocker usually allows AppData\Local)
+::   2. .python\ next to this script     (fallback, may be blocked in Downloads)
+set "PORTABLE_DIR_APPDATA=%LOCALAPPDATA%\MovementTracker\python"
+set "PORTABLE_DIR_LOCAL=%~dp0.python"
+
+:: Check if we already have a working portable Python in either location
+if exist "!PORTABLE_DIR_APPDATA!\python.exe" (
+    "!PORTABLE_DIR_APPDATA!\python.exe" -c "print('ok')" >nul 2>nul
+    if not errorlevel 1 (
+        set "PORTABLE_DIR=!PORTABLE_DIR_APPDATA!"
+        goto :portable_ready
+    )
+    echo Note: Python in AppData is blocked by Group Policy, trying next...
+)
+if exist "!PORTABLE_DIR_LOCAL!\python.exe" (
+    "!PORTABLE_DIR_LOCAL!\python.exe" -c "print('ok')" >nul 2>nul
+    if not errorlevel 1 (
+        set "PORTABLE_DIR=!PORTABLE_DIR_LOCAL!"
+        goto :portable_ready
+    )
+    echo Note: Python in local folder is blocked by Group Policy...
+)
+
+:: Download and extract portable Python
+echo Setting up portable Python...
+echo Downloading portable Python 3.11...
+powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip' -OutFile '!PY_ZIP!' }" 2>nul
+if not exist "!PY_ZIP!" (
+    echo.
+    echo Could not download Python. Check your internet connection.
+    echo.
+    pause
+    exit /b 1
+)
+
+:: Try extracting to AppData\Local first (less likely to be blocked by Group Policy)
+set "PORTABLE_DIR=!PORTABLE_DIR_APPDATA!"
+echo Extracting to %LOCALAPPDATA%\MovementTracker\...
+mkdir "!PORTABLE_DIR!" 2>nul
+powershell -Command "Expand-Archive -Path '!PY_ZIP!' -DestinationPath '!PORTABLE_DIR!' -Force" 2>nul
+
+:: Enable pip in embeddable Python (uncomment 'import site' in python311._pth)
+powershell -Command "(Get-Content '!PORTABLE_DIR!\python311._pth') -replace '^#import site','import site' | Set-Content '!PORTABLE_DIR!\python311._pth'" 2>nul
+
+:: Verify it actually runs (Group Policy check)
+"!PORTABLE_DIR!\python.exe" -c "print('ok')" >nul 2>nul
+if errorlevel 1 (
+    echo Python in AppData blocked by Group Policy, trying local folder...
+    rmdir /s /q "!PORTABLE_DIR!" 2>nul
+
+    :: Fall back to .python\ next to the script
+    set "PORTABLE_DIR=!PORTABLE_DIR_LOCAL!"
+    echo Extracting to !PORTABLE_DIR!...
+    mkdir "!PORTABLE_DIR!" 2>nul
+    powershell -Command "Expand-Archive -Path '!PY_ZIP!' -DestinationPath '!PORTABLE_DIR!' -Force" 2>nul
+    powershell -Command "(Get-Content '!PORTABLE_DIR!\python311._pth') -replace '^#import site','import site' | Set-Content '!PORTABLE_DIR!\python311._pth'" 2>nul
+
+    :: Verify again
+    "!PORTABLE_DIR!\python.exe" -c "print('ok')" >nul 2>nul
+    if errorlevel 1 (
         echo.
-        echo Could not download Python. Check your internet connection.
+        echo ============================================================
+        echo ERROR: Python is blocked by Group Policy in all locations.
+        echo ============================================================
         echo.
+        echo Your IT department blocks .exe files from running in:
+        echo   - %LOCALAPPDATA%\MovementTracker\
+        echo   - %~dp0
+        echo.
+        echo Please ask IT to do ONE of the following:
+        echo   1. Install Python 3.11 system-wide (recommended^)
+        echo   2. Whitelist this folder: %LOCALAPPDATA%\MovementTracker\
+        echo   3. Install Anaconda for your user account
+        echo.
+        del "!PY_ZIP!" 2>nul
         pause
         exit /b 1
     )
-
-    echo Extracting...
-    mkdir "!PORTABLE_DIR!" 2>nul
-    powershell -Command "Expand-Archive -Path '!PY_ZIP!' -DestinationPath '!PORTABLE_DIR!' -Force" 2>nul
-    del "!PY_ZIP!" 2>nul
-
-    :: Enable pip in embeddable Python (uncomment 'import site' in python311._pth)
-    powershell -Command "(Get-Content '!PORTABLE_DIR!\python311._pth') -replace '^#import site','import site' | Set-Content '!PORTABLE_DIR!\python311._pth'" 2>nul
 )
+del "!PY_ZIP!" 2>nul
 
-:: Download pip as a standalone zip app (no .exe files created — avoids Group Policy blocks)
+:portable_ready
+echo Using portable Python at: !PORTABLE_DIR!
+
+:: Download pip as a standalone zip app (no .exe files — avoids Group Policy blocks)
 set "PIP_PYZ=!PORTABLE_DIR!\pip.pyz"
 if not exist "!PIP_PYZ!" (
-    echo Downloading pip (standalone zip^)...
+    echo Downloading pip...
     powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/pip/pip.pyz' -OutFile '!PIP_PYZ!' }" 2>nul
-)
-
-:: Also try traditional get-pip as fallback (in case pip.pyz is unavailable)
-if not exist "!PIP_PYZ!" (
-    echo Downloading pip (get-pip fallback^)...
-    set "GET_PIP=%TEMP%\get-pip.py"
-    powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile '!GET_PIP!' }" 2>nul
-    "!PORTABLE_DIR!\python.exe" "!GET_PIP!" --no-warn-script-location 2>nul
-    del "!GET_PIP!" 2>nul
 )
 
 if exist "!PORTABLE_DIR!\python.exe" (
@@ -190,9 +253,12 @@ echo Using Python: %PYTHON%
 :: ── Determine pip command ───────────────────────────────────────
 :: Prefer pip.pyz (no .exe, avoids Group Policy blocks on locked-down machines)
 set "PIP_CMD="
-set "PIP_PYZ=%~dp0.python\pip.pyz"
-if exist "%PIP_PYZ%" (
-    set "PIP_CMD=%PYTHON% %PIP_PYZ%"
+:: Check both possible pip.pyz locations
+set "PIP_PYZ="
+if exist "%LOCALAPPDATA%\MovementTracker\python\pip.pyz" set "PIP_PYZ=%LOCALAPPDATA%\MovementTracker\python\pip.pyz"
+if exist "%~dp0.python\pip.pyz" set "PIP_PYZ=%~dp0.python\pip.pyz"
+if defined PIP_PYZ (
+    set "PIP_CMD=%PYTHON% "%PIP_PYZ%""
 ) else (
     set "PIP_CMD=%PYTHON% -m pip"
 )
@@ -212,7 +278,7 @@ if errorlevel 1 (
     )
 
     :: Strategy 2: pip.pyz with --only-binary (no .exe created, no compiling)
-    if exist "%PIP_PYZ%" (
+    if defined PIP_PYZ (
         %PYTHON% "%PIP_PYZ%" install --only-binary :all: --no-cache-dir -r requirements.txt
         if not errorlevel 1 goto :deps_ok
         echo pip.pyz binary-only install failed, trying with source builds...
