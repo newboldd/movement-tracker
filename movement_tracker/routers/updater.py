@@ -150,13 +150,27 @@ def apply_update() -> dict:
                 shutil.copy2(src, dst)
                 copied += 1
 
-        # 5. Restore execute permissions on shell scripts
+        # 5. Install any new dependencies from updated requirements.txt
+        req_file = os.path.join(project_root, "requirements.txt")
+        if os.path.exists(req_file):
+            import sys, subprocess
+            logger.info("Installing updated dependencies...")
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-q",
+                     "--disable-pip-version-check", "-r", req_file],
+                    timeout=120, capture_output=True,
+                )
+            except Exception as e:
+                logger.warning(f"Dependency install failed (non-fatal): {e}")
+
+        # 6. Restore execute permissions on shell scripts
         for script in ["setup.sh", "Movement Tracker.command"]:
             script_path = os.path.join(project_root, script)
             if os.path.exists(script_path):
                 os.chmod(script_path, 0o755)
 
-        # 6. Write new VERSION
+        # 7. Write new VERSION
         VERSION_FILE.write_text(latest_sha + "\n")
 
         logger.info(f"Update applied: {copied} files copied, {skipped} preserved. SHA: {latest_sha[:7]}")
@@ -168,7 +182,7 @@ def apply_update() -> dict:
         # Clean up temp files
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    # 6. Schedule restart — exit with code 42 after responding
+    # 8. Schedule restart — exit with code 42 after responding
     import threading
     def _restart():
         import time
