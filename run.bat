@@ -182,16 +182,50 @@ echo Checking dependencies...
 %PYTHON% -c "import uvicorn, fastapi, cv2, numpy, pandas, mediapipe" 2>nul
 if errorlevel 1 (
     echo Installing missing dependencies (this may take a few minutes^)...
-    %PYTHON% -m pip install -r requirements.txt
-    if errorlevel 1 (
-        echo.
-        echo ERROR: Failed to install dependencies. Try manually:
-        echo   %PYTHON% -m pip install -r requirements.txt
-        echo.
-        pause
-        exit /b 1
+
+    :: Strategy 1: offline wheels directory (for air-gapped / locked-down machines)
+    if exist "%~dp0wheels" (
+        echo Found local wheels directory, installing offline...
+        %PYTHON% -m pip install --no-index --find-links "%~dp0wheels" -r requirements.txt --no-build-isolation
+        if not errorlevel 1 goto :deps_ok
+        echo Offline install failed, trying online...
     )
+
+    :: Strategy 2: standard pip install with --only-binary to avoid compiling
+    %PYTHON% -m pip install --only-binary :all: -r requirements.txt
+    if not errorlevel 1 goto :deps_ok
+
+    :: Strategy 3: fall back to allowing source builds (original behavior)
+    %PYTHON% -m pip install -r requirements.txt
+    if not errorlevel 1 goto :deps_ok
+
+    echo.
+    echo ============================================================
+    echo ERROR: Failed to install dependencies.
+    echo ============================================================
+    echo.
+    echo This is often caused by hospital/enterprise Group Policy
+    echo blocking programs in the Downloads folder.
+    echo.
+    echo Try these fixes (easiest first^):
+    echo.
+    echo  1. MOVE this folder to C:\MovementTracker and re-run
+    echo     (paths outside Downloads are less likely to be blocked^)
+    echo.
+    echo  2. Ask IT to whitelist this folder:
+    echo     %~dp0
+    echo.
+    echo  3. Ask IT to install Python 3.11 system-wide, then re-run
+    echo.
+    echo  4. On another (unrestricted^) PC, run:
+    echo       pip download -r requirements.txt -d wheels\
+    echo     Copy the "wheels" folder into this directory, then re-run.
+    echo     (This enables fully offline installation.^)
+    echo.
+    pause
+    exit /b 1
 )
+:deps_ok
 
 :: ── Sample data ──────────────────────────────────────────────────
 if not exist "sample_data\Con01_R1.mp4" (
