@@ -1,11 +1,13 @@
-"""MANO 3D hand model viewer API: trial listing, data loading, heatmap serving."""
+"""MANO 3D hand model viewer API: trial listing, data loading, heatmap serving, fitting."""
 from __future__ import annotations
 
 import json
+import threading
 
 import numpy as np
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, Response
+from pydantic import BaseModel
 
 from ..config import get_settings
 from ..db import get_db_ctx
@@ -37,7 +39,7 @@ def _subject_name(subject_id: int) -> str:
 
 @router.get("/{subject_id}/trials")
 def get_trials(subject_id: int) -> list[dict]:
-    """List trials with available MANO fit data for a subject."""
+    """List trials with MediaPipe data and/or MANO fits for a subject."""
     name = _subject_name(subject_id)
     return list_mano_trials(name)
 
@@ -226,6 +228,108 @@ def get_mediapipe_hints(subject_id: int) -> list[dict]:
         hints.append(result)
 
     return hints
+
+
+class FitRequest(BaseModel):
+    trial_idx: int
+    stage: int = 1
+
+
+@router.get("/{subject_id}/fit/status")
+def get_fit_status(subject_id: int) -> dict:
+    """Check if MANO fitting dependencies are available."""
+    from ..services.mano_fitting import check_mano_available
+    return check_mano_available()
+
+
+@router.post("/{subject_id}/fit")
+def run_fit(subject_id: int, req: FitRequest) -> dict:
+    """Submit a MANO fitting job as a background task."""
+    from ..services.mano_fitting import check_mano_available, run_stage1_fitting
+    from ..services.jobs import registry
+
+    status = check_mano_available()
+    if not status["available"]:
+        raise HTTPException(400, status["message"])
+
+    name = _subject_name(subject_id)
+
+    # Find trial stem
+    try:
+        video_trials = build_trial_map(name)
+    except Exception:
+        raise HTTPException(404, "No videos found")
+
+    if req.trial_idx < 0 or req.trial_idx >= len(video_trials):
+        raise HTTPException(404, f"Trial index {req.trial_idx} out of range")
+
+    trial_stem = video_trials[req.trial_idx]["trial_name"]
+
+    # Create job record
+    with get_db_ctx() as db:
+        db.execute(
+            "INSERT INTO jobs (subject_id, job_type, status) VALUES (?, 'mano_fit', 'pending')",
+            (subject_id,),
+        )
+        job = db.execute(
+            "SELECT * FROM jobs WHERE subject_id = ? ORDER BY id DESC LIMIT 1",
+            (subject_id,),
+        ).fetchone()
+
+    job_id = job["id"]
+    cancel_event = threading.Event()
+    registry._cancel_events[job_id] = cancel_event
+
+    def _run():
+        try:
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (job_id,),
+                )
+
+            def on_progress(pct):
+                with get_db_ctx() as db:
+                    db.execute(
+                        "UPDATE jobs SET progress_pct = ? WHERE id = ?",
+                        (pct, job_id),
+                    )
+
+            result = run_stage1_fitting(
+                name, trial_stem,
+                cancel_event=cancel_event,
+                progress_callback=on_progress,
+            )
+
+            if result.get("cancelled"):
+                with get_db_ctx() as db:
+                    db.execute(
+                        "UPDATE jobs SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (job_id,),
+                    )
+            else:
+                with get_db_ctx() as db:
+                    db.execute(
+                        "UPDATE jobs SET status = 'completed', progress_pct = 100, "
+                        "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (job_id,),
+                    )
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).exception(f"MANO fit job {job_id} failed")
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status = 'failed', error_msg = ?, "
+                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (str(e), job_id),
+                )
+        finally:
+            registry._cancel_events.pop(job_id, None)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+    return {"job_id": job_id, "trial_stem": trial_stem}
 
 
 @router.get("/{subject_id}/video_list")

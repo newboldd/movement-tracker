@@ -26,12 +26,17 @@ const manoViewer = (() => {
 
     // Layer visibility
     let showVideo = true;
-    let show3D = true;
-    let showMano = true;
-    let showMP = false;
-    let showDLC = false;
     let showSkeleton = true;
+    let showMP2D = true;
+    let showMP3D = true;
+    let showMano2D = false;
+    let showMano3D = false;
+    let showDLC = false;
     let showHeatmap = false;
+    // Legacy aliases used in rendering
+    let show3D = true; // always true — 3D viewport visibility
+    let showMano = false; // derived from showMano2D || showMano3D
+    let showMP = true; // derived from showMP2D || showMP3D
 
     // Finger visibility
     const fingerVisibility = {
@@ -273,6 +278,9 @@ const manoViewer = (() => {
             renderDistanceTrace();
         });
 
+        // Update MANO fit status and checkbox state
+        updateFitStatus();
+
         // Load video
         videoEl.src = `/api/mano/${subjectId}/trial/${trial.trial_idx}/video`;
         videoEl.addEventListener('loadedmetadata', () => {
@@ -318,25 +326,26 @@ const manoViewer = (() => {
             $('speedDisplay').textContent = playbackRate + 'x';
         });
 
-        // Video / 3D visibility toggles
+        // Video visibility toggle
         $('showVideo').addEventListener('change', e => {
             showVideo = e.target.checked;
             canvas.parentElement.style.visibility = showVideo ? 'visible' : 'hidden';
             render();
         });
-        $('show3D').addEventListener('change', e => {
-            show3D = e.target.checked;
-            const wrap = $('threejsContainer');
-            wrap.style.visibility = show3D ? 'visible' : 'hidden';
-            wrap.classList.toggle('interactive', show3D);
-            if (show3D && renderer) renderer.render(scene, camera3d);
-        });
-
-        // Layer toggles
-        $('showMano').addEventListener('change', e => { showMano = e.target.checked; render(); update3D(); });
-        $('showMP').addEventListener('change', e => { showMP = e.target.checked; render(); update3D(); });
-        $('showDLC').addEventListener('change', e => { showDLC = e.target.checked; render(); update3D(); });
         $('showSkeleton').addEventListener('change', e => { showSkeleton = e.target.checked; render(); update3D(); });
+
+        // Layer toggles — update derived flags
+        function updateLayerFlags() {
+            showMP = showMP2D || showMP3D;
+            showMano = showMano2D || showMano3D;
+            render();
+            update3D();
+        }
+        $('showMP2D').addEventListener('change', e => { showMP2D = e.target.checked; updateLayerFlags(); });
+        $('showMP3D').addEventListener('change', e => { showMP3D = e.target.checked; updateLayerFlags(); });
+        $('showMano2D').addEventListener('change', e => { showMano2D = e.target.checked; updateLayerFlags(); });
+        $('showMano3D').addEventListener('change', e => { showMano3D = e.target.checked; updateLayerFlags(); });
+        $('showDLC').addEventListener('change', e => { showDLC = e.target.checked; render(); update3D(); });
         $('showHeatmap').addEventListener('change', e => {
             showHeatmap = e.target.checked;
             $('heatmapControls').style.display = showHeatmap ? 'block' : 'none';
@@ -710,7 +719,7 @@ const manoViewer = (() => {
                 if (!isBoneVisible(i, j)) return;
 
                 // MANO skeleton (lime)
-                if (showMano && manoProj[fn] && manoProj[fn][i] && manoProj[fn][j]) {
+                if (showMano2D && manoProj[fn] && manoProj[fn][i] && manoProj[fn][j]) {
                     drawLine(
                         (manoProj[fn][i][0] + xOff) * pixelScale,
                         manoProj[fn][i][1] * pixelScale,
@@ -721,7 +730,7 @@ const manoViewer = (() => {
                 }
 
                 // MediaPipe skeleton (cyan)
-                if (showMP && mpKp[fn] && mpKp[fn][i] && mpKp[fn][j]) {
+                if (showMP2D && mpKp[fn] && mpKp[fn][i] && mpKp[fn][j]) {
                     drawLine(
                         (mpKp[fn][i][0] + xOff) * pixelScale,
                         mpKp[fn][i][1] * pixelScale,
@@ -734,7 +743,7 @@ const manoViewer = (() => {
         }
 
         // MANO joints (lime circles)
-        if (showMano && manoProj[fn]) {
+        if (showMano2D && manoProj[fn]) {
             for (let j = 0; j < 21; j++) {
                 if (!isJointVisible(j) || !manoProj[fn][j]) continue;
                 const x = (manoProj[fn][j][0] + xOff) * pixelScale;
@@ -744,7 +753,7 @@ const manoViewer = (() => {
         }
 
         // MediaPipe joints (cyan X)
-        if (showMP && mpKp[fn]) {
+        if (showMP2D && mpKp[fn]) {
             for (let j = 0; j < 21; j++) {
                 if (!isJointVisible(j) || !mpKp[fn][j]) continue;
                 const x = (mpKp[fn][j][0] + xOff) * pixelScale;
@@ -900,8 +909,8 @@ const manoViewer = (() => {
                 if (v != null) { yMin = Math.min(yMin, v); yMax = Math.max(yMax, v); }
             }
         };
-        if (showMano) checkRange(manoDist);
-        if (showMP) checkRange(mpDist);
+        if (showMano2D || showMano3D) checkRange(manoDist);
+        if (showMP2D || showMP3D) checkRange(mpDist);
 
         if (!isFinite(yMin)) { yMin = 0; yMax = 100; }
         const pad = (yMax - yMin) * 0.1 || 10;
@@ -926,8 +935,8 @@ const manoViewer = (() => {
             distCtx.stroke();
         }
 
-        if (showMano) drawSeries(manoDist, 'lime');
-        if (showMP) drawSeries(mpDist, 'cyan');
+        if (showMano2D || showMano3D) drawSeries(manoDist, 'lime');
+        if (showMP2D || showMP3D) drawSeries(mpDist, 'cyan');
 
         // Frame marker
         distCtx.strokeStyle = '#4a9eff';
@@ -949,11 +958,11 @@ const manoViewer = (() => {
         // Legend
         distCtx.textAlign = 'right';
         let lx = w - 8, ly = 14;
-        if (showMano) {
+        if (showMano2D || showMano3D) {
             distCtx.fillStyle = 'lime';
             distCtx.fillText('MANO', lx, ly); ly += 14;
         }
-        if (showMP) {
+        if (showMP2D || showMP3D) {
             distCtx.fillStyle = 'cyan';
             distCtx.fillText('MediaPipe', lx, ly); ly += 14;
         }
@@ -1080,7 +1089,7 @@ const manoViewer = (() => {
         };
 
         // MANO joints (green)
-        if (showMano && mano3d) {
+        if (showMano3D && mano3d) {
             const manoMat = new THREE.MeshPhongMaterial({ color: 0x00ff00 });
             const boneMat = new THREE.MeshPhongMaterial({ color: 0x00dd00 });
             for (let j = 0; j < 21; j++) {
@@ -1103,7 +1112,7 @@ const manoViewer = (() => {
         }
 
         // MediaPipe joints (cyan)
-        if (showMP && mp3d) {
+        if (showMP3D && mp3d) {
             const mpMat = new THREE.MeshPhongMaterial({ color: 0x5bc0de });
             const mpBoneMat = new THREE.MeshPhongMaterial({ color: 0x4aa0bb });
             for (let j = 0; j < 21; j++) {
@@ -1131,8 +1140,8 @@ const manoViewer = (() => {
             // For now skip 3D DLC (only 2D data available)
         }
 
-        manoGroup.visible = showMano;
-        mpGroup.visible = showMP;
+        manoGroup.visible = showMano3D;
+        mpGroup.visible = showMP3D;
         dlcGroup.visible = showDLC;
 
         renderer.render(scene, camera3d);
@@ -1262,7 +1271,88 @@ const manoViewer = (() => {
         init().catch(e => console.error('MANO viewer init failed:', e));
     }
 
-    return { goToFrame, togglePlay, toggleSide, resetZoom, prevSubject, nextSubject, getExportContext };
+    function updateFitStatus() {
+        const statusEl = $('manoFitStatus');
+        const btn = $('runStage1Btn');
+        if (!statusEl || !btn) return;
+
+        const hasFit = trialData && trialData.has_mano_fit;
+        if (hasFit) {
+            statusEl.innerHTML = '<span style="color:var(--green);">Stage 1 fit available</span>';
+            // Auto-enable MANO checkboxes when fit is available
+            if ($('showMano2D')) { $('showMano2D').checked = true; showMano2D = true; }
+            if ($('showMano3D')) { $('showMano3D').checked = true; showMano3D = true; }
+            showMano = true;
+        } else {
+            statusEl.textContent = 'No fit available';
+            if ($('showMano2D')) { $('showMano2D').checked = false; showMano2D = false; }
+            if ($('showMano3D')) { $('showMano3D').checked = false; showMano3D = false; }
+            showMano = false;
+        }
+    }
+
+    async function runStage1() {
+        if (!subjectId || currentTrialIdx < 0) {
+            alert('Select a subject and trial first.');
+            return;
+        }
+        const btn = $('runStage1Btn');
+        const statusEl = $('manoFitStatus');
+        btn.disabled = true;
+        btn.textContent = 'Submitting...';
+
+        try {
+            const trial = trials[currentTrialIdx];
+            const result = await api(`/api/mano/${subjectId}/fit`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ trial_idx: trial.trial_idx, stage: 1 }),
+            });
+            statusEl.innerHTML = '<span style="color:var(--blue);">Stage 1 fitting running...</span>';
+            btn.textContent = 'Running...';
+
+            // Poll job status
+            if (result.job_id) {
+                pollFitJob(result.job_id);
+            }
+        } catch (e) {
+            statusEl.innerHTML = `<span style="color:var(--red);">Error: ${e.message}</span>`;
+            btn.disabled = false;
+            btn.textContent = 'Run Stage 1';
+        }
+    }
+
+    function pollFitJob(jobId) {
+        const statusEl = $('manoFitStatus');
+        const btn = $('runStage1Btn');
+        const source = new EventSource(`/api/jobs/${jobId}/stream`);
+        source.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            const pct = Math.round(data.progress_pct || 0);
+            statusEl.innerHTML = `<span style="color:var(--blue);">Stage 1 fitting... ${pct}%</span>`;
+
+            if (data.status === 'completed') {
+                source.close();
+                statusEl.innerHTML = '<span style="color:var(--green);">Stage 1 complete! Reloading...</span>';
+                btn.disabled = false;
+                btn.textContent = 'Run Stage 1';
+                // Reload trial data to show the new fit
+                loadTrial(currentTrialIdx);
+            } else if (data.status === 'failed') {
+                source.close();
+                statusEl.innerHTML = `<span style="color:var(--red);">Failed: ${data.error_msg || 'unknown error'}</span>`;
+                btn.disabled = false;
+                btn.textContent = 'Run Stage 1';
+            }
+        };
+        source.onerror = () => {
+            source.close();
+            btn.disabled = false;
+            btn.textContent = 'Run Stage 1';
+        };
+    }
+
+    return { goToFrame, togglePlay, toggleSide, resetZoom, prevSubject, nextSubject, getExportContext, runStage1 };
 })();
 
 // Expose on window for cross-module access (mano.js is an ES module)

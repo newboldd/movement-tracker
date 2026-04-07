@@ -160,30 +160,40 @@
                 <span class="layer-swatch" style="background:#888;"></span> Video
             </label>
             <label class="layer-toggle">
-                <input type="checkbox" id="show3D" checked>
-                <span class="layer-swatch" style="background:#7c4dff;"></span> 3D Model
+                <input type="checkbox" id="showSkeleton" checked>
+                <span class="layer-swatch" style="background:#aaa;"></span> Skeleton
             </label>
             <hr style="border:none;border-top:1px solid var(--border);margin:4px 0;">
             <label class="layer-toggle">
-                <input type="checkbox" id="showMano" checked>
-                <span class="layer-swatch" style="background:lime;"></span> MANO
+                <input type="checkbox" id="showMP2D" checked>
+                <span class="layer-swatch" style="background:cyan;"></span> MediaPipe 2D
             </label>
             <label class="layer-toggle">
-                <input type="checkbox" id="showMP">
-                <span class="layer-swatch" style="background:cyan;"></span> MediaPipe
+                <input type="checkbox" id="showMP3D" checked>
+                <span class="layer-swatch" style="background:#5bc0de;"></span> MediaPipe 3D
             </label>
+            <label class="layer-toggle">
+                <input type="checkbox" id="showMano2D">
+                <span class="layer-swatch" style="background:lime;"></span> MANO 2D
+            </label>
+            <label class="layer-toggle">
+                <input type="checkbox" id="showMano3D">
+                <span class="layer-swatch" style="background:#00dd00;"></span> MANO 3D
+            </label>
+            <hr style="border:none;border-top:1px solid var(--border);margin:4px 0;">
             <label class="layer-toggle">
                 <input type="checkbox" id="showDLC">
                 <span class="layer-swatch" style="background:#f44;"></span> DLC
             </label>
             <label class="layer-toggle">
-                <input type="checkbox" id="showSkeleton" checked>
-                <span class="layer-swatch" style="background:#aaa;"></span> Skeleton
-            </label>
-            <label class="layer-toggle">
                 <input type="checkbox" id="showHeatmap">
                 <span class="layer-swatch" style="background:#ff6600;"></span> Heatmap
             </label>
+
+            <!-- MANO Fitting -->
+            <div class="sidebar-section" style="margin-top:16px;">MANO Fitting</div>
+            <div id="manoFitStatus" style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">No fit available</div>
+            <button class="btn btn-sm" id="runStage1Btn" style="width:100%;" onclick="manoViewer.runStage1()">Run Stage 1</button>
 
             <!-- Fingers -->
             <div class="sidebar-section">Fingers</div>
@@ -247,7 +257,7 @@
         }
     }
     </script>
-    <script src="/static/js/mano.js?v=17" type="module"></script>
+    <script src="/static/js/mano.js?v=18" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

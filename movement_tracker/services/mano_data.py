@@ -151,56 +151,63 @@ def _mano_dir(subject_name: str) -> Path:
 
 
 def list_mano_trials(subject_name: str) -> list[dict]:
-    """List trials that have MANO fit results.
+    """List trials that have MediaPipe data and/or MANO fit results.
 
-    Cross-references against the video trial map so trial indices match
-    the existing video service.
+    Returns trials from the video trial map that have MediaPipe prelabels
+    available.  Each entry includes ``has_mano_fit`` flag.
     """
-    mano_root = _mano_dir(subject_name)
-    if not mano_root.is_dir():
-        return []
-
     # Build video trial map for index alignment
     try:
         video_trials = build_trial_map(subject_name)
     except Exception:
         video_trials = []
 
-    trial_stem_to_idx = {t["trial_name"]: i for i, t in enumerate(video_trials)}
+    if not video_trials:
+        return []
+
+    # Check for MediaPipe prelabels (app's own data)
+    from .mediapipe_prelabel import load_mediapipe_prelabels
+    mp_data = load_mediapipe_prelabels(subject_name)
+
+    # Check for mano_fit files
+    mano_root = _mano_dir(subject_name)
+
     results = []
+    for i, vt in enumerate(video_trials):
+        trial_stem = vt["trial_name"]
+        n_frames = vt["frame_count"]
+        fps = vt["fps"]
 
-    for d in sorted(mano_root.iterdir()):
-        if not d.is_dir():
-            continue
-        if not (d / "mano_fit_v2.npz").exists():
-            continue
-        trial_stem = d.name
-        trial_idx = trial_stem_to_idx.get(trial_stem)
+        # Check if MediaPipe data exists for this trial
+        has_mp = False
+        if mp_data is not None:
+            os_lm = mp_data.get("OS_landmarks")
+            if os_lm is not None:
+                # Check if any frames in this trial's range have valid data
+                start = vt.get("start_frame", 0)
+                end = min(start + n_frames, os_lm.shape[0])
+                if end > start:
+                    trial_slice = os_lm[start:end]
+                    has_mp = np.any(~np.isnan(trial_slice[:, 0, 0]))
 
-        # Get frame count and fps from video trial map if available
-        n_frames = 0
-        fps = 30.0
-        if trial_idx is not None and trial_idx < len(video_trials):
-            vt = video_trials[trial_idx]
-            n_frames = vt["frame_count"]
-            fps = vt["fps"]
-        else:
-            # Fall back to mano data frame count
-            try:
-                data = np.load(str(d / "mano_fit_v2.npz"), allow_pickle=True)
-                n_frames = data["joints_3d"].shape[0]
-            except Exception:
-                pass
+        # Check for mano_fit_v2.npz or mano_fit.npz
+        mano_trial_dir = mano_root / trial_stem
+        has_mano_fit = (
+            (mano_trial_dir / "mano_fit_v2.npz").exists()
+            or (mano_trial_dir / "mano_fit.npz").exists()
+        )
+        has_heatmaps = (mano_trial_dir / "hrnet_w18_heatmaps.npz").exists()
 
-        has_heatmaps = (d / "hrnet_w18_heatmaps.npz").exists()
-
-        results.append({
-            "trial_idx": trial_idx,
-            "trial_stem": trial_stem,
-            "n_frames": n_frames,
-            "has_heatmaps": has_heatmaps,
-            "fps": fps,
-        })
+        # Include trial if it has MediaPipe data OR a MANO fit
+        if has_mp or has_mano_fit:
+            results.append({
+                "trial_idx": i,
+                "trial_stem": trial_stem,
+                "n_frames": n_frames,
+                "has_heatmaps": has_heatmaps,
+                "has_mano_fit": has_mano_fit,
+                "fps": fps,
+            })
 
     return results
 
@@ -242,24 +249,54 @@ def _load_trial_calibration(subject_name: str, trial_stem: str) -> dict | None:
 def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     """Load all MANO viewer data for a single trial.
 
+    Works in two modes:
+    - Full mode: mano_fit_v2.npz or mano_fit.npz exists → load MANO + MP
+    - MP-only mode: no MANO fit → load MediaPipe from prelabels, return null MANO fields
+
     Returns a dict ready for JSON serialisation (numpy arrays converted to lists).
     """
     mano_trial_dir = _mano_dir(subject_name) / trial_stem
-    npz_path = mano_trial_dir / "mano_fit_v2.npz"
-    if not npz_path.exists():
-        raise FileNotFoundError(f"No mano_fit_v2.npz for {subject_name}/{trial_stem}")
 
-    # ── Load MANO fit ──────────────────────────────────────────
-    mano = _load_mano_npz(str(npz_path))
-    joints_3d = mano["joints_3d"]  # (N, 21, 3)
-    N = joints_3d.shape[0]
+    # ── Determine frame count from video trial map ────────────
+    N = 0
+    fps = 30.0
+    start_frame = 0
+    try:
+        trials = build_trial_map(subject_name)
+        for t in trials:
+            if t["trial_name"] == trial_stem:
+                N = t["frame_count"]
+                fps = t["fps"]
+                start_frame = t.get("start_frame", 0)
+                break
+    except Exception:
+        pass
 
-    fit_error_L = mano.get("fit_error_L", np.full(N, np.nan))
-    fit_error_R = mano.get("fit_error_R", np.full(N, np.nan))
-    residuals_L = mano.get("residuals_L")  # (N, 21) or None
-    residuals_R = mano.get("residuals_R")
-    mp_weights_L = mano.get("mp_weights_L")  # (N, 21) or None
-    mp_weights_R = mano.get("mp_weights_R")
+    # ── Load MANO fit (if available) ───────────────────────────
+    has_mano = False
+    joints_3d = None
+    fit_error_L = np.full(N, np.nan)
+    fit_error_R = np.full(N, np.nan)
+    mp_weights_L = None
+    mp_weights_R = None
+
+    for npz_name in ("mano_fit_v2.npz", "mano_fit.npz"):
+        npz_path = mano_trial_dir / npz_name
+        if npz_path.exists():
+            mano = _load_mano_npz(str(npz_path))
+            joints_3d = mano["joints_3d"]  # (N, 21, 3)
+            if N == 0:
+                N = joints_3d.shape[0]
+            fit_error_L = mano.get("fit_error_L", np.full(N, np.nan))
+            fit_error_R = mano.get("fit_error_R", np.full(N, np.nan))
+            mp_weights_L = mano.get("mp_weights_L")
+            mp_weights_R = mano.get("mp_weights_R")
+            has_mano = True
+            break
+
+    if N == 0:
+        raise FileNotFoundError(
+            f"Cannot determine frame count for {subject_name}/{trial_stem}")
 
     # ── Load calibration ───────────────────────────────────────
     calib = _load_trial_calibration(subject_name, trial_stem)
@@ -270,19 +307,24 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     dist1, dist2 = calib["dist1"], calib["dist2"]
     R, T = calib["R"], calib["T"]
 
-    # ── Project 3D→2D ──────────────────────────────────────────
-    # Left camera: identity rotation and translation
     R_eye = np.eye(3, dtype=np.float64)
     T_zero = np.zeros((3, 1), dtype=np.float64)
 
-    mano_proj_L = _project_to_2d(joints_3d, K1, dist1, R_eye, T_zero)
-    mano_proj_R = _project_to_2d(joints_3d, K2, dist2, R, T)
+    # ── Project MANO 3D→2D (if available) ──────────────────────
+    if has_mano:
+        mano_proj_L = _project_to_2d(joints_3d, K1, dist1, R_eye, T_zero)
+        mano_proj_R = _project_to_2d(joints_3d, K2, dist2, R, T)
+    else:
+        mano_proj_L = np.full((N, 21, 2), np.nan)
+        mano_proj_R = np.full((N, 21, 2), np.nan)
+        joints_3d = np.full((N, 21, 3), np.nan)
 
     # ── Load MediaPipe ─────────────────────────────────────────
-    mp_path = mano_trial_dir / "mediapipe.pkl"
     mp_tracked_L = np.full((N, 21, 2), np.nan)
     mp_tracked_R = np.full((N, 21, 2), np.nan)
 
+    # Try mano-dir mediapipe.pkl first (legacy hand_tracking format)
+    mp_path = mano_trial_dir / "mediapipe.pkl"
     if mp_path.exists():
         mp_data = _load_mediapipe_pkl(str(mp_path))
         mp_L = mp_data.get("tracked_L")
@@ -293,6 +335,20 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         if mp_R is not None:
             n = min(N, mp_R.shape[0])
             mp_tracked_R[:n] = mp_R[:n]
+    else:
+        # Fall back to app's own mediapipe_prelabels.npz
+        from .mediapipe_prelabel import load_mediapipe_prelabels
+        prelabels = load_mediapipe_prelabels(subject_name)
+        if prelabels is not None:
+            os_lm = prelabels.get("OS_landmarks")
+            od_lm = prelabels.get("OD_landmarks")
+            end = min(start_frame + N, os_lm.shape[0]) if os_lm is not None else start_frame
+            if os_lm is not None and end > start_frame:
+                n = end - start_frame
+                mp_tracked_L[:n] = os_lm[start_frame:end]
+            if od_lm is not None and end > start_frame:
+                n = end - start_frame
+                mp_tracked_R[:n] = od_lm[start_frame:end]
 
     # ── Triangulate MP to 3D ───────────────────────────────────
     mp_joints_3d = np.full((N, 21, 3), np.nan)
@@ -338,24 +394,14 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
             break
 
     # ── Compute distances ──────────────────────────────────────
-    distances_mano = _compute_distances(joints_3d)
+    distances_mano = _compute_distances(joints_3d) if has_mano else {}
     distances_mp = _compute_distances(mp_joints_3d)
-
-    # ── Get video trial info for fps ───────────────────────────
-    fps = 30.0
-    try:
-        trials = build_trial_map(subject_name)
-        for t in trials:
-            if t["trial_name"] == trial_stem:
-                fps = t["fps"]
-                break
-    except Exception:
-        pass
 
     # ── Assemble result ────────────────────────────────────────
     result: dict[str, Any] = {
         "n_frames": N,
         "fps": fps,
+        "has_mano_fit": has_mano,
         "skeleton": HAND_SKELETON,
         "finger_groups": FINGER_GROUPS,
         "distance_options": {k: list(v) for k, v in DISTANCE_OPTIONS.items()},
