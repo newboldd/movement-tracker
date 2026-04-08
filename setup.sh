@@ -194,6 +194,60 @@ if [ ! -f "$VENV_DIR/.shortcut_hint_shown" ]; then
     touch "$VENV_DIR/.shortcut_hint_shown"
 fi
 
+# ── Auto-update ──────────────────────────────────────────────────────────
+
+echo ""
+echo "Checking for updates..."
+"$VENV_DIR/bin/python" -c "
+import urllib.request, json, sys, os, zipfile, shutil, tempfile
+
+try:
+    VERSION_FILE = os.path.join('$PROJECT_DIR', 'VERSION')
+    local_sha = open(VERSION_FILE).read().strip() if os.path.exists(VERSION_FILE) else ''
+    req = urllib.request.Request(
+        'https://api.github.com/repos/newboldd/movement-tracker/commits/master',
+        headers={'User-Agent': 'MovementTracker', 'Accept': 'application/vnd.github.v3+json'})
+    resp = urllib.request.urlopen(req, timeout=10)
+    remote = json.loads(resp.read())
+    remote_sha = remote['sha']
+    if local_sha == remote_sha:
+        print('Already up to date.')
+        sys.exit(0)
+    print(f'Update available: {remote_sha[:8]} — {remote[\"commit\"][\"message\"].splitlines()[0]}')
+    print('Downloading...')
+    zip_url = 'https://github.com/newboldd/movement-tracker/archive/refs/heads/master.zip'
+    tmp = tempfile.mkdtemp(prefix='mt_update_')
+    zip_path = os.path.join(tmp, 'update.zip')
+    urllib.request.urlretrieve(zip_url, zip_path)
+    with zipfile.ZipFile(zip_path) as zf:
+        zf.extractall(tmp)
+    src = os.path.join(tmp, 'movement-tracker-master')
+    # Copy code files (preserve data)
+    for item in ['movement_tracker', 'requirements.txt', 'setup.sh', 'run.bat',
+                 'scripts', 'calibration', 'Movement Tracker.command', 'CLAUDE.md', 'VERSION']:
+        s = os.path.join(src, item)
+        d = os.path.join('$PROJECT_DIR', item)
+        if os.path.isdir(s):
+            if os.path.exists(d): shutil.rmtree(d)
+            shutil.copytree(s, d)
+        elif os.path.isfile(s):
+            shutil.copy2(s, d)
+    # Update VERSION
+    with open(VERSION_FILE, 'w') as f: f.write(remote_sha)
+    shutil.rmtree(tmp, ignore_errors=True)
+    # Reinstall deps
+    import subprocess
+    subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', '--disable-pip-version-check',
+                    '-r', os.path.join('$PROJECT_DIR', 'requirements.txt')], timeout=120)
+    # Restore execute permissions
+    for script in ['setup.sh', 'Movement Tracker.command']:
+        p = os.path.join('$PROJECT_DIR', script)
+        if os.path.exists(p): os.chmod(p, 0o755)
+    print('Updated successfully.')
+except Exception as e:
+    print(f'Update check failed (non-fatal): {e}')
+" 2>&1 || true
+
 # ── Launch ────────────────────────────────────────────────────────────────
 
 echo ""

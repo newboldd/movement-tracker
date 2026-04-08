@@ -205,6 +205,17 @@
         <div id="statusBanner" style="margin-bottom:16px;"></div>
 
         <div class="card settings-form">
+            <!-- Updates -->
+            <div class="form-section">
+                <h3>Updates</h3>
+                <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+                    <span id="updateVersion" style="font-size:12px;color:var(--text-muted);">Version: loading...</span>
+                    <button class="btn btn-sm" id="updateCheckBtn" onclick="checkForUpdates()">Check for Updates</button>
+                </div>
+                <div id="updateStatus" style="font-size:12px;color:var(--text-muted);margin-bottom:8px;"></div>
+                <button class="btn btn-sm btn-primary" id="updateApplyBtn" onclick="applyUpdate()" style="display:none;">Update Now</button>
+            </div>
+
             <!-- Bodyparts -->
             <div class="form-section">
                 <h3>Bodyparts</h3>
@@ -331,17 +342,6 @@
                     <label>Port</label>
                     <input type="number" id="port" placeholder="8080">
                 </div>
-            </div>
-
-            <!-- Updates -->
-            <div class="form-section">
-                <h3>Updates</h3>
-                <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
-                    <span id="updateVersion" style="font-size:12px;color:var(--text-muted);">Version: loading...</span>
-                    <button class="btn btn-sm" id="updateCheckBtn" onclick="checkForUpdates()">Check for Updates</button>
-                </div>
-                <div id="updateStatus" style="font-size:12px;color:var(--text-muted);margin-bottom:8px;"></div>
-                <button class="btn btn-sm btn-primary" id="updateApplyBtn" onclick="applyUpdate()" style="display:none;">Update Now</button>
             </div>
 
             <!-- Actions -->
