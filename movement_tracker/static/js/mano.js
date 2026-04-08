@@ -516,7 +516,6 @@ const manoViewer = (() => {
 
         // Update non-video things immediately
         renderDistanceTrace();
-        update3D();
 
         // Update fit error
         const side = currentSide === cameraNames[0] ? 'fit_error_L' : 'fit_error_R';
@@ -525,13 +524,15 @@ const manoViewer = (() => {
 
         // Seek then render — never call render() before seeked or the previous
         // decoded frame (or a blank) flashes before the new one arrives.
+        // update3D() is deferred to match the video frame timing.
         const fps = trialData?.fps || trials[currentTrialIdx]?.fps || 30;
         if (videoEl.readyState >= 2 && fps) {
             const t = (currentFrame + 0.5) / fps;
             videoEl.currentTime = t;
-            videoEl.addEventListener('seeked', render, { once: true });
+            videoEl.addEventListener('seeked', () => { render(); update3D(); }, { once: true });
         } else {
             render();
+            update3D();
         }
     }
 
