@@ -1258,12 +1258,16 @@ const manoViewer = (() => {
             let dxSum = 0, dySum = 0, dn = 0;
             for (let j = 0; j < 21; j++) {
                 if (!mp3d_f[j] || !mp2d_arr[currentFrame][j]) continue;
-                // Project 3D point through Three.js camera
+                // Project 3D point through Three.js camera (world → view → clip → NDC)
                 const pt = new THREE.Vector3(mp3d_f[j][0], -mp3d_f[j][1], -mp3d_f[j][2]);
                 pt.applyMatrix4(camera3d.matrixWorldInverse);
-                pt.applyMatrix4(camera3d.projectionMatrix);
-                const cx3d = (pt.x + 1) / 2 * w;
-                const cy3d = (1 - pt.y) / 2 * h;
+                const pt4 = new THREE.Vector4(pt.x, pt.y, pt.z, 1);
+                pt4.applyMatrix4(camera3d.projectionMatrix);
+                if (Math.abs(pt4.w) < 0.001) continue; // behind camera
+                const ndcX = pt4.x / pt4.w;
+                const ndcY = pt4.y / pt4.w;
+                const cx3d = (ndcX + 1) / 2 * w;
+                const cy3d = (1 - ndcY) / 2 * h;
                 // Expected 2D canvas position
                 const cx2d = offsetX + scale * mp2d_arr[currentFrame][j][0] * bps;
                 const cy2d = offsetY + scale * mp2d_arr[currentFrame][j][1] * bps;
