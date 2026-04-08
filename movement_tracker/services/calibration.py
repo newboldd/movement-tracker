@@ -132,7 +132,10 @@ def _load_from_settings_calibrations(camera_name: str) -> dict | None:
             if resolved:
                 calib_path = resolved
             else:
-                logger.warning(f"Calibration file not found: {calib_path}")
+                logger.warning(
+                    f"Calibration file not found: {calib_path} "
+                    f"(DATA_DIR={DATA_DIR}, also tried calibration/{os.path.basename(calib_path)})"
+                )
                 return None
         _calib_cache[camera_name] = load_calibration(calib_path)
         logger.info(f'Loaded calibration for {camera_name}: {calib_path}')
