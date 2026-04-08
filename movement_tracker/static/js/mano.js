@@ -1275,8 +1275,13 @@ const manoViewer = (() => {
         mpGroup.visible = showMP3D;
         dlcGroup.visible = showDLC;
 
-        // Re-apply projection to stay in sync with any canvas zoom/pan changes
-        applySnapProjection();
+        // Render 3D scene — applySnapProjection builds a custom projection
+        // from calibration; if unavailable, fall back to a simple render.
+        if (trialData?.calib && canvas && vidW > 0) {
+            applySnapProjection();
+        } else if (renderer) {
+            renderer.render(scene, camera3d);
+        }
     }
 
     // ── Snap-to-camera ──────────────────────────────────────
