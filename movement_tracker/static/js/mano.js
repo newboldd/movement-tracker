@@ -1172,8 +1172,8 @@ const manoViewer = (() => {
     function snapToCamera() {
         if (!trialData?.calib || !canvas || vidW === 0) return;
 
-        // Reset orbit rotation
-        orbitQuat.identity();
+        // Preserve user's orbit rotation — don't reset it.
+        // The user may have adjusted the 3D view to align with the 2D overlay.
 
         // Camera position & orientation from calibration
         const isLeft = currentSide === cameraNames[0];
