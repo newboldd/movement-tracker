@@ -258,7 +258,10 @@ def _load_trial_calibration(subject_name: str, trial_stem: str) -> dict | None:
         except Exception as e:
             logger.warning(f"Failed to load trial calibration {local_calib}: {e}")
 
-    return get_calibration_for_subject(subject_name)
+    calib = get_calibration_for_subject(subject_name)
+    if calib is None:
+        logger.debug(f"get_calibration_for_subject({subject_name!r}) returned None")
+    return calib
 
 
 def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
@@ -321,6 +324,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         K1, K2 = calib["K1"], calib["K2"]
         dist1, dist2 = calib["dist1"], calib["dist2"]
         R, T = calib["R"], calib["T"]
+        logger.info(f"Loaded calibration for {subject_name}/{trial_stem}")
     else:
         logger.warning(f"No calibration for {subject_name}/{trial_stem} — 3D disabled")
         K1 = K2 = np.eye(3, dtype=np.float64)
@@ -420,16 +424,24 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     distances_mano = _compute_distances(joints_3d) if has_mano else {}
     distances_mp = _compute_distances(mp_joints_3d)
 
-    # Fallback: if 3D distances are all empty (no calibration), compute 2D pixel distances
+    # Fallback: if 3D distances are all empty, try pre-computed from prelabels npz
     mp_has_3d = any(
         any(v is not None for v in vals) for vals in distances_mp.values()
     )
     if not mp_has_3d:
-        logger.info(f"No 3D distances for {subject_name}/{trial_stem}, falling back to 2D")
-        distances_mp = _compute_distances_2d(mp_tracked_L)
-    else:
-        n_valid = sum(1 for v in list(distances_mp.values())[0] if v is not None)
-        logger.info(f"Computed 3D distances for {subject_name}/{trial_stem}: {n_valid}/{N} frames")
+        # Try loading saved distances from mediapipe_prelabels.npz
+        from .mediapipe_prelabel import load_mediapipe_prelabels as _load_mp
+        _saved = _load_mp(subject_name)
+        saved_dist = _saved.get("distances") if _saved else None
+        if saved_dist is not None and len(saved_dist) > start_frame:
+            # Slice to this trial's frame range
+            trial_dist = saved_dist[start_frame:start_frame + N]
+            # Wrap in the standard distance format (only thumb-index available)
+            distances_mp = {"Thumb-Index Aperture": _array_to_list(trial_dist)}
+            logger.info(f"Using saved distances for {subject_name}/{trial_stem}")
+        else:
+            logger.info(f"No 3D distances for {subject_name}/{trial_stem}, falling back to 2D")
+            distances_mp = _compute_distances_2d(mp_tracked_L)
 
     # ── Assemble result ────────────────────────────────────────
     result: dict[str, Any] = {
