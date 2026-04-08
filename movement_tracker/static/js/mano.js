@@ -1117,7 +1117,6 @@ const manoViewer = (() => {
         const corrK = isLeftCam ? trialData?.calib?.K_L : trialData?.calib?.K_R;
         const corrMp2d = isLeftCam ? trialData?.mp_tracked_L : trialData?.mp_tracked_R;
         let _corrMap = null; // { jointIdx: THREE.Vector3 offset }
-        console.log(`[3d-dbg] fn=${fn} corrK=${!!corrK} mp2d[fn]=${!!corrMp2d?.[fn]} mano3d=${!!mano3d} mp3d=${!!mp3d}`);
         if (corrK && corrMp2d?.[fn] && (mano3d || mp3d)) {
             const pts3d = mano3d || mp3d;
             const cfx = corrK[0][0], cfy = corrK[1][1], ccx = corrK[0][2], ccy = corrK[1][2];
@@ -1158,13 +1157,6 @@ const manoViewer = (() => {
         }
 
         // Apply orbit rotation + per-joint correction
-        if (_corrMap) {
-            const keys = Object.keys(_corrMap);
-            if (keys.length > 0) {
-                const sample = _corrMap[keys[0]];
-                console.log(`[3d-fix] corrMap has ${keys.length} entries, sample j=${keys[0]}: (${sample.x.toFixed(1)}, ${sample.y.toFixed(1)}, ${sample.z.toFixed(1)})`);
-            }
-        }
         const orbitPt = (p, jointIdx) => {
             let result = p;
             if (orbitQuat.w !== 1) {
