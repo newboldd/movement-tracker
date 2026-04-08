@@ -1097,21 +1097,12 @@ const manoViewer = (() => {
             if (pn > 0) orbitPivot.set(px/pn, py/pn, pz/pn);
         }
 
-        // Orbit: rotate camera around the pivot point (content stays fixed)
-        // This keeps the hand visually centered during rotation.
-        if (orbitQuat.w !== 1 && camera3d) {
-            // Move camera: orbit around pivot
-            const offset = camera3d.position.clone().sub(orbitPivot);
-            offset.applyQuaternion(orbitQuat);
-            camera3d.position.copy(orbitPivot).add(offset);
-            camera3d.lookAt(orbitPivot);
-            camera3d.updateMatrixWorld(true);
-            // Reset quat so it doesn't accumulate (camera position already updated)
-            orbitQuat.identity();
-        }
-
-        // No point rotation needed — camera moves instead
-        const orbitPt = p => p;
+        // Apply orbit rotation around pivot: p' = pivot + Q * (p - pivot)
+        // Camera stays at calibration position; content rotates around hand center.
+        const orbitPt = p => {
+            if (orbitQuat.w === 1) return p; // identity, skip math
+            return p.clone().sub(orbitPivot).applyQuaternion(orbitQuat).add(orbitPivot);
+        };
 
         // MANO joints (green)
         if (showMano3D && mano3d) {
