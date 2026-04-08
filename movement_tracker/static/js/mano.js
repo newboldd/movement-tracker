@@ -1310,20 +1310,39 @@ const manoViewer = (() => {
         );
         camera3d.projectionMatrixInverse.copy(camera3d.projectionMatrix).invert();
 
-        // Measure and correct CSS offset between Three.js canvas and video canvas
-        if (renderer?.domElement && canvas) {
-            const threeRect = renderer.domElement.getBoundingClientRect();
-            const vidRect = canvas.getBoundingClientRect();
-            const dy = vidRect.top - threeRect.top;
-            const dx = vidRect.left - threeRect.left;
-            if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
-                renderer.domElement.style.transform = `translate(${dx}px, ${dy}px)`;
-            } else {
-                renderer.domElement.style.transform = '';
+        renderer.render(scene, camera3d);
+
+        // Measure projection error and apply CSS transform to Three.js canvas.
+        // Project a known 3D point through Three.js, compare to where the 2D
+        // overlay draws it, and shift the entire 3D canvas by the delta.
+        if (renderer?.domElement) {
+            const mp3d_f = trialData?.mp_joints_3d?.[fn];
+            const mp2d_arr = isLeft ? trialData?.mp_tracked_L : trialData?.mp_tracked_R;
+            if (mp3d_f && mp2d_arr?.[fn]) {
+                camera3d.updateMatrixWorld(true);
+                let dxSum = 0, dySum = 0, dn = 0;
+                for (let j = 0; j < 21; j++) {
+                    if (!mp3d_f[j] || !mp2d_arr[fn][j]) continue;
+                    // Get the scene position (with correction applied)
+                    const sceneP = getScenePos(mp3d_f, j);
+                    // Project through Three.js
+                    const projected = sceneP.clone().project(camera3d);
+                    const px3d = (projected.x + 1) / 2 * w;
+                    const py3d = (1 - projected.y) / 2 * h;
+                    // Where 2D overlay draws it
+                    const px2d = offsetX + scale * mp2d_arr[fn][j][0] * bps;
+                    const py2d = offsetY + scale * mp2d_arr[fn][j][1] * bps;
+                    dxSum += px3d - px2d;
+                    dySum += py3d - py2d;
+                    dn++;
+                }
+                if (dn > 5) {
+                    const avgDx = dxSum / dn;
+                    const avgDy = dySum / dn;
+                    renderer.domElement.style.transform = `translate(${-avgDx}px, ${-avgDy}px)`;
+                }
             }
         }
-
-        renderer.render(scene, camera3d);
     }
 
     // ── Video export context ────────────────────────────────
