@@ -1110,63 +1110,63 @@ const manoViewer = (() => {
             if (pn > 0) orbitPivot.set(px/pn, py/pn, pz/pn);
         }
 
-        // Compute per-point 3D correction to align with 2D overlay
-        // For each 3D point: project with intrinsics, compare to stored 2D,
-        // compute the 3D translation needed to eliminate the pixel error.
+        // Build corrected 3D positions: use 2D pixel positions + triangulated depth
+        // to compute 3D points that project correctly through the camera intrinsics.
+        // This bypasses any projection matrix errors by constructing positions from
+        // known-good 2D data and measured depth.
         const isLeftCam = currentSide === cameraNames[0];
         const corrK = isLeftCam ? trialData?.calib?.K_L : trialData?.calib?.K_R;
         const corrMp2d = isLeftCam ? trialData?.mp_tracked_L : trialData?.mp_tracked_R;
-        let _corrMap = null; // { jointIdx: THREE.Vector3 offset }
+        let _corrected3d = null; // { jointIdx: [X, Y, Z] in world coords }
         if (corrK && corrMp2d?.[fn] && (mano3d || mp3d)) {
             const pts3d = mano3d || mp3d;
             const cfx = corrK[0][0], cfy = corrK[1][1], ccx = corrK[0][2], ccy = corrK[1][2];
             const R = trialData.calib.R, T = trialData.calib.T;
-            _corrMap = {};
+            _corrected3d = {};
             for (let j = 0; j < 21; j++) {
                 if (!pts3d[j] || !corrMp2d[fn][j]) continue;
                 let X = pts3d[j][0], Y = pts3d[j][1], Z = pts3d[j][2];
-                // Apply extrinsics for right camera
+                // Get depth in current camera's frame
+                let camZ;
                 if (!isLeftCam) {
-                    const Xr = R[0][0]*X + R[0][1]*Y + R[0][2]*Z + T[0];
-                    const Yr = R[1][0]*X + R[1][1]*Y + R[1][2]*Z + T[1];
-                    const Zr = R[2][0]*X + R[2][1]*Y + R[2][2]*Z + T[2];
-                    X = Xr; Y = Yr; Z = Zr;
+                    camZ = R[2][0]*X + R[2][1]*Y + R[2][2]*Z + T[2];
+                } else {
+                    camZ = Z;
                 }
-                if (Z <= 0) continue;
-                const projU = cfx * X / Z + ccx;
-                const projV = cfy * Y / Z + ccy;
-                const targetU = corrMp2d[fn][j][0];
-                const targetV = corrMp2d[fn][j][1];
-                // Pixel error → 3D correction (in camera coords)
-                const du = targetU - projU;
-                const dv = targetV - projV;
-                const dx3d = du * Z / cfx;
-                const dy3d = dv * Z / cfy;
-                // Convert correction from camera coords to world coords
-                let wx = dx3d, wy = dy3d, wz = 0;
+                if (camZ <= 0) continue;
+                // Unproject: 2D pixel + depth → 3D in camera coords
+                const u = corrMp2d[fn][j][0];
+                const v = corrMp2d[fn][j][1];
+                const camX = (u - ccx) * camZ / cfx;
+                const camY = (v - ccy) * camZ / cfy;
+                // Convert camera coords → world coords
+                let wX, wY, wZ;
                 if (!isLeftCam) {
-                    // Inverse of R (= R^T since R is orthogonal) to go from cam2 to world
-                    const Rt = R;
-                    wx = Rt[0][0]*dx3d + Rt[1][0]*dy3d;
-                    wy = Rt[0][1]*dx3d + Rt[1][1]*dy3d;
-                    wz = Rt[0][2]*dx3d + Rt[1][2]*dy3d;
+                    // world = R^T * (cam - T)
+                    const dx = camX - T[0], dy = camY - T[1], dz = camZ - T[2];
+                    wX = R[0][0]*dx + R[1][0]*dy + R[2][0]*dz;
+                    wY = R[0][1]*dx + R[1][1]*dy + R[2][1]*dz;
+                    wZ = R[0][2]*dx + R[1][2]*dy + R[2][2]*dz;
+                } else {
+                    wX = camX; wY = camY; wZ = camZ;
                 }
-                // Scene coords: (x, -y, -z)
-                _corrMap[j] = new THREE.Vector3(wx, -wy, -wz);
+                _corrected3d[j] = [wX, wY, wZ];
             }
         }
 
-        // Apply orbit rotation + per-joint correction
-        const orbitPt = (p, jointIdx) => {
-            let result = p;
-            if (orbitQuat.w !== 1) {
-                result = result.clone().sub(orbitPivot).applyQuaternion(orbitQuat).add(orbitPivot);
+        // Helper: get corrected scene position for a joint
+        const getScenePos = (pts3d, j) => {
+            if (_corrected3d && _corrected3d[j]) {
+                const c = _corrected3d[j];
+                return new THREE.Vector3(c[0], -c[1], -c[2]);
             }
-            if (_corrMap && jointIdx != null && _corrMap[jointIdx]) {
-                if (result === p) result = result.clone();
-                result.add(_corrMap[jointIdx]);
-            }
-            return result;
+            return toScene(pts3d[j]);
+        };
+
+        // Apply orbit rotation
+        const orbitPt = (p) => {
+            if (orbitQuat.w === 1) return p;
+            return p.clone().sub(orbitPivot).applyQuaternion(orbitQuat).add(orbitPivot);
         };
 
         // MANO joints (green)
@@ -1176,15 +1176,15 @@ const manoViewer = (() => {
             for (let j = 0; j < 21; j++) {
                 if (!isJointVisible(j) || !mano3d[j]) continue;
                 const sphere = new THREE.Mesh(sphereGeom, manoMat);
-                sphere.position.copy(orbitPt(toScene(mano3d[j]), j));
+                sphere.position.copy(orbitPt(getScenePos(mano3d, j)));
                 manoGroup.add(sphere);
             }
             if (showSkeleton && trialData.skeleton) {
                 trialData.skeleton.forEach(([i, j]) => {
                     if (!isBoneVisible(i, j) || !mano3d[i] || !mano3d[j]) return;
                     const bone = makeBone(
-                        orbitPt(toScene(mano3d[i]), i),
-                        orbitPt(toScene(mano3d[j]), j),
+                        orbitPt(getScenePos(mano3d, i)),
+                        orbitPt(getScenePos(mano3d, j)),
                         1.2, boneMat
                     );
                     if (bone) manoGroup.add(bone);
@@ -1199,15 +1199,15 @@ const manoViewer = (() => {
             for (let j = 0; j < 21; j++) {
                 if (!isJointVisible(j) || !mp3d[j]) continue;
                 const sphere = new THREE.Mesh(sphereGeom, mpMat);
-                sphere.position.copy(orbitPt(toScene(mp3d[j]), j));
+                sphere.position.copy(orbitPt(getScenePos(mp3d, j)));
                 mpGroup.add(sphere);
             }
             if (showSkeleton && trialData.skeleton) {
                 trialData.skeleton.forEach(([i, j]) => {
                     if (!isBoneVisible(i, j) || !mp3d[i] || !mp3d[j]) return;
                     const bone = makeBone(
-                        orbitPt(toScene(mp3d[i]), i),
-                        orbitPt(toScene(mp3d[j]), j),
+                        orbitPt(getScenePos(mp3d, i)),
+                        orbitPt(getScenePos(mp3d, j)),
                         1.0, mpBoneMat
                     );
                     if (bone) mpGroup.add(bone);
