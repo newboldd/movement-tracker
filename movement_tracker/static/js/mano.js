@@ -1249,6 +1249,38 @@ const manoViewer = (() => {
         );
         camera3d.projectionMatrixInverse.copy(camera3d.projectionMatrix).invert();
 
+        // Auto-correct: measure projection error on a known 3D→2D pair and
+        // adjust the projection matrix to eliminate the systematic offset.
+        const mp3d_f = trialData?.mp_joints_3d?.[currentFrame];
+        const mp2d_arr = isLeft ? trialData?.mp_tracked_L : trialData?.mp_tracked_R;
+        if (mp3d_f && mp2d_arr?.[currentFrame]) {
+            camera3d.updateMatrixWorld(true);
+            let dxSum = 0, dySum = 0, dn = 0;
+            for (let j = 0; j < 21; j++) {
+                if (!mp3d_f[j] || !mp2d_arr[currentFrame][j]) continue;
+                // Project 3D point through Three.js camera
+                const pt = new THREE.Vector3(mp3d_f[j][0], -mp3d_f[j][1], -mp3d_f[j][2]);
+                pt.applyMatrix4(camera3d.matrixWorldInverse);
+                pt.applyMatrix4(camera3d.projectionMatrix);
+                const cx3d = (pt.x + 1) / 2 * w;
+                const cy3d = (1 - pt.y) / 2 * h;
+                // Expected 2D canvas position
+                const cx2d = offsetX + scale * mp2d_arr[currentFrame][j][0] * bps;
+                const cy2d = offsetY + scale * mp2d_arr[currentFrame][j][1] * bps;
+                dxSum += cx3d - cx2d;
+                dySum += cy3d - cy2d;
+                dn++;
+            }
+            if (dn > 5) {
+                // Convert pixel offset to NDC offset and apply to projection
+                const ndcDx = (dxSum / dn) / w * 2;
+                const ndcDy = -(dySum / dn) / h * 2;
+                camera3d.projectionMatrix.elements[8] -= ndcDx;   // m02 (col 2, row 0)
+                camera3d.projectionMatrix.elements[9] -= ndcDy;   // m12 (col 2, row 1)
+                camera3d.projectionMatrixInverse.copy(camera3d.projectionMatrix).invert();
+            }
+        }
+
 
         renderer.render(scene, camera3d);
     }
