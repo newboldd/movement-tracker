@@ -1324,8 +1324,7 @@ const manoViewer = (() => {
                 let dxSum = 0, dySum = 0, dn = 0;
                 for (let j = 0; j < 21; j++) {
                     if (!mp3d_f[j] || !mp2d_arr[_cf][j]) continue;
-                    // Get the scene position (with correction applied)
-                    const sceneP = getScenePos(mp3d_f, j);
+                    const sceneP = new THREE.Vector3(mp3d_f[j][0], -mp3d_f[j][1], -mp3d_f[j][2]);
                     // Project through Three.js
                     const projected = sceneP.clone().project(camera3d);
                     const px3d = (projected.x + 1) / 2 * w;
