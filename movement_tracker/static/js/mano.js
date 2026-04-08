@@ -1157,6 +1157,13 @@ const manoViewer = (() => {
         }
 
         // Apply orbit rotation + per-joint correction
+        if (_corrMap) {
+            const keys = Object.keys(_corrMap);
+            if (keys.length > 0) {
+                const sample = _corrMap[keys[0]];
+                console.log(`[3d-fix] corrMap has ${keys.length} entries, sample j=${keys[0]}: (${sample.x.toFixed(1)}, ${sample.y.toFixed(1)}, ${sample.z.toFixed(1)})`);
+            }
+        }
         const orbitPt = (p, jointIdx) => {
             let result = p;
             if (orbitQuat.w !== 1) {
