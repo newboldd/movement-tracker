@@ -1038,6 +1038,10 @@ const manoViewer = (() => {
         camera3d = new THREE.PerspectiveCamera(
             50, container.clientWidth / container.clientHeight, 1, 50000
         );
+        // Disable auto projection matrix updates — we set a custom matrix
+        // from calibration intrinsics. Without this, Three.js overwrites
+        // our matrix before every render, making all projection fixes invisible.
+        camera3d.projectionMatrixAutoUpdate = false;
         camera3d.position.set(0, 0, 500);
 
         renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -1386,9 +1390,6 @@ const manoViewer = (() => {
             camera3d.projectionMatrix.elements[9] += _projCorrNdcY;  // m12
             camera3d.projectionMatrixInverse.copy(camera3d.projectionMatrix).invert();
         }
-        // DEBUG: force a large shift to verify elements[8]/[9] work
-        camera3d.projectionMatrix.elements[9] += 0.5;
-        camera3d.projectionMatrixInverse.copy(camera3d.projectionMatrix).invert();
         // Clear any leftover CSS transform
         if (renderer?.domElement) renderer.domElement.style.transform = '';
     }
