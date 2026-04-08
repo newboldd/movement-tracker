@@ -318,23 +318,22 @@ const manoViewer = (() => {
             sizeCanvases();
             computeAutoCrop();
             if (trialData && trialData.calib) {
-                snapToCamera();
+                snapToCamera(_pendingFrame != null); // skip render if we'll goToFrame soon
             } else {
                 resetZoom();
             }
-            // Seek to midpoint of frame 0 — t=0 cannot be decoded by many codecs
-            videoEl.currentTime = 0.5 / trialFps;
+            // Seek to target frame (or frame 0 if no pending)
+            const seekFrame = _pendingFrame != null ? _pendingFrame : 0;
+            videoEl.currentTime = (seekFrame + 0.5) / trialFps;
             videoEl.addEventListener('seeked', () => {
                 _videoReady = true;
-                // Apply any pending frame from nav state restoration
                 if (_pendingFrame != null) {
-                    goToFrame(_pendingFrame);
+                    currentFrame = _pendingFrame;
                     _pendingFrame = null;
-                } else {
-                    render();
-                    renderDistanceTrace();
-                    update3D();
                 }
+                render();
+                renderDistanceTrace();
+                update3D();
             }, { once: true });
         }, { once: true });
 
@@ -1276,7 +1275,7 @@ const manoViewer = (() => {
     // and resets any orbit rotation.  The camera never moves after this —
     // orbit drags rotate the scene content instead (see update3D / orbitPt).
 
-    function snapToCamera() {
+    function snapToCamera(skipRender) {
         if (!trialData?.calib || !canvas || vidW === 0) return;
 
         // Reset orbit rotation to align 3D model with calibrated camera view
@@ -1315,7 +1314,7 @@ const manoViewer = (() => {
 
         // Apply custom projection
         applySnapProjection();
-        update3D();
+        if (!skipRender) update3D();
     }
 
     /** Recompute and apply the custom projection matrix for the current
