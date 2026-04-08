@@ -10,3 +10,6 @@ pyyaml>=5.0
 mediapipe>=0.10.0,<0.10.19
 protobuf>=3.20,<5
 imageio-ffmpeg>=0.4.9
+# Apple Vision hand pose (macOS only — silently skipped on other platforms)
+pyobjc-framework-Vision>=10.0; sys_platform == "darwin"
+pyobjc-framework-Quartz>=10.0; sys_platform == "darwin"
