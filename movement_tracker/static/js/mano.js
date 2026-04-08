@@ -1110,11 +1110,55 @@ const manoViewer = (() => {
             if (pn > 0) orbitPivot.set(px/pn, py/pn, pz/pn);
         }
 
-        // Apply orbit rotation around pivot: p' = pivot + Q * (p - pivot)
-        // Camera stays at calibration position; content rotates around hand center.
-        const orbitPt = p => {
-            if (orbitQuat.w === 1) return p; // identity, skip math
-            return p.clone().sub(orbitPivot).applyQuaternion(orbitQuat).add(orbitPivot);
+        // Compute per-point 3D correction to align with 2D overlay
+        // For each 3D point: project with intrinsics, compare to stored 2D,
+        // compute the 3D translation needed to eliminate the pixel error.
+        const isLeftCam = currentSide === cameraNames[0];
+        const corrK = isLeftCam ? trialData?.calib?.K_L : trialData?.calib?.K_R;
+        const corrMp2d = isLeftCam ? trialData?.mp_tracked_L : trialData?.mp_tracked_R;
+        let _corrMap = null; // { jointIdx: THREE.Vector3 offset }
+        if (corrK && corrMp2d?.[fn] && (mano3d || mp3d)) {
+            const pts3d = mano3d || mp3d;
+            const cfx = corrK[0][0], cfy = corrK[1][1], ccx = corrK[0][2], ccy = corrK[1][2];
+            const R = trialData.calib.R, T = trialData.calib.T;
+            _corrMap = {};
+            for (let j = 0; j < 21; j++) {
+                if (!pts3d[j] || !corrMp2d[fn][j]) continue;
+                let X = pts3d[j][0], Y = pts3d[j][1], Z = pts3d[j][2];
+                // Apply extrinsics for right camera
+                if (!isLeftCam) {
+                    const Xr = R[0][0]*X + R[0][1]*Y + R[0][2]*Z + T[0];
+                    const Yr = R[1][0]*X + R[1][1]*Y + R[1][2]*Z + T[1];
+                    const Zr = R[2][0]*X + R[2][1]*Y + R[2][2]*Z + T[2];
+                    X = Xr; Y = Yr; Z = Zr;
+                }
+                if (Z <= 0) continue;
+                const projU = cfx * X / Z + ccx;
+                const projV = cfy * Y / Z + ccy;
+                const targetU = corrMp2d[fn][j][0];
+                const targetV = corrMp2d[fn][j][1];
+                // Pixel error → 3D correction (in camera coords)
+                const du = targetU - projU;
+                const dv = targetV - projV;
+                const dx3d = du * Z / cfx;
+                const dy3d = dv * Z / cfy;
+                // Convert back to world coords (for left camera: identity transform)
+                // For scene coords: (dx, -dy, 0) since scene Y is flipped
+                _corrMap[j] = new THREE.Vector3(dx3d, -dy3d, 0);
+            }
+        }
+
+        // Apply orbit rotation + per-joint correction
+        const orbitPt = (p, jointIdx) => {
+            let result = p;
+            if (orbitQuat.w !== 1) {
+                result = result.clone().sub(orbitPivot).applyQuaternion(orbitQuat).add(orbitPivot);
+            }
+            if (_corrMap && jointIdx != null && _corrMap[jointIdx]) {
+                if (result === p) result = result.clone();
+                result.add(_corrMap[jointIdx]);
+            }
+            return result;
         };
 
         // MANO joints (green)
@@ -1124,15 +1168,15 @@ const manoViewer = (() => {
             for (let j = 0; j < 21; j++) {
                 if (!isJointVisible(j) || !mano3d[j]) continue;
                 const sphere = new THREE.Mesh(sphereGeom, manoMat);
-                sphere.position.copy(orbitPt(toScene(mano3d[j])));
+                sphere.position.copy(orbitPt(toScene(mano3d[j]), j));
                 manoGroup.add(sphere);
             }
             if (showSkeleton && trialData.skeleton) {
                 trialData.skeleton.forEach(([i, j]) => {
                     if (!isBoneVisible(i, j) || !mano3d[i] || !mano3d[j]) return;
                     const bone = makeBone(
-                        orbitPt(toScene(mano3d[i])),
-                        orbitPt(toScene(mano3d[j])),
+                        orbitPt(toScene(mano3d[i]), i),
+                        orbitPt(toScene(mano3d[j]), j),
                         1.2, boneMat
                     );
                     if (bone) manoGroup.add(bone);
@@ -1147,15 +1191,15 @@ const manoViewer = (() => {
             for (let j = 0; j < 21; j++) {
                 if (!isJointVisible(j) || !mp3d[j]) continue;
                 const sphere = new THREE.Mesh(sphereGeom, mpMat);
-                sphere.position.copy(orbitPt(toScene(mp3d[j])));
+                sphere.position.copy(orbitPt(toScene(mp3d[j]), j));
                 mpGroup.add(sphere);
             }
             if (showSkeleton && trialData.skeleton) {
                 trialData.skeleton.forEach(([i, j]) => {
                     if (!isBoneVisible(i, j) || !mp3d[i] || !mp3d[j]) return;
                     const bone = makeBone(
-                        orbitPt(toScene(mp3d[i])),
-                        orbitPt(toScene(mp3d[j])),
+                        orbitPt(toScene(mp3d[i]), i),
+                        orbitPt(toScene(mp3d[j]), j),
                         1.0, mpBoneMat
                     );
                     if (bone) mpGroup.add(bone);
@@ -1253,47 +1297,6 @@ const manoViewer = (() => {
             0,   0,   -1,  0,
         );
         camera3d.projectionMatrixInverse.copy(camera3d.projectionMatrix).invert();
-
-        // Compute auto-correction once: measure projection error on first frame with data
-        if (!_projCorrComputed) {
-            const mp3d_f = trialData?.mp_joints_3d?.[currentFrame];
-            const mp2d_arr = isLeft ? trialData?.mp_tracked_L : trialData?.mp_tracked_R;
-            if (mp3d_f && mp2d_arr?.[currentFrame]) {
-                camera3d.updateMatrixWorld(true);
-                let dxSum = 0, dySum = 0, dn = 0;
-                for (let j = 0; j < 21; j++) {
-                    if (!mp3d_f[j] || !mp2d_arr[currentFrame][j]) continue;
-                    const pt = new THREE.Vector3(mp3d_f[j][0], -mp3d_f[j][1], -mp3d_f[j][2]);
-                    pt.applyMatrix4(camera3d.matrixWorldInverse);
-                    const pt4 = new THREE.Vector4(pt.x, pt.y, pt.z, 1);
-                    pt4.applyMatrix4(camera3d.projectionMatrix);
-                    if (Math.abs(pt4.w) < 0.001) continue;
-                    const ndcX = pt4.x / pt4.w;
-                    const ndcY = pt4.y / pt4.w;
-                    const cx3d = (ndcX + 1) / 2 * w;
-                    const cy3d = (1 - ndcY) / 2 * h;
-                    const cx2d = offsetX + scale * mp2d_arr[currentFrame][j][0] * bps;
-                    const cy2d = offsetY + scale * mp2d_arr[currentFrame][j][1] * bps;
-                    dxSum += cx3d - cx2d;
-                    dySum += cy3d - cy2d;
-                    dn++;
-                }
-                if (dn > 5) {
-                    _projCorrNdcX = (dxSum / dn) / w * 2;
-                    _projCorrNdcY = -(dySum / dn) / h * 2;
-                    _projCorrComputed = true;
-                    console.log(`[3d-corr] n=${dn} avgPxDelta=(${(dxSum/dn).toFixed(1)}, ${(dySum/dn).toFixed(1)}) ndcCorr=(${_projCorrNdcX.toFixed(4)}, ${_projCorrNdcY.toFixed(4)})`);
-                }
-            }
-        }
-
-        // Apply persistent correction
-        if (_projCorrComputed) {
-            camera3d.projectionMatrix.elements[8] -= _projCorrNdcX;
-            camera3d.projectionMatrix.elements[9] -= _projCorrNdcY;
-            camera3d.projectionMatrixInverse.copy(camera3d.projectionMatrix).invert();
-        }
-
 
         renderer.render(scene, camera3d);
     }
