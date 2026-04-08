@@ -74,6 +74,7 @@ const deid = (() => {
     let tlDragStartX = null;  // mouse X at drag start
     let tlDragOrigRange = null; // {start, end} at drag start
     let tlDragCreateFrame = null; // frame at start of hand segment creation drag
+    let tlDragNewHandSide = null; // camera side for new hand segment being created
     let handCoverage = [];    // array of frame numbers with MP hand data
     // Multiple hand protection segments: [{id, start, end, radius}]
     let handProtectSegments = [];
@@ -397,30 +398,41 @@ const deid = (() => {
                     end: s.end,
                     radius: s.radius || handMaskRadius,
                     smooth: s.smooth != null ? s.smooth : handSmooth,
+                    side: s.side || null,  // null = legacy (applies to both cameras)
                 }));
             } else if ('segments' in hs) {
                 // User intentionally cleared all segments — keep empty
                 handProtectSegments = [];
             } else if (hasMediapipe && trialMeta) {
-                // No segments key = never configured — apply default
-                handProtectSegments = [{
-                    id: nextHandSegId++,
-                    start: trialMeta.start_frame,
-                    end: trialMeta.end_frame,
-                    radius: handMaskRadius,
-                    smooth: handSmooth,
-                }];
+                // No segments key = never configured — create per-camera defaults
+                handProtectSegments = [];
+                const sides = cameraMode === 'single' ? ['full'] : ['left', 'right'];
+                for (const side of sides) {
+                    handProtectSegments.push({
+                        id: nextHandSegId++,
+                        start: trialMeta.start_frame,
+                        end: trialMeta.end_frame,
+                        radius: handMaskRadius,
+                        smooth: handSmooth,
+                        side: side,
+                    });
+                }
             }
         } catch (e) {
             // No saved settings at all — create default hand protection if MP available
             if (hasMediapipe && trialMeta) {
-                handProtectSegments = [{
-                    id: nextHandSegId++,
-                    start: trialMeta.start_frame,
-                    end: trialMeta.end_frame,
-                    radius: handMaskRadius,
-                    smooth: handSmooth,
-                }];
+                handProtectSegments = [];
+                const sides = cameraMode === 'single' ? ['full'] : ['left', 'right'];
+                for (const side of sides) {
+                    handProtectSegments.push({
+                        id: nextHandSegId++,
+                        start: trialMeta.start_frame,
+                        end: trialMeta.end_frame,
+                        radius: handMaskRadius,
+                        smooth: handSmooth,
+                        side: side,
+                    });
+                }
             }
         }
 
@@ -2182,6 +2194,7 @@ const deid = (() => {
                 segments: handProtectSegments.map(s => ({
                     start: s.start, end: s.end, radius: s.radius,
                     smooth: s.smooth != null ? s.smooth : handSmooth,
+                    side: s.side || null,
                 })),
             });
         } catch (e) {}
@@ -2358,7 +2371,10 @@ const deid = (() => {
         // Compute needed height and resize container
         let neededH = 4 + faceRowH + gap;
         if (nCustom > 0) neededH += nCustom * customSpotRowH + gap;
-        if (hasHands) neededH += handRowH + gap;
+        if (hasHands) {
+            const nHandRows = cameraMode === 'single' ? 1 : 2;
+            neededH += nHandRows * (handRowH + gap);
+        }
         neededH = Math.max(neededH, 65);
         container.style.height = neededH + 8 + 'px';
 
@@ -2451,44 +2467,50 @@ const deid = (() => {
         }
         if (customSpots.length > 0) y += gap;
 
-        // ── Hand row: green coverage + multiple draggable protection segments ──
+        // ── Hand rows: one per camera with coverage + draggable protection segments ──
         if (handCoverage.length > 0 || hasMediapipe) {
-            tlCtx.fillStyle = 'rgba(150,150,150,0.5)';
-            tlCtx.fillText('Hands', 2, y + 12);
+            const handSides = cameraMode === 'single' ? [{ side: 'full', label: 'Hands' }]
+                : [{ side: 'left', label: cameraNames[0] || 'OS' },
+                   { side: 'right', label: cameraNames[1] || 'OD' }];
 
-            // Background coverage heatmap
-            if (handCoverage.length > 0) {
-                tlCtx.fillStyle = 'rgba(76,175,80,0.15)';
-                const pw = Math.max(1, L.barW / L.range);
-                for (const f of handCoverage) {
-                    const x = _frameToTlX(f, L);
-                    tlCtx.fillRect(x, y, pw, handRowH);
+            for (const { side: rowSide, label: rowLabel } of handSides) {
+                tlCtx.fillStyle = 'rgba(150,150,150,0.5)';
+                tlCtx.fillText(rowLabel, 2, y + 12);
+
+                // Background coverage heatmap
+                if (handCoverage.length > 0) {
+                    tlCtx.fillStyle = 'rgba(76,175,80,0.15)';
+                    const pw = Math.max(1, L.barW / L.range);
+                    for (const f of handCoverage) {
+                        const x = _frameToTlX(f, L);
+                        tlCtx.fillRect(x, y, pw, handRowH);
+                    }
                 }
-            }
 
-            // Protection segment bars (multiple, draggable) — filtered by current camera
-            const curSide = _sideLabel();
-            const visibleSegs = handProtectSegments.filter(s => !s.side || s.side === curSide || s.side === 'full');
-            for (const seg of visibleSegs) {
-                const hx1 = _frameToTlX(seg.start, L);
-                const hx2 = _frameToTlX(seg.end, L);
-                const hw = Math.max(3, hx2 - hx1);
-                const isSel = seg.id === selectedHandSegId;
+                // Protection segment bars for this camera side
+                const sideSegs = handProtectSegments.filter(s =>
+                    !s.side || s.side === rowSide || s.side === 'full');
+                for (const seg of sideSegs) {
+                    const hx1 = _frameToTlX(seg.start, L);
+                    const hx2 = _frameToTlX(seg.end, L);
+                    const hw = Math.max(3, hx2 - hx1);
+                    const isSel = seg.id === selectedHandSegId;
 
-                tlCtx.fillStyle = isSel ? 'rgba(76,175,80,0.55)' : 'rgba(76,175,80,0.35)';
-                tlCtx.fillRect(hx1, y + 2, hw, handRowH - 4);
-                tlCtx.strokeStyle = isSel ? 'rgba(76,175,80,1.0)' : 'rgba(76,175,80,0.8)';
-                tlCtx.lineWidth = isSel ? 2 : 1;
-                tlCtx.strokeRect(hx1, y + 2, hw, handRowH - 4);
+                    tlCtx.fillStyle = isSel ? 'rgba(76,175,80,0.55)' : 'rgba(76,175,80,0.35)';
+                    tlCtx.fillRect(hx1, y + 2, hw, handRowH - 4);
+                    tlCtx.strokeStyle = isSel ? 'rgba(76,175,80,1.0)' : 'rgba(76,175,80,0.8)';
+                    tlCtx.lineWidth = isSel ? 2 : 1;
+                    tlCtx.strokeRect(hx1, y + 2, hw, handRowH - 4);
 
-                if (isSel) {
-                    tlCtx.fillStyle = 'rgba(76,175,80,1.0)';
-                    tlCtx.fillRect(hx1 - 1, y + 2, 3, handRowH - 4);
-                    tlCtx.fillRect(hx2 - 2, y + 2, 3, handRowH - 4);
+                    if (isSel) {
+                        tlCtx.fillStyle = 'rgba(76,175,80,1.0)';
+                        tlCtx.fillRect(hx1 - 1, y + 2, 3, handRowH - 4);
+                        tlCtx.fillRect(hx2 - 2, y + 2, 3, handRowH - 4);
+                    }
                 }
-            }
 
-            y += handRowH + gap;
+                y += handRowH + gap;
+            }
         }
 
         // ── Current frame indicator ──
@@ -2565,23 +2587,27 @@ const deid = (() => {
         }
         if (customSpots.length > 0) y += gap;
 
-        // Hit test hand protection segments (filtered by current camera)
-        const hitSide = _sideLabel();
-        const hitSegs = handProtectSegments.filter(s => !s.side || s.side === hitSide || s.side === 'full');
+        // Hit test hand protection segments — per-camera rows
         if (handCoverage.length > 0 || hasMediapipe) {
-            for (const seg of hitSegs) {
-                const hx1 = _frameToTlX(seg.start, L);
-                const hx2 = _frameToTlX(seg.end, L);
+            const handSides = cameraMode === 'single' ? ['full'] : ['left', 'right'];
+            for (const rowSide of handSides) {
+                const rowSegs = handProtectSegments.filter(s =>
+                    !s.side || s.side === rowSide || s.side === 'full');
+                for (const seg of rowSegs) {
+                    const hx1 = _frameToTlX(seg.start, L);
+                    const hx2 = _frameToTlX(seg.end, L);
 
-                if (my >= y + 2 && my <= y + handRowH - 2) {
-                    if (Math.abs(mx - hx1) < 6) return { type: 'hand', seg, edge: 'start' };
-                    if (Math.abs(mx - hx2) < 6) return { type: 'hand', seg, edge: 'end' };
-                    if (mx > hx1 + 4 && mx < hx2 - 4) return { type: 'hand', seg, edge: 'move' };
+                    if (my >= y + 2 && my <= y + handRowH - 2) {
+                        if (Math.abs(mx - hx1) < 6) return { type: 'hand', seg, edge: 'start' };
+                        if (Math.abs(mx - hx2) < 6) return { type: 'hand', seg, edge: 'end' };
+                        if (mx > hx1 + 4 && mx < hx2 - 4) return { type: 'hand', seg, edge: 'move' };
+                    }
                 }
-            }
-            // If in hand row but not on a segment → create new
-            if (my >= y + 2 && my <= y + handRowH - 2) {
-                return { type: 'hand_empty', edge: 'create' };
+                // If in this camera's hand row but not on a segment → create new for this side
+                if (my >= y + 2 && my <= y + handRowH - 2) {
+                    return { type: 'hand_empty', edge: 'create', side: rowSide };
+                }
+                y += handRowH + gap;
             }
         }
 
@@ -2626,6 +2652,8 @@ const deid = (() => {
             tlDragSpot = 'newhand';
             tlDragEdge = 'create';
             tlDragStartX = e.clientX;
+            // Store which camera row was clicked for the new segment
+            tlDragNewHandSide = hit.side || _sideLabel();
         }
         renderTimeline();
     }
@@ -2650,7 +2678,7 @@ const deid = (() => {
                 if (existing) {
                     existing.start = s; existing.end = en;
                 } else {
-                    handProtectSegments.push({ id: -1, start: s, end: en, radius: handMaskRadius, smooth: handSmooth, side: _sideLabel() });
+                    handProtectSegments.push({ id: -1, start: s, end: en, radius: handMaskRadius, smooth: handSmooth, side: tlDragNewHandSide || _sideLabel() });
                 }
                 renderTimeline();
                 return;
