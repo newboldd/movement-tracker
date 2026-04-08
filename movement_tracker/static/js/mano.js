@@ -1386,6 +1386,9 @@ const manoViewer = (() => {
             camera3d.projectionMatrix.elements[9] += _projCorrNdcY;  // m12
             camera3d.projectionMatrixInverse.copy(camera3d.projectionMatrix).invert();
         }
+        // DEBUG: force a large shift to verify elements[8]/[9] work
+        camera3d.projectionMatrix.elements[9] += 0.5;
+        camera3d.projectionMatrixInverse.copy(camera3d.projectionMatrix).invert();
         // Clear any leftover CSS transform
         if (renderer?.domElement) renderer.domElement.style.transform = '';
     }
