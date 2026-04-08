@@ -1228,7 +1228,8 @@ const manoViewer = (() => {
         const m00 = 2 * scale * fx * bps / w;
         const m02 = 1 - 2 * (offsetX + scale * cx * bps) / w;
         const m11 = 2 * scale * fy * bps / h;
-        const m12 = 2 * (offsetY + scale * cy * bps) / h - 1;
+        // Y-flip: scene uses (x,-y,-z) so cy offset is inverted
+        const m12 = 1 - 2 * (offsetY + scale * cy * bps) / h;
         const m22 = -(far + near) / (far - near);
         const m23 = -2 * far * near / (far - near);
 
