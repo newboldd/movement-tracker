@@ -443,13 +443,18 @@ const manoViewer = (() => {
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
         // Sample every 5th frame for speed
+        // MANO projections are in full-frame coords (need xOff for OD camera)
+        // MediaPipe landmarks are already in camera-half coords (no xOff needed)
         for (let f = 0; f < trialData.n_frames; f += 5) {
-            const sources = [proj[f], mp[f]];
-            for (const pts of sources) {
+            const sources = [
+                { pts: proj[f], off: xOff },  // MANO: full-frame coords
+                { pts: mp[f], off: 0 },        // MP: camera-half coords
+            ];
+            for (const { pts, off } of sources) {
                 if (!pts) continue;
                 for (let j = 0; j < 21; j++) {
                     if (!pts[j]) continue;
-                    const px = pts[j][0] + xOff;
+                    const px = pts[j][0] + off;
                     const py = pts[j][1];
                     if (px < minX) minX = px;
                     if (py < minY) minY = py;
@@ -637,7 +642,8 @@ const manoViewer = (() => {
         }, { capture: true });
 
         threeContainer.addEventListener('mousedown', e => {
-            if ((e.ctrlKey || e.metaKey) && (e.button === 0 || e.button === 1)) {
+            // Plain drag → pan; Cmd/Shift+drag → orbit (handled by non-capture listener)
+            if (!(e.metaKey || e.shiftKey || e.ctrlKey) && (e.button === 0 || e.button === 1)) {
                 e.stopPropagation();
                 handleVideoPanStart(e);
             }
@@ -735,8 +741,10 @@ const manoViewer = (() => {
         const manoProj = isLeft ? trialData.mano_proj_L : trialData.mano_proj_R;
         const mpKp = isLeft ? trialData.mp_tracked_L : trialData.mp_tracked_R;
 
-        // For stereo right camera, offset coordinates by -midline; single/multicam = no offset
-        const xOff = isStereo ? (isLeft ? 0 : -midline) : 0;
+        // MANO projections are in full-frame coords — offset needed for OD camera
+        // MP landmarks are already in camera-half coords — no offset needed
+        const manoXOff = isStereo ? (isLeft ? 0 : -midline) : 0;
+        const mpXOff = 0; // MP data is always in camera-half coords
 
         // Draw skeleton lines
         if (showSkeleton && trialData.skeleton) {
@@ -746,9 +754,9 @@ const manoViewer = (() => {
                 // MANO skeleton (lime)
                 if (showMano2D && manoProj[fn] && manoProj[fn][i] && manoProj[fn][j]) {
                     drawLine(
-                        (manoProj[fn][i][0] + xOff) * pixelScale,
+                        (manoProj[fn][i][0] + manoXOff) * pixelScale,
                         manoProj[fn][i][1] * pixelScale,
-                        (manoProj[fn][j][0] + xOff) * pixelScale,
+                        (manoProj[fn][j][0] + manoXOff) * pixelScale,
                         manoProj[fn][j][1] * pixelScale,
                         'lime', 2, 0.7
                     );
@@ -757,9 +765,9 @@ const manoViewer = (() => {
                 // MediaPipe skeleton (cyan)
                 if (showMP2D && mpKp[fn] && mpKp[fn][i] && mpKp[fn][j]) {
                     drawLine(
-                        (mpKp[fn][i][0] + xOff) * pixelScale,
+                        (mpKp[fn][i][0] + mpXOff) * pixelScale,
                         mpKp[fn][i][1] * pixelScale,
-                        (mpKp[fn][j][0] + xOff) * pixelScale,
+                        (mpKp[fn][j][0] + mpXOff) * pixelScale,
                         mpKp[fn][j][1] * pixelScale,
                         'cyan', 1.5, 0.5
                     );
@@ -771,7 +779,7 @@ const manoViewer = (() => {
         if (showMano2D && manoProj[fn]) {
             for (let j = 0; j < 21; j++) {
                 if (!isJointVisible(j) || !manoProj[fn][j]) continue;
-                const x = (manoProj[fn][j][0] + xOff) * pixelScale;
+                const x = (manoProj[fn][j][0] + manoXOff) * pixelScale;
                 const y = manoProj[fn][j][1] * pixelScale;
                 drawJoint(x, y, 'lime', 4);
             }
@@ -781,7 +789,7 @@ const manoViewer = (() => {
         if (showMP2D && mpKp[fn]) {
             for (let j = 0; j < 21; j++) {
                 if (!isJointVisible(j) || !mpKp[fn][j]) continue;
-                const x = (mpKp[fn][j][0] + xOff) * pixelScale;
+                const x = (mpKp[fn][j][0] + mpXOff) * pixelScale;
                 const y = mpKp[fn][j][1] * pixelScale;
                 drawCross(x, y, 'cyan', 4);
             }
@@ -793,17 +801,17 @@ const manoViewer = (() => {
             const indexKey = isLeft ? 'dlc_index_OS' : 'dlc_index_OD';
             if (isJointVisible(4) && trialData[thumbKey][fn]) {
                 const pt = trialData[thumbKey][fn];
-                drawJoint((pt[0] + xOff) * pixelScale, pt[1] * pixelScale, '#ff4444', 5);
+                drawJoint((pt[0] + mpXOff) * pixelScale, pt[1] * pixelScale, '#ff4444', 5);
             }
             if (isJointVisible(8) && trialData[indexKey][fn]) {
                 const pt = trialData[indexKey][fn];
-                drawJoint((pt[0] + xOff) * pixelScale, pt[1] * pixelScale, '#222', 5);
+                drawJoint((pt[0] + mpXOff) * pixelScale, pt[1] * pixelScale, '#222', 5);
             }
         }
 
         // Heatmap overlay
         if (showHeatmap) {
-            drawHeatmapOverlay(fn, heatmapJoint, pixelScale, xOff);
+            drawHeatmapOverlay(fn, heatmapJoint, pixelScale, manoXOff);
         }
     }
 
@@ -1046,9 +1054,12 @@ const manoViewer = (() => {
         // ── Manual orbit: rotate scene content, camera stays fixed ──
         // This keeps the custom projection valid at all times.
         container.addEventListener('mousedown', e => {
-            // Ctrl+click → video pan (handled by capture listener)
-            if (e.ctrlKey || e.metaKey) return;
+            // Plain drag → pan (handled by capture listener on video canvas)
+            // Cmd/Shift+drag → 3D orbit rotation
+            if (!(e.metaKey || e.shiftKey || e.ctrlKey)) return;
             if (e.button === 0) {
+                e.preventDefault();
+                e.stopPropagation();
                 orbitDragging = true;
                 orbitLastX = e.clientX;
                 orbitLastY = e.clientY;
