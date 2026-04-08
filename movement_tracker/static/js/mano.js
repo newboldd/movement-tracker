@@ -1371,16 +1371,23 @@ const manoViewer = (() => {
                     dn++;
                 }
                 if (dn > 5) {
-                    _projCorrNdcX = dxSum / dn;
-                    _projCorrNdcY = dySum / dn;
+                    // Convert pixel offset to NDC offset
+                    _projCorrNdcX = (dxSum / dn) / w * 2;
+                    _projCorrNdcY = (dySum / dn) / h * 2;
                     _projCorrComputed = true;
                 }
             }
         }
-        // Always apply cached correction (persists across orbit rotations)
-        if (_projCorrComputed && renderer?.domElement) {
-            renderer.domElement.style.transform = `translate(${-_projCorrNdcX}px, ${-_projCorrNdcY}px)`;
+        // Apply cached correction to projection matrix (not CSS transform).
+        // This keeps 3D coordinates aligned with visual positions so orbit
+        // rotation centers correctly on the visible hand.
+        if (_projCorrComputed) {
+            camera3d.projectionMatrix.elements[8] -= _projCorrNdcX;  // m02
+            camera3d.projectionMatrix.elements[9] += _projCorrNdcY;  // m12
+            camera3d.projectionMatrixInverse.copy(camera3d.projectionMatrix).invert();
         }
+        // Clear any leftover CSS transform
+        if (renderer?.domElement) renderer.domElement.style.transform = '';
     }
 
     // ── Video export context ────────────────────────────────
