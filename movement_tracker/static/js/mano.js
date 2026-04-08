@@ -1142,9 +1142,17 @@ const manoViewer = (() => {
                 const dv = targetV - projV;
                 const dx3d = du * Z / cfx;
                 const dy3d = dv * Z / cfy;
-                // Convert back to world coords (for left camera: identity transform)
-                // For scene coords: (dx, -dy, 0) since scene Y is flipped
-                _corrMap[j] = new THREE.Vector3(dx3d, -dy3d, 0);
+                // Convert correction from camera coords to world coords
+                let wx = dx3d, wy = dy3d, wz = 0;
+                if (!isLeftCam) {
+                    // Inverse of R (= R^T since R is orthogonal) to go from cam2 to world
+                    const Rt = R;
+                    wx = Rt[0][0]*dx3d + Rt[1][0]*dy3d;
+                    wy = Rt[0][1]*dx3d + Rt[1][1]*dy3d;
+                    wz = Rt[0][2]*dx3d + Rt[1][2]*dy3d;
+                }
+                // Scene coords: (x, -y, -z)
+                _corrMap[j] = new THREE.Vector3(wx, -wy, -wz);
             }
         }
 
