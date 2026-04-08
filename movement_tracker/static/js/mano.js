@@ -296,6 +296,9 @@ const manoViewer = (() => {
         // Update MANO fit status and checkbox state
         updateFitStatus();
 
+        // Reset frame before loading video (loadedmetadata may fire sync for cached vids)
+        currentFrame = 0;
+
         // Load video
         const trialFps = (trialData && trialData.fps) || trial.fps || 30;
         videoEl.src = `/api/mano/${subjectId}/trial/${trial.trial_idx}/video`;
