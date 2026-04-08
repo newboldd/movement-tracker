@@ -8,6 +8,36 @@ let gpuAvailable = false;
 let availableGpus = [];
 let _lastQueueState = null;
 
+// ── Job type → page URL mapping ──────────────────────────
+function jobTypeUrl(jobType, subjectIds) {
+    // Parse first subject ID from the JSON array string
+    let sid = null;
+    try {
+        const ids = typeof subjectIds === 'string' ? JSON.parse(subjectIds) : subjectIds;
+        sid = Array.isArray(ids) ? ids[0] : ids;
+    } catch (e) {}
+    const q = sid ? `?subject=${sid}` : '';
+    const typeMap = {
+        'mediapipe': '/analyze',
+        'vision': '/analyze',
+        'pose': '/analyze',
+        'deidentify': '/deidentify',
+        'blur': '/deidentify',
+        'mediapipe+blur': '/deidentify',
+        'train': '/labeling-select',
+        'refine': '/labeling-select',
+        'analyze_v1': '/results',
+        'analyze_v2': '/results',
+    };
+    const base = typeMap[jobType] || '/subjects';
+    return base + q;
+}
+
+function jobTypeLink(jobType, subjectIds) {
+    const url = jobTypeUrl(jobType, subjectIds);
+    return `<a href="${url}" style="text-decoration:none;color:inherit;font-weight:600;" onclick="sessionStorage.setItem('lastSubjectId',JSON.stringify(${JSON.stringify(subjectIds)}).replace(/[\\[\\]]/g,''))">${jobType}</a>`;
+}
+
 // ── Time helpers ────────────────────────────────────────
 function formatDuration(ms) {
     const secs = Math.floor(ms / 1000);
@@ -373,7 +403,7 @@ function renderLane(elementId, resource, state) {
         html += `
             <div class="queue-item" style="border-left: 3px solid var(--orange);">
                 <span class="job-indicator job-running"></span>
-                <span class="type">${item.job_type}</span>
+                <span class="type">${jobTypeLink(item.job_type, item.subject_ids)}</span>
                 ${targetBadge}
                 <span class="subjects" title="${subjects}">${subjects}</span>
                 <div class="progress-bar" style="width:80px;">
@@ -396,7 +426,7 @@ function renderLane(elementId, resource, state) {
         html += `
             <div class="queue-item">
                 <span class="pos">${i + 1}.</span>
-                <span class="type">${item.job_type}</span>
+                <span class="type">${jobTypeLink(item.job_type, item.subject_ids)}</span>
                 ${targetBadge}
                 <span class="subjects" title="${subjects}">${subjects}</span>
                 <button class="btn btn-sm btn-danger" onclick="cancelQueueItem(${item.id})">Cancel</button>
@@ -424,12 +454,12 @@ async function pollLocalJobs() {
         let html = '';
         for (const job of jobs) {
             const name = job.subject_name || ('Subject ' + job.subject_id);
-            const type = (job.job_type || '').replace(/_/g, ' ');
             const pct = job.progress_pct || 0;
+            const subjectIds = JSON.stringify([job.subject_id]);
             html += `
                 <div class="queue-item" style="border-left: 3px solid var(--orange);">
                     <span class="job-indicator job-running"></span>
-                    <span class="type">${type}</span>
+                    <span class="type">${jobTypeLink(job.job_type, subjectIds)}</span>
                     <span class="subjects">${name}</span>
                     <div class="progress-bar" style="width:80px;">
                         <div class="fill" style="width:${pct}%"></div>
@@ -510,7 +540,7 @@ function renderHistory(history) {
 
         html += `
             <tr>
-                <td style="font-weight:600;">${item.job_type}</td>
+                <td>${jobTypeLink(item.job_type, item.subject_ids)}</td>
                 <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${subjects}">${subjects}</td>
                 <td>${item.resource.toUpperCase()}</td>
                 <td><span class="badge ${statusClass}"${errorTip}>${item.status}</span></td>
