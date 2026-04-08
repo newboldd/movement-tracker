@@ -1310,6 +1310,19 @@ const manoViewer = (() => {
         );
         camera3d.projectionMatrixInverse.copy(camera3d.projectionMatrix).invert();
 
+        // Measure and correct CSS offset between Three.js canvas and video canvas
+        if (renderer?.domElement && canvas) {
+            const threeRect = renderer.domElement.getBoundingClientRect();
+            const vidRect = canvas.getBoundingClientRect();
+            const dy = vidRect.top - threeRect.top;
+            const dx = vidRect.left - threeRect.left;
+            if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+                renderer.domElement.style.transform = `translate(${dx}px, ${dy}px)`;
+            } else {
+                renderer.domElement.style.transform = '';
+            }
+        }
+
         renderer.render(scene, camera3d);
     }
 
