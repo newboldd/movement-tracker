@@ -1282,6 +1282,7 @@ const manoViewer = (() => {
                     _projCorrNdcX = (dxSum / dn) / w * 2;
                     _projCorrNdcY = -(dySum / dn) / h * 2;
                     _projCorrComputed = true;
+                    console.log(`[3d-corr] n=${dn} avgPxDelta=(${(dxSum/dn).toFixed(1)}, ${(dySum/dn).toFixed(1)}) ndcCorr=(${_projCorrNdcX.toFixed(4)}, ${_projCorrNdcY.toFixed(4)})`);
                 }
             }
         }
