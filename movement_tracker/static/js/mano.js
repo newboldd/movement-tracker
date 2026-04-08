@@ -78,6 +78,10 @@ const manoViewer = (() => {
     let orbitDragging = false;
     let orbitLastX = 0, orbitLastY = 0;
 
+    // Projection auto-correction (measured offset between 3D projection and 2D overlay)
+    let _projCorrNdcX = 0, _projCorrNdcY = 0;
+    let _projCorrComputed = false;
+
     // ── Helpers ───────────────────────────────────────────────
     const $ = id => document.getElementById(id);
 
@@ -1183,6 +1187,7 @@ const manoViewer = (() => {
 
         // Reset orbit rotation to align 3D model with calibrated camera view
         orbitQuat.identity();
+        _projCorrComputed = false; // recompute correction for new camera/trial
 
         // Camera position & orientation from calibration
         const isLeft = currentSide === cameraNames[0];
@@ -1249,40 +1254,43 @@ const manoViewer = (() => {
         );
         camera3d.projectionMatrixInverse.copy(camera3d.projectionMatrix).invert();
 
-        // Auto-correct: measure projection error on a known 3D→2D pair and
-        // adjust the projection matrix to eliminate the systematic offset.
-        const mp3d_f = trialData?.mp_joints_3d?.[currentFrame];
-        const mp2d_arr = isLeft ? trialData?.mp_tracked_L : trialData?.mp_tracked_R;
-        if (mp3d_f && mp2d_arr?.[currentFrame]) {
-            camera3d.updateMatrixWorld(true);
-            let dxSum = 0, dySum = 0, dn = 0;
-            for (let j = 0; j < 21; j++) {
-                if (!mp3d_f[j] || !mp2d_arr[currentFrame][j]) continue;
-                // Project 3D point through Three.js camera (world → view → clip → NDC)
-                const pt = new THREE.Vector3(mp3d_f[j][0], -mp3d_f[j][1], -mp3d_f[j][2]);
-                pt.applyMatrix4(camera3d.matrixWorldInverse);
-                const pt4 = new THREE.Vector4(pt.x, pt.y, pt.z, 1);
-                pt4.applyMatrix4(camera3d.projectionMatrix);
-                if (Math.abs(pt4.w) < 0.001) continue; // behind camera
-                const ndcX = pt4.x / pt4.w;
-                const ndcY = pt4.y / pt4.w;
-                const cx3d = (ndcX + 1) / 2 * w;
-                const cy3d = (1 - ndcY) / 2 * h;
-                // Expected 2D canvas position
-                const cx2d = offsetX + scale * mp2d_arr[currentFrame][j][0] * bps;
-                const cy2d = offsetY + scale * mp2d_arr[currentFrame][j][1] * bps;
-                dxSum += cx3d - cx2d;
-                dySum += cy3d - cy2d;
-                dn++;
+        // Compute auto-correction once: measure projection error on first frame with data
+        if (!_projCorrComputed) {
+            const mp3d_f = trialData?.mp_joints_3d?.[currentFrame];
+            const mp2d_arr = isLeft ? trialData?.mp_tracked_L : trialData?.mp_tracked_R;
+            if (mp3d_f && mp2d_arr?.[currentFrame]) {
+                camera3d.updateMatrixWorld(true);
+                let dxSum = 0, dySum = 0, dn = 0;
+                for (let j = 0; j < 21; j++) {
+                    if (!mp3d_f[j] || !mp2d_arr[currentFrame][j]) continue;
+                    const pt = new THREE.Vector3(mp3d_f[j][0], -mp3d_f[j][1], -mp3d_f[j][2]);
+                    pt.applyMatrix4(camera3d.matrixWorldInverse);
+                    const pt4 = new THREE.Vector4(pt.x, pt.y, pt.z, 1);
+                    pt4.applyMatrix4(camera3d.projectionMatrix);
+                    if (Math.abs(pt4.w) < 0.001) continue;
+                    const ndcX = pt4.x / pt4.w;
+                    const ndcY = pt4.y / pt4.w;
+                    const cx3d = (ndcX + 1) / 2 * w;
+                    const cy3d = (1 - ndcY) / 2 * h;
+                    const cx2d = offsetX + scale * mp2d_arr[currentFrame][j][0] * bps;
+                    const cy2d = offsetY + scale * mp2d_arr[currentFrame][j][1] * bps;
+                    dxSum += cx3d - cx2d;
+                    dySum += cy3d - cy2d;
+                    dn++;
+                }
+                if (dn > 5) {
+                    _projCorrNdcX = (dxSum / dn) / w * 2;
+                    _projCorrNdcY = -(dySum / dn) / h * 2;
+                    _projCorrComputed = true;
+                }
             }
-            if (dn > 5) {
-                // Convert pixel offset to NDC offset and apply to projection
-                const ndcDx = (dxSum / dn) / w * 2;
-                const ndcDy = -(dySum / dn) / h * 2;
-                camera3d.projectionMatrix.elements[8] -= ndcDx;   // m02 (col 2, row 0)
-                camera3d.projectionMatrix.elements[9] -= ndcDy;   // m12 (col 2, row 1)
-                camera3d.projectionMatrixInverse.copy(camera3d.projectionMatrix).invert();
-            }
+        }
+
+        // Apply persistent correction
+        if (_projCorrComputed) {
+            camera3d.projectionMatrix.elements[8] -= _projCorrNdcX;
+            camera3d.projectionMatrix.elements[9] -= _projCorrNdcY;
+            camera3d.projectionMatrixInverse.copy(camera3d.projectionMatrix).invert();
         }
 
 
