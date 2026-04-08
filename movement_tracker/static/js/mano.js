@@ -1116,18 +1116,6 @@ const manoViewer = (() => {
         // Helper to convert OpenCV (x,y,z) to Three.js scene (x,-y,-z)
         const toScene = p => new THREE.Vector3(p[0], -p[1], -p[2]);
 
-        // Compute orbit pivot from current frame hand center (only when not actively dragging)
-        const pivotPts = mano3d || mp3d;
-        if (pivotPts && !orbitDragging) {
-            let px = 0, py = 0, pz = 0, pn = 0;
-            for (let j = 0; j < 21; j++) {
-                if (!pivotPts[j]) continue;
-                px += pivotPts[j][0]; py += -pivotPts[j][1]; pz += -pivotPts[j][2];
-                pn++;
-            }
-            if (pn > 0) orbitPivot.set(px/pn, py/pn, pz/pn);
-        }
-
         // Build corrected 3D positions: use 2D pixel positions + triangulated depth
         // to compute 3D points that project correctly through the camera intrinsics.
         // This bypasses any projection matrix errors by constructing positions from
@@ -1169,6 +1157,26 @@ const manoViewer = (() => {
                     wX = camX; wY = camY; wZ = camZ;
                 }
                 _corrected3d[j] = [wX, wY, wZ];
+            }
+        }
+
+        // Compute orbit pivot from corrected hand center (only when not dragging)
+        if (!orbitDragging) {
+            const pts3d = mano3d || mp3d;
+            if (pts3d) {
+                let px = 0, py = 0, pz = 0, pn = 0;
+                for (let j = 0; j < 21; j++) {
+                    if (!pts3d[j]) continue;
+                    // Use corrected position if available
+                    if (_corrected3d && _corrected3d[j]) {
+                        const c = _corrected3d[j];
+                        px += c[0]; py += -c[1]; pz += -c[2];
+                    } else {
+                        px += pts3d[j][0]; py += -pts3d[j][1]; pz += -pts3d[j][2];
+                    }
+                    pn++;
+                }
+                if (pn > 0) orbitPivot.set(px/pn, py/pn, pz/pn);
             }
         }
 
