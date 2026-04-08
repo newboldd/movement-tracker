@@ -1042,7 +1042,7 @@ const manoViewer = (() => {
             orbitLastY = e.clientY;
             // Horizontal drag → rotate around Y, vertical → around X
             const q = new THREE.Quaternion();
-            q.setFromEuler(new THREE.Euler(dy * 0.005, dx * 0.005, 0, 'YXZ'));
+            q.setFromEuler(new THREE.Euler(dy * 0.002, dx * 0.002, 0, 'YXZ'));
             orbitQuat.premultiply(q);
             update3D();
         });
