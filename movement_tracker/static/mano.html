@@ -215,6 +215,13 @@
             <!-- Distance -->
             <div class="sidebar-section">Distance</div>
             <select id="distanceSelect" style="width:100%;padding:4px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:11px;"></select>
+            <div style="display:flex;gap:4px;margin-top:4px;align-items:center;">
+                <label style="font-size:10px;color:var(--text-muted);">Y</label>
+                <input type="number" id="distYMin" placeholder="min" style="width:50px;padding:2px 4px;font-size:10px;background:var(--bg);border:1px solid var(--border);border-radius:3px;color:var(--text);">
+                <span style="font-size:10px;color:var(--text-muted);">–</span>
+                <input type="number" id="distYMax" placeholder="max" style="width:50px;padding:2px 4px;font-size:10px;background:var(--bg);border:1px solid var(--border);border-radius:3px;color:var(--text);">
+                <button class="btn btn-sm" onclick="document.getElementById('distYMin').value='';document.getElementById('distYMax').value='';window.manoViewer.renderDistanceTrace();" style="padding:1px 4px;font-size:10px;">Auto</button>
+            </div>
 
             <!-- Export -->
             <div class="sidebar-section" style="margin-top:16px;">Export</div>

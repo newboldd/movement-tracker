@@ -285,6 +285,9 @@ const manoViewer = (() => {
             selectedMetric = distSel.value;
             renderDistanceTrace();
         });
+        // Y-axis range inputs
+        if ($('distYMin')) $('distYMin').addEventListener('change', renderDistanceTrace);
+        if ($('distYMax')) $('distYMax').addEventListener('change', renderDistanceTrace);
 
         // Update MANO fit status and checkbox state
         updateFitStatus();
@@ -932,6 +935,12 @@ const manoViewer = (() => {
         yMin = Math.max(0, yMin - pad);
         yMax += pad;
 
+        // Override with user-specified Y range if provided
+        const userYMin = parseFloat($('distYMin')?.value);
+        const userYMax = parseFloat($('distYMax')?.value);
+        if (!isNaN(userYMin)) yMin = userYMin;
+        if (!isNaN(userYMax)) yMax = userYMax;
+
         const toX = f => (f / (N - 1)) * w;
         const toY = v => h - ((v - yMin) / (yMax - yMin)) * h;
 
@@ -1295,9 +1304,13 @@ const manoViewer = (() => {
         if (!statusEl || !btn) return;
 
         const hasFit = trialData && trialData.has_mano_fit;
+        const hasMP = trialData && trialData.has_mp;
+        const hasMP3D = trialData && trialData.has_mp_3d;
+        const hasDLC = trialData && trialData.has_dlc;
+
+        // MANO
         if (hasFit) {
             statusEl.innerHTML = '<span style="color:var(--green);">Stage 1 fit available</span>';
-            // Auto-enable MANO checkboxes when fit is available
             if ($('showMano2D')) { $('showMano2D').checked = true; showMano2D = true; }
             if ($('showMano3D')) { $('showMano3D').checked = true; showMano3D = true; }
             showMano = true;
@@ -1307,6 +1320,33 @@ const manoViewer = (() => {
             if ($('showMano3D')) { $('showMano3D').checked = false; showMano3D = false; }
             showMano = false;
         }
+        _setLayerAvail('showMano2D', hasFit);
+        _setLayerAvail('showMano3D', hasFit);
+
+        // MediaPipe
+        _setLayerAvail('showMP2D', hasMP);
+        _setLayerAvail('showMP3D', hasMP3D);
+        if (!hasMP) {
+            if ($('showMP2D')) { $('showMP2D').checked = false; showMP2D = false; }
+        }
+        if (!hasMP3D) {
+            if ($('showMP3D')) { $('showMP3D').checked = false; showMP3D = false; }
+        }
+        showMP = showMP2D || showMP3D;
+
+        // DLC
+        _setLayerAvail('showDLC', hasDLC);
+        if (!hasDLC) {
+            if ($('showDLC')) { $('showDLC').checked = false; showDLC = false; }
+        }
+    }
+
+    function _setLayerAvail(id, available) {
+        const el = $(id);
+        if (!el) return;
+        el.disabled = !available;
+        const label = el.parentElement;
+        if (label) label.style.opacity = available ? '' : '0.4';
     }
 
     async function runStage1() {
@@ -1370,7 +1410,7 @@ const manoViewer = (() => {
         };
     }
 
-    return { goToFrame, togglePlay, toggleSide, resetZoom, prevSubject, nextSubject, getExportContext, runStage1 };
+    return { goToFrame, togglePlay, toggleSide, resetZoom, prevSubject, nextSubject, getExportContext, runStage1, renderDistanceTrace };
 })();
 
 // Expose on window for cross-module access (mano.js is an ES module)
