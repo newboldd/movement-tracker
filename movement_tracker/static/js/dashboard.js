@@ -406,6 +406,7 @@ async function showDetail(subjectId) {
             { key: 'events', label: 'Events' },
             { key: 'mano', label: 'MANO' },
         ];
+        const noFaceList = detail.no_face_videos || [];
         let trialChart = '';
         if (trialStatus.length > 0) {
             // Short trial labels (e.g. "L1" from "Con07_L1")
@@ -413,12 +414,29 @@ async function showDetail(subjectId) {
                 const parts = t.name.split('_');
                 return parts.length > 1 ? parts.slice(1).join('_') : t.name;
             });
+            // Has Faces row with interactive checkboxes
+            const hasFacesRow = `<tr>
+                <td style="padding:1px 4px;color:var(--text-muted);white-space:nowrap;">Has Faces</td>
+                ${trialStatus.map(t => {
+                    const hasFaces = t.status.has_faces !== false;
+                    return `<td style="text-align:center;padding:1px 4px;">
+                        <input type="checkbox" ${hasFaces ? 'checked' : ''}
+                            onchange="toggleTrialFaces(${detail.id}, '${t.name}', this.checked)"
+                            style="cursor:pointer;">
+                    </td>`;
+                }).join('')}
+            </tr>`;
             trialChart = `<table style="font-size:11px;border-collapse:collapse;width:100%;">
                 <tr><td></td>${shortNames.map(n => `<td style="text-align:center;padding:1px 4px;font-weight:600;">${n}</td>`).join('')}</tr>
+                ${hasFacesRow}
                 ${features.map(f => `<tr>
                     <td style="padding:1px 4px;color:var(--text-muted);white-space:nowrap;">${f.label}</td>
                     ${trialStatus.map(t => {
                         const val = t.status[f.key];
+                        // For deident: if trial has no faces, always show checkmark
+                        if (f.key === 'deident' && t.status.has_faces === false) {
+                            return `<td style="text-align:center;padding:1px 4px;"><span style="color:var(--green);">&#10003;</span></td>`;
+                        }
                         return `<td style="text-align:center;padding:1px 4px;">${val ? '<span style="color:var(--green);">&#10003;</span>' : '<span style="color:var(--text-muted);">&#8212;</span>'}</td>`;
                     }).join('')}
                 </tr>`).join('')}
@@ -544,6 +562,28 @@ async function updateClinical(subjectId, field, value) {
         await API.patch(`/api/subjects/${subjectId}`, body);
     } catch (e) {
         console.error('Failed to update clinical field:', e);
+    }
+}
+
+async function toggleTrialFaces(subjectId, trialName, hasFaces) {
+    try {
+        // Get current no_face_videos list
+        const subj = await API.get(`/api/subjects/${subjectId}`);
+        let noFace = subj.no_face_videos || [];
+
+        if (hasFaces) {
+            // Remove from no-face list
+            noFace = noFace.filter(n => n !== trialName);
+        } else {
+            // Add to no-face list
+            if (!noFace.includes(trialName)) noFace.push(trialName);
+        }
+
+        await API.patch(`/api/subjects/${subjectId}`, { no_face_videos: noFace });
+        // Refresh the detail panel
+        showDetail(subjectId);
+    } catch (e) {
+        console.error('Failed to toggle trial faces:', e);
     }
 }
 
