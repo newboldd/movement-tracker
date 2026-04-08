@@ -78,6 +78,10 @@ const manoViewer = (() => {
     let orbitDragging = false;
     let orbitLastX = 0, orbitLastY = 0;
 
+    // Video ready state — prevents drawing labels before video frame is loaded
+    let _videoReady = false;
+    let _pendingFrame = null;
+
     // Projection auto-correction (measured offset between 3D projection and 2D overlay)
     let _projCorrNdcX = 0, _projCorrNdcY = 0;
     let _projCorrComputed = false;
@@ -199,7 +203,11 @@ const manoViewer = (() => {
                 if (nav.trialIdx != null && nav.trialIdx >= 0 && nav.trialIdx < trials.length) {
                     await loadTrial(nav.trialIdx);
                     if (nav.frame != null && trialData && nav.frame >= 0 && nav.frame < trialData.n_frames) {
-                        goToFrame(nav.frame);
+                        if (_videoReady) {
+                            goToFrame(nav.frame);
+                        } else {
+                            _pendingFrame = nav.frame;
+                        }
                     }
                 }
                 if (nav.side && cameraNames.includes(nav.side) && cameraMode === 'stereo') {
@@ -298,6 +306,7 @@ const manoViewer = (() => {
 
         // Reset frame before loading video (loadedmetadata may fire sync for cached vids)
         currentFrame = 0;
+        _videoReady = false;
 
         // Load video
         const trialFps = (trialData && trialData.fps) || trial.fps || 30;
@@ -316,9 +325,16 @@ const manoViewer = (() => {
             // Seek to midpoint of frame 0 — t=0 cannot be decoded by many codecs
             videoEl.currentTime = 0.5 / trialFps;
             videoEl.addEventListener('seeked', () => {
-                render();
-                renderDistanceTrace();
-                update3D();
+                _videoReady = true;
+                // Apply any pending frame from nav state restoration
+                if (_pendingFrame != null) {
+                    goToFrame(_pendingFrame);
+                    _pendingFrame = null;
+                } else {
+                    render();
+                    renderDistanceTrace();
+                    update3D();
+                }
             }, { once: true });
         }, { once: true });
 
@@ -1334,10 +1350,9 @@ const manoViewer = (() => {
 
         renderer.render(scene, camera3d);
 
-        // Measure projection error and apply CSS transform to Three.js canvas.
-        // Project a known 3D point through Three.js, compare to where the 2D
-        // overlay draws it, and shift the entire 3D canvas by the delta.
-        if (renderer?.domElement) {
+        // Measure projection error ONCE (at identity orbit) and cache the CSS correction.
+        // Only recompute when orbit is reset (snap) or zoom/pan changes.
+        if (renderer?.domElement && orbitQuat.w === 1) {
             const _cf = currentFrame;
             const mp3d_f = trialData?.mp_joints_3d?.[_cf];
             const mp2d_arr = isLeft ? trialData?.mp_tracked_L : trialData?.mp_tracked_R;
@@ -1347,11 +1362,9 @@ const manoViewer = (() => {
                 for (let j = 0; j < 21; j++) {
                     if (!mp3d_f[j] || !mp2d_arr[_cf][j]) continue;
                     const sceneP = new THREE.Vector3(mp3d_f[j][0], -mp3d_f[j][1], -mp3d_f[j][2]);
-                    // Project through Three.js
                     const projected = sceneP.clone().project(camera3d);
                     const px3d = (projected.x + 1) / 2 * w;
                     const py3d = (1 - projected.y) / 2 * h;
-                    // Where 2D overlay draws it
                     const px2d = offsetX + scale * mp2d_arr[_cf][j][0] * bps;
                     const py2d = offsetY + scale * mp2d_arr[_cf][j][1] * bps;
                     dxSum += px3d - px2d;
@@ -1359,11 +1372,15 @@ const manoViewer = (() => {
                     dn++;
                 }
                 if (dn > 5) {
-                    const avgDx = dxSum / dn;
-                    const avgDy = dySum / dn;
-                    renderer.domElement.style.transform = `translate(${-avgDx}px, ${-avgDy}px)`;
+                    _projCorrNdcX = dxSum / dn;
+                    _projCorrNdcY = dySum / dn;
+                    _projCorrComputed = true;
                 }
             }
+        }
+        // Always apply cached correction (persists across orbit rotations)
+        if (_projCorrComputed && renderer?.domElement) {
+            renderer.domElement.style.transform = `translate(${-_projCorrNdcX}px, ${-_projCorrNdcY}px)`;
         }
     }
 
