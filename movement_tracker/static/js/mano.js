@@ -1017,7 +1017,11 @@ const manoViewer = (() => {
         renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
         renderer.setClearColor(0x000000, 0);
         renderer.setSize(container.clientWidth, container.clientHeight);
-        renderer.setPixelRatio(window.devicePixelRatio);
+        // Don't scale for devicePixelRatio — the custom projection matrix
+        // uses CSS-pixel dimensions (same as the 2D canvas). Setting DPR
+        // makes the renderer's internal resolution 2x while the projection
+        // stays at 1x, causing a vertical offset on Retina displays.
+        renderer.setPixelRatio(1);
         container.appendChild(renderer.domElement);
 
         container.classList.add('interactive');
