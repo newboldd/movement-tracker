@@ -432,15 +432,27 @@ async function showDetail(subjectId) {
                     <h3>Clinical</h3>
                     ${clinField('Age', 'age', detail.age, 'number')}
                     ${selectField('Sex', 'sex', detail.sex, ['', 'M', 'F', 'Other'])}
-                    ${selectField('Laterality', 'laterality', detail.laterality, ['', 'Right', 'Left', 'Bilateral'])}
-                    ${clinField('Disease Duration', 'disease_duration', detail.disease_duration, 'number')}
-                    ${clinField('Levodopa', 'levodopa', detail.levodopa)}
+                    ${selectField('Handedness', 'handedness', detail.handedness, ['', 'R', 'L', 'Ambidextrous'])}
+                    ${clinField('Diagnosis', 'diagnosis', detail.diagnosis)}
+                    ${selectField('Laterality', 'laterality', detail.laterality, ['', 'R', 'L', 'b/l', 'B/L', 'L>R', 'R>L', 'none'])}
+                    ${clinField('Duration (y)', 'disease_duration', detail.disease_duration, 'number')}
+                    ${clinField('Sinemet', 'sinemet_schedule', detail.sinemet_schedule)}
                     ${clinField('Last Dose', 'last_dose', detail.last_dose)}
-                    ${selectField('DBS', 'dbs', detail.dbs, ['', 'Yes', 'No'])}
+                    ${selectField('DBS', 'dbs', detail.dbs, ['', 'None', 'GPi (R)', 'GPi (L)', 'GPi (b/l)', 'STN (R)', 'STN (L)', 'STN (b/l)', 'VIM'])}
                     ${yesNoField('Fluctuations', 'fluctuations', detail.fluctuations)}
-                    ${yesNoField('Tremor', 'tremor', detail.tremor)}
-                    ${yesNoField('Dysmetria', 'dysmetria', detail.dysmetria)}
+                    ${clinField('Tremor', 'tremor', detail.tremor)}
+                    ${clinField('Dysmetria', 'dysmetria', detail.dysmetria)}
                     ${yesNoField('Myoclonus', 'myoclonus', detail.myoclonus)}
+                    ${clinField('Other Meds', 'other_meds', detail.other_meds)}
+                    ${clinField('Video Date', 'video_date', detail.video_date)}
+                    <div style="display:flex;gap:8px;margin-top:4px;">
+                        <label style="font-size:11px;display:flex;align-items:center;gap:4px;">
+                            <input type="checkbox" ${detail.saa_flag ? 'checked' : ''} onchange="updateClinical(${detail.id},'saa_flag',this.checked?1:0)"> SAA
+                        </label>
+                        <label style="font-size:11px;display:flex;align-items:center;gap:4px;">
+                            <input type="checkbox" ${detail.skin_biopsy_flag ? 'checked' : ''} onchange="updateClinical(${detail.id},'skin_biopsy_flag',this.checked?1:0)"> Skin Biopsy
+                        </label>
+                    </div>
                     <div style="margin-top:8px;">
                         <a class="btn btn-sm" href="/onboarding?subject=${detail.id}" style="text-decoration:none;width:100%;display:block;text-align:center;">Edit Subject</a>
                     </div>
