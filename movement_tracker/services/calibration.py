@@ -89,6 +89,36 @@ def _load_camera_assignments() -> dict:
     return _camera_assignments
 
 
+def _resolve_calibration_path(stored_path: str) -> str | None:
+    """Try to find a calibration file when the stored absolute path is stale.
+
+    Handles the common case where the app folder was moved/copied and the
+    absolute path saved in settings.json no longer matches.
+    """
+    # 1. Try relative to DATA_DIR
+    relative = os.path.join(str(DATA_DIR), stored_path)
+    if os.path.exists(relative):
+        return relative
+
+    # 2. Extract 'calibration/filename.yaml' portion from old absolute path
+    normalized = stored_path.replace("\\", "/")
+    for anchor in ("calibration/", "calibration\\"):
+        idx = normalized.find(anchor)
+        if idx >= 0:
+            tail = stored_path[idx:]  # e.g. "calibration/camera1.yaml"
+            candidate = os.path.join(str(DATA_DIR), tail)
+            if os.path.exists(candidate):
+                return candidate
+
+    # 3. Try just the filename under DATA_DIR/calibration/
+    fname = os.path.basename(stored_path)
+    candidate = os.path.join(str(DATA_DIR), "calibration", fname)
+    if os.path.exists(candidate):
+        return candidate
+
+    return None
+
+
 def _load_from_settings_calibrations(camera_name: str) -> dict | None:
     """Try to load calibration from settings.calibrations[camera_name]."""
     settings = get_settings()
@@ -96,9 +126,14 @@ def _load_from_settings_calibrations(camera_name: str) -> dict | None:
     if not calib_path:
         return None
     if camera_name not in _calib_cache:
+        # Resolve path: try as-is first, then recover from moved installs
         if not os.path.exists(calib_path):
-            logger.warning(f"Calibration file not found: {calib_path}")
-            return None
+            resolved = _resolve_calibration_path(calib_path)
+            if resolved:
+                calib_path = resolved
+            else:
+                logger.warning(f"Calibration file not found: {calib_path}")
+                return None
         _calib_cache[camera_name] = load_calibration(calib_path)
         logger.info(f'Loaded calibration for {camera_name}: {calib_path}')
     return _calib_cache[camera_name]
