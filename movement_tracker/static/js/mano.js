@@ -1084,9 +1084,9 @@ const manoViewer = (() => {
         // Helper to convert OpenCV (x,y,z) to Three.js scene (x,-y,-z)
         const toScene = p => new THREE.Vector3(p[0], -p[1], -p[2]);
 
-        // Compute orbit pivot from current frame hand center
+        // Compute orbit pivot from current frame hand center (only when not actively dragging)
         const pivotPts = mano3d || mp3d;
-        if (pivotPts) {
+        if (pivotPts && !orbitDragging) {
             let px = 0, py = 0, pz = 0, pn = 0;
             for (let j = 0; j < 21; j++) {
                 if (!pivotPts[j]) continue;
@@ -1096,11 +1096,21 @@ const manoViewer = (() => {
             if (pn > 0) orbitPivot.set(px/pn, py/pn, pz/pn);
         }
 
-        // Apply orbit rotation around pivot: p' = pivot + Q * (p - pivot)
-        const orbitPt = p => {
-            if (orbitQuat.w === 1) return p; // identity, skip math
-            return p.clone().sub(orbitPivot).applyQuaternion(orbitQuat).add(orbitPivot);
-        };
+        // Orbit: rotate camera around the pivot point (content stays fixed)
+        // This keeps the hand visually centered during rotation.
+        if (orbitQuat.w !== 1 && camera3d) {
+            // Move camera: orbit around pivot
+            const offset = camera3d.position.clone().sub(orbitPivot);
+            offset.applyQuaternion(orbitQuat);
+            camera3d.position.copy(orbitPivot).add(offset);
+            camera3d.lookAt(orbitPivot);
+            camera3d.updateMatrixWorld(true);
+            // Reset quat so it doesn't accumulate (camera position already updated)
+            orbitQuat.identity();
+        }
+
+        // No point rotation needed — camera moves instead
+        const orbitPt = p => p;
 
         // MANO joints (green)
         if (showMano3D && mano3d) {
