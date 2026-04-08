@@ -1316,13 +1316,14 @@ const manoViewer = (() => {
         // Project a known 3D point through Three.js, compare to where the 2D
         // overlay draws it, and shift the entire 3D canvas by the delta.
         if (renderer?.domElement) {
-            const mp3d_f = trialData?.mp_joints_3d?.[fn];
+            const _cf = currentFrame;
+            const mp3d_f = trialData?.mp_joints_3d?.[_cf];
             const mp2d_arr = isLeft ? trialData?.mp_tracked_L : trialData?.mp_tracked_R;
-            if (mp3d_f && mp2d_arr?.[fn]) {
+            if (mp3d_f && mp2d_arr?.[_cf]) {
                 camera3d.updateMatrixWorld(true);
                 let dxSum = 0, dySum = 0, dn = 0;
                 for (let j = 0; j < 21; j++) {
-                    if (!mp3d_f[j] || !mp2d_arr[fn][j]) continue;
+                    if (!mp3d_f[j] || !mp2d_arr[_cf][j]) continue;
                     // Get the scene position (with correction applied)
                     const sceneP = getScenePos(mp3d_f, j);
                     // Project through Three.js
@@ -1330,8 +1331,8 @@ const manoViewer = (() => {
                     const px3d = (projected.x + 1) / 2 * w;
                     const py3d = (1 - projected.y) / 2 * h;
                     // Where 2D overlay draws it
-                    const px2d = offsetX + scale * mp2d_arr[fn][j][0] * bps;
-                    const py2d = offsetY + scale * mp2d_arr[fn][j][1] * bps;
+                    const px2d = offsetX + scale * mp2d_arr[_cf][j][0] * bps;
+                    const py2d = offsetY + scale * mp2d_arr[_cf][j][1] * bps;
                     dxSum += px3d - px2d;
                     dySum += py3d - py2d;
                     dn++;
