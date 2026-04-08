@@ -342,6 +342,11 @@ const manoViewer = (() => {
         updateVisibleJoints();
         camera3dInit = false;
 
+        // Render whatever we have immediately (before video loads)
+        render();
+        renderDistanceTrace();
+        update3D();
+
         // Clear heatmap cache
         for (const k in heatmapCache) delete heatmapCache[k];
     }

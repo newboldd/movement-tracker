@@ -119,7 +119,7 @@ def _compute_distances(joints_3d: np.ndarray) -> dict[str, list]:
     return distances
 
 
-def _compute_distances_2d(joints_2d: np.ndarray, prefix: str = "") -> dict[str, list]:
+def _compute_distances_2d(joints_2d: np.ndarray) -> dict[str, list]:
     """Compute 2D pixel distance traces from (N,21,2) landmarks (fallback when no 3D)."""
     distances = {}
     for name, (ja, jb) in DISTANCE_OPTIONS.items():
@@ -130,7 +130,7 @@ def _compute_distances_2d(joints_2d: np.ndarray, prefix: str = "") -> dict[str, 
             dist[valid] = np.linalg.norm(
                 joints_2d[valid, ja, :] - joints_2d[valid, jb, :], axis=1
             )
-        distances[prefix + name] = _array_to_list(dist)
+        distances[name] = _array_to_list(dist)
     return distances
 
 
@@ -425,7 +425,11 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         any(v is not None for v in vals) for vals in distances_mp.values()
     )
     if not mp_has_3d:
-        distances_mp = _compute_distances_2d(mp_tracked_L, "2D ")
+        logger.info(f"No 3D distances for {subject_name}/{trial_stem}, falling back to 2D")
+        distances_mp = _compute_distances_2d(mp_tracked_L)
+    else:
+        n_valid = sum(1 for v in list(distances_mp.values())[0] if v is not None)
+        logger.info(f"Computed 3D distances for {subject_name}/{trial_stem}: {n_valid}/{N} frames")
 
     # ── Assemble result ────────────────────────────────────────
     result: dict[str, Any] = {
