@@ -1240,26 +1240,6 @@ const manoViewer = (() => {
         );
         camera3d.projectionMatrixInverse.copy(camera3d.projectionMatrix).invert();
 
-        // Debug: verify projection matches 2D overlay for first MP joint
-        if (trialData?.mp_joints_3d?.[currentFrame]) {
-            const mp3d = trialData.mp_joints_3d[currentFrame];
-            const mp2d = (currentSide === cameraNames[0] ? trialData.mp_tracked_L : trialData.mp_tracked_R);
-            if (mp3d[0] && mp2d?.[currentFrame]?.[0]) {
-                const pt3d = new THREE.Vector3(mp3d[0][0], -mp3d[0][1], -mp3d[0][2]);
-                // Apply camera world matrix inverse to get view-space
-                const viewMat = camera3d.matrixWorldInverse;
-                const viewPt = pt3d.clone().applyMatrix4(viewMat);
-                // Apply projection
-                const projPt = viewPt.clone().applyMatrix4(camera3d.projectionMatrix);
-                // NDC to canvas
-                const canvasX_3d = (projPt.x / projPt.w + 1) / 2 * w;
-                const canvasY_3d = (1 - projPt.y / projPt.w) / 2 * h;
-                // Expected 2D position
-                const canvasX_2d = offsetX + scale * mp2d[currentFrame][0][0] * bps;
-                const canvasY_2d = offsetY + scale * mp2d[currentFrame][0][1] * bps;
-                console.log(`[mano3d] Wrist proj: 3D→(${canvasX_3d.toFixed(1)}, ${canvasY_3d.toFixed(1)}) vs 2D→(${canvasX_2d.toFixed(1)}, ${canvasY_2d.toFixed(1)}) delta=(${(canvasX_3d-canvasX_2d).toFixed(1)}, ${(canvasY_3d-canvasY_2d).toFixed(1)})`);
-            }
-        }
 
         renderer.render(scene, camera3d);
     }

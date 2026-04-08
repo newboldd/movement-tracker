@@ -24,6 +24,17 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
 
+# Suppress noisy access logs for polling endpoints
+class _QuietPollFilter(logging.Filter):
+    """Filter out high-frequency polling requests from uvicorn access log."""
+    _QUIET = ("/api/jobs", "/api/remote/queue")
+    def filter(self, record):
+        msg = record.getMessage()
+        return not any(p in msg for p in self._QUIET)
+
+logging.getLogger("uvicorn.access").addFilter(_QuietPollFilter())
+
+
 class NoCacheMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
