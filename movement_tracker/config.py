@@ -29,9 +29,7 @@ CALIBRATION_DIR = DATA_DIR / "calibration"
 
 # Default calibrations shipped with the app (camera name -> YAML path)
 DEFAULT_CALIBRATIONS = {
-    "camera1": str(CALIBRATION_DIR / "camera1_recalibrated.yaml"),
-    "dysaut_cam1": str(CALIBRATION_DIR / "cam1_calibration.yaml"),
-    "dysaut_cam2": str(CALIBRATION_DIR / "cam2_calibration.yaml"),
+    "camera1": str(CALIBRATION_DIR / "cam1_calibration.yaml"),
 }
 
 

@@ -388,18 +388,23 @@ def _ensure_example_subject(settings):
         ).fetchone()
 
         if existing:
-            # Ensure group_label is set (may be 'Other' from older migration)
-            if existing.get("group_label") != "Control":
+            # Ensure group_label and camera_name are set (may be missing from older installs)
+            needs_update = (
+                existing.get("group_label") != "Control"
+                or not existing.get("camera_name")
+            )
+            if needs_update:
                 db.execute(
-                    "UPDATE subjects SET group_label = 'Control', diagnosis = 'Control' WHERE name = ?",
+                    "UPDATE subjects SET group_label = 'Control', diagnosis = 'Control', "
+                    "camera_name = 'camera1' WHERE name = ?",
                     (EXAMPLE_SUBJECT_NAME,),
                 )
             return
 
         # Create the subject
         db.execute(
-            """INSERT INTO subjects (name, stage, dlc_dir, camera_mode, diagnosis, group_label)
-               VALUES (?, 'created', ?, 'stereo', 'Control', 'Control')""",
+            """INSERT INTO subjects (name, stage, dlc_dir, camera_mode, camera_name, diagnosis, group_label)
+               VALUES (?, 'created', ?, 'stereo', 'camera1', 'Control', 'Control')""",
             (EXAMPLE_SUBJECT_NAME, EXAMPLE_SUBJECT_NAME),
         )
 
