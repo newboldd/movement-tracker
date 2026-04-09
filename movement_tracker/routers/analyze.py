@@ -7,7 +7,7 @@ import math
 from pathlib import Path
 
 import numpy as np
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 
 from ..config import get_settings
@@ -629,6 +629,118 @@ def run_pose(subject_id: int) -> dict:
         except Exception as e:
             with get_db_ctx() as db:
                 db.execute("UPDATE jobs SET status = 'failed', error_msg = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?", (str(e), job_id))
+        finally:
+            registry.unregister_cancel_event(job_id)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"job_id": job_id, "status": "running"}
+
+
+# ── HRNet ─────────────────────────────────────────────────────────────────
+
+@router.get("/{subject_id}/hrnet/status")
+def hrnet_status(subject_id: int) -> dict:
+    """Check if HRNet dependencies are available."""
+    from ..services.hrnet import check_hrnet_available
+    return check_hrnet_available()
+
+
+@router.get("/{subject_id}/hrnet/bbox")
+def hrnet_default_bbox(subject_id: int, trial_idx: int = Query(..., ge=0)) -> dict:
+    """Compute default bounding boxes from MediaPipe landmarks."""
+    from ..services.hrnet import compute_default_bbox
+
+    subj_name = _subject_name(subject_id)
+    mp_data = _load_mediapipe(subj_name)
+    if mp_data is None:
+        raise HTTPException(400, "Run MediaPipe first — no landmarks available")
+
+    trials = _trials(subj_name)
+    if trial_idx >= len(trials):
+        raise HTTPException(404, f"Trial index {trial_idx} out of range")
+    trial = trials[trial_idx]
+    start = trial.get("start_frame", 0)
+    end = start + trial["frame_count"]
+
+    os_lm = mp_data.get("OS")
+    od_lm = mp_data.get("OD")
+
+    bbox_os = compute_default_bbox(os_lm[start:min(end, os_lm.shape[0])]) if os_lm is not None else None
+    bbox_od = compute_default_bbox(od_lm[start:min(end, od_lm.shape[0])]) if od_lm is not None else None
+
+    return {"bbox_os": bbox_os, "bbox_od": bbox_od}
+
+
+@router.post("/{subject_id}/run-hrnet")
+def run_hrnet_endpoint(subject_id: int, body: dict = Body(...)) -> dict:
+    """Run HRNet heatmap inference on a trial. Creates a background job.
+
+    Body: {trial_idx: int, bbox_os: [x1,y1,x2,y2], bbox_od: [x1,y1,x2,y2]}
+    """
+    import threading
+    from ..services.jobs import registry
+    from ..services.hrnet import check_hrnet_available, run_hrnet_trial
+
+    status = check_hrnet_available()
+    if not status["available"]:
+        raise HTTPException(400, status["message"])
+
+    subj_name = _subject_name(subject_id)
+    trial_idx = body.get("trial_idx", 0)
+    bbox_os = body.get("bbox_os")
+    bbox_od = body.get("bbox_od")
+
+    settings = get_settings()
+
+    with get_db_ctx() as db:
+        log_dir = settings.dlc_path / ".logs"
+        log_dir.mkdir(exist_ok=True)
+        log_path = str(log_dir / f"job_hrnet_{subject_id}.log")
+        db.execute(
+            "INSERT INTO jobs (subject_id, job_type, status, log_path) VALUES (?, 'hrnet', 'pending', ?)",
+            (subject_id, log_path),
+        )
+        job = db.execute(
+            "SELECT id FROM jobs WHERE subject_id = ? ORDER BY id DESC LIMIT 1", (subject_id,)
+        ).fetchone()
+
+    job_id = job["id"]
+    cancel = registry.register_cancel_event(job_id)
+
+    def _run():
+        try:
+            with get_db_ctx() as db:
+                db.execute("UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+
+            def progress(pct):
+                if cancel.is_set():
+                    raise InterruptedError
+                with get_db_ctx() as db:
+                    db.execute("UPDATE jobs SET progress_pct = ? WHERE id = ?", (pct, job_id))
+
+            run_hrnet_trial(
+                subj_name, trial_idx,
+                bbox_os=bbox_os, bbox_od=bbox_od,
+                cancel_event=cancel, progress_callback=progress,
+            )
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status = 'completed', progress_pct = 100, "
+                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (job_id,),
+                )
+        except InterruptedError:
+            with get_db_ctx() as db:
+                db.execute("UPDATE jobs SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+        except Exception as e:
+            import logging as _log
+            _log.getLogger(__name__).exception(f"HRNet job {job_id} failed")
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status = 'failed', error_msg = ?, "
+                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (str(e), job_id),
+                )
         finally:
             registry.unregister_cancel_event(job_id)
 

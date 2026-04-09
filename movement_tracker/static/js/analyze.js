@@ -72,7 +72,11 @@ const analyzeViewer = (() => {
 
     async function api(url, opts) {
         const resp = await fetch(url, opts);
-        if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+        if (!resp.ok) {
+            let msg = `${resp.status} ${resp.statusText}`;
+            try { const b = await resp.json(); if (b.detail) msg = b.detail; } catch {}
+            throw new Error(msg);
+        }
         return resp.json();
     }
 
@@ -541,11 +545,47 @@ const analyzeViewer = (() => {
     function setupCanvasEvents() {
         canvas.addEventListener('wheel', handleZoom);
         canvas.addEventListener('mousedown', e => {
+            // Bbox editing intercepts left-click
+            if (bboxEditMode && e.button === 0) {
+                const isStereo = cameraMode === 'stereo';
+                const isLeft = currentSide === cameraNames[0];
+                const sw = isStereo ? (isLeft ? midline : imgW - midline) : imgW;
+                const bps = canvas.width / sw;
+                const xOff = isStereo ? (isLeft ? 0 : -midline) : 0;
+
+                const rect = canvas.getBoundingClientRect();
+                const mx = (e.clientX - rect.left - offsetX) / scale;
+                const my = (e.clientY - rect.top - offsetY) / scale;
+
+                const handle = _bboxHandleHitTest(mx, my, bps, xOff);
+                if (handle) {
+                    bboxDrag = {
+                        handle,
+                        startMx: e.clientX,
+                        startMy: e.clientY,
+                        origBox: [..._getBboxForSide()],
+                    };
+                    e.preventDefault();
+                    return;
+                }
+            }
             if (e.button === 0 || e.button === 1) handlePanStart(e);
         });
-        canvas.addEventListener('mousemove', handlePanMove);
-        canvas.addEventListener('mouseup', () => { dragging = null; });
-        canvas.addEventListener('mouseleave', () => { dragging = null; });
+        canvas.addEventListener('mousemove', e => {
+            if (bboxDrag) {
+                const isStereo = cameraMode === 'stereo';
+                const isLeft = currentSide === cameraNames[0];
+                const sw = isStereo ? (isLeft ? midline : imgW - midline) : imgW;
+                const bps = canvas.width / sw;
+                const dx = e.clientX - bboxDrag.startMx;
+                const dy = e.clientY - bboxDrag.startMy;
+                _applyBboxDrag(dx, dy, bps);
+                return;
+            }
+            handlePanMove(e);
+        });
+        canvas.addEventListener('mouseup', () => { dragging = null; bboxDrag = null; });
+        canvas.addEventListener('mouseleave', () => { dragging = null; bboxDrag = null; });
 
         // Distance trace click to seek
         distCanvas.addEventListener('click', e => {
@@ -741,6 +781,10 @@ const analyzeViewer = (() => {
             if (trialData) {
                 drawOverlays(bps);
             }
+
+            // Bbox editor overlay
+            const xOff = isStereo ? (isLeft ? 0 : -midline) : 0;
+            _drawBboxOverlay(bps, xOff);
 
             ctx.restore();
         } else if (!showVideo && trialData) {
@@ -1086,6 +1130,181 @@ const analyzeViewer = (() => {
     function runVision() { _runDetection('run-vision', 'runVisionBtn', 'Apple Vision Hands'); }
     function runPose() { _runDetection('run-pose', 'runPoseBtn', 'Pose Detection'); }
 
+    // ── HRNet crop box editing ───────────────────────────────
+    let bboxEditMode = false;
+    let bboxOS = null;  // [x1, y1, x2, y2] in image pixels
+    let bboxOD = null;
+    let bboxDrag = null; // {side, handle, startMx, startMy, origBox}
+
+    async function loadDefaultBbox() {
+        if (!subjectId || currentTrialIdx < 0) return;
+        const trial = trials[currentTrialIdx];
+        try {
+            const data = await api(`/api/analyze/${subjectId}/hrnet/bbox?trial_idx=${trial.trial_idx}`);
+            bboxOS = data.bbox_os;
+            bboxOD = data.bbox_od;
+        } catch (e) {
+            const s = $('hrnetStatus');
+            if (s) s.textContent = e.message;
+        }
+    }
+
+    function toggleBboxEdit() {
+        bboxEditMode = !bboxEditMode;
+        const btn = $('editBboxBtn');
+        if (btn) btn.textContent = bboxEditMode ? 'Done Editing' : 'Edit Crop Box';
+        if (bboxEditMode && !bboxOS) loadDefaultBbox().then(render);
+        render();
+    }
+
+    function _getBboxForSide() {
+        return currentSide === cameraNames[0] ? bboxOS : bboxOD;
+    }
+
+    function _setBboxForSide(box) {
+        if (currentSide === cameraNames[0]) bboxOS = box;
+        else bboxOD = box;
+    }
+
+    function _drawBboxOverlay(pixelScale, xOff) {
+        if (!bboxEditMode) return;
+        const box = _getBboxForSide();
+        if (!box) return;
+
+        const [x1, y1, x2, y2] = box;
+        const px1 = (x1 + xOff) * pixelScale;
+        const py1 = y1 * pixelScale;
+        const px2 = (x2 + xOff) * pixelScale;
+        const py2 = y2 * pixelScale;
+
+        // Dim outside
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.4)';
+        const cw = canvas.width / scale, ch = canvas.height / scale;
+        ctx.fillRect(0, 0, cw, py1);
+        ctx.fillRect(0, py2, cw, ch - py2);
+        ctx.fillRect(0, py1, px1, py2 - py1);
+        ctx.fillRect(px2, py1, cw - px2, py2 - py1);
+
+        // Border
+        ctx.strokeStyle = '#0f0';
+        ctx.lineWidth = 2 / scale;
+        ctx.setLineDash([6 / scale, 4 / scale]);
+        ctx.strokeRect(px1, py1, px2 - px1, py2 - py1);
+        ctx.setLineDash([]);
+
+        // Handles (corners + edges)
+        const hs = 6 / scale;
+        ctx.fillStyle = '#0f0';
+        const mx = (px1 + px2) / 2, my = (py1 + py2) / 2;
+        for (const [hx, hy] of [
+            [px1, py1], [px2, py1], [px1, py2], [px2, py2],
+            [mx, py1], [mx, py2], [px1, my], [px2, my],
+        ]) {
+            ctx.fillRect(hx - hs / 2, hy - hs / 2, hs, hs);
+        }
+        ctx.restore();
+    }
+
+    function _bboxHandleHitTest(mx, my, pixelScale, xOff) {
+        const box = _getBboxForSide();
+        if (!box) return null;
+        const [x1, y1, x2, y2] = box;
+        const px1 = (x1 + xOff) * pixelScale;
+        const py1 = y1 * pixelScale;
+        const px2 = (x2 + xOff) * pixelScale;
+        const py2 = y2 * pixelScale;
+
+        const r = 10 / scale;
+        const midx = (px1 + px2) / 2, midy = (py1 + py2) / 2;
+        const handles = [
+            ['nw', px1, py1], ['ne', px2, py1], ['sw', px1, py2], ['se', px2, py2],
+            ['n', midx, py1], ['s', midx, py2], ['w', px1, midy], ['e', px2, midy],
+        ];
+        for (const [name, hx, hy] of handles) {
+            if (Math.abs(mx - hx) < r && Math.abs(my - hy) < r) return name;
+        }
+        if (mx >= px1 && mx <= px2 && my >= py1 && my <= py2) return 'move';
+        return null;
+    }
+
+    function _applyBboxDrag(dx, dy, pixelScale) {
+        if (!bboxDrag) return;
+        const box = [...bboxDrag.origBox];
+        const dpx = dx / (pixelScale * scale);
+        const dpy = dy / (pixelScale * scale);
+        const h = bboxDrag.handle;
+
+        if (h === 'move') {
+            box[0] += dpx; box[1] += dpy; box[2] += dpx; box[3] += dpy;
+        } else {
+            if (h.includes('w')) box[0] += dpx;
+            if (h.includes('e')) box[2] += dpx;
+            if (h.includes('n')) box[1] += dpy;
+            if (h.includes('s')) box[3] += dpy;
+        }
+        // Ensure min size
+        if (box[2] - box[0] < 20) box[2] = box[0] + 20;
+        if (box[3] - box[1] < 20) box[3] = box[1] + 20;
+        _setBboxForSide(box.map(v => Math.round(v)));
+        render();
+    }
+
+    async function runHRNet() {
+        if (!subjectId || currentTrialIdx < 0) return;
+        if (!bboxOS) await loadDefaultBbox();
+
+        const trial = trials[currentTrialIdx];
+        const btn = $('runHRNetBtn');
+        const status = $('hrnetStatus');
+
+        if (btn) btn.disabled = true;
+        if (status) status.textContent = 'Submitting...';
+
+        try {
+            const result = await api(`/api/analyze/${subjectId}/run-hrnet`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    trial_idx: trial.trial_idx,
+                    bbox_os: bboxOS,
+                    bbox_od: bboxOD,
+                }),
+            });
+            const jobId = result.job_id;
+            if (status) status.textContent = 'HRNet running...';
+
+            const evtSource = new EventSource(`/api/jobs/${jobId}/stream`);
+            evtSource.onmessage = async (event) => {
+                const data = JSON.parse(event.data);
+                if (data.status === 'running') {
+                    const pct = data.progress_pct ? Math.round(data.progress_pct) : 0;
+                    if (status) status.textContent = `HRNet... ${pct}%`;
+                } else if (data.status === 'completed') {
+                    evtSource.close();
+                    if (status) status.textContent = 'HRNet complete.';
+                    if (btn) btn.disabled = false;
+                } else if (data.status === 'failed') {
+                    evtSource.close();
+                    if (status) status.textContent = `HRNet failed: ${data.error_msg || 'unknown'}`;
+                    if (btn) btn.disabled = false;
+                } else if (data.status === 'cancelled') {
+                    evtSource.close();
+                    if (status) status.textContent = 'HRNet cancelled.';
+                    if (btn) btn.disabled = false;
+                }
+            };
+            evtSource.onerror = () => {
+                evtSource.close();
+                if (status) status.textContent = 'Connection lost.';
+                if (btn) btn.disabled = false;
+            };
+        } catch (err) {
+            if (status) status.textContent = `Error: ${err.message || err}`;
+            if (btn) btn.disabled = false;
+        }
+    }
+
     // ── Public API ───────────────────────────────────────────
     return {
         init,
@@ -1098,6 +1317,8 @@ const analyzeViewer = (() => {
         runMediapipe,
         runVision,
         runPose,
+        toggleBboxEdit,
+        runHRNet,
     };
 })();
 

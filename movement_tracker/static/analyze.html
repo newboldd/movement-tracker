@@ -191,6 +191,17 @@
             <button class="btn btn-sm" id="runPoseBtn" onclick="analyzeViewer.runPose()" style="width:100%;margin-bottom:4px;">
                 Detect Pose
             </button>
+
+            <!-- HRNet -->
+            <div class="sidebar-section" style="margin-top:12px;">HRNet Heatmaps</div>
+            <button class="btn btn-sm" id="editBboxBtn" onclick="analyzeViewer.toggleBboxEdit()" style="width:100%;margin-bottom:4px;">
+                Edit Crop Box
+            </button>
+            <button class="btn btn-sm" id="runHRNetBtn" onclick="analyzeViewer.runHRNet()" style="width:100%;margin-bottom:4px;">
+                Run HRNet
+            </button>
+            <div id="hrnetStatus" style="font-size:11px;color:var(--text-muted);margin-bottom:4px;"></div>
+
             <div id="detectionStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
 
             <!-- Shortcuts -->
@@ -228,6 +239,6 @@
 
     <script src="/static/js/nav.js?v=2"></script>
     <script src="/static/js/api.js?v=1"></script>
-    <script src="/static/js/analyze.js?v=1"></script>
+    <script src="/static/js/analyze.js?v=2"></script>
 </body>
 </html>
