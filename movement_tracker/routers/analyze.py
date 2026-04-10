@@ -645,6 +645,13 @@ def hrnet_status(subject_id: int) -> dict:
     return check_hrnet_available()
 
 
+@router.post("/{subject_id}/hrnet/install")
+def hrnet_install(subject_id: int) -> dict:
+    """Install HRNet dependencies (torch CPU + timm). May take a few minutes."""
+    from ..services.hrnet import install_hrnet_deps
+    return install_hrnet_deps()
+
+
 @router.get("/{subject_id}/hrnet/bbox")
 def hrnet_default_bbox(subject_id: int, trial_idx: int = Query(..., ge=0)) -> dict:
     """Compute default bounding boxes from MediaPipe landmarks."""

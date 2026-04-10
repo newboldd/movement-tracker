@@ -37,21 +37,66 @@ WEIGHTS_FILENAME = "hrnet_w18_hand_256x256.pth"
 
 def check_hrnet_available() -> dict:
     """Check if HRNet dependencies are available."""
+    missing = []
     try:
         import torch  # noqa: F401
     except ImportError:
-        return {
-            "available": False,
-            "message": "PyTorch not installed. Run: pip install torch --index-url https://download.pytorch.org/whl/cpu",
-        }
+        missing.append("torch")
     try:
         import timm  # noqa: F401
     except ImportError:
+        missing.append("timm")
+    if missing:
         return {
             "available": False,
-            "message": "timm not installed. Run: pip install timm",
+            "installable": True,
+            "missing": missing,
+            "message": f"Missing: {', '.join(missing)}. Click Install to download (~550 MB).",
         }
-    return {"available": True, "message": "Ready"}
+    return {"available": True, "installable": False, "missing": [], "message": "Ready"}
+
+
+def install_hrnet_deps() -> dict:
+    """Install torch (CPU) and timm via pip. Returns status dict."""
+    import sys
+    import subprocess
+
+    python = sys.executable
+    installed = []
+    errors = []
+
+    # Check what's missing
+    status = check_hrnet_available()
+    if status["available"]:
+        return {"ok": True, "message": "Already installed"}
+
+    for pkg in status["missing"]:
+        try:
+            if pkg == "torch":
+                logger.info("Installing PyTorch (CPU-only, ~540 MB)...")
+                result = subprocess.run(
+                    [python, "-m", "pip", "install", "-q", "--disable-pip-version-check",
+                     "torch", "--index-url", "https://download.pytorch.org/whl/cpu"],
+                    capture_output=True, text=True, timeout=600,
+                )
+            else:
+                logger.info(f"Installing {pkg}...")
+                result = subprocess.run(
+                    [python, "-m", "pip", "install", "-q", "--disable-pip-version-check", pkg],
+                    capture_output=True, text=True, timeout=120,
+                )
+            if result.returncode == 0:
+                installed.append(pkg)
+                logger.info(f"Installed {pkg}")
+            else:
+                errors.append(f"{pkg}: {result.stderr[-200:]}")
+                logger.error(f"Failed to install {pkg}: {result.stderr[-200:]}")
+        except Exception as e:
+            errors.append(f"{pkg}: {e}")
+
+    if errors:
+        return {"ok": False, "message": f"Failed: {'; '.join(errors)}", "installed": installed}
+    return {"ok": True, "message": f"Installed: {', '.join(installed)}", "installed": installed}
 
 
 def _weights_path() -> Path:
@@ -93,14 +138,25 @@ def _build_model():
             super().__init__()
             self.backbone = backbone
             # HRNet outputs multi-scale features; use highest resolution
-            # The first feature map is typically 1/4 resolution
-            # Add a simple 1x1 conv to predict heatmaps
-            self.head = nn.Conv2d(18, n_joints, kernel_size=1)
+            # Determine output channels dynamically
+            self.head = None
+            self.n_joints = n_joints
+
+        def _ensure_head(self, n_channels):
+            """Lazily create head conv after seeing the actual channel count."""
+            if self.head is None or self.head.in_channels != n_channels:
+                self.head = nn.Conv2d(n_channels, self.n_joints, kernel_size=1)
+                # Initialize head weights
+                nn.init.normal_(self.head.weight, std=0.001)
+                nn.init.zeros_(self.head.bias)
+                self.head = self.head.to(next(self.backbone.parameters()).device)
 
         def forward(self, x):
             features = self.backbone(x)
             # Use highest resolution feature map (first output)
-            hm = self.head(features[0])
+            feat = features[0]
+            self._ensure_head(feat.shape[1])
+            hm = self.head(feat)
             return hm
 
     model = HRNetPose(backbone)
