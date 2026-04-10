@@ -557,7 +557,7 @@ const analyzeViewer = (() => {
                 const mx = (e.clientX - rect.left - offsetX) / scale;
                 const my = (e.clientY - rect.top - offsetY) / scale;
 
-                const handle = _bboxHandleHitTest(mx, my, bps, xOff);
+                const handle = _bboxHandleHitTest(mx, my, bps);
                 if (handle) {
                     bboxDrag = {
                         handle,
@@ -784,7 +784,7 @@ const analyzeViewer = (() => {
 
             // Bbox editor overlay
             const xOff = isStereo ? (isLeft ? 0 : -midline) : 0;
-            _drawBboxOverlay(bps, xOff);
+            _drawBboxOverlay(bps);
 
             ctx.restore();
         } else if (!showVideo && trialData) {
@@ -1166,15 +1166,16 @@ const analyzeViewer = (() => {
         else bboxOD = box;
     }
 
-    function _drawBboxOverlay(pixelScale, xOff) {
+    function _drawBboxOverlay(pixelScale) {
         if (!bboxEditMode) return;
         const box = _getBboxForSide();
         if (!box) return;
 
+        // Bbox coords are in camera-half pixel space (same as MP landmarks) — no xOff needed
         const [x1, y1, x2, y2] = box;
-        const px1 = (x1 + xOff) * pixelScale;
+        const px1 = x1 * pixelScale;
         const py1 = y1 * pixelScale;
-        const px2 = (x2 + xOff) * pixelScale;
+        const px2 = x2 * pixelScale;
         const py2 = y2 * pixelScale;
 
         // Dim outside
@@ -1206,13 +1207,13 @@ const analyzeViewer = (() => {
         ctx.restore();
     }
 
-    function _bboxHandleHitTest(mx, my, pixelScale, xOff) {
+    function _bboxHandleHitTest(mx, my, pixelScale) {
         const box = _getBboxForSide();
         if (!box) return null;
         const [x1, y1, x2, y2] = box;
-        const px1 = (x1 + xOff) * pixelScale;
+        const px1 = x1 * pixelScale;
         const py1 = y1 * pixelScale;
-        const px2 = (x2 + xOff) * pixelScale;
+        const px2 = x2 * pixelScale;
         const py2 = y2 * pixelScale;
 
         const r = 10 / scale;
