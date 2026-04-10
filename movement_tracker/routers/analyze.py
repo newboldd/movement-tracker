@@ -655,7 +655,7 @@ def hrnet_default_bbox(subject_id: int, trial_idx: int = Query(..., ge=0)) -> di
     if mp_data is None:
         raise HTTPException(400, "Run MediaPipe first — no landmarks available")
 
-    trials = _trials(subj_name)
+    trials = build_trial_map(subj_name)
     if trial_idx >= len(trials):
         raise HTTPException(404, f"Trial index {trial_idx} out of range")
     trial = trials[trial_idx]
