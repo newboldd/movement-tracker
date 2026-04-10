@@ -368,31 +368,19 @@ const SUBJECT_PAGES = [
                 </div>`;
             }
 
-            const cpuItems = [...running.filter(r => r.resource === 'cpu'), ...cpuQueue];
-            const gpuItems = [...running.filter(r => r.resource === 'gpu'), ...gpuQueue];
+            /* Single combined list: running first, then queued, then local-only */
+            const allItems = [
+                ...running.map(r => ({ ...r, _src: 'queue' })),
+                ...cpuQueue.map(r => ({ ...r, _src: 'queue' })),
+                ...gpuQueue.map(r => ({ ...r, _src: 'queue' })),
+            ];
 
             let html = '';
-
-            /* Local jobs section (mediapipe, pose, deidentify, etc.) */
-            if (localOnly.length > 0) {
-                html += '<div style="padding:4px 0;">';
-                html += '<h4 style="margin:0 0 4px 12px;">Local</h4>';
+            if (allItems.length === 0 && localOnly.length === 0) {
+                html = '<div class="empty-msg">No active jobs</div>';
+            } else {
+                allItems.forEach(item => { html += _jobRow(item); });
                 localOnly.forEach(job => { html += _localJobRow(job); });
-                html += '</div>';
-            }
-
-            /* Remote queue section */
-            const hasRemote = cpuItems.length > 0 || gpuItems.length > 0;
-            if (hasRemote || localOnly.length === 0) {
-                html += '<div class="jobs-grid">';
-                html += '<div><h4>CPU</h4>';
-                if (cpuItems.length === 0) html += '<div class="empty-msg">Empty</div>';
-                else cpuItems.forEach(item => { html += _jobRow(item); });
-                html += '</div>';
-                html += '<div><h4>GPU</h4>';
-                if (gpuItems.length === 0) html += '<div class="empty-msg">Empty</div>';
-                else gpuItems.forEach(item => { html += _jobRow(item); });
-                html += '</div></div>';
             }
 
             if (html !== _lastHtml) {

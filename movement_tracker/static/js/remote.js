@@ -345,16 +345,27 @@ async function refreshQueue() {
 
 function renderQueue(state) {
     _lastQueueState = state;
-    renderLane('gpuLane', 'gpu', state);
-    renderLane('cpuLane', 'cpu', state);
+    renderLane4('localCpuLane', 'cpu', 'local-cpu', state);
+    renderLane4('localGpuLane', 'gpu', 'local-gpu', state);
+    renderLane4('remoteCpuLane', 'cpu', 'remote', state);
+    renderLane4('remoteGpuLane', 'gpu', 'remote', state);
+
+    // Grey out local GPU if unavailable
+    const gpuPanel = document.getElementById('localGpuPanel');
+    if (gpuPanel) {
+        gpuPanel.style.opacity = gpuAvailable ? '' : '0.4';
+    }
+
     renderHistory(state.history);
 }
 
 // Tick elapsed time every second for running jobs
 setInterval(() => {
     if (_lastQueueState && _lastQueueState.running && _lastQueueState.running.length > 0) {
-        renderLane('gpuLane', 'gpu', _lastQueueState);
-        renderLane('cpuLane', 'cpu', _lastQueueState);
+        renderLane4('localCpuLane', 'cpu', 'local-cpu', _lastQueueState);
+        renderLane4('localGpuLane', 'gpu', 'local-gpu', _lastQueueState);
+        renderLane4('remoteCpuLane', 'cpu', 'remote', _lastQueueState);
+        renderLane4('remoteGpuLane', 'gpu', 'remote', _lastQueueState);
     }
 }, 1000);
 
@@ -375,10 +386,23 @@ function getExecutionTargetBadge(item) {
     return `<span style="background:${color};color:white;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:600;">${label}</span>`;
 }
 
-function renderLane(elementId, resource, state) {
+function renderLane4(elementId, resource, target, state) {
     const el = document.getElementById(elementId);
-    const running = state.running.filter(r => r.resource.startsWith(resource));
-    const queued = resource === 'gpu' ? state.gpu_queue : state.cpu_queue;
+    if (!el) return;
+    // Filter running items by resource AND execution target
+    const isLocal = target.startsWith('local');
+    const running = state.running.filter(r => {
+        const rTarget = r.execution_target || 'remote';
+        if (isLocal) return r.resource === resource && rTarget.startsWith('local');
+        return r.resource === resource && rTarget === 'remote';
+    });
+    // Filter queued items similarly
+    const allQueued = resource === 'gpu' ? state.gpu_queue : state.cpu_queue;
+    const queued = allQueued.filter(q => {
+        const qTarget = q.execution_target || 'remote';
+        if (isLocal) return qTarget.startsWith('local');
+        return qTarget === 'remote';
+    });
 
     if (running.length === 0 && queued.length === 0) {
         el.innerHTML = '<span class="empty-state">Empty</span>';

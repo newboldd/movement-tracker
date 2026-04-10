@@ -260,23 +260,25 @@
             </div>
         </div>
 
-        <!-- Local Jobs -->
-        <div class="card" id="localJobsCard" style="display:none;">
-            <h2>Local Jobs</h2>
-            <div id="localJobsLane"><span class="empty-state">No local jobs running.</span></div>
-        </div>
-
-        <!-- Queue -->
+        <!-- Queue: 4 lane boxes -->
         <div class="card">
             <h2>Queue</h2>
             <div class="remote-grid">
                 <div class="lane-panel">
-                    <h4>GPU Lane</h4>
-                    <div id="gpuLane"><span class="empty-state">Empty</span></div>
+                    <h4><span style="color:var(--blue);">●</span> Local CPU</h4>
+                    <div id="localCpuLane"><span class="empty-state">Empty</span></div>
+                </div>
+                <div class="lane-panel" id="localGpuPanel">
+                    <h4><span style="color:var(--green);">●</span> Local GPU</h4>
+                    <div id="localGpuLane"><span class="empty-state">Empty</span></div>
                 </div>
                 <div class="lane-panel">
-                    <h4>CPU Lane</h4>
-                    <div id="cpuLane"><span class="empty-state">Empty</span></div>
+                    <h4><span style="color:var(--text-muted);">●</span> Remote CPU</h4>
+                    <div id="remoteCpuLane"><span class="empty-state">Empty</span></div>
+                </div>
+                <div class="lane-panel">
+                    <h4><span style="color:var(--text-muted);">●</span> Remote GPU</h4>
+                    <div id="remoteGpuLane"><span class="empty-state">Empty</span></div>
                 </div>
             </div>
         </div>
