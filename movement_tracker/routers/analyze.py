@@ -753,3 +753,51 @@ def run_hrnet_endpoint(subject_id: int, body: dict = Body(...)) -> dict:
 
     threading.Thread(target=_run, daemon=True).start()
     return {"job_id": job_id, "status": "running"}
+
+
+# ── Heatmap serving ──────────────────────────────────────────────────────
+
+@router.get("/{subject_id}/heatmap")
+def get_heatmap_frame(
+    subject_id: int,
+    trial_idx: int = Query(..., ge=0),
+    frame: int = Query(..., ge=0),
+    joint: int = Query(..., ge=0, le=20),
+    side: str = Query("OS"),
+) -> dict:
+    """Serve a single 64x64 heatmap for one joint at one frame.
+
+    Returns: {heatmap: [[float]], bbox: [x1,y1,x2,y2], max_val: float}
+    """
+    subj_name = _subject_name(subject_id)
+    settings = get_settings()
+    hm_path = settings.dlc_path / subj_name / "hrnet_heatmaps.npz"
+    if not hm_path.exists():
+        raise HTTPException(404, "No HRNet heatmaps found. Run HRNet first.")
+
+    hm_data = np.load(str(hm_path), mmap_mode="r")
+
+    cam_names = settings.camera_names or ["OS", "OD"]
+    cam_key = "OS" if side in ("OS", "left", cam_names[0]) else "OD"
+    hm_key = f"heatmaps_{cam_key}"
+    bbox_key = f"bbox_{cam_key}"
+
+    if hm_key not in hm_data:
+        raise HTTPException(404, f"No heatmaps for camera {cam_key}")
+
+    heatmaps = hm_data[hm_key]  # (N, 21, 64, 64)
+    bbox = hm_data[bbox_key]     # [x1, y1, x2, y2]
+
+    start_frame = int(hm_data.get("start_frame", 0))
+    local_frame = frame - start_frame
+    if local_frame < 0 or local_frame >= heatmaps.shape[0]:
+        raise HTTPException(404, f"Frame {frame} out of range")
+
+    hm = heatmaps[local_frame, joint]  # (64, 64)
+    max_val = float(np.max(hm))
+
+    return {
+        "heatmap": [[round(float(hm[r, c]), 4) for c in range(hm.shape[1])] for r in range(hm.shape[0])],
+        "bbox": [float(v) for v in bbox],
+        "max_val": max_val,
+    }

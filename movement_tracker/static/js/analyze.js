@@ -31,6 +31,10 @@ const analyzeViewer = (() => {
     let showVision = false;
     let showDLC = false;
     let showSkeleton = true;
+    let showHeatmap = false;
+    let heatmapJoint = 4; // thumb tip default
+    let heatmapCache = {};
+    let hasHeatmaps = false;
 
     // Finger visibility
     const fingerVisibility = {
@@ -307,6 +311,23 @@ const analyzeViewer = (() => {
         if (visRow) visRow.style.display = (trialData.vision && (trialData.vision.OS || trialData.vision.OD)) ? '' : 'none';
         if (dlcRow) dlcRow.style.display = (trialData.dlc && (trialData.dlc.OS || trialData.dlc.OD)) ? '' : 'none';
 
+        // Check for HRNet heatmaps
+        hasHeatmaps = false;
+        heatmapCache = {};
+        try {
+            // Quick check: try fetching frame 0 joint 0 — if 404, no heatmaps
+            await api(`/api/analyze/${subjectId}/heatmap?trial_idx=${trial.trial_idx}&frame=${trial.start_frame || 0}&joint=0&side=${currentSide}`);
+            hasHeatmaps = true;
+        } catch { hasHeatmaps = false; }
+        const hmRow = $('heatmapToggleRow');
+        if (hmRow) hmRow.style.display = hasHeatmaps ? '' : 'none';
+        if (!hasHeatmaps) {
+            showHeatmap = false;
+            const hmCb = $('showHeatmap');
+            if (hmCb) hmCb.checked = false;
+            $('heatmapControls').style.display = 'none';
+        }
+
         // Load video
         const trialIdx = trial.trial_idx != null ? trial.trial_idx : idx;
         videoEl.src = `/api/analyze/${subjectId}/trial/${trialIdx}/video`;
@@ -376,6 +397,31 @@ const analyzeViewer = (() => {
             showSkeleton = e.target.checked;
             render();
         });
+        $('showHeatmap').addEventListener('change', e => {
+            showHeatmap = e.target.checked;
+            $('heatmapControls').style.display = showHeatmap ? 'block' : 'none';
+            render();
+        });
+        // Populate heatmap joint selector
+        const hmJointSel = $('heatmapJointSelect');
+        if (hmJointSel) {
+            const jointNames = ['Wrist','Thumb CMC','Thumb MCP','Thumb IP','Thumb Tip',
+                'Index MCP','Index PIP','Index DIP','Index Tip',
+                'Middle MCP','Middle PIP','Middle DIP','Middle Tip',
+                'Ring MCP','Ring PIP','Ring DIP','Ring Tip',
+                'Pinky MCP','Pinky PIP','Pinky DIP','Pinky Tip'];
+            jointNames.forEach((name, i) => {
+                const opt = document.createElement('option');
+                opt.value = i;
+                opt.textContent = `${i}: ${name}`;
+                if (i === heatmapJoint) opt.selected = true;
+                hmJointSel.appendChild(opt);
+            });
+            hmJointSel.addEventListener('change', e => {
+                heatmapJoint = parseInt(e.target.value);
+                render();
+            });
+        }
 
         // Distance selector
         $('distanceSelect').addEventListener('change', () => {
@@ -887,6 +933,64 @@ const analyzeViewer = (() => {
                 );
             }
         }
+
+        // HRNet heatmap overlay
+        if (showHeatmap && hasHeatmaps) {
+            drawHeatmapOverlay(fn, heatmapJoint, pixelScale);
+        }
+    }
+
+    async function drawHeatmapOverlay(frame, joint, pixelScale) {
+        if (!subjectId || currentTrialIdx < 0) return;
+        const trial = trials[currentTrialIdx];
+        if (!trial) return;
+
+        const key = `${frame}_${joint}_${currentSide}`;
+        if (!heatmapCache[key]) {
+            try {
+                heatmapCache[key] = await api(
+                    `/api/analyze/${subjectId}/heatmap?trial_idx=${trial.trial_idx}&frame=${frame}&joint=${joint}&side=${currentSide}`
+                );
+            } catch {
+                return;
+            }
+        }
+
+        const data = heatmapCache[key];
+        if (!data || !data.heatmap) return;
+
+        const hm = data.heatmap;
+        const [bx1, by1, bx2, by2] = data.bbox;
+        const hmH = hm.length, hmW = hm[0].length;
+
+        // Create colored heatmap image
+        const offCanvas = document.createElement('canvas');
+        offCanvas.width = hmW;
+        offCanvas.height = hmH;
+        const offCtx = offCanvas.getContext('2d');
+        const imgData = offCtx.createImageData(hmW, hmH);
+
+        const maxVal = data.max_val || 1;
+        for (let r = 0; r < hmH; r++) {
+            for (let c = 0; c < hmW; c++) {
+                const v = hm[r][c] / maxVal;
+                const idx = (r * hmW + c) * 4;
+                // Hot colormap: black → red → yellow → white
+                imgData.data[idx] = Math.min(255, v * 510);           // R
+                imgData.data[idx + 1] = Math.max(0, (v - 0.5) * 510);// G
+                imgData.data[idx + 2] = Math.max(0, (v - 0.75) * 1020);// B
+                imgData.data[idx + 3] = Math.min(200, v * 400);       // A
+            }
+        }
+        offCtx.putImageData(imgData, 0, 0);
+
+        // Draw onto main canvas at the bbox location
+        // Bbox coords are in camera-half pixel space
+        const dx = bx1 * pixelScale;
+        const dy = by1 * pixelScale;
+        const dw = (bx2 - bx1) * pixelScale;
+        const dh = (by2 - by1) * pixelScale;
+        ctx.drawImage(offCanvas, dx, dy, dw, dh);
     }
 
     function drawLine(x1, y1, x2, y2, color, width, alpha) {

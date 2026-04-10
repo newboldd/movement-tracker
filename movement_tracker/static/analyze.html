@@ -164,6 +164,14 @@
                     <input type="checkbox" id="showSkeleton" checked>
                     <span class="layer-swatch" style="background:#aaa;"></span> Skeleton
                 </label>
+                <label class="layer-toggle" id="heatmapToggleRow" style="display:none;">
+                    <input type="checkbox" id="showHeatmap">
+                    <span class="layer-swatch" style="background:#f80;"></span> Heatmap
+                </label>
+                <div id="heatmapControls" style="display:none;padding:4px 0 4px 20px;">
+                    <label style="font-size:11px;color:var(--text-muted);">Joint:</label>
+                    <select id="heatmapJointSelect" style="font-size:11px;padding:2px 4px;background:var(--bg);border:1px solid var(--border);border-radius:3px;color:var(--text);"></select>
+                </div>
             </div>
             <input type="hidden" id="showVideo" value="on">
 
@@ -239,6 +247,6 @@
 
     <script src="/static/js/nav.js?v=2"></script>
     <script src="/static/js/api.js?v=1"></script>
-    <script src="/static/js/analyze.js?v=3"></script>
+    <script src="/static/js/analyze.js?v=4"></script>
 </body>
 </html>
