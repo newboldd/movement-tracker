@@ -358,7 +358,7 @@ const manoViewer = (() => {
         $('playBtn').addEventListener('click', togglePlay);
         $('sideToggle').addEventListener('click', toggleSide);
         $('resetZoomBtn').addEventListener('click', resetZoom);
-        $('snapCamBtn').addEventListener('click', snapToCamera);
+        $('snapCamBtn').addEventListener('click', () => snapToCamera());
         $('prevSubjectBtn').addEventListener('click', prevSubject);
         $('nextSubjectBtn').addEventListener('click', nextSubject);
 
