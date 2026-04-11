@@ -202,13 +202,6 @@ const manoViewer = (() => {
             if (nav.subjectId === parseInt(sel.value)) {
                 if (nav.trialIdx != null && nav.trialIdx >= 0 && nav.trialIdx < trials.length) {
                     await loadTrial(nav.trialIdx);
-                    if (nav.frame != null && trialData && nav.frame >= 0 && nav.frame < trialData.n_frames) {
-                        if (_videoReady) {
-                            goToFrame(nav.frame);
-                        } else {
-                            _pendingFrame = nav.frame;
-                        }
-                    }
                 }
                 if (nav.side && cameraNames.includes(nav.side) && cameraMode === 'stereo') {
                     currentSide = nav.side;
