@@ -336,7 +336,16 @@ function connectQueueStream() {
 
 async function refreshQueue() {
     try {
-        const state = await API.get('/api/remote/queue');
+        const [state, localJobs] = await Promise.all([
+            API.get('/api/remote/queue'),
+            API.get('/api/jobs?status=running').catch(() => []),
+        ]);
+        // Merge local-only jobs (not in queue) into state for rendering
+        const queueJobIds = new Set();
+        [...(state.running || []), ...(state.cpu_queue || []), ...(state.gpu_queue || [])].forEach(item => {
+            if (item.job_id) queueJobIds.add(item.job_id);
+        });
+        state._localOnly = localJobs.filter(j => !queueJobIds.has(j.id));
         renderQueue(state);
     } catch (e) {
         console.error('Failed to refresh queue:', e);
@@ -404,14 +413,36 @@ function renderLane4(elementId, resource, target, state) {
         return qTarget === 'remote';
     });
 
-    if (running.length === 0 && queued.length === 0) {
+    // Include local-only jobs (thread-based, not in queue) for the local CPU lane
+    const localOnly = (target === 'local-cpu' && state._localOnly) ? state._localOnly : [];
+
+    if (running.length === 0 && queued.length === 0 && localOnly.length === 0) {
         el.innerHTML = '<span class="empty-state">Empty</span>';
         return;
     }
 
     let html = '';
 
-    // Running items
+    // Local-only jobs (thread-based, not managed by queue)
+    for (const job of localOnly) {
+        const name = job.subject_name || ('Subject ' + job.subject_id);
+        const pct = job.progress_pct || 0;
+        const subjectIds = JSON.stringify([job.subject_id]);
+        html += `
+            <div class="queue-item" style="border-left: 3px solid var(--orange);">
+                <span class="job-indicator job-running"></span>
+                <span class="type">${jobTypeLink(job.job_type, subjectIds)}</span>
+                <span class="subjects">${name}</span>
+                <div class="progress-bar" style="width:80px;">
+                    <div class="fill" style="width:${pct}%"></div>
+                </div>
+                <span style="font-size:11px;">${pct.toFixed(0)}%</span>
+                <button class="btn btn-sm btn-danger" onclick="cancelLocalJob(${job.id})">Cancel</button>
+            </div>
+        `;
+    }
+
+    // Running items (from queue)
     for (const item of running) {
         const subjects = parseSubjects(item.subject_ids);
         const pct = item.progress_pct || 0;
