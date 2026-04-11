@@ -1342,10 +1342,19 @@ const manoViewer = (() => {
         const K = isLeft ? trialData.calib.K_L : trialData.calib.K_R;
         const sw = isStereo ? (isLeft ? midline : vidW - midline) : vidW;
 
-        const fx = K[0][0], fy = K[1][1], cx = K[0][2], cy = K[1][2];
+        const fx = K[0][0], fy = K[1][1];
+        let cx = K[0][2], cy = K[1][2];
         const w = canvas.width, h = canvas.height;
         const bps = w / sw;
         const near = 0.1, far = 50000;
+
+        // Apply cached projection correction (measured from 3D→2D comparison)
+        // by adjusting the principal point. This shifts the projection center
+        // without breaking the 3D coordinate system (unlike CSS transform).
+        if (_projCorrComputed) {
+            cx += _projCorrNdcX / (scale * bps);
+            cy += _projCorrNdcY / (scale * bps);
+        }
 
         const m00 = 2 * scale * fx * bps / w;
         const m02 = 1 - 2 * (offsetX + scale * cx * bps) / w;
@@ -1393,9 +1402,9 @@ const manoViewer = (() => {
                 }
             }
         }
-        // Apply cached correction as CSS transform on the Three.js canvas.
-        if (_projCorrComputed && renderer?.domElement) {
-            renderer.domElement.style.transform = `translate(${-_projCorrNdcX}px, ${-_projCorrNdcY}px)`;
+        // Clear any leftover CSS transform (correction is now baked into cx/cy)
+        if (renderer?.domElement && renderer.domElement.style.transform) {
+            renderer.domElement.style.transform = '';
         }
     }
 
