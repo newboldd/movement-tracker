@@ -1148,7 +1148,6 @@ const manoViewer = (() => {
                 for (let j = 0; j < 21; j++) {
                     if (!pts3d[j]) continue;
                     px += pts3d[j][0]; py += -pts3d[j][1]; pz += -pts3d[j][2];
-                    }
                     pn++;
                 }
                 if (pn > 0) orbitPivot.set(px/pn, py/pn, pz/pn);
