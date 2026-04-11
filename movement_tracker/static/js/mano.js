@@ -27,7 +27,7 @@ const manoViewer = (() => {
     // Layer visibility
     let showVideo = true;
     let showSkeleton = true;
-    let showMP2D = true;
+    let showMP2D = false;
     let showMP3D = true;
     let showMano2D = false;
     let showMano3D = false;
