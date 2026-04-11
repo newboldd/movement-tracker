@@ -1140,22 +1140,73 @@ const manoViewer = (() => {
         // Helper to convert OpenCV (x,y,z) to Three.js scene (x,-y,-z)
         const toScene = p => new THREE.Vector3(p[0], -p[1], -p[2]);
 
-        // Compute orbit pivot from hand center (only when not dragging)
+        // Pivot computed after getScenePos is defined (below)
+
+        // Position 3D spheres so they project to the correct 2D positions.
+        // Uses the 2D overlay coordinates + triangulated depth to place each
+        // joint exactly where it should appear on screen.
+        const isLeftCam = currentSide === cameraNames[0];
+        const K_cam = isLeftCam ? trialData?.calib?.K_L : trialData?.calib?.K_R;
+        const mp2d_cam = isLeftCam ? trialData?.mp_tracked_L : trialData?.mp_tracked_R;
+        const R_cam = trialData?.calib?.R;
+        const T_cam = trialData?.calib?.T;
+
+        const getScenePos = (pts3d, j, isMano) => {
+            // For MANO joints, use raw 3D positions (they have their own fitting)
+            if (isMano) return toScene(pts3d[j]);
+
+            // For MP joints: use 2D pixel + triangulated depth → 3D
+            // This guarantees the 3D sphere projects exactly to the 2D overlay position
+            if (K_cam && mp2d_cam?.[fn]?.[j] && pts3d[j]) {
+                const cfx = K_cam[0][0], cfy = K_cam[1][1];
+                const ccx = K_cam[0][2], ccy = K_cam[1][2];
+                const u = mp2d_cam[fn][j][0];
+                const v = mp2d_cam[fn][j][1];
+
+                // Get depth in current camera frame
+                let X = pts3d[j][0], Y = pts3d[j][1], Z = pts3d[j][2];
+                let camZ;
+                if (!isLeftCam && R_cam && T_cam) {
+                    camZ = R_cam[2][0]*X + R_cam[2][1]*Y + R_cam[2][2]*Z + T_cam[2];
+                } else {
+                    camZ = Z;
+                }
+                if (camZ <= 0) return toScene(pts3d[j]);
+
+                // Unproject: 2D pixel + depth → camera 3D
+                const camX = (u - ccx) * camZ / cfx;
+                const camY = (v - ccy) * camZ / cfy;
+
+                // Convert to world coords
+                let wX, wY, wZ;
+                if (!isLeftCam && R_cam && T_cam) {
+                    const dx = camX - T_cam[0], dy = camY - T_cam[1], dz = camZ - T_cam[2];
+                    wX = R_cam[0][0]*dx + R_cam[1][0]*dy + R_cam[2][0]*dz;
+                    wY = R_cam[0][1]*dx + R_cam[1][1]*dy + R_cam[2][1]*dz;
+                    wZ = R_cam[0][2]*dx + R_cam[1][2]*dy + R_cam[2][2]*dz;
+                } else {
+                    wX = camX; wY = camY; wZ = camZ;
+                }
+                return new THREE.Vector3(wX, -wY, -wZ);
+            }
+            return toScene(pts3d[j]);
+        };
+
+        // Compute orbit pivot using corrected positions (matches displayed spheres)
         if (!orbitDragging) {
             const pts3d = mano3d || mp3d;
+            const isMano = !!mano3d;
             if (pts3d) {
                 let px = 0, py = 0, pz = 0, pn = 0;
                 for (let j = 0; j < 21; j++) {
                     if (!pts3d[j]) continue;
-                    px += pts3d[j][0]; py += -pts3d[j][1]; pz += -pts3d[j][2];
+                    const p = getScenePos(pts3d, j, isMano);
+                    px += p.x; py += p.y; pz += p.z;
                     pn++;
                 }
                 if (pn > 0) orbitPivot.set(px/pn, py/pn, pz/pn);
             }
         }
-
-        // Convert 3D point to scene coordinates
-        const getScenePos = (pts3d, j) => toScene(pts3d[j]);
 
         // Apply orbit rotation
         const orbitPt = (p) => {
@@ -1170,15 +1221,15 @@ const manoViewer = (() => {
             for (let j = 0; j < 21; j++) {
                 if (!isJointVisible(j) || !mano3d[j]) continue;
                 const sphere = new THREE.Mesh(sphereGeom, manoMat);
-                sphere.position.copy(orbitPt(getScenePos(mano3d, j)));
+                sphere.position.copy(orbitPt(getScenePos(mano3d, j, true)));
                 manoGroup.add(sphere);
             }
             if (showSkeleton && trialData.skeleton) {
                 trialData.skeleton.forEach(([i, j]) => {
                     if (!isBoneVisible(i, j) || !mano3d[i] || !mano3d[j]) return;
                     const bone = makeBone(
-                        orbitPt(getScenePos(mano3d, i)),
-                        orbitPt(getScenePos(mano3d, j)),
+                        orbitPt(getScenePos(mano3d, i, true)),
+                        orbitPt(getScenePos(mano3d, j, true)),
                         1.2, boneMat
                     );
                     if (bone) manoGroup.add(bone);
