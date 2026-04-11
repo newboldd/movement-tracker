@@ -1245,8 +1245,8 @@ const manoViewer = (() => {
 
         // MediaPipe joints (cyan)
         if (showMP3D && mp3d) {
-            const mpMat = new THREE.MeshPhongMaterial({ color: 0x00ffff });
-            const mpBoneMat = new THREE.MeshPhongMaterial({ color: 0x00cccc });
+            const mpMat = new THREE.MeshPhongMaterial({ color: 0x00ffff, emissive: 0x00aaaa });
+            const mpBoneMat = new THREE.MeshPhongMaterial({ color: 0x00ffff, emissive: 0x008888 });
             for (let j = 0; j < 21; j++) {
                 if (!isJointVisible(j) || !mp3d[j]) continue;
                 const sphere = new THREE.Mesh(sphereGeom, mpMat);
@@ -1373,9 +1373,9 @@ const manoViewer = (() => {
 
         renderer.render(scene, camera3d);
 
-        // Measure projection error ONCE (at identity orbit) and cache the CSS correction.
-        // Only recompute when orbit is reset (snap) or zoom/pan changes.
-        if (renderer?.domElement && orbitQuat.w === 1) {
+        // Measure projection error ONCE (at identity orbit) and cache.
+        // Only recompute after snap resets _projCorrComputed.
+        if (!_projCorrComputed && renderer?.domElement && orbitQuat.w === 1) {
             const _cf = currentFrame;
             const mp3d_f = trialData?.mp_joints_3d?.[_cf];
             const mp2d_arr = isLeft ? trialData?.mp_tracked_L : trialData?.mp_tracked_R;
