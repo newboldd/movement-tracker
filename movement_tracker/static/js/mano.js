@@ -1140,63 +1140,14 @@ const manoViewer = (() => {
         // Helper to convert OpenCV (x,y,z) to Three.js scene (x,-y,-z)
         const toScene = p => new THREE.Vector3(p[0], -p[1], -p[2]);
 
-        // Build corrected 3D positions: use 2D pixel positions + triangulated depth
-        // to compute 3D points that project correctly through the camera intrinsics.
-        // This bypasses any projection matrix errors by constructing positions from
-        // known-good 2D data and measured depth.
-        const isLeftCam = currentSide === cameraNames[0];
-        const corrK = isLeftCam ? trialData?.calib?.K_L : trialData?.calib?.K_R;
-        const corrMp2d = isLeftCam ? trialData?.mp_tracked_L : trialData?.mp_tracked_R;
-        let _corrected3d = null; // { jointIdx: [X, Y, Z] in world coords }
-        if (corrK && corrMp2d?.[fn] && (mano3d || mp3d)) {
-            const pts3d = mano3d || mp3d;
-            const cfx = corrK[0][0], cfy = corrK[1][1], ccx = corrK[0][2], ccy = corrK[1][2];
-            const R = trialData.calib.R, T = trialData.calib.T;
-            _corrected3d = {};
-            for (let j = 0; j < 21; j++) {
-                if (!pts3d[j] || !corrMp2d[fn][j]) continue;
-                let X = pts3d[j][0], Y = pts3d[j][1], Z = pts3d[j][2];
-                // Get depth in current camera's frame
-                let camZ;
-                if (!isLeftCam) {
-                    camZ = R[2][0]*X + R[2][1]*Y + R[2][2]*Z + T[2];
-                } else {
-                    camZ = Z;
-                }
-                if (camZ <= 0) continue;
-                // Unproject: 2D pixel + depth → 3D in camera coords
-                const u = corrMp2d[fn][j][0];
-                const v = corrMp2d[fn][j][1];
-                const camX = (u - ccx) * camZ / cfx;
-                const camY = (v - ccy) * camZ / cfy;
-                // Convert camera coords → world coords
-                let wX, wY, wZ;
-                if (!isLeftCam) {
-                    // world = R^T * (cam - T)
-                    const dx = camX - T[0], dy = camY - T[1], dz = camZ - T[2];
-                    wX = R[0][0]*dx + R[1][0]*dy + R[2][0]*dz;
-                    wY = R[0][1]*dx + R[1][1]*dy + R[2][1]*dz;
-                    wZ = R[0][2]*dx + R[1][2]*dy + R[2][2]*dz;
-                } else {
-                    wX = camX; wY = camY; wZ = camZ;
-                }
-                _corrected3d[j] = [wX, wY, wZ];
-            }
-        }
-
-        // Compute orbit pivot from corrected hand center (only when not dragging)
+        // Compute orbit pivot from hand center (only when not dragging)
         if (!orbitDragging) {
             const pts3d = mano3d || mp3d;
             if (pts3d) {
                 let px = 0, py = 0, pz = 0, pn = 0;
                 for (let j = 0; j < 21; j++) {
                     if (!pts3d[j]) continue;
-                    // Use corrected position if available
-                    if (_corrected3d && _corrected3d[j]) {
-                        const c = _corrected3d[j];
-                        px += c[0]; py += -c[1]; pz += -c[2];
-                    } else {
-                        px += pts3d[j][0]; py += -pts3d[j][1]; pz += -pts3d[j][2];
+                    px += pts3d[j][0]; py += -pts3d[j][1]; pz += -pts3d[j][2];
                     }
                     pn++;
                 }
@@ -1204,15 +1155,8 @@ const manoViewer = (() => {
             }
         }
 
-        // Helper: get corrected scene position for a joint
-        // Only applies 2D→3D correction for MP data, not MANO (which has its own 3D positions)
-        const getScenePos = (pts3d, j, isMano) => {
-            if (!isMano && _corrected3d && _corrected3d[j]) {
-                const c = _corrected3d[j];
-                return new THREE.Vector3(c[0], -c[1], -c[2]);
-            }
-            return toScene(pts3d[j]);
-        };
+        // Convert 3D point to scene coordinates
+        const getScenePos = (pts3d, j) => toScene(pts3d[j]);
 
         // Apply orbit rotation
         const orbitPt = (p) => {
@@ -1227,15 +1171,15 @@ const manoViewer = (() => {
             for (let j = 0; j < 21; j++) {
                 if (!isJointVisible(j) || !mano3d[j]) continue;
                 const sphere = new THREE.Mesh(sphereGeom, manoMat);
-                sphere.position.copy(orbitPt(getScenePos(mano3d, j, true)));
+                sphere.position.copy(orbitPt(getScenePos(mano3d, j)));
                 manoGroup.add(sphere);
             }
             if (showSkeleton && trialData.skeleton) {
                 trialData.skeleton.forEach(([i, j]) => {
                     if (!isBoneVisible(i, j) || !mano3d[i] || !mano3d[j]) return;
                     const bone = makeBone(
-                        orbitPt(getScenePos(mano3d, i, true)),
-                        orbitPt(getScenePos(mano3d, j, true)),
+                        orbitPt(getScenePos(mano3d, i)),
+                        orbitPt(getScenePos(mano3d, j)),
                         1.2, boneMat
                     );
                     if (bone) manoGroup.add(bone);
@@ -1245,8 +1189,8 @@ const manoViewer = (() => {
 
         // MediaPipe joints (cyan)
         if (showMP3D && mp3d) {
-            const mpMat = new THREE.MeshPhongMaterial({ color: 0x00dddd, emissive: 0x007777 });
-            const mpBoneMat = new THREE.MeshPhongMaterial({ color: 0x00dddd, emissive: 0x006666 });
+            const mpMat = new THREE.MeshPhongMaterial({ color: 0x00eeee, emissive: 0x008888 });
+            const mpBoneMat = new THREE.MeshPhongMaterial({ color: 0x00eeee, emissive: 0x007777 });
             for (let j = 0; j < 21; j++) {
                 if (!isJointVisible(j) || !mp3d[j]) continue;
                 const sphere = new THREE.Mesh(sphereGeom, mpMat);
@@ -1348,13 +1292,9 @@ const manoViewer = (() => {
         const bps = w / sw;
         const near = 0.1, far = 50000;
 
-        // Apply cached projection correction (measured from 3D→2D comparison)
-        // by adjusting the principal point. This shifts the projection center
-        // without breaking the 3D coordinate system (unlike CSS transform).
-        if (_projCorrComputed) {
-            cx += _projCorrNdcX / (scale * bps);
-            cy += _projCorrNdcY / (scale * bps);
-        }
+        // Note: no automatic projection correction — it caused drift and snap issues.
+        // The 3D model may have a small (~10px) offset from the 2D overlay due to
+        // triangulation inaccuracies. Rotation works correctly without correction.
 
         const m00 = 2 * scale * fx * bps / w;
         const m02 = 1 - 2 * (offsetX + scale * cx * bps) / w;
@@ -1375,34 +1315,7 @@ const manoViewer = (() => {
 
         // Measure projection error ONCE (at identity orbit) and cache.
         // Only recompute after snap resets _projCorrComputed.
-        if (!_projCorrComputed && renderer?.domElement && orbitQuat.w === 1) {
-            const _cf = currentFrame;
-            const mp3d_f = trialData?.mp_joints_3d?.[_cf];
-            const mp2d_arr = isLeft ? trialData?.mp_tracked_L : trialData?.mp_tracked_R;
-            if (mp3d_f && mp2d_arr?.[_cf]) {
-                camera3d.updateMatrixWorld(true);
-                let dxSum = 0, dySum = 0, dn = 0;
-                for (let j = 0; j < 21; j++) {
-                    if (!mp3d_f[j] || !mp2d_arr[_cf][j]) continue;
-                    const sceneP = new THREE.Vector3(mp3d_f[j][0], -mp3d_f[j][1], -mp3d_f[j][2]);
-                    const projected = sceneP.clone().project(camera3d);
-                    const px3d = (projected.x + 1) / 2 * w;
-                    const py3d = (1 - projected.y) / 2 * h;
-                    const px2d = offsetX + scale * mp2d_arr[_cf][j][0] * bps;
-                    const py2d = offsetY + scale * mp2d_arr[_cf][j][1] * bps;
-                    dxSum += px3d - px2d;
-                    dySum += py3d - py2d;
-                    dn++;
-                }
-                if (dn > 5) {
-                    // Store as pixel offset (for CSS transform)
-                    _projCorrNdcX = dxSum / dn;
-                    _projCorrNdcY = dySum / dn;
-                    _projCorrComputed = true;
-                }
-            }
-        }
-        // Clear any leftover CSS transform (correction is now baked into cx/cy)
+        // Clear any leftover CSS transform
         if (renderer?.domElement && renderer.domElement.style.transform) {
             renderer.domElement.style.transform = '';
         }
