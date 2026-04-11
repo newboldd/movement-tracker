@@ -1245,8 +1245,8 @@ const manoViewer = (() => {
 
         // MediaPipe joints (cyan)
         if (showMP3D && mp3d) {
-            const mpMat = new THREE.MeshPhongMaterial({ color: 0x5bc0de });
-            const mpBoneMat = new THREE.MeshPhongMaterial({ color: 0x4aa0bb });
+            const mpMat = new THREE.MeshPhongMaterial({ color: 0x00ffff });
+            const mpBoneMat = new THREE.MeshPhongMaterial({ color: 0x00cccc });
             for (let j = 0; j < 21; j++) {
                 if (!isJointVisible(j) || !mp3d[j]) continue;
                 const sphere = new THREE.Mesh(sphereGeom, mpMat);
