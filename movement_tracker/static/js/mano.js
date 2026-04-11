@@ -1205,8 +1205,9 @@ const manoViewer = (() => {
         }
 
         // Helper: get corrected scene position for a joint
-        const getScenePos = (pts3d, j) => {
-            if (_corrected3d && _corrected3d[j]) {
+        // Only applies 2D→3D correction for MP data, not MANO (which has its own 3D positions)
+        const getScenePos = (pts3d, j, isMano) => {
+            if (!isMano && _corrected3d && _corrected3d[j]) {
                 const c = _corrected3d[j];
                 return new THREE.Vector3(c[0], -c[1], -c[2]);
             }
@@ -1226,15 +1227,15 @@ const manoViewer = (() => {
             for (let j = 0; j < 21; j++) {
                 if (!isJointVisible(j) || !mano3d[j]) continue;
                 const sphere = new THREE.Mesh(sphereGeom, manoMat);
-                sphere.position.copy(orbitPt(getScenePos(mano3d, j)));
+                sphere.position.copy(orbitPt(getScenePos(mano3d, j, true)));
                 manoGroup.add(sphere);
             }
             if (showSkeleton && trialData.skeleton) {
                 trialData.skeleton.forEach(([i, j]) => {
                     if (!isBoneVisible(i, j) || !mano3d[i] || !mano3d[j]) return;
                     const bone = makeBone(
-                        orbitPt(getScenePos(mano3d, i)),
-                        orbitPt(getScenePos(mano3d, j)),
+                        orbitPt(getScenePos(mano3d, i, true)),
+                        orbitPt(getScenePos(mano3d, j, true)),
                         1.2, boneMat
                     );
                     if (bone) manoGroup.add(bone);
