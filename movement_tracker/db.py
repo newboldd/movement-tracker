@@ -146,15 +146,16 @@ CREATE TABLE IF NOT EXISTS mp_crop_boxes (
     subject_id INTEGER NOT NULL REFERENCES subjects(id),
     trial_idx INTEGER NOT NULL,
     camera_name TEXT NOT NULL,
+    model_name TEXT NOT NULL DEFAULT 'default',
     x1 REAL NOT NULL,
     y1 REAL NOT NULL,
     x2 REAL NOT NULL,
     y2 REAL NOT NULL,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(subject_id, trial_idx, camera_name)
+    UNIQUE(subject_id, trial_idx, camera_name, model_name)
 );
 
-CREATE INDEX IF NOT EXISTS idx_mp_crop_boxes ON mp_crop_boxes(subject_id, trial_idx);
+CREATE INDEX IF NOT EXISTS idx_mp_crop_boxes_model ON mp_crop_boxes(subject_id, trial_idx, model_name);
 
 CREATE TABLE IF NOT EXISTS blur_specs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -194,6 +195,21 @@ CREATE TABLE IF NOT EXISTS blur_hand_settings (
     show_landmarks INTEGER DEFAULT 0,
     UNIQUE(subject_id, trial_idx)
 );
+
+CREATE TABLE IF NOT EXISTS remote_downloads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+    subject_id INTEGER REFERENCES subjects(id) ON DELETE CASCADE,
+    job_type TEXT NOT NULL,
+    output_path TEXT NOT NULL,
+    remote_size INTEGER,
+    local_size INTEGER,
+    downloaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ignored INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(subject_id, job_type, output_path)
+);
+CREATE INDEX IF NOT EXISTS idx_remote_downloads_job ON remote_downloads(job_id);
+CREATE INDEX IF NOT EXISTS idx_remote_downloads_subject ON remote_downloads(subject_id, job_type);
 """
 
 
@@ -205,10 +221,11 @@ def dict_factory(cursor, row):
 
 def get_db() -> sqlite3.Connection:
     """Get a database connection with dict row factory."""
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=10)
     conn.row_factory = dict_factory
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -558,6 +575,66 @@ def _migrate_add_mp_crop_boxes(conn):
         logger.info("Created mp_crop_boxes table")
 
 
+def _migrate_add_crop_box_model(conn):
+    """Add model_name column to mp_crop_boxes for per-model bounding boxes.
+
+    SQLite doesn't support adding NOT NULL columns without a default to existing rows,
+    and doesn't support altering constraints. We recreate the table.
+    """
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(mp_crop_boxes)").fetchall()]
+        if cols and "model_name" in cols:
+            return  # already migrated
+
+        # Check if a previous failed migration left the renamed table
+        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        has_old = "_mp_crop_boxes_old" in tables
+        has_current = "mp_crop_boxes" in tables
+
+        if has_current and not has_old:
+            conn.execute("ALTER TABLE mp_crop_boxes RENAME TO _mp_crop_boxes_old")
+        elif not has_current and not has_old:
+            return  # table doesn't exist yet, SCHEMA will create it
+        conn.execute("""
+            CREATE TABLE mp_crop_boxes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject_id INTEGER NOT NULL REFERENCES subjects(id),
+                trial_idx INTEGER NOT NULL,
+                camera_name TEXT NOT NULL,
+                model_name TEXT NOT NULL DEFAULT 'default',
+                x1 REAL NOT NULL,
+                y1 REAL NOT NULL,
+                x2 REAL NOT NULL,
+                y2 REAL NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(subject_id, trial_idx, camera_name, model_name)
+            )
+        """)
+        conn.execute("""
+            INSERT INTO mp_crop_boxes (subject_id, trial_idx, camera_name, model_name, x1, y1, x2, y2, updated_at)
+            SELECT subject_id, trial_idx, camera_name, 'default', x1, y1, x2, y2, updated_at
+            FROM _mp_crop_boxes_old
+        """)
+        conn.execute("DROP TABLE _mp_crop_boxes_old")
+        conn.execute("DROP INDEX IF EXISTS idx_mp_crop_boxes")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mp_crop_boxes_model ON mp_crop_boxes(subject_id, trial_idx, model_name)")
+        logger.info("Migrated mp_crop_boxes with model_name column")
+    except Exception as e:
+        logger.warning(f"crop_box model migration: {e}")
+
+
+def _migrate_add_job_params(conn):
+    """Add params_json column to jobs, and extra_params_json to job_queue."""
+    columns = _get_table_columns(conn, "jobs")
+    if "params_json" not in columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN params_json TEXT")
+        logger.info("Added params_json column to jobs table")
+    columns_q = _get_table_columns(conn, "job_queue")
+    if "extra_params_json" not in columns_q:
+        conn.execute("ALTER TABLE job_queue ADD COLUMN extra_params_json TEXT")
+        logger.info("Added extra_params_json column to job_queue table")
+
+
 def _migrate_add_face_detections(conn):
     """Create face_detections table if missing, add side column if needed."""
     tables = [r["name"] for r in conn.execute(
@@ -642,6 +719,41 @@ def init_db():
     _migrate_add_face_detections(conn)
     conn.commit()
 
+    _migrate_add_crop_box_model(conn)
+    conn.commit()
+
+    _migrate_add_job_params(conn)
+    conn.commit()
+
+    _migrate_add_remote_downloads(conn)
+    conn.commit()
+
     conn.executescript(SCHEMA)
     conn.commit()
     conn.close()
+
+
+def _migrate_add_remote_downloads(conn):
+    """Create remote_downloads table for tracking which results from remote
+    jobs have already been pulled to local."""
+    tables = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "remote_downloads" in tables:
+        return
+    conn.executescript("""
+        CREATE TABLE remote_downloads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+            subject_id INTEGER REFERENCES subjects(id) ON DELETE CASCADE,
+            job_type TEXT NOT NULL,
+            output_path TEXT NOT NULL,
+            remote_size INTEGER,
+            local_size INTEGER,
+            downloaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            ignored INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(subject_id, job_type, output_path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_remote_downloads_job ON remote_downloads(job_id);
+        CREATE INDEX IF NOT EXISTS idx_remote_downloads_subject ON remote_downloads(subject_id, job_type);
+    """)
+    logger.info("Created remote_downloads table")

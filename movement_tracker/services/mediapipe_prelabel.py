@@ -195,7 +195,10 @@ def _pick_tapping_track(tracks, video_name="", trial_name=""):
     return chosen
 
 
-def run_mediapipe(subject_name: str, progress_callback=None) -> str:
+def run_mediapipe(subject_name: str, progress_callback=None,
+                  crop_boxes: dict | None = None,
+                  static_image_mode: bool = False,
+                  trial_idx: int | None = None) -> str:
     """Run MediaPipe on all stereo videos for a subject.
 
     Extracts all 21 hand joint positions from both camera halves.
@@ -206,6 +209,20 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
     Args:
         subject_name: Subject identifier
         progress_callback: callable(pct: float) for progress updates (0-100)
+        crop_boxes: Optional per-trial crop boxes, keyed by trial index.
+            Each value is a dict with 'OS' and/or 'OD' keys mapping to
+            [x1, y1, x2, y2] in camera-half pixel coordinates.
+            MediaPipe is run on the cropped region; landmarks are remapped
+            back to full half-frame coordinates automatically.
+        static_image_mode: When True, every frame runs the full palm
+            detector (no between-frame tracker).  3-5x slower but recovers
+            detection on hard poses (back-of-hand views, etc.) where the
+            tracker fails to lock on and propagates a NaN gap.
+        trial_idx: When set, process ONLY this trial — the other trials'
+            slices in the saved npz are preserved from the existing file
+            (or left NaN if no prior file exists).  Used by the per-trial
+            "Run MediaPipe" button on the mano page so adjusting one
+            trial's bbox doesn't silently re-process the others.
 
     Returns:
         Path to the saved npz file.
@@ -229,6 +246,50 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
     OD_all_tracks = np.full((total_frames, 2, N_JOINTS, 2), np.nan)
     confidence_OS = np.full(total_frames, np.nan)
     confidence_OD = np.full(total_frames, np.nan)
+
+    # Single-trial mode: pre-populate the output arrays with whatever the
+    # existing npz already has, so the slices for trials we're NOT going
+    # to process are preserved.  Without this, run-MP-for-trial-K would
+    # blow away every other trial's landmarks because the npz is rewritten
+    # whole each time.
+    if trial_idx is not None:
+        existing_npz = settings.dlc_path / subject_name / "mediapipe_prelabels.npz"
+        if existing_npz.exists():
+            try:
+                _prev = np.load(str(existing_npz))
+                def _load_into(dst, key):
+                    if key in _prev.files:
+                        src = _prev[key]
+                        n = min(dst.shape[0], src.shape[0])
+                        if src.shape[1:] == dst.shape[1:]:
+                            dst[:n] = src[:n]
+                _load_into(OS_landmarks, "OS_landmarks")
+                _load_into(OD_landmarks, "OD_landmarks")
+                _load_into(OS_all_tracks, "OS_all_tracks")
+                _load_into(OD_all_tracks, "OD_all_tracks")
+                if "confidence_OS" in _prev.files:
+                    src = _prev["confidence_OS"]
+                    n = min(confidence_OS.shape[0], src.shape[0])
+                    confidence_OS[:n] = src[:n]
+                if "confidence_OD" in _prev.files:
+                    src = _prev["confidence_OD"]
+                    n = min(confidence_OD.shape[0], src.shape[0])
+                    confidence_OD[:n] = src[:n]
+            except Exception as _e:
+                logger.warning(f"Could not preload existing npz: {_e} — single-trial run will leave other trials as NaN")
+        else:
+            logger.info(f"No existing npz at {existing_npz} — single-trial run will leave other trials as NaN")
+        # Filter trials list to just the requested index.  Stash the
+        # original index on the trial dict so the per-trial crop_boxes
+        # lookup below still uses the user-visible trial number rather
+        # than ``trials.index(trial)`` (which would always be 0 after
+        # filtering).
+        if 0 <= trial_idx < len(trials):
+            _picked = dict(trials[trial_idx])
+            _picked["__orig_idx__"] = trial_idx
+            trials = [_picked]
+        else:
+            raise ValueError(f"trial_idx {trial_idx} out of range for {subject_name}")
 
     frames_processed = 0
 
@@ -265,13 +326,21 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
         # Create separate MediaPipe instances per camera half
         mp_hands = mp_lib.solutions.hands
         det_L = mp_hands.Hands(
-            static_image_mode=False, max_num_hands=2,
+            static_image_mode=static_image_mode, max_num_hands=2,
             min_detection_confidence=0.5, min_tracking_confidence=0.5,
         )
         det_R = mp_hands.Hands(
-            static_image_mode=False, max_num_hands=2,
+            static_image_mode=static_image_mode, max_num_hands=2,
             min_detection_confidence=0.5, min_tracking_confidence=0.5,
         )
+
+        # Per-trial crop boxes (may be None if not set).  In single-
+        # trial mode the filtered list has length 1, so
+        # ``trials.index(trial)`` would always be 0; fall back to the
+        # original index stashed in ``__orig_idx__`` so we look up the
+        # right crop box from the DB-loaded dict.
+        _t_idx = trial.get("__orig_idx__", trials.index(trial))
+        trial_crop = crop_boxes.get(_t_idx) if crop_boxes else None
 
         # Track up to 2 hands per camera, then pick the tapping hand
         os_tracks = np.full((actual_frame_count, 2, N_JOINTS, 2), np.nan)
@@ -280,6 +349,8 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
         od_conf = np.full((actual_frame_count, 2), np.nan)
         prev_os = [None, None]
         prev_od = [None, None]
+
+        right_w = full_w - midline
 
         for local_frame in range(actual_frame_count):
             ret, frame = cap.read()
@@ -291,16 +362,50 @@ def run_mediapipe(subject_name: str, progress_callback=None) -> str:
             frame_L = frame[:, :midline, :]
             frame_R = frame[:, midline:, :]
 
-            # Process left camera (OS)
-            rgb_L = cv2.cvtColor(frame_L, cv2.COLOR_BGR2RGB)
-            res_L = det_L.process(rgb_L)
-            hands_L, scores_L, _ = _extract_hands(res_L, midline, h)
+            # Process left camera (OS) — apply crop if set
+            crop_L = trial_crop.get("OS") if trial_crop else None
+            if crop_L:
+                cx1 = max(0, int(crop_L[0])); cy1 = max(0, int(crop_L[1]))
+                cx2 = min(midline, int(crop_L[2])); cy2 = min(h, int(crop_L[3]))
+                cropped_L = frame_L[cy1:cy2, cx1:cx2, :]
+                if cropped_L.size > 0:
+                    cw = cx2 - cx1; ch_c = cy2 - cy1
+                    rgb_L = cv2.cvtColor(cropped_L, cv2.COLOR_BGR2RGB)
+                    res_L = det_L.process(rgb_L)
+                    hands_L, scores_L, _ = _extract_hands(res_L, cw, ch_c)
+                    # Offset landmarks back to full half-frame coordinates
+                    for hand in hands_L:
+                        hand[:, 0] += cx1
+                        hand[:, 1] += cy1
+                else:
+                    hands_L, scores_L = [], []
+            else:
+                rgb_L = cv2.cvtColor(frame_L, cv2.COLOR_BGR2RGB)
+                res_L = det_L.process(rgb_L)
+                hands_L, scores_L, _ = _extract_hands(res_L, midline, h)
             _assign_hands_to_tracks(hands_L, scores_L, prev_os, os_tracks, os_conf, local_frame)
 
-            # Process right camera (OD)
-            rgb_R = cv2.cvtColor(frame_R, cv2.COLOR_BGR2RGB)
-            res_R = det_R.process(rgb_R)
-            hands_R, scores_R, _ = _extract_hands(res_R, full_w - midline, h)
+            # Process right camera (OD) — apply crop if set
+            crop_R = trial_crop.get("OD") if trial_crop else None
+            if crop_R:
+                cx1 = max(0, int(crop_R[0])); cy1 = max(0, int(crop_R[1]))
+                cx2 = min(right_w, int(crop_R[2])); cy2 = min(h, int(crop_R[3]))
+                cropped_R = frame_R[cy1:cy2, cx1:cx2, :]
+                if cropped_R.size > 0:
+                    cw = cx2 - cx1; ch_c = cy2 - cy1
+                    rgb_R = cv2.cvtColor(cropped_R, cv2.COLOR_BGR2RGB)
+                    res_R = det_R.process(rgb_R)
+                    hands_R, scores_R, _ = _extract_hands(res_R, cw, ch_c)
+                    # Offset landmarks back to full half-frame coordinates
+                    for hand in hands_R:
+                        hand[:, 0] += cx1
+                        hand[:, 1] += cy1
+                else:
+                    hands_R, scores_R = [], []
+            else:
+                rgb_R = cv2.cvtColor(frame_R, cv2.COLOR_BGR2RGB)
+                res_R = det_R.process(rgb_R)
+                hands_R, scores_R, _ = _extract_hands(res_R, right_w, h)
             _assign_hands_to_tracks(hands_R, scores_R, prev_od, od_tracks, od_conf, local_frame)
 
             frames_processed += 1
@@ -417,36 +522,111 @@ def _compute_2d_distances(landmarks):
     return distances
 
 
+_MAX_PREROLL_TRIM = 10  # Real pre-rolls are typically 1–5 frames; never 30+.
+
+
 def _detect_frame_offset(subject_name: str, npz_data: dict) -> int:
-    """Detect frame offset for misaligned MediaPipe files.
+    """Detect the pre-roll trim offset for MediaPipe NPZ files processed on a
+    different machine.
 
-    When frame counts differ between machines, MediaPipe data may be misaligned.
-    This attempts to detect per-trial misalignments.
+    Some codecs expose negative-PTS pre-roll frames to OpenCV that the browser
+    player never sees.  When the NPZ was built on such a machine it has
+    ``stored_total = expected_total + pre_roll`` extra frames at the *start*.
+    We can correct this deterministically by trimming those frames.
 
-    However, since the offset wasn't applied when the NPZ was saved, we can only
-    detect THAT there's a mismatch, not reliably fix it without knowing the
-    original processing details.
+    Hardening:
+      * Refuses to trim when the offset is suspiciously large
+        (``> _MAX_PREROLL_TRIM``).  Large offsets nearly always come from
+        the npz having been built under a different OpenCV decoder that
+        agreed with the trial-map cv2 about per-file totals at the time
+        but no longer does — trimming the start in that case silently
+        corrupts every trial.  Refuse to trim and emit a clear warning
+        recommending an MP re-run.
+      * Refuses to trim when the offset matches an internal-file decoder
+        gap (one of the trial videos reports more frames in metadata
+        than cv2 can actually decode) — same reason.
 
-    Returns 0 (no correction applied), and logs diagnostics instead.
+    Returns:
+      positive int  – NPZ has this many extra frames at the start; callers
+                      should slice ``arr[offset:]`` before use.
+      0             – counts match, the offset could not be determined,
+                      or trimming was refused as unsafe.
     """
     try:
         trials = build_trial_map(subject_name)
         expected_total = trials[-1]["end_frame"] + 1 if trials else 0
+        stored_total   = int(npz_data.get("total_frames", 0))
 
-        # Array size from the npz
-        stored_total = int(npz_data.get("total_frames", 0))
+        if stored_total == expected_total:
+            return 0
 
-        if stored_total != expected_total:
+        offset = stored_total - expected_total
+
+        if offset > 0:
+            # Per-trial decoder-gap probe: check the frame-count cache for
+            # each trial video and sum any reported-vs-actual gaps.  If the
+            # offset is fully explained by internal-file gaps, the diff is
+            # NOT pre-roll and trimming the start would corrupt earlier
+            # trials.
+            import json
+            from pathlib import Path
+            internal_gap = 0
+            for t in trials:
+                vp = Path(t["video_path"])
+                cache_path = vp.parent / ".frame_counts.json"
+                if not cache_path.exists():
+                    continue
+                try:
+                    cache = json.loads(cache_path.read_text())
+                except (json.JSONDecodeError, OSError):
+                    continue
+                entry = cache.get(vp.name)
+                if not entry:
+                    continue
+                # We don't store cv2-reported metadata counts in the cache,
+                # so the only proxy we have is the cached `count` (actual
+                # decoded).  For the internal-gap check we need to compare
+                # against what cv2 reports right now.
+                try:
+                    import cv2 as _cv2
+                    cap = _cv2.VideoCapture(str(vp))
+                    reported = int(cap.get(_cv2.CAP_PROP_FRAME_COUNT))
+                    cap.release()
+                    actual = int(entry.get("count", reported))
+                    if reported > actual:
+                        internal_gap += (reported - actual)
+                except Exception:
+                    pass
+
+            if internal_gap >= offset:
+                logger.warning(
+                    f"{subject_name}: NPZ has {stored_total} frames, trial map expects "
+                    f"{expected_total} (offset={offset}). Internal-file decoder gaps sum "
+                    f"to {internal_gap} — diff is NOT pre-roll, refusing to trim. "
+                    f"Re-run MediaPipe to rebuild the NPZ under the current cv2."
+                )
+                return 0
+
+            if offset > _MAX_PREROLL_TRIM:
+                logger.warning(
+                    f"{subject_name}: NPZ offset {offset} frames is too large to be "
+                    f"pre-roll (max ≤ {_MAX_PREROLL_TRIM}). Likely a different cv2 decoder "
+                    f"built the NPZ. Refusing to trim — re-run MediaPipe to fix."
+                )
+                return 0
+
+            logger.info(
+                f"{subject_name}: NPZ has {stored_total} frames, trial map expects "
+                f"{expected_total} — trimming {offset} pre-roll frame(s) from start."
+            )
+            return offset
+        else:
             logger.warning(
-                f"{subject_name}: Frame count mismatch detected! "
-                f"NPZ stored {stored_total} frames, but trial map expects {expected_total}. "
-                f"This suggests the video files were processed on a different machine "
-                f"with different codec/frame counting behavior. "
-                f"MediaPipe labels may be misaligned. "
+                f"{subject_name}: Frame count mismatch — NPZ has {stored_total} frames "
+                f"but trial map expects {expected_total} ({-offset} frames missing). "
                 f"Consider reprocessing MediaPipe on this machine."
             )
-
-        return 0  # Conservative: don't attempt auto-correction
+            return 0
     except Exception as e:
         logger.debug(f"Could not detect frame offset for {subject_name}: {e}")
         return 0
@@ -483,30 +663,16 @@ def load_mediapipe_prelabels(subject_name: str) -> dict | None:
         conf_OD = data["confidence_OD"].copy()
         dist = data["distances"].copy() if "distances" in data else None
 
-        # Apply offset correction if needed (shift data forward, pad start with NaN)
+        # Apply pre-roll trim: NPZ stored more frames than the trial map expects
+        # because it was processed on a machine that exposed extra pre-roll frames.
+        # Trim the first `frame_offset` frames so indices align with the trial map.
         if frame_offset > 0:
-            OS_lm_corrected = np.full_like(OS_lm, np.nan)
-            OD_lm_corrected = np.full_like(OD_lm, np.nan)
-            conf_OS_corrected = np.full_like(conf_OS, np.nan)
-            conf_OD_corrected = np.full_like(conf_OD, np.nan)
-
-            # Shift data forward by frame_offset
-            OS_lm_corrected[frame_offset:] = OS_lm[:-frame_offset]
-            OD_lm_corrected[frame_offset:] = OD_lm[:-frame_offset]
-            conf_OS_corrected[frame_offset:] = conf_OS[:-frame_offset]
-            conf_OD_corrected[frame_offset:] = conf_OD[:-frame_offset]
-
+            OS_lm    = OS_lm[frame_offset:]
+            OD_lm    = OD_lm[frame_offset:]
+            conf_OS  = conf_OS[frame_offset:]
+            conf_OD  = conf_OD[frame_offset:]
             if dist is not None:
-                dist_corrected = np.full_like(dist, np.nan)
-                dist_corrected[frame_offset:] = dist[:-frame_offset]
-                dist = dist_corrected
-
-            OS_lm = OS_lm_corrected
-            OD_lm = OD_lm_corrected
-            conf_OS = conf_OS_corrected
-            conf_OD = conf_OD_corrected
-
-            logger.info(f"{subject_name}: Applied frame offset {frame_offset} to MediaPipe data")
+                dist = dist[frame_offset:]
 
         result = {
             "OS_landmarks": OS_lm,
@@ -514,7 +680,7 @@ def load_mediapipe_prelabels(subject_name: str) -> dict | None:
             "confidence_OS": conf_OS,
             "confidence_OD": conf_OD,
             "distances": dist if dist is not None else data.get("distances"),
-            "total_frames": int(data["total_frames"]),
+            "total_frames": len(OS_lm),  # use trimmed length
         }
         # Preserve run history keys
         for k in data.files if hasattr(data, 'files') else data:

@@ -258,6 +258,7 @@ const labeler = (() => {
     // ── Init ──────────────────────────────────────────
     // Detect whether this is the MediaPipe page or the DLC page
     const isMediaPipePage = window.location.pathname === '/mediapipe';
+    const isEventsPage = window.location.pathname === '/events';
 
     function init() {
         const params = new URLSearchParams(window.location.search);
@@ -489,6 +490,14 @@ const labeler = (() => {
                 // Slightly enlarge distance trace for comparison
                 const distContainer = document.getElementById('distanceTraceContainer');
                 if (distContainer) distContainer.style.height = '180px';
+            } else if (isEventsPage) {
+                // Events page: same as DLC but hide mode switcher (standalone page)
+                if (mpCropSection) mpCropSection.style.display = 'none';
+                if (modeSwitcher) modeSwitcher.style.display = 'none';
+                // Highlight Events nav link
+                document.querySelectorAll('nav a').forEach(a => {
+                    a.classList.toggle('active', a.getAttribute('href') === '/events');
+                });
             } else {
                 // DLC page: hide MP controls, show DLC UI
                 if (mpCropSection) mpCropSection.style.display = 'none';
@@ -864,7 +873,8 @@ const labeler = (() => {
                 currentEventTrialIdx = newTrial;
                 const trialLabel = document.getElementById('trialSelectorLabel');
                 if (trialLabel && trials[currentEventTrialIdx]) {
-                    trialLabel.textContent = trials[currentEventTrialIdx].trial_name;
+                    const tn = trials[currentEventTrialIdx].trial_name;
+                    trialLabel.textContent = tn.includes('_') ? tn.split('_').slice(1).join('_') : tn;
                 }
                 updateEventCounts();
                 // Re-render distance trace for the new trial
@@ -874,7 +884,8 @@ const labeler = (() => {
                 if (overlay && overlay.classList.contains('active')) {
                     const modalTrial = document.getElementById('detectModalTrial');
                     if (modalTrial && trials[currentEventTrialIdx]) {
-                        modalTrial.textContent = `(${trials[currentEventTrialIdx].trial_name})`;
+                        const tn = trials[currentEventTrialIdx].trial_name;
+                        modalTrial.textContent = `(${tn.includes('_') ? tn.split('_').slice(1).join('_') : tn})`;
                     }
                     showMetricPlotsForCurrentTrial();
                 }
@@ -1597,8 +1608,19 @@ const labeler = (() => {
         _updateMpCamStatus();
     }
 
-    // ── Helper: get current trial index from currentFrame ──
+    // ── Helper: get current trial index ──
+    // Prefer ``currentTrialIdx`` (the trial the video element is loaded
+    // with — set whenever the user explicitly switches trials).  Only
+    // fall back to the frame-range lookup when that's not set yet (initial
+    // page load).  Previously this function ignored ``currentTrialIdx``
+    // entirely and walked the frame ranges; if ``currentFrame`` lagged
+    // behind the trial switch (e.g. the user clicked Re-run before the
+    // video catch-up landed it in the new trial's range), it silently
+    // returned 0 = L1.  That's why "MP for R1" sometimes ran on L1.
     function _getCurrentTrialIdx() {
+        if (typeof currentTrialIdx === 'number' && currentTrialIdx >= 0 && currentTrialIdx < trials.length) {
+            return currentTrialIdx;
+        }
         for (let i = 0; i < trials.length; i++) {
             if (currentFrame >= trials[i].start_frame && currentFrame <= trials[i].end_frame) {
                 return i;
@@ -4721,7 +4743,8 @@ const labeler = (() => {
             currentEventTrialIdx = getTrialForFrame(currentFrame);
             const trialLabel = document.getElementById('trialSelectorLabel');
             if (trialLabel && trials[currentEventTrialIdx]) {
-                trialLabel.textContent = trials[currentEventTrialIdx].trial_name;
+                const tn = trials[currentEventTrialIdx].trial_name;
+                trialLabel.textContent = tn.includes('_') ? tn.split('_').slice(1).join('_') : tn;
             }
             updateEventCounts();
             renderDistanceTrace();
@@ -4874,7 +4897,8 @@ const labeler = (() => {
         if (overlay) overlay.classList.add('active');
         const trialLabel = document.getElementById('detectModalTrial');
         if (trialLabel && trials[currentEventTrialIdx]) {
-            trialLabel.textContent = `(${trials[currentEventTrialIdx].trial_name})`;
+            const tn = trials[currentEventTrialIdx].trial_name;
+            trialLabel.textContent = `(${tn.includes('_') ? tn.split('_').slice(1).join('_') : tn})`;
         }
 
         // Auto-default "Peaks only" based on saved events for current trial
@@ -5236,7 +5260,8 @@ const labeler = (() => {
             const trialEvents = eventsInTrial(currentEventTrialIdx);
             const total = EVENT_TYPES.reduce((s, t) => s + (trialEvents[t] || []).length, 0);
             const modeLabel = peaksOnly ? 'peaks' : 'events';
-            updateLabelInfo(`Detected ${total} ${modeLabel} in ${trial.trial_name} — Save to keep`);
+            const tn = trial.trial_name.includes('_') ? trial.trial_name.split('_').slice(1).join('_') : trial.trial_name;
+            updateLabelInfo(`Detected ${total} ${modeLabel} in ${tn} — Save to keep`);
         } catch (e) {
             alert('Detection failed: ' + e.message);
         } finally {

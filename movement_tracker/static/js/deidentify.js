@@ -15,6 +15,39 @@ const deid = (() => {
     let playTimer = null;
     let playbackSpeed = 1.0;
 
+    // Render queue
+    let _renderInProgress = false;
+    let _renderQueue = []; // [{subjectId, trialIdx, trialName}]
+
+    // Remote server detection
+    let _hasRemote = false;
+    (async () => {
+        try {
+            const s = await API.get('/api/settings');
+            _hasRemote = !!(s.remote_host && s.remote_host.trim());
+        } catch {}
+    })();
+
+    /** Show inline Local/Remote buttons inside a Run button.
+     *  If no remote server, resolves 'local-cpu' immediately. */
+    function _promptTarget(btn) {
+        return new Promise(resolve => {
+            if (!_hasRemote) { resolve('local-cpu'); return; }
+            const origHTML = btn.innerHTML;
+            const origOnclick = btn.onclick;
+            btn.onclick = null;
+            btn.style.padding = '0';
+            btn.innerHTML = `<span style="display:flex;gap:2px;width:100%;height:100%;">
+                <button class="btn btn-sm btn-success" style="flex:1;font-size:10px;border-radius:3px 0 0 3px;">Local</button>
+                <button class="btn btn-sm btn-success" style="flex:1;font-size:10px;border-radius:0 3px 3px 0;">Remote</button>
+            </span>`;
+            const [localBtn, remoteBtn] = btn.querySelectorAll('button');
+            const cleanup = () => { btn.innerHTML = origHTML; btn.onclick = origOnclick; btn.style.padding = ''; };
+            localBtn.addEventListener('click', e => { e.stopPropagation(); cleanup(); resolve('local-cpu'); });
+            remoteBtn.addEventListener('click', e => { e.stopPropagation(); cleanup(); resolve('remote'); });
+        });
+    }
+
     // Camera
     let cameraMode = 'stereo';
     let cameraNames = ['OS', 'OD'];
@@ -22,7 +55,22 @@ const deid = (() => {
     let hasMediapipe = false;
 
     // Face detection results: [{frame, faces: [{x1,y1,x2,y2,side}]}]
+    // faceDetByLocalFrame is a Map<localFrame, faces[]> built whenever faceDetections
+    // changes — avoids the dense-index bug (faceDetections[localFrame] is wrong because
+    // the array is sparse: only frames with detections are present).
     let faceDetections = [];
+    let faceDetByLocalFrame = new Map();
+    let _pendingAutoCreateFaceSpots = false;
+
+    function _rebuildFaceDetMap() {
+        faceDetByLocalFrame = new Map();
+        if (!trialMeta) return;
+        const startFrame = trialMeta.start_frame || 0;
+        for (const entry of faceDetections) {
+            const lf = entry.frame - startFrame;
+            faceDetByLocalFrame.set(lf, entry.faces || []);
+        }
+    }
     // Active blur spots: [{id, spot_type, x, y, radius, frame_start, frame_end, side}]
     let blurSpots = [];
     let nextSpotId = 1;
@@ -43,6 +91,13 @@ const deid = (() => {
     let handSmooth = 7;  // morphological close on hand circles
     let handSmooth2 = 0;  // unified: set to 0, only smooth (pre-forearm) is used
     let handMaskEnabled = true;
+    // Hand-mask source: 'mediapipe' (default — current circle-based mask
+    // built from MP keypoints) or 'hrnet' (threshold the per-frame
+    // max-over-21-joints heatmap, then smooth).  Sliders specific to the
+    // HRnet path live in #hrnetHandControls.
+    let handMaskSource = 'mediapipe';
+    let hrnetMaskThresh = 0.30;
+    let hrnetMaskSmooth = 7;
     // dlcRadius removed — all hand keypoints use the same marker size
     let hasDlcLabels = false;
 
@@ -112,7 +167,7 @@ const deid = (() => {
         renderSpotList();
         updateSpotControls();
         scheduleSave();
-        _saveHandSettings();
+        saveHandSettings();
         render();
         renderTimeline();
     }
@@ -128,7 +183,7 @@ const deid = (() => {
         renderSpotList();
         updateSpotControls();
         scheduleSave();
-        _saveHandSettings();
+        saveHandSettings();
         render();
         renderTimeline();
     }
@@ -179,6 +234,24 @@ const deid = (() => {
         // Keyboard
         document.addEventListener('keydown', onKeyDown);
 
+        // Save on page unload (handles browser refresh, tab close, navigation away)
+        window.addEventListener('beforeunload', () => {
+            if (!subjectId || currentTrialIdx < 0 || blurSpots.length === 0) return;
+            if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+            const specs = blurSpots.map(s => ({
+                spot_type: s.spot_type, x: s.x, y: s.y, radius: s.radius,
+                width: s.width || null, height: s.height || null,
+                offset_x: s.offset_x || 0, offset_y: s.offset_y || 0,
+                frame_start: s.frame_start, frame_end: s.frame_end,
+                side: s.side || 'full', shape: s.shape || 'oval',
+            }));
+            const blob = new Blob(
+                [JSON.stringify({ trial_idx: currentTrialIdx, specs })],
+                { type: 'application/json' }
+            );
+            navigator.sendBeacon(`/api/deidentify/${subjectId}/blur-specs`, blob);
+        });
+
         // Resize
         window.addEventListener('resize', () => {
             if (!hasUserZoom) fitImage();
@@ -218,7 +291,7 @@ const deid = (() => {
         subjectId = sid;
         sessionStorage.setItem('dlc_lastSubjectId', String(sid));
         if (typeof setNavState === 'function') setNavState({ subjectId: sid });
-        faceDetections = [];
+        faceDetections = []; faceDetByLocalFrame = new Map(); _pendingAutoCreateFaceSpots = false;
         blurSpots = [];
         selectedSpotId = null;
         handLandmarks = [];
@@ -229,6 +302,10 @@ const deid = (() => {
             trials = data.trials;
             cameraMode = data.subject.camera_mode || 'stereo';
             hasMediapipe = data.has_mediapipe || false;
+            const hasPose = data.has_pose || false;
+            // Hide "Detect Pose" button if both hand and pose detection are done
+            const goBtn = document.getElementById('goAnalyzeBtn');
+            if (goBtn) goBtn.style.display = (hasMediapipe && hasPose) ? 'none' : '';
 
             // Set camera names
             if (cameraMode === 'single') {
@@ -263,7 +340,7 @@ const deid = (() => {
         trials.forEach((t, i) => {
             const btn = document.createElement('button');
             btn.className = 'trial-btn';
-            btn.textContent = t.trial_name;
+            btn.textContent = t.trial_name.includes('_') ? t.trial_name.split('_').slice(1).join('_') : t.trial_name;
             // Color: green if no faces or already deidentified, red if needs deident
             if (!t.has_faces || t.has_blurred) {
                 btn.style.borderColor = 'var(--green)';
@@ -303,55 +380,43 @@ const deid = (() => {
     // ── Select trial ──
     async function selectTrial(idx) {
         if (playing) togglePlay();
+        // Flush any pending save for the previous trial before switching
+        if (saveTimer) {
+            clearTimeout(saveTimer);
+            saveTimer = null;
+            await saveSpecs();
+        }
         currentTrialIdx = idx;
         trialMeta = trials[idx];
         currentFrame = trialMeta.start_frame;
         if (typeof setNavState === 'function') setNavState({ trialIdx: idx, frame: currentFrame });
 
-        // Fall back to 'original' if current view mode requires blurred video that doesn't exist
-        if (viewMode === 'deidentified' && (!trialMeta || !trialMeta.has_blurred)) {
-            viewMode = 'original';
-        }
+        // Always start in mask-editing mode when switching trials
+        viewMode = 'original';
         _updateViewButtons();
         _updateSidebarState();
+        // Sync "has faces" checkbox
+        const hfToggle = document.getElementById('hasFacesToggle');
+        if (hfToggle) hfToggle.checked = trialMeta.has_faces !== false;
         totalFrames = trialMeta.frame_count;
         fps = trialMeta.fps || 30;
         handLandmarks = [];
         handLandmarksBulk = {}; // clear bulk cache for new trial
 
-        // Load saved face detections from DB
-        try {
-            const fdResp = await API.get(`/api/deidentify/${subjectId}/face-detections?trial_idx=${idx}`);
+        // Load face detections and blur specs in parallel
+        {
+            let fdResp = { faces: [] }, bsResp = { specs: [] };
+            try {
+                [fdResp, bsResp] = await Promise.all([
+                    API.get(`/api/deidentify/${subjectId}/face-detections?trial_idx=${idx}`),
+                    API.get(`/api/deidentify/${subjectId}/blur-specs?trial_idx=${idx}`),
+                ]);
+            } catch (e) {}
+
             faceDetections = fdResp.faces || [];
-            if (faceDetections.length > 0) {
-                const nFaces = faceDetections.filter(f => f.faces.length > 0).length;
-                document.getElementById('faceDetStatus').textContent =
-                    `${nFaces} frames with faces`;
-                document.getElementById('detectFacesBtn').style.display = 'block';
-                document.getElementById('detectFacesBtn').textContent = 'Re-detect Faces';
-            } else {
-                // No saved detections — auto-detect
-                document.getElementById('faceDetStatus').textContent = 'Detecting faces...';
-                // Fire and forget — will update UI when done
-                _autoDetectFaces(idx);
-            }
-        } catch (e) {
-            faceDetections = [];
-            document.getElementById('faceDetStatus').textContent = 'Detecting faces...';
-            _autoDetectFaces(idx);
-        }
+            _rebuildFaceDetMap();
+            blurSpots = (bsResp.specs || []).map(s => ({ ...s, id: nextSpotId++ }));
 
-        // Update UI
-        document.querySelectorAll('.trial-btn').forEach((b, i) => {
-            b.classList.toggle('active', i === idx);
-        });
-
-        // (frame slider removed — timeline handles navigation)
-
-        // Load saved blur specs
-        try {
-            const resp = await API.get(`/api/deidentify/${subjectId}/blur-specs?trial_idx=${idx}`);
-            blurSpots = (resp.specs || []).map(s => ({ ...s, id: nextSpotId++ }));
             // Warn about legacy face spots without proper side assignment
             if (cameraMode === 'stereo') {
                 const legacy = blurSpots.filter(s => s.spot_type === 'face' && (!s.side || s.side === 'full'));
@@ -360,9 +425,30 @@ const deid = (() => {
                         'Re-run Detect Faces to assign blur spots to individual cameras.';
                 }
             }
-        } catch (e) {
-            blurSpots = [];
+
+            if (faceDetections.length > 0) {
+                const nFaces = faceDetections.filter(f => f.faces.length > 0).length;
+                document.getElementById('faceDetStatus').textContent = `${nFaces} frames with faces`;
+                document.getElementById('detectFacesBtn').style.display = 'block';
+                document.getElementById('detectFacesBtn').textContent = 'Re-detect Faces';
+                // Don't auto-create face spots — respect user's edits.
+                // Face spots are only created after explicit "Detect Faces" click.
+            } else if (blurSpots.length === 0 && !bsResp._ever_saved) {
+                // Trial has never been touched — auto-detect faces on first visit
+                document.getElementById('faceDetStatus').textContent = 'Detecting faces...';
+                _autoDetectFaces(idx);
+            } else {
+                // Trial has been edited but detections not saved — show button only
+                document.getElementById('detectFacesBtn').style.display = 'block';
+                document.getElementById('detectFacesBtn').textContent = 'Detect Faces';
+                document.getElementById('faceDetStatus').textContent = '';
+            }
         }
+
+        // Update UI
+        document.querySelectorAll('.trial-btn').forEach((b, i) => {
+            b.classList.toggle('active', i === idx);
+        });
 
         // Load hand protection segments
         handProtectSegments = [];
@@ -376,6 +462,11 @@ const deid = (() => {
             handSmooth2 = hs.hand_smooth2 || 0;
             handTemporalSmooth = hs.hand_temporal || 0;
             handOverlayEnabled = hs.show_landmarks || false;
+            // Hand-mask source + HRnet sliders (added later — use defaults
+            // if absent for back-compat with older saved rows).
+            handMaskSource = hs.mask_source === 'hrnet' ? 'hrnet' : 'mediapipe';
+            hrnetMaskThresh = hs.hrnet_mask_thresh != null ? hs.hrnet_mask_thresh : 0.30;
+            hrnetMaskSmooth = hs.hrnet_mask_smooth != null ? hs.hrnet_mask_smooth : 7;
             document.getElementById('handRadiusSlider').value = handMaskRadius;
             document.getElementById('handRadiusVal').textContent = handMaskRadius;
             document.getElementById('handSmoothSlider').value = handSmooth;
@@ -391,6 +482,25 @@ const deid = (() => {
             if (temporalVal) { temporalVal.textContent = handTemporalSmooth; }
             const overlayToggle = document.getElementById('handOverlayToggle');
             if (overlayToggle) { overlayToggle.checked = handOverlayEnabled; }
+            // Restore hand-mask source radio + HRnet slider DOM values.
+            const _srcRadio = document.querySelector(
+                `input[name="handMaskSource"][value="${handMaskSource}"]`
+            );
+            if (_srcRadio) _srcRadio.checked = true;
+            const _mpBox = document.getElementById('mpHandControls');
+            const _hrBox = document.getElementById('hrnetHandControls');
+            if (_mpBox) _mpBox.style.display = handMaskSource === 'mediapipe' ? '' : 'none';
+            if (_hrBox) _hrBox.style.display = handMaskSource === 'hrnet' ? '' : 'none';
+            const _ovLbl = document.getElementById('handOverlayLabel');
+            if (_ovLbl) _ovLbl.style.display = handMaskSource === 'mediapipe' ? '' : 'none';
+            const _hrThS = document.getElementById('hrnetMaskThreshSlider');
+            const _hrThV = document.getElementById('hrnetMaskThreshVal');
+            if (_hrThS) _hrThS.value = hrnetMaskThresh;
+            if (_hrThV) _hrThV.textContent = hrnetMaskThresh.toFixed(2);
+            const _hrSmS = document.getElementById('hrnetMaskSmoothSlider');
+            const _hrSmV = document.getElementById('hrnetMaskSmoothVal');
+            if (_hrSmS) _hrSmS.value = hrnetMaskSmooth;
+            if (_hrSmV) _hrSmV.textContent = hrnetMaskSmooth;
             if (hs.segments && hs.segments.length > 0) {
                 handProtectSegments = hs.segments.map(s => ({
                     id: nextHandSegId++,
@@ -400,11 +510,11 @@ const deid = (() => {
                     smooth: s.smooth != null ? s.smooth : handSmooth,
                     side: s.side || null,  // null = legacy (applies to both cameras)
                 }));
-            } else if ('segments' in hs) {
-                // User intentionally cleared all segments — keep empty
+            } else if (hs.has_row) {
+                // DB row exists with no segments — user intentionally cleared, respect that
                 handProtectSegments = [];
             } else if (hasMediapipe && trialMeta) {
-                // No segments key = never configured — create per-camera defaults
+                // No DB row = never configured — create per-camera defaults
                 handProtectSegments = [];
                 const sides = cameraMode === 'single' ? ['full'] : ['left', 'right'];
                 for (const side of sides) {
@@ -449,7 +559,7 @@ const deid = (() => {
             } catch (e) {}
         }
 
-        _updateViewButtons();
+        _updateSidebarState();
         await loadFrame(currentFrame);
         renderSpotList();
         renderTimeline();
@@ -532,48 +642,45 @@ const deid = (() => {
     }
 
     function _updateViewButtons() {
-        const btns = {
-            original: document.getElementById('viewOriginal'),
-            preview: document.getElementById('viewPreview'),
-            deidentified: document.getElementById('viewDeidentified'),
-        };
-        for (const [mode, btn] of Object.entries(btns)) {
-            if (!btn) continue;
-            if (mode === viewMode) {
-                btn.style.background = 'var(--blue)';
-                btn.style.color = '#fff';
-            } else {
-                btn.style.background = '';
-                btn.style.color = '';
-            }
-        }
-        // Disable deidentified button if no rendered video
-        const deidBtn = btns.deidentified;
-        if (deidBtn) {
-            deidBtn.disabled = !trialMeta || !trialMeta.has_blurred;
-            deidBtn.title = (!trialMeta || !trialMeta.has_blurred)
-                ? 'Render first to enable' : 'Show blurred video';
+        // Update View Deidentified Video button availability
+        const viewDeidBtn = document.getElementById('viewDeidBtn');
+        if (viewDeidBtn) {
+            const avail = trialMeta && trialMeta.has_blurred;
+            viewDeidBtn.disabled = !avail;
+            viewDeidBtn.style.opacity = avail ? '' : '0.35';
+            viewDeidBtn.title = avail ? 'View deidentified video' : 'Render first to enable';
         }
     }
 
     function _updateSidebarState() {
         const sidebar = document.querySelector('.deid-sidebar');
         if (!sidebar) return;
-        if (viewMode === 'deidentified' || viewMode === 'preview') {
-            sidebar.style.opacity = '0.4';
-            sidebar.style.pointerEvents = 'none';
-            // Keep render button active in preview mode
-            if (viewMode === 'preview') {
-                const renderSection = document.getElementById('renderSection');
-                if (renderSection) {
-                    renderSection.style.opacity = '';
-                    renderSection.style.pointerEvents = '';
-                }
+        const renderSection = document.getElementById('renderSection');
+
+        // Show the correct workflow button group
+        const maskBtns    = document.getElementById('workflowMaskBtns');
+        const previewBtns = document.getElementById('workflowPreviewBtns');
+        const deidBtns    = document.getElementById('workflowDeidBtns');
+        if (maskBtns)    maskBtns.style.display    = viewMode === 'original'      ? '' : 'none';
+        if (previewBtns) previewBtns.style.display  = viewMode === 'preview'       ? '' : 'none';
+        if (deidBtns)    deidBtns.style.display     = viewMode === 'deidentified'  ? '' : 'none';
+
+        // Keep the View Deidentified Video button in sync
+        _updateViewButtons();
+
+        // Dim non-workflow sections when not in mask-editing mode.
+        // The renderSection (workflow buttons) always stays interactive.
+        const allSections = sidebar.querySelectorAll('.section');
+        const shouldDimOthers = (viewMode === 'preview' || viewMode === 'deidentified');
+        allSections.forEach(s => {
+            if (s === renderSection) {
+                s.style.opacity = '';
+                s.style.pointerEvents = '';
+            } else {
+                s.style.opacity    = shouldDimOthers ? '0.4' : '';
+                s.style.pointerEvents = shouldDimOthers ? 'none' : '';
             }
-        } else {
-            sidebar.style.opacity = '';
-            sidebar.style.pointerEvents = '';
-        }
+        });
     }
 
     function toggleSide() {
@@ -589,19 +696,11 @@ const deid = (() => {
         loadFrame(currentFrame);
     }
 
-    // ── Go to MediaPipe page for this subject ──
-    function goToMediapipe() {
-        if (!subjectId) return;
-        sessionStorage.setItem('deid_returnFrame', currentFrame);
-        sessionStorage.setItem('deid_returnSubject', subjectId);
-        window.location.href = `/analyze?subject=${subjectId}`;
-    }
-
     function goToAnalyze() {
         if (!subjectId) return;
         sessionStorage.setItem('deid_returnFrame', currentFrame);
         sessionStorage.setItem('deid_returnSubject', subjectId);
-        window.location.href = `/analyze?subject=${subjectId}`;
+        window.location.href = `/mano?subject=${subjectId}`;
     }
 
     // ── Side label mapping (stereo: left/right ↔ camera names) ──
@@ -624,8 +723,8 @@ const deid = (() => {
         // For face spots: track the nearest face detection centroid + offset
         if (spot.spot_type === 'face' && faceDetections.length > 0) {
             const localFrame = currentFrame - (trialMeta ? trialMeta.start_frame : 0);
-            if (localFrame >= 0 && localFrame < faceDetections.length) {
-                const faces = _facesForCurrentSide(faceDetections[localFrame]);
+            if (localFrame >= 0) {
+                const faces = _facesForCurrentSide({ faces: faceDetByLocalFrame.get(localFrame) || [] });
                 if (faces.length > 0) {
                     // Find closest face to spot's reference position
                     let bestFace = faces[0];
@@ -675,6 +774,151 @@ const deid = (() => {
         return c3;
     }
 
+    // ── HRnet MIP cache + client-side mask builder ───────────────────────
+    // When handMaskSource === 'hrnet' we threshold each frame's max-over-
+    // joints heatmap (loaded once per trial) and place it into the canvas
+    // at the per-frame bbox.  Slider changes (threshold / smooth) just
+    // re-run this builder — no server round-trip.
+    let _hrnetMaskData = null;       // {mip_L: Float32Array, mip_R, bbox_L, bbox_R, n_frames, start_frame, mip_size}
+    let _hrnetMaskTrialIdx = -1;     // which trial _hrnetMaskData was loaded for
+    let _hrnetMaskFetchInFlight = null;
+
+    function _decodeFloat16ToFloat32(b64) {
+        // Decode a base64-encoded float16 buffer into a Float32Array via
+        // a one-pass conversion through Uint16Array.  IEEE 754 half →
+        // float reconstruction; only handles finite values which is what
+        // HRnet MIPs contain (∈ [0, 1]).
+        if (!b64) return null;
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const u16 = new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+        const f32 = new Float32Array(u16.length);
+        for (let i = 0; i < u16.length; i++) {
+            const h = u16[i];
+            const sign = (h & 0x8000) >> 15;
+            const exp = (h & 0x7c00) >> 10;
+            const frac = h & 0x03ff;
+            let v;
+            if (exp === 0) v = (sign ? -1 : 1) * Math.pow(2, -14) * (frac / 1024);
+            else if (exp === 0x1f) v = frac ? NaN : (sign ? -Infinity : Infinity);
+            else v = (sign ? -1 : 1) * Math.pow(2, exp - 15) * (1 + frac / 1024);
+            f32[i] = v;
+        }
+        return f32;
+    }
+
+    async function _ensureHrnetMaskData() {
+        if (currentTrialIdx < 0 || !subjectId) return null;
+        if (_hrnetMaskTrialIdx === currentTrialIdx && _hrnetMaskData) return _hrnetMaskData;
+        if (_hrnetMaskFetchInFlight) return _hrnetMaskFetchInFlight;
+        _hrnetMaskFetchInFlight = (async () => {
+            try {
+                const r = await API.get(`/api/deidentify/${subjectId}/hrnet-mask-data?trial_idx=${currentTrialIdx}`);
+                if (!r.available) {
+                    _hrnetMaskData = null;
+                    return null;
+                }
+                _hrnetMaskData = {
+                    mip_L: _decodeFloat16ToFloat32(r.mip_L_b64),
+                    mip_L_shape: r.mip_L_shape,
+                    mip_R: _decodeFloat16ToFloat32(r.mip_R_b64),
+                    mip_R_shape: r.mip_R_shape,
+                    bbox_L: r.bbox_L || [],
+                    bbox_R: r.bbox_R || [],
+                    n_frames: r.n_frames,
+                    start_frame: r.start_frame,
+                    mip_size: r.mip_size || 64,
+                };
+                _hrnetMaskTrialIdx = currentTrialIdx;
+                return _hrnetMaskData;
+            } catch (e) {
+                console.warn('hrnet-mask-data fetch failed:', e);
+                return null;
+            } finally {
+                _hrnetMaskFetchInFlight = null;
+            }
+        })();
+        return _hrnetMaskFetchInFlight;
+    }
+
+    function _buildHandMaskHrnet(frameInTrial, side, smoothPx, w, h) {
+        // Returns an offscreen canvas with the binary HRnet mask painted
+        // white where MIP > threshold, then Gaussian-blurred + thresholded
+        // for smooth edges.  Trial-relative frame index, since the MIP is
+        // sized to the trial.
+        const data = _hrnetMaskData;
+        if (!data) return null;
+        const f = Math.min(Math.max(0, frameInTrial), data.n_frames - 1);
+        const mip = side === 'OS' ? data.mip_L : data.mip_R;
+        const bboxes = side === 'OS' ? data.bbox_L : data.bbox_R;
+        if (!mip || !bboxes || !bboxes[f]) return null;
+        const S = data.mip_size;                         // 64
+        const off = f * S * S;
+        const bbox = bboxes[f];                           // [x1, y1, x2, y2] in image px
+        const bx = bbox[0], by = bbox[1];
+        const bw = bbox[2] - bbox[0], bh = bbox[3] - bbox[1];
+        if (bw <= 0 || bh <= 0) return null;
+
+        // Step 1: build a 64×64 binary mask at the threshold.
+        //
+        // The saved MIP comes from sigmoid(logits) in the inference
+        // pipeline → bimodal: most pixels at the ~0.7 background floor,
+        // a thin tail at joint peaks near 1.0.  Anchoring the lower
+        // end at the per-frame MEDIAN (which sits inside that
+        // background spike) and the upper end at the per-frame max
+        // makes the threshold slider span the actually-interesting
+        // shoulder + peak portion instead of cliff-dropping at
+        // threshold ≈ 0.  Matches the server-side normalisation.
+        const samples = [];
+        let hi = -Infinity;
+        for (let i = 0; i < S * S; i++) {
+            const v = mip[off + i];
+            samples.push(v);
+            if (v > hi) hi = v;
+        }
+        samples.sort((a, b) => a - b);
+        const baseline = samples[(S * S) >> 1]; // median
+        const span = hi - baseline;
+        const small = document.createElement('canvas');
+        small.width = S; small.height = S;
+        const sCtx = small.getContext('2d');
+        const img = sCtx.createImageData(S, S);
+        const thresh = hrnetMaskThresh;
+        for (let i = 0; i < S * S; i++) {
+            let v = span > 1e-6 ? (mip[off + i] - baseline) / span : 0;
+            if (v < 0) v = 0;
+            else if (v > 1) v = 1;
+            const on = v > thresh ? 255 : 0;
+            const j = i * 4;
+            img.data[j] = on; img.data[j+1] = on; img.data[j+2] = on; img.data[j+3] = on;
+        }
+        sCtx.putImageData(img, 0, 0);
+
+        // Step 2: upscale the 64×64 binary mask onto a canvas-sized buffer
+        // at the bbox location.  Use nearest-neighbor (smoothing disabled)
+        // so the intermediate stays binary — the morphological close in
+        // step 3 owns all the smoothing + dilation.
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const cx = c.getContext('2d');
+        cx.imageSmoothingEnabled = false;
+        cx.drawImage(small,
+            offsetX + bx * scale, offsetY + by * scale,
+            bw * scale,           bh * scale);
+
+        // Step 3: morphological close — identical to the MP path's
+        // _buildHandMask finalization.  Blurs the binary mask, stacks
+        // 8 draws to saturate alpha, then thresholds at >30.  This
+        // DILATES the foreground (the hand) as smoothPx grows.  The
+        // earlier inline `blur + threshold@127` was approximately
+        // identity at the hand interior but eroded the hand at the
+        // bbox edges (where the binary white neighbors empty canvas),
+        // which is what made the slider look like it was acting on
+        // the background.
+        return _morphClose(c, smoothPx);
+    }
+
     // ── Build smoothed hand protection mask ──
     function _buildHandMask(landmarks, radiusPx, forearmPx, smoothPx, smooth2Px, w, h) {
         // Replace MediaPipe fingertips with DLC labels when available
@@ -722,8 +966,16 @@ const deid = (() => {
             for (let ci = 0; ci < chain.length - 1; ci++) {
                 const a = byJoint[chain[ci]];
                 const b = byJoint[chain[ci + 1]];
-                if (a && b) {
-                    allPoints.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, type: 'interp' });
+                if (!a || !b) continue;
+                // wrist→MCP segment (ci=0) gets three palm-fill rows at
+                // 1/4, 1/2, 3/4; finger inter-joint segments only need 1/2.
+                const fracs = ci === 0 ? [0.25, 0.5, 0.75] : [0.5];
+                for (const f of fracs) {
+                    allPoints.push({
+                        x: a.x + f * (b.x - a.x),
+                        y: a.y + f * (b.y - a.y),
+                        type: 'interp',
+                    });
                 }
             }
         }
@@ -833,18 +1085,34 @@ const deid = (() => {
             bCtx.fill();
         }
 
-        // Build and subtract hand protection mask
+        // Build and subtract hand protection mask.  Two source paths:
+        //  - MediaPipe: stamp circles at landmark positions (requires
+        //    landmarks for the current frame).
+        //  - HRnet: threshold the MIP at the per-frame bbox (works
+        //    without any MediaPipe labels).
         const landmarks = _getVisibleLandmarks();
-        if (landmarks.length > 0) {
-            const activeSegment = _getActiveHandSegment();
-            if (activeSegment) {
+        const activeSegment = _getActiveHandSegment();
+        if (activeSegment) {
+            let handMask = null;
+            if (handMaskSource === 'hrnet') {
+                if (_hrnetMaskData && _hrnetMaskTrialIdx === currentTrialIdx) {
+                    const frameInTrial = currentFrame - (_hrnetMaskData.start_frame || 0);
+                    const _curSide = _sideLabel();
+                    handMask = _buildHandMaskHrnet(
+                        frameInTrial, _curSide === 'left' ? 'OS' : 'OD',
+                        hrnetMaskSmooth * scale, cw, ch,
+                    );
+                } else {
+                    _ensureHrnetMaskData().then(d => { if (d) render(); });
+                }
+            } else if (landmarks.length > 0) {
                 const radiusPx = (activeSegment.radius || handMaskRadius) * scale;
                 const faPx = forearmRadius * scale;
                 const smPx = (activeSegment.smooth != null ? activeSegment.smooth : handSmooth) * scale;
                 const sm2Px = handSmooth2 * scale;
-                const handMask = _buildHandMask(landmarks, radiusPx, faPx, smPx, sm2Px, cw, ch);
-
-                // Subtract hand mask from blur using destination-out
+                handMask = _buildHandMask(landmarks, radiusPx, faPx, smPx, sm2Px, cw, ch);
+            }
+            if (handMask) {
                 bCtx.globalCompositeOperation = 'destination-out';
                 bCtx.drawImage(handMask, 0, 0);
                 bCtx.globalCompositeOperation = 'source-over';
@@ -921,8 +1189,8 @@ const deid = (() => {
 
         // Draw face detections (blue dashed rectangles) — filtered by current side
         const localFrame = currentFrame - (trialMeta ? trialMeta.start_frame : 0);
-        if (faceDetections.length > localFrame) {
-            const faces = _facesForCurrentSide(faceDetections[localFrame]);
+        {
+            const faces = _facesForCurrentSide({ faces: faceDetByLocalFrame.get(localFrame) || [] });
             if (faces.length > 0) {
                 ctx.setLineDash([6, 4]);
                 ctx.strokeStyle = 'rgba(33,150,243,0.8)';
@@ -947,16 +1215,39 @@ const deid = (() => {
             currentFrame >= s.start && currentFrame <= s.end &&
             (!s.side || s.side === curSideLabel || s.side === 'full')
         );
-        const handProtectActive = activeSeg && visibleLandmarks.length > 0;
+        // HRnet doesn't need MP landmarks — it builds the mask from the
+        // MIP heatmap at the per-frame bbox.  Only require MP labels for
+        // the MediaPipe source.
+        const handProtectActive = activeSeg
+            && (handMaskSource === 'hrnet' || visibleLandmarks.length > 0);
         const activeProtectRadius = activeSeg ? (activeSeg.radius || handMaskRadius) : handMaskRadius;
         const activeSmooth = activeSeg ? (activeSeg.smooth != null ? activeSeg.smooth : handSmooth) : handSmooth;
 
-        // Build smoothed hand mask (morphological close via blur+threshold)
+        // Build smoothed hand mask (morphological close via blur+threshold).
+        // For HRnet source we use the per-frame MIP threshold instead of
+        // the MP circle stamping; both produce a same-size canvas mask
+        // that the rest of the compositing path consumes unchanged.
         let handMaskCanvas = null;
         if (handProtectActive) {
-            handMaskCanvas = _buildHandMask(
-                visibleLandmarks, activeProtectRadius * scale, forearmRadius * scale, activeSmooth * scale, handSmooth2 * scale, cw, ch
-            );
+            if (handMaskSource === 'hrnet') {
+                if (_hrnetMaskData && _hrnetMaskTrialIdx === currentTrialIdx) {
+                    const frameInTrial = currentFrame - (_hrnetMaskData.start_frame || 0);
+                    handMaskCanvas = _buildHandMaskHrnet(
+                        frameInTrial, curSideLabel === 'left' ? 'OS' : 'OD',
+                        hrnetMaskSmooth * scale, cw, ch,
+                    );
+                } else {
+                    // Kick off the fetch; once it lands, _ensureHrnetMaskData
+                    // will return data and the next render() call (via the
+                    // .then) picks it up.
+                    _ensureHrnetMaskData().then(d => { if (d) render(); });
+                }
+            } else {
+                handMaskCanvas = _buildHandMask(
+                    visibleLandmarks, activeProtectRadius * scale, forearmRadius * scale,
+                    activeSmooth * scale, handSmooth2 * scale, cw, ch
+                );
+            }
         }
 
         // Draw ALL blur spots on one offscreen canvas, then subtract hand protection
@@ -1098,28 +1389,52 @@ const deid = (() => {
             // Draw the smoothed mask
             hCtx.drawImage(handMaskCanvas, 0, 0);
 
-            // Erode inward by 2px: shrink the mask slightly and erase it
+            // Build the eroded "inner" shape used to cut out the centre
+            // so only an outline remains.  Source-aware:
+            //   * MediaPipe — rebuild from landmarks with a smaller
+            //     circle radius (and slightly smaller forearm + smooth).
+            //   * HRnet — rebuild from the same MIP threshold with a
+            //     smaller dilation (smoothPx - 4).  Using the MP builder
+            //     here produced a green hand region with the MP shape
+            //     punched out of it whenever the user picked HRnet.
             const innerCanvas = document.createElement('canvas');
             innerCanvas.width = cw;
             innerCanvas.height = ch;
             const ic = innerCanvas.getContext('2d');
-            // Shrink by drawing at reduced radius
-            const shrinkR = activeProtectRadius * scale - 2;
-            if (shrinkR > 0) {
-                if (activeSmooth > 0) {
-                    // Rebuild mask at slightly smaller radius (shrink forearm too)
-                    const shrinkForearm = Math.max(0, forearmRadius * scale - 2);
-                    ic.drawImage(_buildHandMask(
-                        visibleLandmarks, shrinkR, shrinkForearm, activeSmooth * scale, Math.max(0, handSmooth2 * scale - 2), cw, ch
-                    ), 0, 0);
-                } else {
-                    ic.fillStyle = '#fff';
-                    for (const lm of visibleLandmarks) {
-                        ic.beginPath();
-                        ic.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, shrinkR, 0, Math.PI * 2);
-                        ic.fill();
-                    }
+
+            let drewInner = false;
+            if (handMaskSource === 'hrnet' && _hrnetMaskData && _hrnetMaskTrialIdx === currentTrialIdx) {
+                const _curSide = _sideLabel();
+                const frameInTrial = currentFrame - (_hrnetMaskData.start_frame || 0);
+                const innerSmoothPx = Math.max(1, (hrnetMaskSmooth * scale) - 4);
+                const innerMask = _buildHandMaskHrnet(
+                    frameInTrial, _curSide === 'left' ? 'OS' : 'OD',
+                    innerSmoothPx, cw, ch,
+                );
+                if (innerMask) {
+                    ic.drawImage(innerMask, 0, 0);
+                    drewInner = true;
                 }
+            } else {
+                const shrinkR = activeProtectRadius * scale - 2;
+                if (shrinkR > 0) {
+                    if (activeSmooth > 0) {
+                        const shrinkForearm = Math.max(0, forearmRadius * scale - 2);
+                        ic.drawImage(_buildHandMask(
+                            visibleLandmarks, shrinkR, shrinkForearm, activeSmooth * scale, Math.max(0, handSmooth2 * scale - 2), cw, ch
+                        ), 0, 0);
+                    } else {
+                        ic.fillStyle = '#fff';
+                        for (const lm of visibleLandmarks) {
+                            ic.beginPath();
+                            ic.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, shrinkR, 0, Math.PI * 2);
+                            ic.fill();
+                        }
+                    }
+                    drewInner = true;
+                }
+            }
+            if (drewInner) {
                 hCtx.globalCompositeOperation = 'destination-out';
                 hCtx.drawImage(innerCanvas, 0, 0);
                 hCtx.globalCompositeOperation = 'source-over';
@@ -1164,10 +1479,10 @@ const deid = (() => {
 
         // Check if clicking on a face detection → create face spot (if none exists for this face)
         const localFrame = currentFrame - (trialMeta ? trialMeta.start_frame : 0);
-        if (faceDetections.length > localFrame) {
-            const entry = faceDetections[localFrame];
-            if (entry && entry.faces) {
-                for (const f of entry.faces) {
+        {
+            const _faceList = faceDetByLocalFrame.get(localFrame) || [];
+            if (_faceList.length > 0) {
+                for (const f of _faceList) {
                     if (ix >= f.x1 && ix <= f.x2 && iy >= f.y1 && iy <= f.y2) {
                         const fcx = (f.x1 + f.x2) / 2;
                         const fcy = (f.y1 + f.y2) / 2;
@@ -1223,10 +1538,10 @@ const deid = (() => {
             if (currentFrame < spot.frame_start || currentFrame > spot.frame_end) continue;
             const pos = _getSpotPosition(spot);
             const dx = ix - pos.x;
-            const dy = ix - pos.y;
+            const dy = iy - pos.y;
             // Use the larger dimension for hit testing
             const hitR = Math.max(spot.width || spot.radius, spot.height || spot.radius) / 2;
-            if (Math.sqrt(dx * dx + (iy - pos.y) * (iy - pos.y)) <= hitR) {
+            if (Math.sqrt(dx * dx + dy * dy) <= hitR) {
                 selectedSpotId = spot.id;
                 renderSpotList();
                 updateSpotControls();
@@ -1236,8 +1551,8 @@ const deid = (() => {
             }
         }
 
-        // In original view, clicking empty canvas creates a custom spot
-        if (viewMode === 'original') {
+        // In original view + addingCustom mode, clicking empty canvas creates a custom spot
+        if (viewMode === 'original' && addingCustom) {
             const spot = {
                 id: nextSpotId++,
                 spot_type: 'custom',
@@ -1498,10 +1813,15 @@ const deid = (() => {
     function setPlaybackSpeed(val) {
         playbackSpeed = val;
         document.getElementById('speedVal').textContent = val + 'x';
-        // Restart playback with new speed if playing
         if (playing) {
-            togglePlay();
-            togglePlay();
+            if (videoPlaying && videoEl) {
+                // Update video rate live — no restart needed
+                videoEl.playbackRate = val;
+            } else {
+                // Fallback timer interval depends on speed — restart
+                togglePlay();
+                togglePlay();
+            }
         }
     }
 
@@ -1524,6 +1844,11 @@ const deid = (() => {
             loadFrame(currentFrame);
         } else {
             if (!trialMeta) return;
+            // Restart from beginning if at the end
+            if (currentFrame >= trialMeta.end_frame) {
+                currentFrame = trialMeta.start_frame;
+                document.getElementById('frameDisplay').textContent = currentFrame;
+            }
             playing = true;
             btn.innerHTML = '&#9616;&#9616;';
             _startVideoPlayback();
@@ -1565,6 +1890,7 @@ const deid = (() => {
         const localFrame = currentFrame - trialMeta.start_frame;
         const startTime = localFrame / fps;
         videoEl.currentTime = startTime;
+        videoEl.playbackRate = playbackSpeed;
         videoPlaying = true;
 
         try {
@@ -1687,7 +2013,7 @@ const deid = (() => {
             };
             img.onerror = () => { loading = false; };
             img.src = url;
-        }, 1000 / fps);
+        }, Math.round(1000 / (fps * playbackSpeed)));
     }
 
     // ── Face detection ──
@@ -1704,6 +2030,7 @@ const deid = (() => {
                 trial_idx: currentTrialIdx,
             });
             faceDetections = result.faces || [];
+            _rebuildFaceDetMap();
             const nFaces = faceDetections.filter(f => f.faces.length > 0).length;
             status.textContent = `Found faces in ${nFaces}/${faceDetections.length} frames`;
 
@@ -1725,7 +2052,10 @@ const deid = (() => {
             const result = await API.post(`/api/deidentify/${subjectId}/detect-faces`, {
                 trial_idx: trialIdx,
             });
+            // Discard results if the user navigated to a different trial while detection ran
+            if (currentTrialIdx !== trialIdx) return;
             faceDetections = result.faces || [];
+            _rebuildFaceDetMap();
             const nFaces = faceDetections.filter(f => f.faces.length > 0).length;
             document.getElementById('faceDetStatus').textContent =
                 `${nFaces} frames with faces`;
@@ -1749,9 +2079,8 @@ const deid = (() => {
     function _autoCreateFaceSpots() {
         if (!faceDetections.length || !trialMeta) return;
 
-        // If user already has saved face spots for this trial, don't overwrite them
-        const existingFaceSpots = blurSpots.filter(s => s.spot_type === 'face');
-        if (existingFaceSpots.length > 0) return;
+        // If the trial has any saved blur spots the user has been here before — don't auto-create
+        if (blurSpots.length > 0) return;
 
         // Find the most common face position per side (cluster by center)
         const clusters = {}; // key: side → [{cx, cy, w, h, count, firstFrame, lastFrame}]
@@ -1997,7 +2326,7 @@ const deid = (() => {
         } else {
             handLandmarks = [];
         }
-        saveHandSettings();
+        await saveHandSettings();
         render();
     }
 
@@ -2135,23 +2464,20 @@ const deid = (() => {
                 seg.radius = handMaskRadius;
             }
         }
-        saveHandSettings();
-        render();
+        _scheduleHandSaveRender();
         renderTimeline();
     }
 
     function updateForearmRadius(val) {
         forearmRadius = parseInt(val);
         document.getElementById('handForearmVal').textContent = forearmRadius;
-        saveHandSettings();
-        render();
+        _scheduleHandSaveRender();
     }
 
     function updateForearmExtent(val) {
         forearmExtent = parseFloat(val);
         document.getElementById('handExtentVal').textContent = forearmExtent.toFixed(1);
-        saveHandSettings();
-        render();
+        _scheduleHandSaveRender();
     }
 
     function updateHandSmooth(val) {
@@ -2166,15 +2492,13 @@ const deid = (() => {
                 seg.smooth = handSmooth;
             }
         }
-        saveHandSettings();
-        render();
+        _scheduleHandSaveRender();
     }
 
     function updateHandSmooth2(val) {
         handSmooth2 = parseInt(val);
         document.getElementById('handSmooth2Val').textContent = handSmooth2;
-        saveHandSettings();
-        render();
+        _scheduleHandSaveRender();
     }
 
     async function saveHandSettings() {
@@ -2191,6 +2515,10 @@ const deid = (() => {
                 // dlc_radius removed — unified marker size
                 hand_temporal: handTemporalSmooth,
                 show_landmarks: handOverlayEnabled,
+                // New: hand-mask source + HRnet sliders.
+                mask_source: handMaskSource,
+                hrnet_mask_thresh: hrnetMaskThresh,
+                hrnet_mask_smooth: hrnetMaskSmooth,
                 segments: handProtectSegments.map(s => ({
                     start: s.start, end: s.end, radius: s.radius,
                     smooth: s.smooth != null ? s.smooth : handSmooth,
@@ -2201,20 +2529,33 @@ const deid = (() => {
         renderTimeline();
     }
 
-    function deleteSelectedHandSeg() {
+    async function deleteSelectedHandSeg() {
         if (!selectedHandSegId) return;
         _pushUndo();
         handProtectSegments = handProtectSegments.filter(s => s.id !== selectedHandSegId);
         selectedHandSegId = null;
-        saveHandSettings();
+        await saveHandSettings();
         render();
         renderTimeline();
     }
 
-    // ── Save blur specs (debounced) ──
+    // ── Hand settings save + render (debounced) ──
+    let _handSettingsTimer = null;
+    function _scheduleHandSaveRender() {
+        if (_handSettingsTimer) clearTimeout(_handSettingsTimer);
+        _handSettingsTimer = setTimeout(async () => {
+            await saveHandSettings();
+            render();
+            // When in preview mode, reload the frame so the preview reflects
+            // the updated hand settings (server re-renders with new params).
+            if (viewMode === 'preview') loadFrame(currentFrame);
+        }, 150);
+    }
+
+    // ── Save blur specs (immediate) ──
     function scheduleSave() {
         if (saveTimer) clearTimeout(saveTimer);
-        saveTimer = setTimeout(saveSpecs, 500);
+        saveTimer = setTimeout(saveSpecs, 0);
     }
 
     async function saveSpecs() {
@@ -2233,13 +2574,23 @@ const deid = (() => {
             side: s.side || 'full',
             shape: s.shape || 'oval',
         }));
+        const statusEl = document.getElementById('statusMsg');
         try {
             await API.put(`/api/deidentify/${subjectId}/blur-specs`, {
                 trial_idx: currentTrialIdx,
                 specs: specs,
             });
+            if (statusEl) {
+                statusEl.textContent = 'Saved';
+                statusEl.style.color = 'var(--green, #4caf50)';
+                setTimeout(() => { if (statusEl.textContent === 'Saved') statusEl.textContent = ''; }, 1500);
+            }
         } catch (e) {
             console.error('Save blur specs failed:', e);
+            if (statusEl) {
+                statusEl.textContent = 'Save failed: ' + e.message;
+                statusEl.style.color = 'var(--danger, #f44336)';
+            }
         }
     }
 
@@ -2247,18 +2598,30 @@ const deid = (() => {
     async function renderTrial() {
         if (!subjectId || currentTrialIdx < 0) return;
 
+        // Prompt Local/Remote
+        const btn = document.getElementById('renderBtn');
+        const target = btn ? await _promptTarget(btn) : 'local-cpu';
+        if (!target) return;
+
         // Save current specs first
         await saveSpecs();
 
+        const trialName = trialMeta ? trialMeta.trial_name : `trial ${currentTrialIdx}`;
+        const status = document.getElementById('renderStatus');
+
+        // Always submit to the backend queue — it handles concurrency
+        _startRender(subjectId, currentTrialIdx, trialName, target);
+    }
+
+    async function _startRender(sid, trialIdx, trialName, target = 'local-cpu') {
         const btn = document.getElementById('renderBtn');
         const status = document.getElementById('renderStatus');
-        const trialName = trialMeta ? trialMeta.trial_name : `trial ${currentTrialIdx}`;
-        btn.disabled = true;
-        status.textContent = `Rendering ${trialName}...`;
+        status.textContent = `Submitting ${trialName}...`;
 
         try {
-            const result = await API.post(`/api/deidentify/${subjectId}/render`, {
-                trial_idx: currentTrialIdx,
+            const result = await API.post(`/api/deidentify/${sid}/render`, {
+                trial_idx: trialIdx,
+                execution_target: target,
             });
             let jobId = result.job_id;
 
@@ -2268,7 +2631,7 @@ const deid = (() => {
                 for (let attempt = 0; attempt < 30 && !jobId; attempt++) {
                     await new Promise(r => setTimeout(r, 1000));
                     try {
-                        const check = await API.get(`/api/jobs?status=running&status=pending&subject_id=${subjectId}&job_type=deidentify`);
+                        const check = await API.get(`/api/jobs?status=running&status=pending&subject_id=${sid}&job_type=deidentify`);
                         if (check && check.length > 0) {
                             jobId = check[0].id;
                         }
@@ -2276,11 +2639,11 @@ const deid = (() => {
                 }
                 if (!jobId) {
                     status.textContent = 'Job not started — check Processing page';
-                    btn.disabled = false;
                     return;
                 }
             }
 
+            status.textContent = `Rendering ${trialName}...`;
             API.streamJob(jobId,
                 (data) => {
                     if (data.status === 'running') {
@@ -2289,28 +2652,40 @@ const deid = (() => {
                     }
                 },
                 (data) => {
-                    btn.disabled = false;
                     if (data.status === 'completed') {
                         status.textContent = `Render complete! ${trialName} saved.`;
-                        if (trialMeta) trialMeta.has_blurred = true;
-                        _updateViewButtons();
                         // Update trial button color to green
                         const trialBtns = document.querySelectorAll('.trial-btn');
-                        if (trialBtns[currentTrialIdx]) {
-                            trialBtns[currentTrialIdx].style.borderColor = 'var(--green)';
-                            trialBtns[currentTrialIdx].style.color = 'var(--green)';
+                        // Find the trial by matching trialIdx across all trials
+                        const matchIdx = trials.findIndex(t => t.trial_idx === trialIdx);
+                        if (matchIdx >= 0 && trialBtns[matchIdx]) {
+                            trialBtns[matchIdx].style.borderColor = 'var(--green)';
+                            trialBtns[matchIdx].style.color = 'var(--green)';
+                        }
+                        if (trialIdx === currentTrialIdx && trialMeta) {
+                            trialMeta.has_blurred = true;
+                            _updateSidebarState();
                         }
                     } else if (data.status === 'failed') {
                         status.textContent = 'Render failed: ' + (data.error_msg || 'unknown');
                     } else {
                         status.textContent = 'Render ' + data.status;
                     }
+                    // Process next queued render
+                    _processNextInQueue();
                 },
             );
         } catch (e) {
             status.textContent = 'Error: ' + e.message;
-            btn.disabled = false;
         }
+    }
+
+    function _processNextInQueue() {
+        if (_renderQueue.length === 0) return;
+        const next = _renderQueue.shift();
+        const status = document.getElementById('renderStatus');
+        status.textContent = `Starting queued render: ${next.trialName}...`;
+        _startRender(next.subjectId, next.trialIdx, next.trialName, next.target || 'local-cpu');
     }
 
     // ── Timeline ──────────────────────────────────────────────────────────
@@ -2468,10 +2843,15 @@ const deid = (() => {
         if (customSpots.length > 0) y += gap;
 
         // ── Hand rows: one per camera with coverage + draggable protection segments ──
+        // Only show the row for the active camera side so the timeline isn't cluttered.
         if (handCoverage.length > 0 || hasMediapipe) {
-            const handSides = cameraMode === 'single' ? [{ side: 'full', label: 'Hands' }]
+            const allHandSides = cameraMode === 'single' ? [{ side: 'full', label: 'Hands' }]
                 : [{ side: 'left', label: cameraNames[0] || 'OS' },
                    { side: 'right', label: cameraNames[1] || 'OD' }];
+            // Map currentSide (camera name) to row side ('left'/'right'/'full')
+            const activeSide = cameraMode === 'single' ? 'full'
+                : (currentSide === cameraNames[0] ? 'left' : 'right');
+            const handSides = allHandSides.filter(s => s.side === activeSide);
 
             for (const { side: rowSide, label: rowLabel } of handSides) {
                 tlCtx.fillStyle = 'rgba(150,150,150,0.5)';
@@ -2587,9 +2967,11 @@ const deid = (() => {
         }
         if (customSpots.length > 0) y += gap;
 
-        // Hit test hand protection segments — per-camera rows
+        // Hit test hand protection segments — only the active camera row (matches render)
         if (handCoverage.length > 0 || hasMediapipe) {
-            const handSides = cameraMode === 'single' ? ['full'] : ['left', 'right'];
+            const activeSide = cameraMode === 'single' ? 'full'
+                : (currentSide === cameraNames[0] ? 'left' : 'right');
+            const handSides = [activeSide];
             for (const rowSide of handSides) {
                 const rowSegs = handProtectSegments.filter(s =>
                     !s.side || s.side === rowSide || s.side === 'full');
@@ -2740,7 +3122,7 @@ const deid = (() => {
         }
     }
 
-    function onTlMouseUp(e) {
+    async function onTlMouseUp(e) {
         if (tlDragSpot) {
             if (tlDragSpot === 'newhand') {
                 // Finalize the new segment (replace the preview id=-1)
@@ -2749,10 +3131,26 @@ const deid = (() => {
                     preview.id = nextHandSegId++;
                     selectedHandSegId = preview.id;
                 } else {
-                    // Too small, remove it
+                    // Too small — treat as click
+                    // If no segments exist for this camera, create a full-trial segment
+                    const side = tlDragNewHandSide || _sideLabel();
+                    const hasSegsForSide = handProtectSegments.some(s =>
+                        s.id !== -1 && (!s.side || s.side === side || s.side === 'full'));
                     handProtectSegments = handProtectSegments.filter(s => s.id !== -1);
+                    if (!hasSegsForSide && trialMeta) {
+                        const newSeg = {
+                            id: nextHandSegId++,
+                            start: trialMeta.start_frame,
+                            end: trialMeta.end_frame,
+                            radius: handMaskRadius,
+                            smooth: handSmooth,
+                            side: side,
+                        };
+                        handProtectSegments.push(newSeg);
+                        selectedHandSegId = newSeg.id;
+                    }
                 }
-                saveHandSettings();
+                await saveHandSettings();
                 render();
             } else if (tlDragSpot && typeof tlDragSpot === 'object' && tlDragSpot.start !== undefined) {
                 saveHandSettings();
@@ -2790,6 +3188,43 @@ const deid = (() => {
     // ── Public API ──
     document.addEventListener('DOMContentLoaded', init);
 
+    // ── Hand-mask source: MediaPipe (current) vs HRnet (MIP threshold) ──
+    function setHandMaskSource(src) {
+        if (src !== 'mediapipe' && src !== 'hrnet') return;
+        handMaskSource = src;
+        const mp = document.getElementById('mpHandControls');
+        const hr = document.getElementById('hrnetHandControls');
+        if (mp) mp.style.display = src === 'mediapipe' ? '' : 'none';
+        if (hr) hr.style.display = src === 'hrnet' ? '' : 'none';
+        // "Show hand landmarks" only paints MP keypoints — irrelevant when
+        // the HRnet MIP path is the source.  Hide it accordingly.
+        const overlayLbl = document.getElementById('handOverlayLabel');
+        if (overlayLbl) overlayLbl.style.display = src === 'mediapipe' ? '' : 'none';
+        // Persist + render via the standard debounced helper used by
+        // every other hand-mask slider (also handles preview-mode
+        // server-frame reload).
+        if (src === 'hrnet') {
+            // Fetch the MIP arrays now so the green outline can be built
+            // immediately (the next render() picks it up).
+            _ensureHrnetMaskData().then(() => render());
+        }
+        _scheduleHandSaveRender();
+    }
+
+    function updateHrnetMaskThresh(val) {
+        hrnetMaskThresh = parseFloat(val);
+        const el = document.getElementById('hrnetMaskThreshVal');
+        if (el) el.textContent = hrnetMaskThresh.toFixed(2);
+        _scheduleHandSaveRender();
+    }
+
+    function updateHrnetMaskSmooth(val) {
+        hrnetMaskSmooth = parseInt(val, 10);
+        const el = document.getElementById('hrnetMaskSmoothVal');
+        if (el) el.textContent = hrnetMaskSmooth;
+        _scheduleHandSaveRender();
+    }
+
     return {
         detectFaces,
         togglePlay,
@@ -2813,10 +3248,49 @@ const deid = (() => {
         updateHandSmooth,
         updateHandSmooth2,
         updateHandTemporalSmooth,
-        goToMediapipe,
+        setHandMaskSource,
+        updateHrnetMaskThresh,
+        updateHrnetMaskSmooth,
         goToAnalyze,
         renderTrial,
+        toggleHasFaces,
         undo,
         redo,
     };
+
+    async function toggleHasFaces(hasFaces) {
+        if (!subjectId || currentTrialIdx < 0 || !trialMeta) return;
+        const stem = trialMeta.trial_name;
+        try {
+            // Get current subject data to read existing no_face_videos
+            const subjects = await API.get('/api/subjects');
+            const subj = subjects.find(s => s.id === subjectId);
+            if (!subj) return;
+            let noFace = [];
+            try { noFace = JSON.parse(subj.no_face_videos || '[]'); } catch {}
+            if (!Array.isArray(noFace)) noFace = [];
+
+            if (hasFaces) {
+                // Remove from no_face list
+                noFace = noFace.filter(s => s !== stem);
+            } else {
+                // Add to no_face list
+                if (!noFace.includes(stem)) noFace.push(stem);
+            }
+            await API.patch(`/api/subjects/${subjectId}`, { no_face_videos: noFace });
+            trialMeta.has_faces = hasFaces;
+            // Update trial button color
+            const btns = document.querySelectorAll('.trial-btn');
+            if (btns[currentTrialIdx]) {
+                const color = (!hasFaces || trialMeta.has_blurred) ? 'var(--green)' : '';
+                btns[currentTrialIdx].style.borderColor = color;
+                btns[currentTrialIdx].style.color = color;
+            }
+        } catch (e) {
+            console.error('Failed to update has_faces:', e);
+            // Revert checkbox
+            const hfToggle = document.getElementById('hasFacesToggle');
+            if (hfToggle) hfToggle.checked = !hasFaces;
+        }
+    }
 })();

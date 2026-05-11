@@ -7,9 +7,28 @@
     <link rel="stylesheet" href="/static/css/main.css?v=7">
     <style>
         body { overflow: hidden; }
+        /* Hide sidebar scrollbar (still scrollable via wheel/touch). */
+        #sidebarScroll {
+            scrollbar-width: none;        /* Firefox */
+            -ms-overflow-style: none;     /* IE / old Edge */
+        }
+        #sidebarScroll::-webkit-scrollbar { width: 0; height: 0; display: none; }
+        button:focus:not(:focus-visible), .btn:focus:not(:focus-visible), select:focus:not(:focus-visible) { outline: none; box-shadow: none; }
+        /* Dual vertical Y range slider */
+        .y-range-wrap { position:relative; width:14px; flex-shrink:0; }
+        .y-range-wrap .y-track { position:absolute; left:5px; top:0; bottom:0; width:4px; background:var(--border); border-radius:2px; pointer-events:none; }
+        .y-range-wrap .y-fill { position:absolute; left:5px; width:4px; background:var(--accent); border-radius:2px; pointer-events:none; }
+        .y-range-wrap input[type=range] { -webkit-appearance:none; appearance:none; background:transparent; position:absolute; left:0; width:14px; margin:0; pointer-events:none; }
+        .y-range-wrap input[type=range]::-webkit-slider-runnable-track { width:4px; background:transparent; }
+        .y-range-wrap input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:10px; height:10px; border-radius:50%; background:var(--accent); margin-left:-3px; cursor:pointer; pointer-events:auto; }
+        .y-range-wrap input[type=range]::-moz-range-track { width:4px; background:transparent; }
+        .y-range-wrap input[type=range]::-moz-range-thumb { width:10px; height:10px; border-radius:50%; background:var(--accent); border:none; cursor:pointer; pointer-events:auto; }
         .trial-btn { padding:3px 10px; border-radius:4px; border:1px solid var(--border); background:var(--bg); color:var(--text-muted); cursor:pointer; font-size:12px; font-family:inherit; transition:all 0.15s; }
         .trial-btn:hover { border-color:var(--blue); color:var(--text); }
-        .trial-btn.active { background:var(--blue); border-color:var(--blue); color:#fff; }
+        .trial-btn.active, .btn.active { background:var(--blue); border-color:var(--blue); color:#fff; }
+        #heatmapMipBtn.active { background:#ff6600; border-color:#ff6600; color:#fff; }
+        #offsetsToggleBtn.active { background:#ff6600; border-color:#ff6600; color:#fff; }
+        .err-stage.active { background:#ff2222; border-color:#ff2222; color:#fff; }
 
         /* ── Layer toggle styling ── */
         .layer-toggle {
@@ -47,11 +66,14 @@
         }
         .canvas-wrap canvas {
             display: block; width: 100%; height: 100%;
+            touch-action: none;
         }
         .three-wrap {
             position: absolute; inset: 0;
             pointer-events: none; /* pass clicks through to video by default */
+            touch-action: none;
         }
+        #distCanvas { touch-action: none; }
         .three-wrap.interactive {
             pointer-events: auto; /* enabled when 3D is visible */
         }
@@ -66,10 +88,11 @@
 
         /* ── Distance trace ── */
         #distanceCanvas {
-            width: 100%; height: 120px; cursor: crosshair;
+            width: 100%; height: 100%; cursor: crosshair;
             background: var(--bg-card); border-radius: 4px;
-            flex-shrink: 0; margin-top: 4px;
+            flex-shrink: 0;
         }
+        #plotResizer:hover { opacity: 1 !important; background: var(--accent) !important; }
 
         /* Section headers */
         .sidebar-section {
@@ -85,7 +108,6 @@
         <div style="display:flex;align-items:center;gap:16px;">
             <h1 style="margin:0;"><a href="/" style="font-size:18px;">Movement Tracker</a></h1>
             <div style="display:flex;align-items:center;gap:8px;">
-                <span style="font-size:18px;font-weight:600;">MANO</span>
                 <select id="subjectSelect" class="subject-select"></select>
                 <button class="btn btn-sm" id="prevSubjectBtn" title="Previous subject">&larr;</button>
                 <button class="btn btn-sm" id="nextSubjectBtn" title="Next subject">&rarr;</button>
@@ -95,11 +117,10 @@
             <a href="/videos" class="nav-browse">Browse Videos</a>
             <a href="/subjects">Subjects</a>
             <span class="nav-dropdown">
-                <a href="/analyze" class="active">Analyze</a>
+                <a href="/mano" class="active">Analyze</a>
                 <div class="nav-dropdown-menu">
-                    <a href="/analyze">Detect</a>
+                    <a href="/mano" class="active">Auto</a>
                     <a href="/labeling-select">DLC</a>
-                    <a href="/mano" class="active">MANO</a>
                     <a href="/events">Events</a>
                     <a href="/deidentify">Deidentify</a>
                 </div>
@@ -122,119 +143,720 @@
         </nav>
     </div>
 
+    <button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle sidebar">☰</button>
+
     <div class="labeling-layout">
         <!-- Sidebar -->
-        <div class="labeling-sidebar">
-            <!-- Trial selector -->
-            <div class="sidebar-section">Trial</div>
+        <div class="labeling-sidebar" id="manoSidebar">
+            <div id="sidebarScroll" style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;">
             <div id="trialBtns" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:4px;"></div>
 
-            <!-- Navigation -->
-            <div class="sidebar-section">Navigation</div>
-            <div style="display:flex;gap:4px;margin-bottom:6px;">
-                <button class="btn btn-sm" id="prevFrameBtn" title="Previous frame (A/Left)">&larr;</button>
-                <button class="btn btn-sm" id="playBtn" title="Play/Pause (Space)">&#9654;</button>
-                <button class="btn btn-sm" id="nextFrameBtn" title="Next frame (S/Right)">&rarr;</button>
+            <!-- Models -->
+            <div class="sidebar-section" style="margin-bottom:0;">Models</div>
+            <div style="display:grid;grid-template-columns:1fr 24px 24px 24px;gap:2px 4px;align-items:center;font-size:12px;margin-bottom:4px;margin-top:0;">
+                <span></span>
+                <span style="font-size:9px;color:var(--text-muted);text-align:center;">2D</span>
+                <span style="font-size:9px;color:var(--text-muted);text-align:center;">3D</span>
+                <span style="font-size:9px;color:var(--text-muted);text-align:center;">Err</span>
+
+                <!-- 1. MediaPipe -->
+                <span style="color:var(--text-muted);"><span class="layer-swatch" style="background:#00cccc;"></span> MediaPipe</span>
+                <input type="checkbox" id="showMP2D" style="margin:0;justify-self:center;">
+                <input type="checkbox" id="showMP3D" checked style="margin:0;justify-self:center;">
+                <span></span>
+
+                <!-- 2. Vision -->
+                <span style="color:var(--text-muted);"><span class="layer-swatch" style="background:#2196f3;"></span> Vision</span>
+                <input type="checkbox" id="showVision2D" style="margin:0;justify-self:center;">
+                <input type="checkbox" id="showVision3D" style="margin:0;justify-self:center;">
+                <span></span>
+
+                <!-- 3. Pose -->
+                <span style="color:var(--text-muted);"><span class="layer-swatch" style="background:#ffeb3b;"></span> Pose</span>
+                <input type="checkbox" id="showPose2D" style="margin:0;justify-self:center;">
+                <input type="checkbox" id="showPose3D" style="margin:0;justify-self:center;">
+                <span></span>
+
+                <!-- 4. Heatmap (clickable label expands its sub-stages) -->
+                <span class="model-toggle" data-group="heatmap" style="color:var(--text-muted);cursor:pointer;user-select:none;"><span id="heatmapExpand" style="display:inline-block;width:9px;font-size:9px;color:var(--text-muted);">▶</span> HRnet</span>
+                <span></span><span></span><span></span>
+                <!-- HRnet sub-stages (hidden by default) -->
+                <span class="hm-row" data-hm="hrnet" style="color:var(--text-muted);padding-left:18px;display:none;align-items:center;gap:4px;"><span class="layer-swatch" style="background:#ff9966;"></span> Peaks</span>
+                <input type="checkbox" class="hm-row hm-2d" data-hm="hrnet" style="margin:0;justify-self:center;display:none;">
+                <input type="checkbox" class="hm-row hm-3d" data-hm="hrnet" style="margin:0;justify-self:center;display:none;">
+                <input type="checkbox" class="hm-row hm-err" id="showHRnetCorrections" data-hm="hrnet" title="Show Y/Z-correct error detections + camera attribution overlay" style="margin:0;justify-self:center;display:none;">
+                <!-- HRnet Correct pipeline: Y/Z-correct stage -->
+                <span class="hm-row" data-hm="yzc" style="color:var(--text-muted);padding-left:18px;display:none;"><span class="layer-swatch" style="background:#ffb074;"></span> Y/Z-correct</span>
+                <input type="checkbox" class="hm-row hm-2d" id="showHRnetYZC2D" data-hm="yzc" style="margin:0;justify-self:center;display:none;">
+                <input type="checkbox" class="hm-row hm-3d" id="showHRnetYZC3D" data-hm="yzc" style="margin:0;justify-self:center;display:none;">
+                <span class="hm-row" data-hm="yzc" style="display:none;"></span>
+                <!-- HRnet Correct pipeline: Z-smooth stage -->
+                <span class="hm-row" data-hm="zsm" style="color:var(--text-muted);padding-left:18px;display:none;"><span class="layer-swatch" style="background:#ffa040;"></span> Z-smooth</span>
+                <input type="checkbox" class="hm-row hm-2d" id="showHRnetZSM2D" data-hm="zsm" style="margin:0;justify-self:center;display:none;">
+                <input type="checkbox" class="hm-row hm-3d" id="showHRnetZSM3D" data-hm="zsm" style="margin:0;justify-self:center;display:none;">
+                <span class="hm-row" data-hm="zsm" style="display:none;"></span>
+                <!-- HRnet Correct pipeline: stereo Hungarian peaks -->
+                <span class="hm-row" data-hm="stereohun" style="color:var(--text-muted);padding-left:18px;display:none;"><span class="layer-swatch" style="background:#ff8a65;"></span> Stereo-Hungarian</span>
+                <input type="checkbox" class="hm-row hm-2d" id="showStereoHun2D" data-hm="stereohun" style="margin:0;justify-self:center;display:none;">
+                <input type="checkbox" class="hm-row hm-3d" id="showStereoHun3D" data-hm="stereohun" style="margin:0;justify-self:center;display:none;">
+                <span class="hm-row" data-hm="stereohun" style="display:none;"></span>
+
+                <!-- 5. DLC -->
+                <span style="color:var(--text-muted);"><span class="layer-swatch" style="background:#f44;"></span> DLC</span>
+                <input type="checkbox" id="showDLC" style="margin:0;justify-self:center;">
+                <input type="checkbox" id="showDLC3D" style="margin:0;justify-self:center;">
+                <span></span>
+
+                <!-- 6. Skeleton v1 -->
+                <span style="color:var(--text-muted);"><span class="layer-swatch" style="background:lime;"></span> Skeleton v1</span>
+                <input type="checkbox" id="showMano2D" style="margin:0;justify-self:center;">
+                <input type="checkbox" id="showMano3D" style="margin:0;justify-self:center;">
+                <span></span>
+
+                <!-- 7. Skeleton v2 -->
+                <span style="color:var(--text-muted);"><span class="layer-swatch" style="background:#e040fb;"></span> Skeleton v2</span>
+                <input type="checkbox" id="showLegacyV2_2D" style="margin:0;justify-self:center;">
+                <input type="checkbox" id="showLegacyV2_3D" style="margin:0;justify-self:center;">
+                <span></span>
+
+                <!-- 8. Skeleton v3 (clickable label expands its stages) -->
+                <span class="model-toggle" data-group="v3" style="color:var(--text-muted);cursor:pointer;user-select:none;"><span id="v3Expand" style="display:inline-block;width:9px;font-size:9px;color:var(--text-muted);">▶</span><span class="layer-swatch" style="background:#ff9800;"></span> Skeleton v3</span>
+                <span></span><span></span><span></span>
+                <!-- Hidden masters retained so existing JS can read showSkelV2_2D/3D (driven by the stage 2D/3D set unions) -->
+                <input type="checkbox" id="showSkelV2_2D" style="display:none;">
+                <input type="checkbox" id="showSkelV2_3D" style="display:none;">
+                <!-- v3 stage rows -->
+                <span class="stage-row" data-stage="mediapipe" style="color:var(--text-muted);padding-left:18px;"><span class="layer-swatch" style="background:#00cccc;"></span> Mediapipe</span>
+                <input type="checkbox" class="stage-row stage-2d" data-stage="mediapipe" style="margin:0;justify-self:center;">
+                <input type="checkbox" class="stage-row stage-3d" data-stage="mediapipe" style="margin:0;justify-self:center;">
+                <input type="checkbox" class="stage-row stage-err" data-stage="mediapipe" style="margin:0;justify-self:center;">
+<span class="stage-row" data-stage="z_correct" style="color:var(--text-muted);padding-left:18px;"><span class="layer-swatch" style="background:#ffa726;"></span> Y/Z-correct</span>
+                <input type="checkbox" class="stage-row stage-2d" data-stage="z_correct" style="margin:0;justify-self:center;">
+                <input type="checkbox" class="stage-row stage-3d" data-stage="z_correct" style="margin:0;justify-self:center;">
+                <input type="checkbox" class="stage-row stage-err" data-stage="z_correct" style="margin:0;justify-self:center;">
+                <span class="stage-row" data-stage="z_smooth" style="color:var(--text-muted);padding-left:18px;"><span class="layer-swatch" style="background:#ff9800;"></span> Z-smooth</span>
+                <input type="checkbox" class="stage-row stage-2d" data-stage="z_smooth" style="margin:0;justify-self:center;">
+                <input type="checkbox" class="stage-row stage-3d" data-stage="z_smooth" style="margin:0;justify-self:center;">
+                <input type="checkbox" class="stage-row stage-err" data-stage="z_smooth" style="margin:0;justify-self:center;">
+                <span class="stage-row" data-stage="hrnet_snap" style="color:var(--text-muted);padding-left:18px;"><span class="layer-swatch" style="background:#ab47bc;"></span> HRnet-snap</span>
+                <input type="checkbox" class="stage-row stage-2d" data-stage="hrnet_snap" style="margin:0;justify-self:center;">
+                <input type="checkbox" class="stage-row stage-3d" data-stage="hrnet_snap" style="margin:0;justify-self:center;">
+                <input type="checkbox" class="stage-row stage-err" data-stage="hrnet_snap" style="margin:0;justify-self:center;">
+                <span class="stage-row" data-stage="bone_correct" style="color:var(--text-muted);padding-left:18px;"><span class="layer-swatch" style="background:#66bb6a;"></span> Bone-correct</span>
+                <input type="checkbox" class="stage-row stage-2d" data-stage="bone_correct" style="margin:0;justify-self:center;">
+                <input type="checkbox" class="stage-row stage-3d" data-stage="bone_correct" style="margin:0;justify-self:center;">
+                <input type="checkbox" class="stage-row stage-err" data-stage="bone_correct" style="margin:0;justify-self:center;">
+                <span class="stage-row" data-stage="bone_smooth" style="color:var(--text-muted);padding-left:18px;"><span class="layer-swatch" style="background:#26c6da;"></span> Bone-smooth</span>
+                <input type="checkbox" class="stage-row stage-2d" data-stage="bone_smooth" style="margin:0;justify-self:center;">
+                <input type="checkbox" class="stage-row stage-3d" data-stage="bone_smooth" style="margin:0;justify-self:center;">
+                <input type="checkbox" class="stage-row stage-err" data-stage="bone_smooth" style="margin:0;justify-self:center;">
+
+                <!-- 9. Historical fit dropdown -->
+                <span style="color:var(--text-muted);display:flex;align-items:center;gap:2px;"><span id="prevExpand" style="display:none;width:9px;font-size:9px;color:var(--text-muted);cursor:pointer;user-select:none;">▶</span><select id="prevFitSelect" style="font-size:11px;background:var(--bg);color:var(--text-muted);border:1px solid var(--border);border-radius:3px;padding:0 2px;max-width:120px;" disabled><option value="">No history</option></select></span>
+                <span id="prevCtrlSlot2D" style="justify-self:center;"></span>
+                <span id="prevCtrlSlot3D" style="justify-self:center;"></span>
+                <span id="prevCtrlSlotErr" style="justify-self:center;"></span>
             </div>
-            <div style="margin-bottom:6px;">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-                    <label style="font-size:12px;color:var(--text-muted);">Speed</label>
-                    <span id="speedDisplay" style="font-size:12px;color:var(--accent);font-weight:bold;">1x</span>
+            <!-- Labels Hand (finger visibility + heatmap) -->
+            <div class="sidebar-section" style="position:relative;">Labels
+                <button id="heatmapMipBtn" class="btn btn-sm" style="display:none;position:absolute;right:0;top:-2px;font-size:9px;padding:1px 6px;line-height:1.4;">MIP</button>
+                <button id="offsetsToggleBtn" class="btn btn-sm" style="position:absolute;right:0;top:18px;font-size:9px;padding:1px 6px;line-height:1.4;" title="Show anatomical offset arrows on every displayed Skeleton v3 stage">Offsets</button>
+            </div>
+            <div id="handDiagramLabelsWrap" style="width:180px;height:160px;margin:2px auto;">
+            <svg id="handDiagramLabels" viewBox="-10 -15 160 151" width="180" height="160" xmlns="http://www.w3.org/2000/svg">
+                <style>
+                    #handDiagramLabels g[data-finger] > * { transition:opacity 0.15s; }
+                    /* Dim only bones and non-selected joints when a finger is
+                       hidden — the finger's letter label and any heatmap-active
+                       joint stay at full opacity so they remain clickable and
+                       visible. */
+                    #handDiagramLabels g[data-finger].dimmed > *:not(.heatmap-active):not(text) { opacity:0.2; }
+                    #handDiagramLabels .bone { stroke-width:2.5; stroke-linecap:round; }
+                    #handDiagramLabels .joint { stroke:#000; stroke-width:0.4; cursor:pointer; }
+                    #handDiagramLabels text { font-size:10px; font-weight:bold; fill:var(--text-muted); cursor:pointer; text-anchor:middle; }
+                    #handDiagramLabels g[data-finger].finger-hover .joint { r:5; stroke:#fff; stroke-width:1; }
+                    #handDiagramLabels g[data-finger].finger-hover text { fill:#fff; }
+                    #handDiagramLabels .joint.joint-hover { r:5; stroke:#fff; stroke-width:1; }
+                    #handDiagramLabels .joint.heatmap-active { stroke:#ff6600; stroke-width:2; r:5; filter:drop-shadow(0 0 3px #ff6600); }
+                </style>
+                <g data-finger="wrist"><circle class="joint" data-joint="0" cx="70" cy="120" r="4" fill="#888"/><text x="82" y="124">W</text></g>
+                <g data-finger="thumb"><line class="bone" x1="70" y1="120" x2="38" y2="100" stroke="#60c0e0"/><line class="bone" x1="38" y1="100" x2="22" y2="88" stroke="#60c0e0"/><line class="bone" x1="22" y1="88" x2="10" y2="74" stroke="#60c0e0"/><line class="bone" x1="10" y1="74" x2="4" y2="63" stroke="#60c0e0"/><circle class="joint" data-joint="1" cx="38" cy="100" r="3" fill="#60c0e0"/><circle class="joint" data-joint="2" cx="22" cy="88" r="3" fill="#60c0e0"/><circle class="joint" data-joint="3" cx="10" cy="74" r="3" fill="#60c0e0"/><circle class="joint" data-joint="4" cx="4" cy="63" r="3" fill="#60c0e0"/><text x="-2" y="57">T</text></g>
+                <g data-finger="index"><line class="bone" x1="70" y1="120" x2="42" y2="72" stroke="#60c0e0"/><line class="bone" x1="42" y1="72" x2="36" y2="46" stroke="#60c0e0"/><line class="bone" x1="36" y1="46" x2="33" y2="22" stroke="#60c0e0"/><line class="bone" x1="33" y1="22" x2="31" y2="2" stroke="#60c0e0"/><circle class="joint" data-joint="5" cx="42" cy="72" r="3" fill="#60c0e0"/><circle class="joint" data-joint="6" cx="36" cy="46" r="3" fill="#60c0e0"/><circle class="joint" data-joint="7" cx="33" cy="22" r="3" fill="#60c0e0"/><circle class="joint" data-joint="8" cx="31" cy="2" r="3" fill="#60c0e0"/><text x="23" y="0">I</text></g>
+                <g data-finger="middle"><line class="bone" x1="70" y1="120" x2="64" y2="69" stroke="#60c0e0"/><line class="bone" x1="64" y1="69" x2="62" y2="43" stroke="#60c0e0"/><line class="bone" x1="62" y1="43" x2="61" y2="19" stroke="#60c0e0"/><line class="bone" x1="61" y1="19" x2="60" y2="-3" stroke="#60c0e0"/><circle class="joint" data-joint="9" cx="64" cy="69" r="3" fill="#60c0e0"/><circle class="joint" data-joint="10" cx="62" cy="43" r="3" fill="#60c0e0"/><circle class="joint" data-joint="11" cx="61" cy="19" r="3" fill="#60c0e0"/><circle class="joint" data-joint="12" cx="60" cy="-3" r="3" fill="#60c0e0"/><text x="52" y="-4">M</text></g>
+                <g data-finger="ring"><line class="bone" x1="70" y1="120" x2="86" y2="72" stroke="#60c0e0"/><line class="bone" x1="86" y1="72" x2="89" y2="48" stroke="#60c0e0"/><line class="bone" x1="89" y1="48" x2="91" y2="26" stroke="#60c0e0"/><line class="bone" x1="91" y1="26" x2="92" y2="6" stroke="#60c0e0"/><circle class="joint" data-joint="13" cx="86" cy="72" r="3" fill="#60c0e0"/><circle class="joint" data-joint="14" cx="89" cy="48" r="3" fill="#60c0e0"/><circle class="joint" data-joint="15" cx="91" cy="26" r="3" fill="#60c0e0"/><circle class="joint" data-joint="16" cx="92" cy="6" r="3" fill="#60c0e0"/><text x="99" y="4">R</text></g>
+                <g data-finger="pinky"><line class="bone" x1="70" y1="120" x2="107" y2="76" stroke="#60c0e0"/><line class="bone" x1="107" y1="76" x2="113" y2="56" stroke="#60c0e0"/><line class="bone" x1="113" y1="56" x2="117" y2="38" stroke="#60c0e0"/><line class="bone" x1="117" y1="38" x2="120" y2="22" stroke="#60c0e0"/><circle class="joint" data-joint="17" cx="107" cy="76" r="3" fill="#60c0e0"/><circle class="joint" data-joint="18" cx="113" cy="56" r="3" fill="#60c0e0"/><circle class="joint" data-joint="19" cx="117" cy="38" r="3" fill="#60c0e0"/><circle class="joint" data-joint="20" cx="120" cy="22" r="3" fill="#60c0e0"/><text x="127" y="18">P</text></g>
+            </svg>
+            </div>
+
+            <!-- Heatmap threshold slider — dims when no joint is active and
+                 hides entirely when the trial has no HRnet heatmap data. -->
+            <div id="heatmapThreshRow" style="font-size:11px;margin-top:8px;margin-bottom:6px;">
+                <div style="display:flex;align-items:center;gap:6px;">
+                    <span id="heatmapThreshLabel" style="color:var(--text-muted);white-space:nowrap;">Threshold</span>
+                    <input type="range" id="heatmapThreshSlider" min="0" max="0.95" step="0.01" value="0.1" style="width:80px;flex-shrink:0;height:4px;opacity:0.4;" disabled>
+                    <span id="heatmapThreshVal" class="slider-val" style="color:var(--text-muted);font-weight:bold;min-width:28px;opacity:0.4;">0.10</span>
                 </div>
-                <input type="range" id="speedSlider" min="0" max="10" value="4"
-                       style="width:100%;cursor:pointer;height:6px;">
             </div>
 
-            <!-- View -->
-            <div class="sidebar-section">View</div>
-            <div style="display:flex;gap:4px;margin-bottom:6px;">
-                <button class="btn btn-sm" id="sideToggle" title="Toggle camera (E)">OS</button>
-                <button class="btn btn-sm" id="resetZoomBtn" title="Reset zoom (Z)">Reset Zoom</button>
-                <button class="btn btn-sm" id="snapCamBtn" title="Reset 3D view to camera (C)">Snap</button>
+            <!-- 2D Pose Detection -->
+            <div class="sidebar-section" style="margin-top:12px;">2D Pose Detection</div>
+            <div id="detectModelList" style="display:flex;flex-direction:column;gap:3px;margin-bottom:4px;">
+                <div class="detect-model-row" data-model="run-mediapipe">
+                    <button class="btn btn-sm detect-model-btn" style="width:100%;font-size:10px;text-align:left;">MediaPipe (hand joints)</button>
+                    <!-- Static-image-mode option for MediaPipe only.  Hidden
+                         until the MediaPipe row is the active detect model
+                         (toggled in mano.js by _enterDetectMode /
+                         _exitDetectMode). -->
+                    <label id="mpStaticImageRow"
+                           style="display:none;align-items:center;gap:4px;font-size:10px;color:var(--text-muted);padding-left:6px;margin-top:2px;cursor:pointer;"
+                           title="Disable MediaPipe's between-frame tracker so each frame gets a fresh palm-detector pass.  3-5x slower but recovers detection on hard poses (e.g. back-of-hand views) where the sticky tracker fails to lock on.">
+                        <input type="checkbox" id="mpStaticImageMode" style="margin:0;">
+                        Static image mode
+                    </label>
+                </div>
+                <div class="detect-model-row" data-model="run-vision">
+                    <button class="btn btn-sm detect-model-btn" style="width:100%;font-size:10px;text-align:left;">Vision (hand joints)</button>
+                </div>
+                <div class="detect-model-row" data-model="run-hrnet">
+                    <button class="btn btn-sm detect-model-btn" style="width:100%;font-size:10px;text-align:left;">HRNet (heat maps)</button>
+                </div>
+                <div class="detect-model-row" data-model="run-pose">
+                    <button class="btn btn-sm detect-model-btn" style="width:100%;font-size:10px;text-align:left;">MediaPipe (body joints)</button>
+                </div>
             </div>
-
-            <!-- Layers -->
-            <div class="sidebar-section">Layers</div>
-            <label class="layer-toggle">
-                <input type="checkbox" id="showVideo" checked>
-                <span class="layer-swatch" style="background:#888;"></span> Video
-            </label>
-            <label class="layer-toggle">
-                <input type="checkbox" id="showSkeleton" checked>
-                <span class="layer-swatch" style="background:#aaa;"></span> Skeleton
-            </label>
-            <hr style="border:none;border-top:1px solid var(--border);margin:4px 0;">
-            <label class="layer-toggle">
-                <input type="checkbox" id="showMP2D">
-                <span class="layer-swatch" style="background:cyan;"></span> MediaPipe 2D
-            </label>
-            <label class="layer-toggle">
-                <input type="checkbox" id="showMP3D" checked>
-                <span class="layer-swatch" style="background:#5bc0de;"></span> MediaPipe 3D
-            </label>
-            <label class="layer-toggle">
-                <input type="checkbox" id="showMano2D">
-                <span class="layer-swatch" style="background:lime;"></span> MANO 2D
-            </label>
-            <label class="layer-toggle">
-                <input type="checkbox" id="showMano3D">
-                <span class="layer-swatch" style="background:#00dd00;"></span> MANO 3D
-            </label>
-            <hr style="border:none;border-top:1px solid var(--border);margin:4px 0;">
-            <label class="layer-toggle">
-                <input type="checkbox" id="showDLC">
-                <span class="layer-swatch" style="background:#f44;"></span> DLC
-            </label>
-            <label class="layer-toggle">
-                <input type="checkbox" id="showHeatmap">
-                <span class="layer-swatch" style="background:#ff6600;"></span> Heatmap
-            </label>
+            <div id="detectStatus" style="font-size:11px;color:var(--text-muted);margin-bottom:4px;"></div>
 
             <!-- Skeleton Fitting -->
             <div class="sidebar-section" style="margin-top:16px;">Skeleton Fitting</div>
             <div id="manoFitStatus" style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">No fit available</div>
-            <button class="btn btn-sm" id="runStage1Btn" style="width:100%;" onclick="manoViewer.runStage1()">Run Stage 1</button>
 
-            <!-- Fingers -->
-            <div class="sidebar-section">Fingers</div>
-            <div class="finger-grid" id="fingerToggles">
-                <label class="finger-toggle"><input type="checkbox" data-finger="wrist" checked> Wrist</label>
-                <label class="finger-toggle"><input type="checkbox" data-finger="thumb" checked> Thumb</label>
-                <label class="finger-toggle"><input type="checkbox" data-finger="index" checked> Index</label>
-                <label class="finger-toggle"><input type="checkbox" data-finger="middle" checked> Middle</label>
-                <label class="finger-toggle"><input type="checkbox" data-finger="ring" checked> Ring</label>
-                <label class="finger-toggle"><input type="checkbox" data-finger="pinky" checked> Pinky</label>
+            <!-- HRnet Correct (peak refinement → Y/Z-correct → Z-smooth → Stereo-Hungarian) -->
+            <button class="btn btn-sm" id="fitHRnetBtn" style="width:100%;">HRnet Correct</button>
+            <div id="fitHRnetPanel" style="display:none;margin-top:6px;">
+                <div style="font-size:10px;color:var(--text-muted);margin-bottom:6px;line-height:1.4;">
+                    Cluster-centroid peaks → Y/Z-correct (epipolar + depth outliers) → Z-smooth (depth jumps) → Stereo-Hungarian (joint-stereo assignment).
+                </div>
+
+                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;">Argmax cluster</div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);" title="Number of pixels grown from the argmax (greedy max-neighbour) before taking value-weighted centroid. 1 = pure argmax (skip).">Cluster size (px)</label>
+                        <span id="hfWCluster" class="slider-val" style="color:var(--text-muted);font-weight:bold;">1</span>
+                    </div>
+                    <input type="range" id="hfSliderCluster" min="1" max="25" step="1" value="1" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);" title="Reject argmax candidates whose 8-neighbour mean is below this fraction of the seed value.">Spike support</label>
+                        <span id="hfWSpike" class="slider-val" style="color:var(--text-muted);font-weight:bold;">0.00</span>
+                    </div>
+                    <input type="range" id="hfSliderSpike" min="0" max="1" step="0.01" value="0" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);" title="Pixels within this many heatmap pixels of any edge must have full neighbour support.">Edge margin (hm-px)</label>
+                        <span id="hfWEdge" class="slider-val" style="color:var(--text-muted);font-weight:bold;">0</span>
+                    </div>
+                    <input type="range" id="hfSliderEdge" min="0" max="8" step="1" value="0" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+
+                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;margin-top:8px;">Y/Z-correct — detection</div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);" title="Threshold for flagging frames with bad Y disparity.">Y disparity</label>
+                        <span id="hfWYZ_y" class="slider-val" style="color:var(--text-muted);font-weight:bold;">0.00</span>
+                    </div>
+                    <input type="range" id="hfSliderYZ_y" min="0" max="1" step="0.01" value="0" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);" title="Threshold for flagging Z outliers (per-joint robust median).">Z outlier</label>
+                        <span id="hfWYZ_zo" class="slider-val" style="color:var(--text-muted);font-weight:bold;">0.00</span>
+                    </div>
+                    <input type="range" id="hfSliderYZ_zo" min="0" max="1" step="0.01" value="0" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);" title="Hard rule: every frame of any joint whose median Z deviates from the hand-wide consensus by more than this many mm gets flagged. Catches sustained-contamination cases the Z-outlier detector misses. 0 = off.">Joint Z range (mm)</label>
+                        <span id="hfWYZ_zm" class="slider-val" style="color:var(--text-muted);font-weight:bold;">0</span>
+                    </div>
+                    <input type="range" id="hfSliderYZ_zm" min="0" max="200" step="5" value="0" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;margin-top:6px;">Y/Z-correct — camera attribution</div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);" title="Weight on per-camera 2D-jump score when picking the bad camera.">2D jump</label>
+                        <span id="hfWYZ_aJ" class="slider-val" style="color:var(--text-muted);font-weight:bold;">0.00</span>
+                    </div>
+                    <input type="range" id="hfSliderYZ_aJ" min="0" max="1" step="0.01" value="0" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);" title="Weight on per-camera cluster-AUC trust (low AUC → likely bad camera).">Cluster AUC</label>
+                        <span id="hfWYZ_aC" class="slider-val" style="color:var(--text-muted);font-weight:bold;">0.00</span>
+                    </div>
+                    <input type="range" id="hfSliderYZ_aC" min="0" max="1" step="0.01" value="0" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+
+                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;margin-top:8px;">Z-smooth</div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);" title="Threshold for flagging single-frame Z jumps.">Z jumps</label>
+                        <span id="hfWZS" class="slider-val" style="color:var(--text-muted);font-weight:bold;">0.00</span>
+                    </div>
+                    <input type="range" id="hfSliderZS" min="0" max="1" step="0.01" value="0" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);" title="Half-window (frames) for the local polynomial fit used to predict the smooth Z baseline. Drives both the corrector and the dashed reference line on Pos: <Joint> Z plots when Corrections is on.">Smooth window (±N)</label>
+                        <span id="hfWZSWin" class="slider-val" style="color:var(--text-muted);font-weight:bold;">15</span>
+                    </div>
+                    <input type="range" id="hfSliderZSWin" min="1" max="60" step="1" value="15" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+
+                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;margin-top:8px;">Stereo-Hungarian — bone-length re-pick</div>
+                <div style="font-size:10px;color:var(--text-muted);margin-bottom:4px;line-height:1.4;">
+                    For any frame whose triangulated bone-to-parent deviates from the per-bone median by more than the threshold, brute-force the top-K NMS heatmap peaks per camera and keep the pair whose triangulated 3D best satisfies bone length while sitting on solid heatmap support.
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);" title="Bone deviation threshold from the per-bone median (mm). Frames above this are re-picked. 0 = off.">Bone threshold (mm)</label>
+                        <span id="hfWBoneThr" class="slider-val" style="color:var(--text-muted);font-weight:bold;">0</span>
+                    </div>
+                    <input type="range" id="hfSliderBoneThr" min="0" max="30" step="0.5" value="0" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);" title="Number of NMS-suppressed heatmap peaks to consider per camera when re-picking a flagged joint.">Candidates per cam</label>
+                        <span id="hfWBoneK" class="slider-val" style="color:var(--text-muted);font-weight:bold;">8</span>
+                    </div>
+                    <input type="range" id="hfSliderBoneK" min="2" max="20" step="1" value="8" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);" title="Weight on |new_bone_length − target| (mm). Higher = bone length dominates pair selection. Heatmap-value cost is 2 − vL/h_max − vR/h_max.">Bone weight</label>
+                        <span id="hfWBoneW" class="slider-val" style="color:var(--text-muted);font-weight:bold;">1.00</span>
+                    </div>
+                    <input type="range" id="hfSliderBoneW" min="0" max="5" step="0.01" value="1" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);" title="Weight on (2 − vL/h_max − vR/h_max). Higher = prefer high-AUC peaks even if bone length is slightly worse.">Heatmap weight</label>
+                        <span id="hfWHM" class="slider-val" style="color:var(--text-muted);font-weight:bold;">1.00</span>
+                    </div>
+                    <input type="range" id="hfSliderHM" min="0" max="5" step="0.01" value="1" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);" title="Pixel radius for NMS suppression on the candidate heatmap peaks.">Peak NMS radius (px)</label>
+                        <span id="hfWOverlap" class="slider-val" style="color:var(--text-muted);font-weight:bold;">8</span>
+                    </div>
+                    <input type="range" id="hfSliderOverlap" min="1" max="30" step="1" value="8" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+
+                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;margin-top:8px;">Wrist reconstruction</div>
+                <div style="font-size:10px;color:var(--text-muted);margin-bottom:4px;line-height:1.4;">
+                    After bone re-pick, solve the wrist position per-frame as the point satisfying all 5 wrist-MCP target lengths (medians from Z-smooth), then temporally smooth the wrist 3D trajectory and re-project into both cameras.
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);" title="Half-window (frames) for the polynomial smoothing of the wrist 3D trajectory after the per-frame least-squares solve. Larger = smoother wrist motion at the cost of responsiveness. 0 = no temporal smoothing.">Wrist smooth (±N)</label>
+                        <span id="hfWWristSm" class="slider-val" style="color:var(--text-muted);font-weight:bold;">5</span>
+                    </div>
+                    <input type="range" id="hfSliderWristSm" min="0" max="30" step="1" value="5" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+
+                <div style="display:flex;gap:4px;margin-top:8px;">
+                    <button class="btn btn-sm btn-success" id="runHRnetFitBtn" style="flex:1;">Run</button>
+                    <button class="btn btn-sm" id="hrnetFitResetBtn" style="font-size:10px;padding:2px 6px;">Reset</button>
+                    <button class="btn btn-sm" id="hrnetFitCloseBtn" style="font-size:10px;padding:2px 6px;">Close</button>
+                </div>
+                <div id="fitHRnetStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
             </div>
 
-            <!-- Heatmap joint -->
-            <div id="heatmapControls" style="display:none;margin-top:8px;">
-                <div class="sidebar-section">Heatmap Joint</div>
-                <select id="jointSelect" style="width:100%;padding:4px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:11px;"></select>
+            <!-- v1 — locked algorithm -->
+            <button class="btn btn-sm" id="fitSkeletonBtn" style="width:100%;margin-top:6px;">Fit Skeleton (v1)</button>
+            <div id="fitOptionsPanel" style="display:none;margin-top:6px;">
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Reprojection</label>
+                        <span id="fitWReproj" style="color:var(--text-muted);font-weight:bold;">1.0</span>
+                    </div>
+                    <input type="range" id="fitSliderReproj" min="0" max="20" step="0.5" value="1"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Bone Length</label>
+                        <span id="fitWBone" style="color:var(--text-muted);font-weight:bold;">5.0</span>
+                    </div>
+                    <input type="range" id="fitSliderBone" min="0" max="20" step="0.5" value="5"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Smoothness</label>
+                        <span id="fitWSmooth" style="color:var(--text-muted);font-weight:bold;">1.0</span>
+                    </div>
+                    <input type="range" id="fitSliderSmooth" min="0" max="5" step="0.1" value="1"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <label style="display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:4px;cursor:pointer;">
+                    <input type="checkbox" id="fitSnapBones" style="margin:0;">
+                    <span style="color:var(--text-muted);">Snap bone lengths</span>
+                </label>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Joint Angles</label>
+                        <span id="fitWAngle" style="color:var(--text-muted);font-weight:bold;">2.0</span>
+                    </div>
+                    <input type="range" id="fitSliderAngle" min="0" max="10" step="0.5" value="2"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="display:flex;gap:4px;">
+                    <button class="btn btn-sm btn-success" id="runStage1Btn" style="flex:1;" onclick="manoViewer.runStage1()">Run</button>
+                    <button class="btn btn-sm" style="font-size:10px;padding:2px 6px;" onclick="manoViewer.resetFitDefaults()">Reset</button>
+                    <button class="btn btn-sm" id="fitCancelBtn" style="font-size:10px;padding:2px 6px;">Close</button>
+                </div>
             </div>
+            <div id="fitV1Status" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
 
-            <!-- Distance -->
-            <div class="sidebar-section">Distance</div>
-            <select id="distanceSelect" style="width:100%;padding:4px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:11px;"></select>
-            <div style="display:flex;gap:4px;margin-top:4px;align-items:center;">
-                <label style="font-size:10px;color:var(--text-muted);">Y</label>
-                <input type="number" id="distYMin" placeholder="min" style="width:50px;padding:2px 4px;font-size:10px;background:var(--bg);border:1px solid var(--border);border-radius:3px;color:var(--text);">
-                <span style="font-size:10px;color:var(--text-muted);">–</span>
-                <input type="number" id="distYMax" placeholder="max" style="width:50px;padding:2px 4px;font-size:10px;background:var(--bg);border:1px solid var(--border);border-radius:3px;color:var(--text);">
-                <button class="btn btn-sm" onclick="document.getElementById('distYMin').value='';document.getElementById('distYMax').value='';window.manoViewer.renderDistanceTrace();" style="padding:1px 4px;font-size:10px;">Auto</button>
+            <!-- Skeleton v2 — legacy smoothing (absolute-position + z-constancy) -->
+            <button class="btn btn-sm" id="fitSkeletonLegacyBtn" style="width:100%;margin-top:6px;">Fit Skeleton (v2)</button>
+            <div id="fitLegacyPanel" style="display:none;margin-top:6px;">
+                <div style="font-size:10px;color:var(--text-muted);margin-bottom:6px;line-height:1.4;">
+                    Legacy smoothing: per-joint absolute position + z-constancy. May bias bones shorter.
+                </div>
+                <!-- Input weights -->
+                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;">Input weights</div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Mediapipe</label>
+                        <span id="lgWMediapipe" style="color:var(--text-muted);font-weight:bold;">10.0</span>
+                    </div>
+                    <input type="range" id="lgSliderMediapipe" min="0" max="20" step="0.1" value="10"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">DLC</label>
+                        <span id="lgWDLC" style="color:var(--text-muted);font-weight:bold;">1.0</span>
+                    </div>
+                    <input type="range" id="lgSliderDLC" min="0" max="5" step="0.1" value="1"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <!-- Regularisation -->
+                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;margin-top:6px;">Regularisation</div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Wrist smooth ×</label>
+                        <span id="lgWSmoothWrist" style="color:var(--text-muted);font-weight:bold;">1.0</span>
+                    </div>
+                    <input type="range" id="lgSliderSmoothWrist" min="0.1" max="10" step="0.1" value="1"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Smooth (XY)</label>
+                        <span id="lgWSmoothXY" style="color:var(--text-muted);font-weight:bold;">10.0</span>
+                    </div>
+                    <input type="range" id="lgSliderSmoothXY" min="0" max="20" step="0.1" value="10"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Smooth (Z)</label>
+                        <span id="lgWSmoothZ" style="color:var(--text-muted);font-weight:bold;">10.0</span>
+                    </div>
+                    <input type="range" id="lgSliderSmoothZ" min="0" max="20" step="0.1" value="10"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Smooth (angles)</label>
+                        <span id="lgWSmoothAngles" style="color:var(--text-muted);font-weight:bold;">10.0</span>
+                    </div>
+                    <input type="range" id="lgSliderSmoothAngles" min="0" max="20" step="0.1" value="10"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Constraints <button class="btn btn-sm" onclick="manoViewer.openConstraintsEditor()" style="font-size:10px;padding:1px 8px;margin-left:4px;">Edit</button></label>
+                        <span id="lgWConstraints" style="color:var(--text-muted);font-weight:bold;">10.0</span>
+                    </div>
+                    <input type="range" id="lgSliderConstraints" min="0" max="20" step="0.5" value="10"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="display:flex;gap:4px;">
+                    <button class="btn btn-sm btn-success" id="runFitLegacyBtn" style="flex:1;" onclick="manoViewer.runFitLegacy()">Run</button>
+                    <button class="btn btn-sm" style="font-size:10px;padding:2px 6px;" onclick="manoViewer.resetFitLegacyDefaults()">Reset</button>
+                    <button class="btn btn-sm" id="fitLegacyCancelBtn" style="font-size:10px;padding:2px 6px;">Close</button>
+                </div>
             </div>
+            <div id="fitLegacyStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
 
-            <!-- Export -->
-            <div class="sidebar-section" style="margin-top:16px;">Export</div>
-            <button class="btn btn-sm" id="exportVideoBtn" style="width:100%;">Export Video</button>
+            <!-- Skeleton v3 — FK parameterisation, multi-source -->
+            <button class="btn btn-sm" id="fitSkeletonV2Btn" style="width:100%;margin-top:6px;">Fit Skeleton (v3)</button>
+            <div id="fitV2Panel" style="display:none;margin-top:6px;">
+                <div style="font-size:10px;color:var(--text-muted);margin-bottom:6px;line-height:1.4;">
+                    Skeleton v3 (error-detection + correction): detect MP errors, attribute per-camera blame, then fit.
+                </div>
+
+                <!-- ── Error Detection ───────────────────────────────── -->
+                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;">Error Detection</div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Y disparity</label>
+                        <span id="edWY" style="color:var(--text-muted);font-weight:bold;">0.0</span>
+                    </div>
+                    <input type="range" id="edSliderY" min="0" max="1" step="0.01" value="0" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Z outlier</label>
+                        <span id="edWZOut" style="color:var(--text-muted);font-weight:bold;">0.0</span>
+                    </div>
+                    <input type="range" id="edSliderZOut" min="0" max="1" step="0.01" value="0"
+                           title="Per-joint deviation of current Z from robust video-wide median" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Z jumps</label>
+                        <span id="edWZ" style="color:var(--text-muted);font-weight:bold;">0.0</span>
+                    </div>
+                    <input type="range" id="edSliderZ" min="0" max="1" step="0.01" value="0" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);" title="Replace MP label with HRnet peak when their pixel mismatch exceeds this distance.">HRnet peak dist (px)</label>
+                        <span id="edWHR" style="color:var(--text-muted);font-weight:bold;">0</span>
+                    </div>
+                    <input type="range" id="edSliderHR" min="0" max="40" step="0.5" value="0" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Bone length</label>
+                        <span id="edWBL" style="color:var(--text-muted);font-weight:bold;">0.0</span>
+                    </div>
+                    <input type="range" id="edSliderBL" min="0" max="1" step="0.01" value="0" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Bone length jumps</label>
+                        <span id="edWBA" style="color:var(--text-muted);font-weight:bold;">0.0</span>
+                    </div>
+                    <input type="range" id="edSliderBA" min="0" max="1" step="0.01" value="0" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Joint angles <button class="btn btn-sm" onclick="manoViewer.openConstraintsEditor()" style="font-size:10px;padding:1px 8px;margin-left:4px;">Edit</button></label>
+                        <span id="edWAng" style="color:var(--text-muted);font-weight:bold;">0.0</span>
+                    </div>
+                    <input type="range" id="edSliderAng" min="0" max="1" step="0.01" value="0" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+
+                <!-- ── Camera Attribution ───────────────────────────── -->
+                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;margin-top:8px;">Camera Attribution</div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">2D jump</label>
+                        <span id="eaWJump" style="color:var(--text-muted);font-weight:bold;">0.000</span>
+                    </div>
+                    <input type="range" id="eaSliderJump" min="0" max="1" step="0.001" value="0"
+                           title="Lower = stricter (winner-take-all per suspicious joint)" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">MP confidence</label>
+                        <span id="eaWConf" style="color:var(--text-muted);font-weight:bold;">0.000</span>
+                    </div>
+                    <input type="range" id="eaSliderConf" min="0" max="1" step="0.001" value="0"
+                           title="Lower = stricter (winner-take-all per suspicious joint)" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">HRnet</label>
+                        <span id="eaWHRnet" style="color:var(--text-muted);font-weight:bold;">0.000</span>
+                    </div>
+                    <input type="range" id="eaSliderHRnet" min="0" max="1" step="0.001" value="0"
+                           title="Higher weight = trust HRnet heatmap value at MP label more for picking the bad camera"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+
+                <div style="display:flex;gap:4px;margin-top:8px;margin-bottom:6px;">
+                    <button class="btn btn-sm btn-success" id="runFitV2Btn" style="flex:1;" onclick="manoViewer.runFitV2()">Run</button>
+                    <button class="btn btn-sm" id="fitV2CancelBtn" style="font-size:10px;padding:2px 8px;">Close</button>
+                </div>
+                <div id="errorsStatus" style="font-size:10px;color:var(--text-muted);margin-bottom:6px;"></div>
+
+                <!-- ── Existing fit sliders (dimmed/disabled; kept for reference) ── -->
+                <div id="v2LegacySlidersWrap" style="opacity:0.35;pointer-events:none;">
+                <!-- Input weights -->
+                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;">Input weights</div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Mediapipe</label>
+                        <span id="v2WMediapipe" style="color:var(--text-muted);font-weight:bold;">10.0</span>
+                    </div>
+                    <input type="range" id="v2SliderMediapipe" min="0" max="20" step="0.1" value="10"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Vision</label>
+                        <span id="v2WVision" style="color:var(--text-muted);font-weight:bold;">1.0</span>
+                    </div>
+                    <input type="range" id="v2SliderVision" min="0" max="5" step="0.1" value="1"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">DLC</label>
+                        <span id="v2WDLC" style="color:var(--text-muted);font-weight:bold;">1.0</span>
+                    </div>
+                    <input type="range" id="v2SliderDLC" min="0" max="5" step="0.1" value="1"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">HRNet (heat maps)</label>
+                        <span id="v2WHRNet" style="color:var(--text-muted);font-weight:bold;">0.0</span>
+                    </div>
+                    <input type="range" id="v2SliderHRNet" min="0" max="5" step="0.1" value="0"
+                           style="width:100%;cursor:pointer;height:5px;">
+                    <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text-muted);margin-top:2px;cursor:pointer;">
+                        <input type="checkbox" id="v2HRNetFingertipsOnly" style="margin:0;"> Fingertips only
+                    </label>
+                    <div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text-muted);margin-top:4px;">
+                        <span>Source:</span>
+                        <select id="v2HRnetSource" style="font-size:10px;background:var(--bg);color:var(--text-muted);border:1px solid var(--border);border-radius:3px;padding:0 2px;flex:1;">
+                            <option value="hungarian" selected>Stereo-Hungarian (HRnet Fit)</option>
+                            <option value="centroid">Cluster centroid (HRnet Fit)</option>
+                            <option value="refined">Peak select (legacy)</option>
+                            <option value="raw">Raw argmax (legacy)</option>
+                            <option value="auto">Auto (best available)</option>
+                        </select>
+                    </div>
+                </div>
+                <!-- Regularisation -->
+                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;margin-top:6px;">Regularisation</div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Wrist smooth ×</label>
+                        <span id="v2WSmoothWrist" style="color:var(--text-muted);font-weight:bold;">1.0</span>
+                    </div>
+                    <input type="range" id="v2SliderSmoothWrist" min="0.1" max="10" step="0.1" value="1"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Smooth (XY)</label>
+                        <span id="v2WSmoothXY" style="color:var(--text-muted);font-weight:bold;">10.0</span>
+                    </div>
+                    <input type="range" id="v2SliderSmoothXY" min="0" max="20" step="0.1" value="10"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Smooth (Z)</label>
+                        <span id="v2WSmoothZ" style="color:var(--text-muted);font-weight:bold;">10.0</span>
+                    </div>
+                    <input type="range" id="v2SliderSmoothZ" min="0" max="20" step="0.1" value="10"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Smooth (angles)</label>
+                        <span id="v2WSmoothAngles" style="color:var(--text-muted);font-weight:bold;">10.0</span>
+                    </div>
+                    <input type="range" id="v2SliderSmoothAngles" min="0" max="20" step="0.1" value="10"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <!-- Joint constraints (slider 0 = off) -->
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Constraints <button class="btn btn-sm" onclick="manoViewer.openConstraintsEditor()" style="font-size:10px;padding:1px 8px;margin-left:4px;">Edit</button></label>
+                        <span id="v2WConstraints" style="color:var(--text-muted);font-weight:bold;">10.0</span>
+                    </div>
+                    <input type="range" id="v2SliderConstraints" min="0" max="20" step="0.5" value="10"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                </div> <!-- /v2LegacySlidersWrap -->
+            </div>
+            <div id="fitV2Status" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
+
+            <!-- PLOTTING_SECTION_START -->
+            <div class="sidebar-section" style="margin-top:16px;">Plotting</div>
+            <div id="handDiagramPlotWrap" style="width:180px;height:160px;margin:2px auto;position:relative;">
+                <button id="plotModeToggle" title="Toggle Angle/Position mode" style="position:absolute;top:0;right:0;font-size:9px;padding:1px 5px;cursor:pointer;background:var(--surface2);border:1px solid var(--border);color:var(--text-muted);border-radius:3px;line-height:1.4;z-index:2;" onclick="manoViewer.togglePlotMode()"><span style="color:var(--text);font-weight:bold;">Angle</span><span style="opacity:0.35;margin:0 3px;">|</span><span>Position</span></button>
+                <button id="resetPlotBtn" title="Reset to Thumb-Index Aperture" style="position:absolute;bottom:0;right:0;font-size:9px;padding:1px 5px;cursor:pointer;background:var(--surface2);border:1px solid var(--border);color:var(--text-muted);border-radius:3px;line-height:1.4;z-index:2;" onclick="manoViewer.resetPlotSelection()">Reset</button>
+            <svg id="handDiagramPlot" viewBox="-10 -15 160 151" width="180" height="160" xmlns="http://www.w3.org/2000/svg">
+                <style>
+                    #handDiagramPlot .bone { stroke-width:2.5; stroke-linecap:round; cursor:pointer; }
+                    #handDiagramPlot .bone:hover { stroke-width:4; filter:brightness(1.4); }
+                    #handDiagramPlot .joint { stroke:#000; stroke-width:0.4; cursor:pointer; }
+                    #handDiagramPlot .joint:hover { r:5; stroke:#fff; stroke-width:1; }
+                    #handDiagramPlot text { font-size:8px; fill:var(--text-muted); pointer-events:none; text-anchor:middle; }
+                    #handDiagramPlot .selected-dist { stroke:#ff4080 !important; opacity:1 !important; stroke-width:3 !important; }
+                    #handDiagramPlot .selected-angle { stroke:#ff4080 !important; stroke-width:2 !important; r:5 !important; filter:drop-shadow(0 0 3px #ff4080); }
+                    #handDiagramPlot .aperture { stroke-width:2; stroke-dasharray:3,3; stroke-linecap:round; cursor:pointer; opacity:0.6; }
+                    #handDiagramPlot .aperture:hover { opacity:1; filter:drop-shadow(0 0 4px #fff); }
+                    #handDiagramPlot .aperture-hit { stroke:transparent; stroke-width:10; cursor:pointer; }
+                    #handDiagramPlot .aperture.selected-dist { stroke-width:2 !important; filter:drop-shadow(0 0 3px #ff4080); }
+                    #handDiagramPlot .mcp-dist { stroke-width:1.5; stroke-dasharray:2,3; stroke-linecap:round; cursor:pointer; opacity:0.4; }
+                    #handDiagramPlot .mcp-dist:hover { opacity:1; filter:drop-shadow(0 0 3px #fff); }
+                    #handDiagramPlot .mcp-dist.selected-dist { stroke:#ff4080 !important; opacity:1 !important; stroke-width:2 !important; filter:drop-shadow(0 0 3px #ff4080); }
+                    #handDiagramPlot .mcp-dist-hit { stroke:transparent; stroke-width:10; cursor:pointer; }
+                    #handDiagramPlot .angle-label { font-size:9px; font-weight:bold; pointer-events:all; user-select:none; }
+                    #handDiagramPlot .spread-label { font-size:9px; font-weight:bold; pointer-events:all; user-select:none; cursor:pointer; fill:#555; display:none; }
+                    #handDiagramPlot .coord-label  { font-size:9px; font-weight:bold; pointer-events:all; user-select:none; cursor:pointer; fill:#555; display:none; }
+                    #handDiagramPlot .tip-joint { display:none; }
+                    #handDiagramPlot.pos-mode .tip-joint { display:inline; }
+                </style>
+                <!-- MCP distance lines (behind joints) -->
+                <line class="mcp-dist" data-mcp="MCP: Thumb-Index" x1="38" y1="100" x2="53" y2="91" stroke="#60c0e0"/>
+                <line class="mcp-dist-hit" data-mcp="MCP: Thumb-Index" x1="38" y1="100" x2="53" y2="91"/>
+                <line class="mcp-dist" data-mcp="MCP: Index-Middle" x1="42" y1="72" x2="64" y2="69" stroke="#60c0e0"/>
+                <line class="mcp-dist-hit" data-mcp="MCP: Index-Middle" x1="42" y1="72" x2="64" y2="69"/>
+                <line class="mcp-dist" data-mcp="MCP: Middle-Ring" x1="64" y1="69" x2="86" y2="72" stroke="#60c0e0"/>
+                <line class="mcp-dist-hit" data-mcp="MCP: Middle-Ring" x1="64" y1="69" x2="86" y2="72"/>
+                <line class="mcp-dist" data-mcp="MCP: Ring-Pinky" x1="86" y1="72" x2="107" y2="76" stroke="#60c0e0"/>
+                <line class="mcp-dist-hit" data-mcp="MCP: Ring-Pinky" x1="86" y1="72" x2="107" y2="76"/>
+                <g data-finger="thumb"><line class="bone" data-j1="0" data-j2="1" x1="70" y1="120" x2="38" y2="100" stroke="#60c0e0"/><line class="bone" data-j1="1" data-j2="2" x1="38" y1="100" x2="22" y2="88" stroke="#60c0e0"/><line class="bone" data-j1="2" data-j2="3" x1="22" y1="88" x2="10" y2="74" stroke="#60c0e0"/><line class="bone" data-j1="3" data-j2="4" x1="10" y1="74" x2="4" y2="63" stroke="#60c0e0"/><circle class="joint" data-joint="1" cx="38" cy="100" r="3" fill="#60c0e0"/><circle class="joint" data-joint="2" cx="22" cy="88" r="3" fill="#60c0e0"/><circle class="joint" data-joint="3" cx="10" cy="74" r="3" fill="#60c0e0"/></g>
+                <g data-finger="index"><line class="bone" data-j1="0" data-j2="5" x1="70" y1="120" x2="42" y2="72" stroke="#60c0e0"/><line class="bone" data-j1="5" data-j2="6" x1="42" y1="72" x2="36" y2="46" stroke="#60c0e0"/><line class="bone" data-j1="6" data-j2="7" x1="36" y1="46" x2="33" y2="22" stroke="#60c0e0"/><line class="bone" data-j1="7" data-j2="8" x1="33" y1="22" x2="31" y2="2" stroke="#60c0e0"/><circle class="joint" data-joint="5" cx="42" cy="72" r="3" fill="#60c0e0"/><circle class="joint" data-joint="6" cx="36" cy="46" r="3" fill="#60c0e0"/><circle class="joint" data-joint="7" cx="33" cy="22" r="3" fill="#60c0e0"/></g>
+                <g data-finger="middle"><line class="bone" data-j1="0" data-j2="9" x1="70" y1="120" x2="64" y2="69" stroke="#60c0e0"/><line class="bone" data-j1="9" data-j2="10" x1="64" y1="69" x2="62" y2="43" stroke="#60c0e0"/><line class="bone" data-j1="10" data-j2="11" x1="62" y1="43" x2="61" y2="19" stroke="#60c0e0"/><line class="bone" data-j1="11" data-j2="12" x1="61" y1="19" x2="60" y2="-3" stroke="#60c0e0"/><circle class="joint" data-joint="9" cx="64" cy="69" r="3" fill="#60c0e0"/><circle class="joint" data-joint="10" cx="62" cy="43" r="3" fill="#60c0e0"/><circle class="joint" data-joint="11" cx="61" cy="19" r="3" fill="#60c0e0"/></g>
+                <g data-finger="ring"><line class="bone" data-j1="0" data-j2="13" x1="70" y1="120" x2="86" y2="72" stroke="#60c0e0"/><line class="bone" data-j1="13" data-j2="14" x1="86" y1="72" x2="89" y2="48" stroke="#60c0e0"/><line class="bone" data-j1="14" data-j2="15" x1="89" y1="48" x2="91" y2="26" stroke="#60c0e0"/><line class="bone" data-j1="15" data-j2="16" x1="91" y1="26" x2="92" y2="6" stroke="#60c0e0"/><circle class="joint" data-joint="13" cx="86" cy="72" r="3" fill="#60c0e0"/><circle class="joint" data-joint="14" cx="89" cy="48" r="3" fill="#60c0e0"/><circle class="joint" data-joint="15" cx="91" cy="26" r="3" fill="#60c0e0"/></g>
+                <g data-finger="pinky"><line class="bone" data-j1="0" data-j2="17" x1="70" y1="120" x2="107" y2="76" stroke="#60c0e0"/><line class="bone" data-j1="17" data-j2="18" x1="107" y1="76" x2="113" y2="56" stroke="#60c0e0"/><line class="bone" data-j1="18" data-j2="19" x1="113" y1="56" x2="117" y2="38" stroke="#60c0e0"/><line class="bone" data-j1="19" data-j2="20" x1="117" y1="38" x2="120" y2="22" stroke="#60c0e0"/><circle class="joint" data-joint="17" cx="107" cy="76" r="3" fill="#60c0e0"/><circle class="joint" data-joint="18" cx="113" cy="56" r="3" fill="#60c0e0"/><circle class="joint" data-joint="19" cx="117" cy="38" r="3" fill="#60c0e0"/></g>
+                <circle class="joint tip-joint" data-joint="4" cx="4" cy="63" r="2.5" fill="#60c0e0"/>
+                <circle class="joint tip-joint" data-joint="8" cx="31" cy="2" r="2.5" fill="#60c0e0"/>
+                <circle class="joint tip-joint" data-joint="12" cx="60" cy="-3" r="2.5" fill="#60c0e0"/>
+                <circle class="joint tip-joint" data-joint="16" cx="92" cy="6" r="2.5" fill="#60c0e0"/>
+                <circle class="joint tip-joint" data-joint="20" cx="120" cy="22" r="2.5" fill="#60c0e0"/>
+                <line class="aperture selected-dist" id="apertureLine" data-j1="4" data-j2="8" x1="4" y1="63" x2="31" y2="2" stroke="#fff"/>
+                <line class="aperture-hit" id="apertureHit" x1="4" y1="63" x2="31" y2="2"/>
+                <circle class="joint" data-joint="0" cx="70" cy="120" r="4" fill="#60c0e0"/>
+                <text class="spread-label" data-spread="Spread 1" x="33" y="95">1</text>
+                <text class="spread-label" data-spread="Spread 2" x="53" y="84">2</text>
+                <text class="spread-label" data-spread="Spread 3" x="75" y="84">3</text>
+                <text class="spread-label" data-spread="Spread 4" x="97" y="87">4</text>
+                <!-- coord-labels are added dynamically per joint in position mode -->
+            </svg>
+            </div>
+            <!-- PLOTTING_SECTION_END -->
 
             <!-- Shortcuts -->
             <div class="sidebar-section" style="margin-top:16px;">Shortcuts</div>
             <div style="font-size:10px;color:var(--text-muted);line-height:1.6;">
                 <b>A/&larr;</b> prev frame &nbsp; <b>S/&rarr;</b> next frame<br>
                 <b>Space</b> play/pause &nbsp; <b>E</b> toggle camera<br>
-                <b>Z</b> reset zoom &nbsp; <b>C</b> snap camera<br>
+                <b>Z</b> tracking zoom &nbsp; <b>C</b> snap camera<br>
                 <b>Scroll</b> zoom
             </div>
+            </div> <!-- /sidebarScroll -->
+
+            <!-- Plotting pinned at the bottom of the sidebar so it's always
+                 visible regardless of scroll position in the upper region -->
+            <div id="plottingPinned" style="flex-shrink:0;border-top:1px solid var(--border);padding-top:8px;margin-top:6px;background:var(--bg-card);"></div>
         </div>
 
         <!-- Main content -->
@@ -242,20 +864,97 @@
             <div class="mano-viewports">
                 <div class="canvas-wrap">
                     <canvas id="videoCanvas"></canvas>
-                    <video id="videoEl" style="display:none;" muted tabindex="-1"></video>
                 </div>
                 <div class="three-wrap" id="threejsContainer"></div>
             </div>
+            <!-- Drag handle: resize the bottom panel (controls + plot) vertically -->
+            <div id="plotResizer" title="Drag to resize plot" style="height:10px;cursor:ns-resize;background:var(--border);flex-shrink:0;opacity:0.6;border-top:1px solid var(--surface2);border-bottom:1px solid var(--surface2);touch-action:none;user-select:none;"></div>
             <div class="controls-bar">
+                <button class="btn btn-sm" id="prevFrameBtn" title="Previous frame (A/Left)" style="padding:2px 6px;">&larr;</button>
+                <button class="btn btn-sm" id="playBtn" title="Play/Pause (Space)" style="padding:2px 6px;width:28px;">&#9654;</button>
+                <button class="btn btn-sm" id="nextFrameBtn" title="Next frame (S/Right)" style="padding:2px 6px;">&rarr;</button>
+                <input type="range" id="speedSlider" min="0" max="10" value="3"
+                       style="width:90px;cursor:pointer;height:5px;">
+                <span id="speedDisplay" style="font-size:10px;color:var(--text-muted);font-weight:bold;width:28px;text-align:left;flex-shrink:0;">1x</span>
+                <button class="btn btn-sm" id="sideToggle" title="Toggle camera (E)" style="padding:2px 6px;"><span style="color:var(--text);font-weight:bold;">OS</span><span style="opacity:0.35;margin:0 3px;">|</span><span>OD</span></button>
+                <button class="btn btn-sm" id="trackZoomBtn" title="Toggle tracking zoom (Z)" style="padding:2px 6px;">Track</button>
+                <button class="btn btn-sm" id="snapCamBtn" title="Reset 3D view to camera (C)" style="padding:2px 6px;">Snap</button>
+                <button class="btn btn-sm" id="toggleVideoBtn" title="Toggle video (V)" style="padding:2px 6px;">Hide Video</button>
+                <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text-muted);">
+                    X
+                    <input type="range" id="xScaleSlider" min="1" max="10" step="0.1" value="1"
+                           title="Timeline X scale (1 = full trial, >1 scrolls)"
+                           style="width:80px;cursor:pointer;height:5px;">
+                </label>
                 <span>Frame: <strong id="frameDisplay">0</strong> / <span id="totalFrames">0</span></span>
-                <span>Trial: <strong id="trialName">-</strong></span>
-                <span>Err: <strong id="fitError">-</strong></span>
+                <span id="plotValues" style="font-size:11px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
+                <strong id="fitError" style="display:none;"></strong>
+                <span style="flex:1;"></span>
+                <button class="btn btn-sm" id="exportVideoBtn" style="padding:2px 6px;">Export Video</button>
             </div>
-            <canvas id="distanceCanvas"></canvas>
+            <select id="distanceSelect" style="display:none;"></select>
+            <div id="plotFlexRow" style="display:flex;flex-shrink:0;height:var(--plot-h,115px);">
+                <div id="distYAxisWrap" style="display:flex;align-items:center;flex-shrink:0;">
+                    <span id="yAxisLabel" style="writing-mode:vertical-rl;transform:rotate(180deg);font-size:10px;color:var(--text-muted);white-space:nowrap;padding:0 2px;">Distance (mm)</span>
+                </div>
+                <div id="distYRangeWrap" class="y-range-wrap" style="height:100%;margin-top:auto;">
+                    <div class="y-track"></div>
+                    <div class="y-fill" id="yRangeFill"></div>
+                    <input type="range" id="distYMinSlider" min="0" max="200" value="0"
+                           orient="vertical" style="writing-mode:vertical-lr;direction:rtl;height:100%;">
+                    <input type="range" id="distYMaxSlider" min="-200" max="200" value="200"
+                           orient="vertical" style="writing-mode:vertical-lr;direction:rtl;height:100%;">
+                </div>
+                <div id="distScrollWrap" style="flex:1;overflow-x:auto;overflow-y:hidden;min-width:0;height:100%;align-self:flex-end;">
+                    <canvas id="distanceCanvas" style="display:block;"></canvas>
+                </div>
+                <div id="angleYRangeWrap" class="y-range-wrap" style="height:100%;margin-top:auto;visibility:hidden;margin-left:6px;">
+                    <div class="y-track"></div>
+                    <div class="y-fill" id="yRangeFillAngle"></div>
+                    <input type="range" id="angleYMinSlider" min="-200" max="200" value="-200"
+                           orient="vertical" style="writing-mode:vertical-lr;direction:rtl;height:100%;">
+                    <input type="range" id="angleYMaxSlider" min="-200" max="200" value="200"
+                           orient="vertical" style="writing-mode:vertical-lr;direction:rtl;height:100%;">
+                </div>
+                <div id="angleYAxisWrap" style="visibility:hidden;display:flex;align-items:center;flex-shrink:0;">
+                    <span id="yAxisLabelAngle" style="writing-mode:vertical-rl;font-size:10px;color:var(--text-muted);white-space:nowrap;padding:0 2px;">Angle (°)</span>
+                </div>
+            </div>
         </div>
     </div>
 
-    <script src="/static/js/nav.js?v=2"></script>
+    <!-- Joint Angle Constraints Editor Modal -->
+    <div id="constraintsModal" style="display:none;position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,0.55);align-items:center;justify-content:center;">
+        <div style="background:var(--bg-card);border-radius:8px;padding:20px;max-width:560px;width:95%;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.4);">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                <h3 style="margin:0;font-size:15px;">Joint Angle Constraints</h3>
+                <span id="constraintsCustomBadge" style="display:none;font-size:10px;padding:2px 6px;border-radius:3px;background:var(--blue);color:#fff;">Custom</span>
+            </div>
+            <table style="width:100%;border-collapse:collapse;font-size:12px;" id="constraintsTable">
+                <thead>
+                    <tr style="border-bottom:1px solid var(--border);">
+                        <th style="text-align:left;padding:4px 6px;color:var(--text-muted);font-size:10px;" rowspan="2">Joint</th>
+                        <th style="text-align:center;padding:2px 6px;color:var(--text-muted);font-size:10px;border-bottom:none;" colspan="2">Flex/Ext</th>
+                        <th style="text-align:center;padding:2px 6px;color:var(--text-muted);font-size:10px;border-bottom:none;" colspan="2">Abd/Add</th>
+                    </tr>
+                    <tr style="border-bottom:1px solid var(--border);">
+                        <th style="text-align:right;padding:2px 4px;color:var(--text-muted);font-size:9px;width:52px;">Min</th>
+                        <th style="text-align:right;padding:2px 4px;color:var(--text-muted);font-size:9px;width:52px;">Max</th>
+                        <th style="text-align:right;padding:2px 4px;color:var(--text-muted);font-size:9px;width:52px;">Min</th>
+                        <th style="text-align:right;padding:2px 4px;color:var(--text-muted);font-size:9px;width:52px;">Max</th>
+                    </tr>
+                </thead>
+                <tbody id="constraintsBody"></tbody>
+            </table>
+            <div style="display:flex;gap:6px;margin-top:12px;">
+                <button class="btn btn-sm btn-success" id="constraintsSaveBtn" onclick="manoViewer.saveConstraints()" style="flex:1;">Save</button>
+                <button class="btn btn-sm" id="constraintsResetBtn" onclick="manoViewer.resetConstraints()">Reset Defaults</button>
+                <button class="btn btn-sm" onclick="manoViewer.cancelConstraintsEditor()">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/nav.js?v=9"></script>
     <script type="importmap">
     {
         "imports": {
@@ -264,7 +963,8 @@
         }
     }
     </script>
-    <script src="/static/js/mano.js?v=48" type="module"></script>
+    <script src="/static/js/touch-shim.js?v=1"></script>
+    <script src="/static/js/mano.js?v=332" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
@@ -78,6 +79,11 @@ def run_stage1_fitting(
     trial_stem: str,
     cancel_event: threading.Event | None = None,
     progress_callback: Callable[[float], None] | None = None,
+    w_reproj: float = 1.0,
+    w_bone: float = 5.0,
+    w_smooth: float = 1.0,
+    snap_bones: bool = False,
+    w_angle: float = 2.0,
 ) -> dict[str, Any]:
     """Run Stage 1 skeleton fitting for a single trial.
 
@@ -137,8 +143,11 @@ def run_stage1_fitting(
     mp_R = od_lm[start_frame:end].copy()
     N = mp_L.shape[0]
 
-    # Calibration
-    calib = get_calibration_for_subject(subject_name)
+    # Calibration — use trial-level first (same as display code)
+    from .mano_data import _load_trial_calibration
+    calib = _load_trial_calibration(subject_name, trial_stem)
+    if calib is None:
+        calib = get_calibration_for_subject(subject_name)
     if calib is None:
         raise ValueError(f"No stereo calibration for {subject_name}")
 
@@ -234,6 +243,15 @@ def run_stage1_fitting(
     logger.info(f"  Fitting {n_valid} frames ({n_valid * 21 * 3} position params)")
     report(20)
 
+    # ── Load joint angle priors (custom overrides or bundled defaults) ──
+    angle_prior_data = None
+    _angle_priors_list = []
+    if w_angle > 0:
+        from .mano_data import load_angle_priors
+        angle_prior_data = load_angle_priors()
+        _angle_priors_list = angle_prior_data.get("joints", [])
+        logger.info(f"  Loaded {len(_angle_priors_list)} joint angle priors (flex+abd per joint)")
+
     # ── Stage 1 optimization ───────────────────────────────────
     n_iters = 300
 
@@ -241,6 +259,21 @@ def run_stage1_fitting(
         {"params": [joints_3d], "lr": 0.5},
         {"params": [offset_L, offset_R], "lr": 0.1},
     ])
+
+    # Build kinematic chain traversal order (BFS from wrist) for bone projection
+    _chain_order = []  # list of (parent_joint, child_joint, bone_index)
+    _bone_map = {(j1, j2): b for b, (j1, j2) in enumerate(BONES)}
+    _visited = {0}
+    _queue = [0]
+    while _queue:
+        p = _queue.pop(0)
+        for cj, pj in PARENT.items():
+            if pj == p and cj not in _visited:
+                _visited.add(cj)
+                _queue.append(cj)
+                bi = _bone_map.get((pj, cj), _bone_map.get((cj, pj)))
+                if bi is not None and target_bone_lengths[bi] > 0:
+                    _chain_order.append((pj, cj, bi))
 
     logger.info(f"  Running Stage 1 ({n_iters} iterations)...")
 
@@ -276,14 +309,36 @@ def run_stage1_fitting(
                 acc = vel[1:] - vel[:-1]
                 loss_temporal = loss_temporal + 0.05 * (acc ** 2).mean()
 
-        loss = loss_reproj + 5.0 * loss_bone + loss_temporal
+        # Loss 4: Joint angle constraints (palm-normal flex/abd decomposition)
+        loss_angle = torch.tensor(0.0, device=device)
+        if w_angle > 0 and _angle_priors_list:
+            from .angle_constraint_loss import compute_angle_constraint_loss
+            _cg = angle_prior_data.get("constraint_groups") if angle_prior_data else None
+            loss_angle = compute_angle_constraint_loss(joints_3d, _angle_priors_list, _cg)
+
+        loss = w_reproj * loss_reproj + w_bone * loss_bone + w_smooth * loss_temporal + w_angle * loss_angle
 
         if torch.isnan(loss) or torch.isinf(loss):
             continue
 
         loss.backward()
+        for p in [joints_3d, offset_L, offset_R]:
+            if p.grad is not None:
+                torch.nan_to_num_(p.grad, nan=0.0, posinf=0.0, neginf=0.0)
         torch.nn.utils.clip_grad_norm_([joints_3d, offset_L, offset_R], max_norm=5.0)
         optimizer.step()
+
+        # Project bone lengths to target values (hard constraint)
+        if snap_bones:
+            with torch.no_grad():
+                for pj, cj, bi in _chain_order:
+                    vec = joints_3d[:, cj] - joints_3d[:, pj]
+                    length = vec.norm(dim=1, keepdim=True).clamp(min=1e-6)
+                    joints_3d[:, cj] = joints_3d[:, pj] + vec * (target_bl[bi] / length)
+
+        # Yield GIL periodically so the web server can handle requests
+        if it % 5 == 0:
+            import time; time.sleep(0)
 
         # Report progress (20% → 90%)
         if it % 10 == 0:
@@ -294,8 +349,10 @@ def run_stage1_fitting(
                 eL = torch.sqrt(((pL - tgt_L) ** 2).sum(-1)).mean().item()
                 eR = torch.sqrt(((pR - tgt_R) ** 2).sum(-1)).mean().item()
                 be = (bone_lens - target_bl).abs().mean().item()
+            angle_val = loss_angle.item()
             logger.info(
-                f"    iter {it}: L={eL:.1f}px R={eR:.1f}px bone_err={be:.1f}mm"
+                f"    iter {it}: L={eL:.1f}px R={eR:.1f}px bone_err={be:.1f}mm angle={angle_val:.3f}"
+                f" [w_r={w_reproj} w_b={w_bone} w_s={w_smooth} w_a={w_angle} snap={snap_bones}]"
             )
 
     report(90)
@@ -339,6 +396,34 @@ def run_stage1_fitting(
         stage=1,
         fit_type="skeleton",
     )
+
+    # Save fitting parameters alongside the npz
+    import json as _json
+    from datetime import datetime
+    params_path = mano_trial_dir / "mano_fit_params.json"
+    params_path.write_text(_json.dumps({
+        "fit_type": "skeleton",
+        "version": "v1.0",
+        "subject": subject_name,
+        "trial": trial_stem,
+        "n_frames": int(N),
+        "n_fitted": int(n_valid),
+        "n_iters": n_iters,
+        "params": {
+            "w_reproj": w_reproj,
+            "w_bone": w_bone,
+            "w_smooth": w_smooth,
+            "snap_bones": snap_bones,
+            "w_angle": w_angle,
+        },
+        "results": {
+            "mean_error_L": float(np.nanmean(all_err_L)),
+            "mean_error_R": float(np.nanmean(all_err_R)),
+            "target_bone_lengths": target_bone_lengths.tolist(),
+        },
+        "angle_constraints": angle_prior_data,
+        "timestamp": datetime.now().isoformat(),
+    }, indent=2))
 
     # Clear cached data so next load picks up the new fit
     from .mano_data import _load_mano_npz

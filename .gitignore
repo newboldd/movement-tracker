@@ -28,3 +28,6 @@ scratch/
 .env
 calibration/cam2_calibration.yaml
 calibration/camera1_recalibrated.yaml
+
+# Runtime cache (recomputed per machine)
+.preview_distances.json

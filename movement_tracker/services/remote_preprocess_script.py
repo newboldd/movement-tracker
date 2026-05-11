@@ -793,11 +793,40 @@ def deidentify_video(input_path: str, output_path: str,
     # Reopen video instead of seeking (seeking can be inaccurate with H.264)
     cap.release()
     cap = cv2.VideoCapture(input_path)
-    codec = "avc1" if sys.platform == "darwin" else "mp4v"
-    fourcc = cv2.VideoWriter_fourcc(*codec)
-    writer = cv2.VideoWriter(output_path, fourcc, fps, (full_w, h))
-    if not writer.isOpened():
-        raise RuntimeError(f"cv2.VideoWriter failed to open: {output_path} (codec={codec})")
+    # Pipe raw frames into ffmpeg → H.264 yuv420p so the output is
+    # decodable in HTML5 <video> on every browser.  cv2.VideoWriter('mp4v')
+    # on Windows produced MPEG-4 ASP files browsers refuse to play.
+    import shutil, subprocess
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        # imageio-ffmpeg ships a bundled binary that's available on the
+        # remote host even without a system ffmpeg.
+        try:
+            import imageio_ffmpeg
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            ffmpeg = None
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not found on remote host; install ffmpeg or imageio-ffmpeg")
+    _popen_kwargs = {"stdin": subprocess.PIPE,
+                      "stdout": subprocess.DEVNULL,
+                      "stderr": subprocess.PIPE}
+    if os.name == 'nt':
+        _popen_kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0) |
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
+    proc = subprocess.Popen([
+        ffmpeg, "-y",
+        "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-s", f"{full_w}x{h}", "-pix_fmt", "bgr24",
+        "-r", str(fps),
+        "-i", "-",
+        "-c:v", "libx264", "-preset", "slow", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-an",
+        "-movflags", "+faststart",
+        output_path,
+    ], **_popen_kwargs)
 
     extra_blur_L = overrides["extra_blur_L"] if is_stereo else None
     extra_blur_R = overrides["extra_blur_R"] if is_stereo else None
@@ -828,14 +857,21 @@ def deidentify_video(input_path: str, output_path: str,
             frame = _apply_face_blur(frame, faces[t], hand_mask)
             out_frame = frame
 
-        writer.write(out_frame)
+        proc.stdin.write(np.ascontiguousarray(out_frame, dtype=np.uint8).tobytes())
 
         if subject_name and t % 10 == 0:
             pct = video_pct_base + (40 + t / n_frames * 60) / 100 * video_pct_span
             emit_progress(subject_name, pct)
 
     cap.release()
-    writer.release()
+    try:
+        proc.stdin.close()
+    except Exception:
+        pass
+    stderr_bytes = proc.stderr.read() if proc.stderr else b""
+    proc.wait(timeout=600)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg encoding failed: {stderr_bytes.decode(errors='replace')[:500]}")
 
     logger.info(f"Deidentified: {Path(input_path).name}")
 

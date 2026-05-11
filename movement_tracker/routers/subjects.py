@@ -175,11 +175,35 @@ def list_subjects() -> List[dict]:
     return [_subject_row_to_response(r) for r in rows]
 
 
+def _infer_group_label(name: str, diagnosis: str | None) -> str:
+    """Map a subject (by name or diagnosis string) to one of the configured
+    diagnosis_groups.  Used at subject-creation time so new subjects land in
+    the right dashboard column without a manual auto-assign step."""
+    from ..config import get_settings
+    groups = get_settings().diagnosis_groups or ["Control", "MSA", "PD", "PSP"]
+    candidates = []
+    if diagnosis: candidates.append(str(diagnosis))
+    if name:      candidates.append(str(name))
+    for text in candidates:
+        u = text.upper()
+        for g in groups:
+            if g.upper() in u:
+                return g
+    # Prefix match on name (first 3 chars vs each group prefix)
+    if name and len(name) >= 3:
+        p = name[:3].upper()
+        for g in groups:
+            if g.upper().startswith(p):
+                return g
+    return groups[0] if groups else "Control"
+
+
 @router.post("", status_code=201)
 def create_subject(req: SubjectCreate) -> dict:
     """Create a new subject entry."""
     # Store just the subject name as dlc_dir (relative)
     dlc_dir = req.name
+    group_label = _infer_group_label(req.name, req.diagnosis)
     with get_db_ctx() as db:
         # Check if already exists
         existing = db.execute(
@@ -189,9 +213,9 @@ def create_subject(req: SubjectCreate) -> dict:
             raise HTTPException(400, f"Subject '{req.name}' already exists")
 
         db.execute(
-            """INSERT INTO subjects (name, stage, dlc_dir, video_pattern, diagnosis)
-               VALUES (?, 'created', ?, ?, ?)""",
-            (req.name, dlc_dir, req.video_pattern, req.diagnosis),
+            """INSERT INTO subjects (name, stage, dlc_dir, video_pattern, diagnosis, group_label)
+               VALUES (?, 'created', ?, ?, ?, ?)""",
+            (req.name, dlc_dir, req.video_pattern, req.diagnosis, group_label),
         )
         row = db.execute(
             "SELECT * FROM subjects WHERE name = ?", (req.name,)
@@ -225,6 +249,9 @@ def update_subject(subject_id: int, req: SubjectUpdate) -> dict:
                 "UPDATE subjects SET camera_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (camera_val, subject_id),
             )
+            # Clear calibration cache so the new assignment takes effect immediately
+            from ..services.calibration import clear_calibration_cache
+            clear_calibration_cache()
         if req.no_face_videos is not None:
             nfv_json = json.dumps(req.no_face_videos) if req.no_face_videos else None
             db.execute(

@@ -17,6 +17,7 @@ router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 def list_jobs(
     subject_id: Optional[int] = Query(None),
     status: Optional[str] = Query(None),
+    limit: Optional[int] = Query(None, ge=1, le=500),
 ) -> List[dict]:
     """List jobs, optionally filtered by subject or status."""
     with get_db_ctx() as db:
@@ -26,9 +27,18 @@ def list_jobs(
             query += " AND j.subject_id = ?"
             params.append(subject_id)
         if status is not None:
-            query += " AND j.status = ?"
-            params.append(status)
+            statuses = [s.strip() for s in status.split(',') if s.strip()]
+            if len(statuses) == 1:
+                query += " AND j.status = ?"
+                params.append(statuses[0])
+            elif len(statuses) > 1:
+                placeholders = ','.join('?' * len(statuses))
+                query += f" AND j.status IN ({placeholders})"
+                params.extend(statuses)
         query += " ORDER BY j.created_at DESC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
         jobs = db.execute(query, params).fetchall()
     return jobs
 
@@ -49,33 +59,57 @@ def get_job(job_id: int) -> dict:
 
 @router.get("/{job_id}/stream")
 async def stream_job(job_id: int) -> StreamingResponse:
-    """SSE stream for job progress updates."""
-    with get_db_ctx() as db:
-        job = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-    if not job:
-        raise HTTPException(404, "Job not found")
+    """SSE stream for job progress updates.
+
+    Accepts either a jobs.id or a job_queue.id. Checks queue first to
+    resolve the real job_id, since queue_ids may collide with old job ids.
+    """
+    orig_id = job_id
 
     async def event_generator():
-        while True:
+        nonlocal job_id
+        try:
+            # Resolve queue_id → job_id if needed
             with get_db_ctx() as db:
-                current = db.execute(
-                    """SELECT j.status, j.progress_pct, j.error_msg, j.remote_host,
-                              j.job_type, s.name AS subject_name
-                       FROM jobs j LEFT JOIN subjects s ON j.subject_id = s.id
-                       WHERE j.id = ?""",
-                    (job_id,),
-                ).fetchone()
+                qrow = db.execute("SELECT job_id, status FROM job_queue WHERE id = ?", (orig_id,)).fetchone()
+            if qrow:
+                if qrow["job_id"]:
+                    job_id = qrow["job_id"]
+                else:
+                    # Wait for the worker to create the jobs row
+                    for _ in range(60):
+                        await asyncio.sleep(1)
+                        with get_db_ctx() as db:
+                            qrow = db.execute("SELECT job_id, status FROM job_queue WHERE id = ?", (orig_id,)).fetchone()
+                        if not qrow or qrow["status"] in ("failed", "cancelled"):
+                            yield f"data: {json.dumps({'status': 'failed', 'error_msg': 'Queue item failed'})}\n\n"
+                            return
+                        if qrow["job_id"]:
+                            job_id = qrow["job_id"]
+                            break
 
-            if not current:
-                break
+            # Poll the jobs table
+            while True:
+                with get_db_ctx() as db:
+                    current = db.execute(
+                        """SELECT j.status, j.progress_pct, j.error_msg, j.remote_host,
+                                  j.job_type, s.name AS subject_name
+                           FROM jobs j LEFT JOIN subjects s ON j.subject_id = s.id
+                           WHERE j.id = ?""",
+                        (job_id,),
+                    ).fetchone()
 
-            data = json.dumps(current)
-            yield f"data: {data}\n\n"
+                if not current:
+                    break
 
-            if current["status"] in ("completed", "failed", "cancelled"):
-                break
+                yield f"data: {json.dumps(current)}\n\n"
 
-            await asyncio.sleep(1)
+                if current["status"] in ("completed", "failed", "cancelled"):
+                    break
+
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            return
 
     return StreamingResponse(
         event_generator(),
@@ -139,14 +173,32 @@ async def stream_job_log(job_id: int) -> StreamingResponse:
 
 @router.post("/{job_id}/cancel")
 def cancel_job(job_id: int) -> dict:
-    """Cancel a running job."""
+    """Cancel a running or pending job.
+
+    - Running subprocess / tmux jobs: terminated via the registry.
+    - Running thread-based jobs: signalled via the cancel event when one
+      was registered.
+    - Pending jobs (or running jobs with no registered process/event):
+      DB row is marked ``cancelled`` so the UI clears the entry.  Any
+      thread that didn't register a cancel event keeps running but the
+      user-visible state is correct.
+    """
     with get_db_ctx() as db:
         job = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
     if not job:
         raise HTTPException(404, "Job not found")
 
-    if job["status"] != "running":
-        raise HTTPException(400, "Job is not running")
+    if job["status"] not in ("running", "pending"):
+        raise HTTPException(400, f"Job already {job['status']}")
 
-    success = registry.cancel(job_id)
-    return {"cancelled": success}
+    if job["status"] == "running":
+        registry.cancel(job_id)  # best-effort; ignored when no process/event
+
+    with get_db_ctx() as db:
+        db.execute(
+            "UPDATE jobs SET status = 'cancelled', "
+            "finished_at = CURRENT_TIMESTAMP WHERE id = ? "
+            "AND status IN ('running','pending')",
+            (job_id,),
+        )
+    return {"cancelled": True}

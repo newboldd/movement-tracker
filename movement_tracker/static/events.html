@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Movement Tracker - Events</title>
+    <link rel="stylesheet" href="/static/css/main.css?v=7">
+    <style>
+        body { overflow: hidden; }
+        button:focus:not(:focus-visible), .btn:focus:not(:focus-visible), select:focus:not(:focus-visible) { outline: none; box-shadow: none; }
+
+        /* ── Main content area ── */
+        .events-main {
+            flex: 1; display: flex; flex-direction: column;
+            overflow: hidden; padding: 8px;
+        }
+        .events-viewports {
+            flex: 1; position: relative; min-height: 0;
+            background: #111; border-radius: 4px; overflow: hidden;
+        }
+        .canvas-wrap {
+            position: absolute; inset: 0;
+        }
+        .canvas-wrap canvas {
+            display: block; width: 100%; height: 100%;
+        }
+
+        /* ── Controls bar ── */
+        .controls-bar {
+            display: flex; align-items: center; gap: 12px;
+            padding: 6px 0; font-size: 12px; color: var(--text-muted);
+            flex-shrink: 0;
+        }
+        .controls-bar strong { color: var(--text); }
+
+        /* ── Distance trace ── */
+        #distanceCanvas {
+            width: 100%; height: 140px; cursor: crosshair;
+            background: var(--bg-card); border-radius: 4px;
+            flex-shrink: 0; margin-top: 4px;
+        }
+
+        /* Section headers */
+        .sidebar-section {
+            font-size: 13px; color: var(--text-muted);
+            margin: 12px 0 6px 0; font-weight: 600;
+        }
+        .sidebar-section:first-child { margin-top: 0; }
+
+        .trial-btn { padding:3px 10px; border-radius:4px; border:1px solid var(--border); background:var(--bg); color:var(--text-muted); cursor:pointer; font-size:12px; font-family:inherit; transition:all 0.15s; }
+        .trial-btn:hover { border-color:var(--blue); color:var(--text); }
+        .trial-btn.active, .btn.active { background:var(--blue); border-color:var(--blue); color:#fff; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div style="display:flex;align-items:center;gap:16px;">
+            <h1 style="margin:0;"><a href="/" style="font-size:18px;">Movement Tracker</a></h1>
+            <div style="display:flex;align-items:center;gap:8px;">
+                <select id="subjectSelect" class="subject-select"></select>
+                <button class="btn btn-sm" id="prevSubjectBtn" title="Previous subject">&larr;</button>
+                <button class="btn btn-sm" id="nextSubjectBtn" title="Next subject">&rarr;</button>
+            </div>
+        </div>
+        <nav>
+            <a href="/videos" class="nav-browse">Browse Videos</a>
+            <a href="/subjects">Subjects</a>
+            <span class="nav-dropdown">
+                <a href="/mano" class="active">Analyze</a>
+                <div class="nav-dropdown-menu">
+                    <a href="/mano">Auto</a>
+                    <a href="/labeling-select">DLC</a>
+                    <a href="/events" class="active">Events</a>
+                    <a href="/deidentify">Deidentify</a>
+                </div>
+            </span>
+            <span class="nav-dropdown">
+                <a href="/results">Results</a>
+                <div class="nav-dropdown-menu">
+                    <a href="/results?tab=distances">Individual</a>
+                    <a href="/results?tab=group">Group Comparison</a>
+                    <a href="/oscillations">Oscillations</a>
+                </div>
+            </span>
+            <span class="nav-dropdown" id="navJobQueue">
+                <a href="/remote"><span id="navJobDot" class="nav-job-dot" style="display:none;"></span>Jobs</a>
+                <div class="nav-dropdown-menu nav-jobs-dropdown" id="navJobsPanel">
+                    <div style="padding:8px 12px;font-size:11px;color:var(--text-muted);">Loading...</div>
+                </div>
+            </span>
+            <a href="/settings">Settings</a>
+        </nav>
+    </div>
+
+    <div class="labeling-layout">
+        <!-- Sidebar -->
+        <div class="labeling-sidebar">
+            <div id="trialBtns" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px;"></div>
+
+            <!-- Events section -->
+            <div class="sidebar-section">Events</div>
+
+            <!-- Current trial indicator -->
+            <div id="trialIndicator" style="margin-bottom:8px;">
+                <span style="font-size:12px;color:var(--text-muted);">Trial:</span>
+                <span id="trialSelectorLabel" style="font-size:13px;font-weight:600;margin-left:4px;">--</span>
+            </div>
+
+            <!-- Auto-detect -->
+            <button class="btn btn-sm" id="detectEventsBtn" style="width:100%;margin-bottom:8px;">Auto-detect...</button>
+
+            <!-- Place event type buttons (populated dynamically) -->
+            <div id="eventTypeButtons" style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:8px;"></div>
+
+            <!-- Delete / Shift -->
+            <div style="display:flex;gap:4px;margin-bottom:8px;">
+                <button class="btn btn-sm" id="deleteEventBtn" title="Delete event at current frame (X)" style="flex:1;">Delete</button>
+            </div>
+            <div style="display:flex;gap:4px;margin-bottom:10px;">
+                <button class="btn btn-sm" id="shiftLeftBtn" title="Shift event back 1 frame ([)" style="flex:1;">&larr; Shift</button>
+                <button class="btn btn-sm" id="shiftRightBtn" title="Shift event forward 1 frame (])" style="flex:1;">Shift &rarr;</button>
+            </div>
+
+            <!-- Nav events -->
+            <div style="display:flex;gap:4px;margin-bottom:10px;">
+                <button class="btn btn-sm" id="prevEventBtn" title="Previous event (Q)" style="flex:1;">&larr; Event</button>
+                <button class="btn btn-sm" id="nextEventBtn" title="Next event (W)" style="flex:1;">Event &rarr;</button>
+            </div>
+
+            <!-- Event type visibility toggles -->
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">Show events:</div>
+            <div id="eventVisToggles" style="display:flex;flex-direction:column;gap:3px;"></div>
+
+            <!-- Save events -->
+            <button class="btn btn-sm btn-success" id="saveEventsBtn" style="width:100%;margin-top:8px;">Save Events</button>
+
+            <!-- Event counts -->
+            <div id="eventCounts" style="font-size:11px;color:var(--text-muted);margin-top:6px;line-height:1.6;"></div>
+
+            <!-- Shortcuts -->
+            <div class="sidebar-section" style="margin-top:16px;">Shortcuts</div>
+            <div style="font-size:10px;color:var(--text-muted);line-height:1.6;">
+                <b>A/&larr;</b> prev frame &nbsp; <b>S/&rarr;</b> next frame<br>
+                <b>Space</b> play/pause &nbsp; <b>E</b> toggle camera<br>
+                <b>Q</b> prev event &nbsp; <b>W</b> next event<br>
+                <b>X</b> delete event &nbsp; <b>[</b> / <b>]</b> shift event<br>
+                <b>1-4</b> place event type<br>
+                <b>Ctrl+Z</b> undo &nbsp; <b>Ctrl+S</b> save<br>
+                <b>Scroll</b> zoom
+            </div>
+        </div>
+
+        <!-- Main content -->
+        <div class="events-main">
+            <div class="events-viewports" id="canvasContainer">
+                <div class="canvas-wrap">
+                    <canvas id="videoCanvas"></canvas>
+                </div>
+            </div>
+            <div class="controls-bar">
+                <button class="btn btn-sm" id="prevFrameBtn" title="Previous frame (A/Left)" style="padding:2px 6px;">&larr;</button>
+                <button class="btn btn-sm" id="playBtn" title="Play/Pause (Space)" style="padding:2px 6px;width:28px;">&#9654;</button>
+                <button class="btn btn-sm" id="nextFrameBtn" title="Next frame (S/Right)" style="padding:2px 6px;">&rarr;</button>
+                <input type="range" id="speedSlider" min="0" max="10" value="3"
+                       style="width:90px;cursor:pointer;height:5px;">
+                <span id="speedDisplay" style="font-size:10px;color:var(--accent);font-weight:bold;width:28px;text-align:left;flex-shrink:0;">1x</span>
+                <button class="btn btn-sm" id="sideToggle" title="Toggle camera (E)" style="padding:2px 6px;">OS</button>
+                <span>Frame: <strong id="frameDisplay">0</strong> / <span id="totalFrames">0</span></span>
+                <span>Trial: <strong id="trialName">-</strong></span>
+                <span id="statusInfo" style="font-size:11px;color:var(--text-muted);"></span>
+                <span style="flex:1;"></span>
+            </div>
+            <canvas id="distanceCanvas"></canvas>
+        </div>
+    </div>
+
+    <!-- Auto-detect Configuration Modal -->
+    <div class="modal-overlay" id="detectModalOverlay">
+        <div class="modal" id="detectModal" style="max-width:700px;">
+            <h3 style="margin-bottom:8px;">Auto-detect Configuration
+                <span id="detectModalTrial" style="font-size:13px;color:var(--text-muted);margin-left:8px;"></span>
+            </h3>
+
+            <!-- Event-type focus selector -->
+            <div id="detectFocusSelector" style="display:flex;gap:4px;margin-bottom:12px;">
+                <button class="btn btn-sm active" data-focus="all">All Events</button>
+                <button class="btn btn-sm" data-focus="open" style="color:#00cc44;">Opens</button>
+                <button class="btn btn-sm" data-focus="peak" style="color:#ffcc00;">Peaks</button>
+                <button class="btn btn-sm" data-focus="close" style="color:#ff4444;">Closes</button>
+            </div>
+
+            <!-- Metric plots area -->
+            <div id="metricPlotsArea" style="margin-bottom:12px;">
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">Metric plots (trial-local frames)</div>
+                <div id="metricPlotsLoading" style="display:none;text-align:center;padding:12px;color:var(--text-muted);font-size:12px;">
+                    Computing metrics...
+                </div>
+                <div id="metricPlotsContainer" style="display:none;">
+                    <canvas id="distPlotCanvas" style="width:100%;height:90px;"></canvas>
+                    <canvas id="reversalPlotCanvas" style="width:100%;height:90px;" class="detect-metric-canvas"></canvas>
+                    <canvas id="ssdPlotCanvas" style="width:100%;height:90px;" class="detect-metric-canvas"></canvas>
+                </div>
+                <div id="metricPlotsUnavailable" style="display:none;text-align:center;padding:8px;color:var(--text-muted);font-size:11px;">
+                    Metrics unavailable -- detection will use distance only
+                </div>
+            </div>
+
+            <!-- Peak Detection parameters -->
+            <div style="margin-bottom:10px;">
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">Peak Detection</div>
+                <div class="detect-core-params">
+                    <label title="Minimum distance (mm) for a peak to count as a real finger opening.">Min peak height <input type="number" id="paramMinPeakHeight" value="15" min="1" step="1" data-affects="peak"></label>
+                    <label title="Distance (mm) that must be reached between peaks.">Valley thresh <input type="number" id="paramValleyThresh" value="25" min="1" step="1" data-affects="peak"></label>
+                    <label title="Minimum frames between events.">Min event gap <input type="number" id="paramMinEventGap" value="10" min="1" step="1" data-affects="all"></label>
+                </div>
+            </div>
+
+            <!-- Open Detection parameters -->
+            <div style="margin-bottom:10px;">
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">Open Detection</div>
+                <div class="detect-core-params">
+                    <label title="Velocity threshold (mm/frame) for pinpointing the exact open onset.">Open thresh <input type="number" id="paramOpenThresh" value="5" min="0.1" step="0.5" data-affects="open"></label>
+                    <label title="How many frames to search backward from a peak for the open onset.">Nback <input type="number" id="paramNback" value="60" min="10" step="5" data-affects="open"></label>
+                </div>
+            </div>
+
+            <!-- Detection Mode -->
+            <div style="margin-bottom:10px;">
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">Detection Mode</div>
+                <div style="display:flex;gap:16px;margin-bottom:4px;">
+                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;" title="Only detect peaks -- skip open/close detection and sequence validation.">
+                        <input type="checkbox" id="stepPeaksOnly" checked>
+                        Peaks only
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;" title="Enforce open/peak/close sequence: drop events that don't fit.">
+                        <input type="checkbox" id="stepEnforceSequence" checked>
+                        Enforce sequence
+                    </label>
+                </div>
+            </div>
+
+            <!-- Refinement Step toggles -->
+            <div style="margin-bottom:10px;">
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">Refinement Steps</div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                    <div class="detect-step-card" id="cardReversal">
+                        <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:6px;" title="Use motion reversal metric to refine peak positions.">
+                            <input type="checkbox" id="stepReversal" checked>
+                            Reversal peak refinement
+                        </label>
+                        <div class="detect-param">
+                            <label title="Frames to search around each peak for the motion reversal point.">Search radius <input type="number" id="paramReversalRadius" value="3" min="1" max="10" step="1" data-affects="peak"></label>
+                            <label title="Rejects reversal refinement if peak distance drops by more than this fraction.">Peak guard <input type="number" id="paramPeakGuard" value="0.1" min="0" max="1" step="0.05" data-affects="peak"></label>
+                        </div>
+                    </div>
+                    <div class="detect-step-card" id="cardSsd">
+                        <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:6px;" title="Use SSD motion energy metric to refine open/close positions.">
+                            <input type="checkbox" id="stepSsd" checked>
+                            SSD open/close refinement
+                        </label>
+                        <div class="detect-param">
+                            <label title="Frames to search around open/close for the motion energy onset/offset.">SSD radius <input type="number" id="paramSsdRadius" value="5" min="1" max="15" step="1" data-affects="open,close"></label>
+                            <label title="Frame offset applied after SSD refinement of opens.">Open bias <input type="number" id="paramOpenBias" value="-1" min="-5" max="5" step="1" data-affects="open"></label>
+                            <label title="Frame offset applied after SSD refinement of closes.">Close bias <input type="number" id="paramCloseBias" value="1" min="-5" max="5" step="1" data-affects="close"></label>
+                            <label title="Rejects SSD refinement if refined distance exceeds this fraction of peak distance.">Dist guard <input type="number" id="paramDistGuard" value="0.25" min="0" max="1" step="0.05" data-affects="open,close"></label>
+                            <label title="Smoothing sigma for SSD signal before refinement.">SSD sigma <input type="number" id="paramGaussianSigma" value="2.0" min="0.5" max="5" step="0.5" data-affects="open,close"></label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Advanced parameters -->
+            <details style="margin-bottom:12px;">
+                <summary style="font-size:12px;color:var(--text-muted);cursor:pointer;margin-bottom:4px;">Advanced</summary>
+                <div class="detect-core-params" style="margin-top:4px;">
+                    <label title="Distances above this (mm) are treated as tracking artifacts.">Max valid dist <input type="number" id="paramMaxValidDist" value="200" min="50" max="500" step="10" data-affects="all"></label>
+                    <label title="Minimum peak height for edge intervals.">Edge min peak <input type="number" id="paramEdgeMinPeak" value="15" min="0" max="100" step="1" data-affects="peak"></label>
+                </div>
+            </details>
+
+            <!-- Actions -->
+            <div class="actions">
+                <button class="btn btn-sm" id="detectCancelBtn">Cancel</button>
+                <button class="btn btn-sm btn-success" id="runDetectBtn">Run Detection</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/nav.js?v=9"></script>
+    <script src="/static/js/api.js?v=10"></script>
+    <script src="/static/js/events.js?v=1"></script>
+</body>
+</html>

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
@@ -145,6 +146,50 @@ def _smooth_face_detections(faces_per_frame, n_frames, w, h):
     return result
 
 
+# ── Landmark interpolation across missing frames ────────────────────────
+
+def interpolate_landmarks_inplace(arr, start: int = 0, end: int | None = None):
+    """Linearly interpolate NaN values per (joint, dim) across a frame range.
+
+    Mutates ``arr`` in place.  ``arr`` is expected to be ``(N, J, 2)`` —
+    e.g. ``OS_landmarks`` from ``mediapipe_prelabels.npz``.  Interpolation
+    is restricted to the inclusive range ``[start, end]`` so we never
+    bridge a gap across trial boundaries (NaN frames in one trial
+    shouldn't be filled from another trial's landmarks).
+
+    Edge behaviour: ``np.interp`` holds endpoints by default, so leading
+    / trailing NaN gaps inside the range get filled with the nearest
+    valid value.  This is exactly what the hand mask wants — protection
+    should stay active across MediaPipe drop-outs, including drop-outs
+    at the very start or end of the trial.
+
+    Joints / dims with NO valid frames in the range stay all-NaN.
+    """
+    import numpy as _np
+    if arr is None or arr.size == 0:
+        return arr
+    N = arr.shape[0]
+    if end is None:
+        end = N - 1
+    start = max(0, int(start))
+    end = min(N - 1, int(end))
+    if end <= start:
+        return arr
+    seg = arr[start:end + 1]            # view, in-place writes propagate
+    M = seg.shape[0]
+    idx = _np.arange(M)
+    for j in range(seg.shape[1]):
+        for d in range(seg.shape[2]):
+            col = seg[:, j, d]
+            valid = ~_np.isnan(col)
+            if not valid.any() or valid.all():
+                continue
+            # ``np.interp`` holds the nearest endpoint outside the convex
+            # hull of valid indices, which is the behaviour we want.
+            seg[:, j, d] = _np.interp(idx, idx[valid], col[valid])
+    return arr
+
+
 # ── Hand protection (MediaPipe Hands) ────────────────────────────────────
 
 def _build_hand_mask(shape, hand_results):
@@ -175,6 +220,121 @@ def _build_hand_mask(shape, hand_results):
         mask = cv2.dilate(mask, kernel)
 
     return mask > 0
+
+
+# ── HRnet MIP-based hand mask (preview + render share this) ─────────────
+# Module-level so the live-preview endpoint can build the same HRnet
+# hand mask the full render pipeline uses, instead of duplicating the
+# closure-captured version inside ``render_with_blur_specs``.
+
+def build_hand_mask_from_hrnet_mip(
+    subject_name: str, trial_idx: int, frame_num: int,
+    side_label: str, w_side: int, h_side: int,
+    thresh: float = 0.30, smooth_px: int = 7,
+):
+    """Build an HRnet-MIP-based hand mask for one camera half.
+
+    Reads ``hrnet_w18_mip.npz`` + ``hand_crop.json`` from the subject's
+    mano output dir, thresholds the 64×64 MIP at ``thresh``, drops it
+    into the per-frame bbox on a (h_side, w_side) canvas, then runs a
+    Gaussian-blur + re-threshold smoothing pass (``smooth_px`` controls
+    the dilation amount).
+
+    Returns a (h, w) bool array, or ``None`` if the HRnet data isn't
+    available for this subject/trial.  The renderer falls back to the
+    MediaPipe-circle mask in that case.
+
+    Args:
+        subject_name: e.g. ``"MSA09"``.
+        trial_idx: index into ``build_trial_map(subject_name)``.
+        frame_num: GLOBAL frame number (across all trials).
+        side_label: ``"left"`` / ``"right"`` / ``"full"`` — ``"left"``
+            and ``"full"`` use the OS MIP, ``"right"`` the OD.
+        w_side, h_side: dimensions of the destination canvas (single
+            camera half for stereo, full frame for multicam).
+        thresh: MIP threshold (0..1).  Higher = tighter mask.
+        smooth_px: dilation strength.  0 = no smoothing.
+    """
+    import numpy as _np
+    from .mano_data import _mano_dir
+    from .video import build_trial_map as _btm
+    import json as _jjson
+
+    try:
+        tmap = _btm(subject_name)
+    except Exception as e:
+        logger.warning(f"build_hand_mask_from_hrnet_mip: build_trial_map failed: {e}")
+        return None
+    if trial_idx < 0 or trial_idx >= len(tmap):
+        return None
+    tdef = tmap[trial_idx]
+    stem = tdef["trial_name"]
+    mip_path = _mano_dir(subject_name) / stem / "hrnet_w18_mip.npz"
+    crop_path = _mano_dir(subject_name) / stem / "hand_crop.json"
+    if not mip_path.exists() or not crop_path.exists():
+        return None
+    try:
+        d = _np.load(mip_path)
+        mip_L = d["heatmaps_L_mip"] if "heatmaps_L_mip" in d.files else None
+        mip_R = d["heatmaps_R_mip"] if "heatmaps_R_mip" in d.files else None
+        with open(crop_path) as f:
+            cj = _jjson.load(f)
+        bbox_L = cj.get("crop_L_perframe") or [cj.get("crop_L")]
+        bbox_R = cj.get("crop_R_perframe") or [cj.get("crop_R")]
+    except Exception as e:
+        logger.warning(f"build_hand_mask_from_hrnet_mip: load failed: {e}")
+        return None
+    trial_start = int(tdef.get("start_frame", 0))
+    mip = mip_L if side_label in ("left", "full") else mip_R
+    bboxes = bbox_L if side_label in ("left", "full") else bbox_R
+    if mip is None or not bboxes:
+        return None
+    f_in_trial = frame_num - trial_start
+    if f_in_trial < 0 or f_in_trial >= mip.shape[0]:
+        return None
+    bbox = bboxes[f_in_trial] if f_in_trial < len(bboxes) else bboxes[-1]
+    if bbox is None or len(bbox) != 4:
+        return None
+    bx1, by1, bx2, by2 = (int(round(v)) for v in bbox)
+    bw, bh = bx2 - bx1, by2 - by1
+    if bw <= 0 or bh <= 0:
+        return None
+    # Re-normalise the per-frame 64×64 MIP so the threshold slider
+    # operates on a meaningful range.  The saved MIPs come from
+    # ``expit(logits)`` in remote_hrnet_script.py, which gives a
+    # bimodal distribution: a huge background spike at sigmoid(~0) ≈
+    # 0.7 (most of the bbox area) plus a thin tail of joint peaks up
+    # to 1.0.  Using per-frame min/max as the anchors snaps the entire
+    # background spike to exactly 0 (because float16 quantises most
+    # of them to a single value), creating a cliff at threshold ≈ 0
+    # where 79% of pixels suddenly drop out for any thresh > 0.
+    #
+    # Better: anchor the lower end at the per-frame *median* (which
+    # falls inside the background spike) and the upper end at the
+    # max.  Then background normalises to ≤ 0 (clipped), the shoulder
+    # of each joint Gaussian gets a smooth fraction in (0, 1), and the
+    # slider's full [0, 1] range maps to "include the shoulder vs.
+    # only the peak."
+    frame_mip = mip[f_in_trial].astype(np.float32)
+    baseline = float(np.median(frame_mip))
+    hi = float(frame_mip.max())
+    if hi - baseline > 1e-6:
+        frame_mip = np.clip((frame_mip - baseline) / (hi - baseline), 0.0, 1.0)
+    else:
+        frame_mip = np.zeros_like(frame_mip)
+    small = (frame_mip > thresh).astype(np.uint8) * 255
+    big = cv2.resize(small, (bw, bh), interpolation=cv2.INTER_LINEAR)
+    big = (big > 127).astype(np.uint8) * 255
+    out = np.zeros((h_side, w_side), dtype=np.uint8)
+    sx1, sy1 = max(0, bx1), max(0, by1)
+    sx2, sy2 = min(w_side, bx2), min(h_side, by2)
+    if sx2 > sx1 and sy2 > sy1:
+        out[sy1:sy2, sx1:sx2] = big[sy1 - by1:sy2 - by1, sx1 - bx1:sx2 - bx1]
+    if smooth_px and smooth_px > 0:
+        k = max(1, int(smooth_px) | 1)
+        out = cv2.GaussianBlur(out, (k, k), 0)
+        out = (out > 127).astype(np.uint8) * 255
+    return out > 0
 
 
 # ── Blur compositing ─────────────────────────────────────────────────────
@@ -311,17 +471,33 @@ def deidentify_video(input_path: str, output_path: str,
     if os.path.exists(output_path):
         os.remove(output_path)
 
-    # Try avc1 (H.264 via VideoToolbox) on macOS, fall back to mp4v
-    writer = None
-    for codec in (["avc1", "mp4v"] if sys.platform == "darwin" else ["mp4v"]):
-        fourcc = cv2.VideoWriter_fourcc(*codec)
-        writer = cv2.VideoWriter(output_path, fourcc, fps, (full_w, h))
-        if writer.isOpened():
-            break
-        writer.release()
-        writer = None
-    if writer is None:
-        raise RuntimeError(f"cv2.VideoWriter failed to open: {output_path}")
+    # Pipe raw frames into ffmpeg → H.264 yuv420p so the output is
+    # decodable in HTML5 <video> on every browser.  The previous code
+    # used cv2.VideoWriter('mp4v') on Windows, which produced MPEG-4 ASP
+    # files browsers refuse to play.
+    from .ffmpeg import get_ffmpeg_path
+    ffmpeg = get_ffmpeg_path()
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not found. Install FFmpeg or pip install imageio-ffmpeg")
+    _popen_kwargs = {"stdin": subprocess.PIPE,
+                      "stdout": subprocess.DEVNULL,
+                      "stderr": subprocess.PIPE}
+    if os.name == 'nt':
+        _popen_kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0) |
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
+    proc = subprocess.Popen([
+        ffmpeg, "-y",
+        "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-s", f"{full_w}x{h}", "-pix_fmt", "bgr24",
+        "-r", str(fps),
+        "-i", "-",
+        "-c:v", "libx264", "-preset", "slow", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-an",
+        "-movflags", "+faststart",
+        output_path,
+    ], **_popen_kwargs)
 
     face_det_count = 0
 
@@ -364,13 +540,20 @@ def deidentify_video(input_path: str, output_path: str,
             if faces[t]:
                 face_det_count += 1
 
-        writer.write(out_frame)
+        proc.stdin.write(np.ascontiguousarray(out_frame, dtype=np.uint8).tobytes())
 
         if progress_callback and t % 10 == 0:
             progress_callback(40 + t / n_frames * 60)  # Pass 2 = 40-100%
 
     cap.release()
-    writer.release()
+    try:
+        proc.stdin.close()
+    except Exception:
+        pass
+    stderr_bytes = proc.stderr.read() if proc.stderr else b""
+    proc.wait(timeout=600)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg encoding failed: {stderr_bytes.decode(errors='replace')[:500]}")
     hands.close()
 
     if progress_callback:
@@ -562,7 +745,9 @@ def render_with_blur_specs(input_path: str, output_path: str,
                            subject_name: str | None = None,
                            start_frame: int = 0,
                            frame_count: int | None = None,
-                           progress_callback=None) -> dict:
+                           progress_callback=None,
+                           mp_data=None,
+                           pose_data=None) -> dict:
     """Render a video with blur specs matching the frontend preview.
 
     Face-type spots track face detection centroids per frame.
@@ -599,6 +784,12 @@ def render_with_blur_specs(input_path: str, output_path: str,
     forearm_extent = 0.4
     hand_smooth2 = 5
     dlc_radius_val = 15
+    # HRnet-mask alternative source (when ``mask_source == "hrnet"`` the
+    # renderer thresholds the HRnet MIP for each frame instead of stamping
+    # circles around MediaPipe keypoints).
+    mask_source = "mediapipe"
+    hrnet_mask_thresh = 0.30
+    hrnet_mask_smooth = 7
     if hand_settings:
         import json as _json
         hand_mask_radius = hand_settings.get("hand_mask_radius") or hand_settings.get("mask_radius") or 10
@@ -607,6 +798,17 @@ def render_with_blur_specs(input_path: str, output_path: str,
         forearm_extent = hand_settings.get("forearm_extent", 0.7)
         hand_smooth2 = hand_settings.get("hand_smooth2", 0)
         dlc_radius_val = hand_settings.get("dlc_radius", 15)
+        mask_source = hand_settings.get("mask_source") or "mediapipe"
+        if mask_source not in ("mediapipe", "hrnet"):
+            mask_source = "mediapipe"
+        try:
+            hrnet_mask_thresh = float(hand_settings.get("hrnet_mask_thresh", 0.30))
+        except (TypeError, ValueError):
+            hrnet_mask_thresh = 0.30
+        try:
+            hrnet_mask_smooth = int(hand_settings.get("hrnet_mask_smooth", 7))
+        except (TypeError, ValueError):
+            hrnet_mask_smooth = 7
         seg_json = hand_settings.get("segments_json", "[]")
         try:
             hand_segments = _json.loads(seg_json) if isinstance(seg_json, str) else (seg_json or [])
@@ -615,62 +817,128 @@ def render_with_blur_specs(input_path: str, output_path: str,
         if not hand_segments:
             hand_segments = []
 
-        # Load from npz if subject_name provided
+        # Load from npz if subject_name provided.
+        # Accepts pre-loaded data via mp_data/pose_data kwargs (used by remote worker
+        # to avoid relative import failures in standalone context).
         if subject_name and hand_segments:
-            from ..config import get_settings
-            settings = get_settings()
-            npz_path = settings.dlc_path / subject_name / "mediapipe_prelabels.npz"
-            if npz_path.exists():
-                import numpy as np2
-                npz = np2.load(str(npz_path))
-                os_lm = npz.get("OS_landmarks")
-                od_lm = npz.get("OD_landmarks")
-                hand_lm_data = {}
+            import numpy as np2
+
+            def _build_lm_data(os_lm, od_lm, existing=None):
+                """Build hand_lm_data dict from OS/OD landmark arrays."""
+                lm_data = existing or {}
                 if os_lm is not None:
                     for f in range(os_lm.shape[0]):
-                        if f not in hand_lm_data:
-                            hand_lm_data[f] = []
+                        if f not in lm_data:
+                            lm_data[f] = []
                         for j in range(os_lm.shape[1]):
                             x, y = os_lm[f, j, 0], os_lm[f, j, 1]
                             if not np.isnan(x):
-                                hand_lm_data[f].append({"x": float(x), "y": float(y), "side": "left", "type": "hand", "joint": j})
+                                lm_data[f].append({"x": float(x), "y": float(y), "side": "left", "type": "hand", "joint": j})
                 if od_lm is not None:
                     for f in range(od_lm.shape[0]):
-                        if f not in hand_lm_data:
-                            hand_lm_data[f] = []
+                        if f not in lm_data:
+                            lm_data[f] = []
                         for j in range(od_lm.shape[1]):
                             x, y = od_lm[f, j, 0], od_lm[f, j, 1]
                             if not np.isnan(x):
-                                hand_lm_data[f].append({"x": float(x), "y": float(y), "side": "right", "type": "hand", "joint": j})
+                                lm_data[f].append({"x": float(x), "y": float(y), "side": "right", "type": "hand", "joint": j})
+                return lm_data
 
-                # Also load pose landmarks for forearm triangle (elbow)
-                pose_path = settings.dlc_path / subject_name / "pose_prelabels.npz"
-                if pose_path.exists():
-                    pose_npz = np2.load(str(pose_path))
-                    pose_os = pose_npz.get("OS_pose")
-                    pose_od = pose_npz.get("OD_pose")
+            def _build_pose_data(pose_os, pose_od, existing):
+                """Merge pose landmarks into existing lm_data dict."""
+                lm_data = existing
+                if pose_os is not None:
+                    for f in range(pose_os.shape[0]):
+                        if f not in lm_data:
+                            lm_data[f] = []
+                        for j in range(pose_os.shape[1]):
+                            x, y = pose_os[f, j, 0], pose_os[f, j, 1]
+                            if not np.isnan(x):
+                                lm_data[f].append({"x": float(x), "y": float(y), "side": "left", "type": "pose", "joint": j})
+                if pose_od is not None:
+                    for f in range(pose_od.shape[0]):
+                        if f not in lm_data:
+                            lm_data[f] = []
+                        for j in range(pose_od.shape[1]):
+                            x, y = pose_od[f, j, 0], pose_od[f, j, 1]
+                            if not np.isnan(x):
+                                lm_data[f].append({"x": float(x), "y": float(y), "side": "right", "type": "pose", "joint": j})
+                return lm_data
+
+            # Interpolate NaN gaps inside this trial's frame range so the
+            # hand mask stays active when MediaPipe drops detection on
+            # individual frames.  ``start_frame`` and ``total`` come from
+            # the renderer scope above.
+            _interp_start = int(start_frame)
+            _interp_end = _interp_start + int(total) - 1
+
+            if mp_data is not None:
+                # Pre-loaded data provided (e.g., remote worker) — use directly,
+                # no file I/O or relative imports needed.
+                os_lm = mp_data.get("OS_landmarks")
+                od_lm = mp_data.get("OD_landmarks")
+                if os_lm is not None:
+                    os_lm = np2.array(os_lm, copy=True)
+                    interpolate_landmarks_inplace(os_lm, _interp_start, _interp_end)
+                if od_lm is not None:
+                    od_lm = np2.array(od_lm, copy=True)
+                    interpolate_landmarks_inplace(od_lm, _interp_start, _interp_end)
+                hand_lm_data = _build_lm_data(os_lm, od_lm)
+                if pose_data is not None:
+                    pose_os = pose_data.get("OS_pose")
+                    pose_od = pose_data.get("OD_pose")
                     if pose_os is not None:
-                        for f in range(pose_os.shape[0]):
-                            if f not in hand_lm_data:
-                                hand_lm_data[f] = []
-                            for j in range(pose_os.shape[1]):
-                                x, y = pose_os[f, j, 0], pose_os[f, j, 1]
-                                if not np.isnan(x):
-                                    hand_lm_data[f].append({"x": float(x), "y": float(y), "side": "left", "type": "pose", "joint": j})
+                        pose_os = np2.array(pose_os, copy=True)
+                        interpolate_landmarks_inplace(pose_os, _interp_start, _interp_end)
                     if pose_od is not None:
-                        for f in range(pose_od.shape[0]):
-                            if f not in hand_lm_data:
-                                hand_lm_data[f] = []
-                            for j in range(pose_od.shape[1]):
-                                x, y = pose_od[f, j, 0], pose_od[f, j, 1]
-                                if not np.isnan(x):
-                                    hand_lm_data[f].append({"x": float(x), "y": float(y), "side": "right", "type": "pose", "joint": j})
+                        pose_od = np2.array(pose_od, copy=True)
+                        interpolate_landmarks_inplace(pose_od, _interp_start, _interp_end)
+                    hand_lm_data = _build_pose_data(pose_os, pose_od, hand_lm_data)
+            else:
+                from ..config import get_settings
+                from .mediapipe_prelabel import _detect_frame_offset
+                settings = get_settings()
+                npz_path = settings.dlc_path / subject_name / "mediapipe_prelabels.npz"
+                if npz_path.exists():
+                    npz = np2.load(str(npz_path))
+                    os_lm = npz.get("OS_landmarks")
+                    od_lm = npz.get("OD_landmarks")
+                    # Trim pre-roll frames if NPZ was built on a machine with different
+                    # codec frame-counting behaviour (e.g. OpenCV exposing negative-PTS frames).
+                    _mp_offset = _detect_frame_offset(subject_name, npz)
+                    if _mp_offset > 0 and os_lm is not None:
+                        os_lm = os_lm[_mp_offset:]
+                    if _mp_offset > 0 and od_lm is not None:
+                        od_lm = od_lm[_mp_offset:]
+                    # Interpolate AFTER the offset trim (so frame indices
+                    # align with the renderer's start_frame/total range).
+                    if os_lm is not None:
+                        os_lm = np2.array(os_lm, copy=True)
+                        interpolate_landmarks_inplace(os_lm, _interp_start, _interp_end)
+                    if od_lm is not None:
+                        od_lm = np2.array(od_lm, copy=True)
+                        interpolate_landmarks_inplace(od_lm, _interp_start, _interp_end)
+                    hand_lm_data = _build_lm_data(os_lm, od_lm)
 
-    # Only seek if start_frame is within this file's frame count.
-    # start_frame is a global offset — for multi-file subjects each trial
-    # has its own video starting at local frame 0, so don't seek past the end.
-    if start_frame > 0 and start_frame < reported:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+                    # Also load pose landmarks for forearm triangle (elbow)
+                    pose_npz_path = settings.dlc_path / subject_name / "pose_prelabels.npz"
+                    if pose_npz_path.exists():
+                        pose_npz = np2.load(str(pose_npz_path))
+                        pose_os = pose_npz.get("OS_pose")
+                        pose_od = pose_npz.get("OD_pose")
+                        # Apply same pre-roll trim to pose data
+                        _pose_offset = _detect_frame_offset(subject_name, pose_npz)
+                        if _pose_offset > 0 and pose_os is not None:
+                            pose_os = pose_os[_pose_offset:]
+                        if _pose_offset > 0 and pose_od is not None:
+                            pose_od = pose_od[_pose_offset:]
+                        if pose_os is not None:
+                            pose_os = np2.array(pose_os, copy=True)
+                            interpolate_landmarks_inplace(pose_os, _interp_start, _interp_end)
+                        if pose_od is not None:
+                            pose_od = np2.array(pose_od, copy=True)
+                            interpolate_landmarks_inplace(pose_od, _interp_start, _interp_end)
+                        hand_lm_data = _build_pose_data(pose_os, pose_od, hand_lm_data)
 
     import os, subprocess
 
@@ -685,7 +953,9 @@ def render_with_blur_specs(input_path: str, output_path: str,
         cap.release()
         raise RuntimeError("ffmpeg not found. Install FFmpeg or pip install imageio-ffmpeg")
 
-    # Reset to start
+    # Each trial has its own video file starting at local frame 0.
+    # start_frame is the global subject-level offset used only for looking up
+    # face_detections and blur_specs by global frame number — NOT a seek position.
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
     # Hand mask cache: reuse when landmarks haven't moved
@@ -705,18 +975,135 @@ def render_with_blur_specs(input_path: str, output_path: str,
         return max(max(abs(a[0]-b[0]), abs(a[1]-b[1]))
                    for a, b in zip(old_hash, new_hash)) > HAND_CACHE_THRESHOLD
 
-    def _get_hand_mask_cached(side_label, lms, w_side, h_side, r, sm, fa_r, fa_e, sm2):
+    def _get_hand_mask_cached(side_label, lms, w_side, h_side, r, sm, fa_r, fa_e, sm2, dlc_rad=0):
         key = side_label
         new_hash = _lm_hash(lms)
-        params = (r, sm, fa_r, fa_e, sm2)
+        params = (r, sm, fa_r, fa_e, sm2, dlc_rad)
         cached = _hand_cache.get(key)
         if cached and cached["params"] == params and not _lm_moved(cached["lm_hash"], new_hash):
             return cached["mask"]
-        mask = _build_hand_mask_from_landmarks(lms, w_side, h_side, r, sm, fa_r, fa_e, sm2)
+        mask = _build_hand_mask_from_landmarks(lms, w_side, h_side, r, sm, fa_r, fa_e, sm2,
+                                               dlc_radius=dlc_rad)
         _hand_cache[key] = {"lm_hash": new_hash, "mask": mask, "params": params}
         return mask
 
-    # Pipe frames directly to ffmpeg for H.264 encoding
+    # ── HRnet MIP-based mask (alternative to MP-circle mask) ───────────
+    # Loaded lazily on first use so the renderer doesn't pay the cost when
+    # the user picked MediaPipe.  Each side gets a (N_trial, 64, 64) MIP
+    # plus a (N_trial, 4) per-frame bbox.
+    _hrnet_mip = {"loaded": False, "L": None, "R": None,
+                   "bbox_L": None, "bbox_R": None,
+                   "trial_start": 0, "n_trial": 0}
+
+    def _load_hrnet_mip():
+        if _hrnet_mip["loaded"] or not subject_name:
+            return
+        _hrnet_mip["loaded"] = True
+        try:
+            from .mano_data import _mano_dir
+            from .video import build_trial_map as _btm
+            import json as _jjson, numpy as _np
+            tmap = _btm(subject_name)
+            # Pick the trial whose start_frame matches the renderer's offset.
+            tdef = next((t for t in tmap if t.get("start_frame", 0) == start_frame), None)
+            if tdef is None:
+                return
+            stem = tdef["trial_name"]
+            mip_path = _mano_dir(subject_name) / stem / "hrnet_w18_mip.npz"
+            crop_path = _mano_dir(subject_name) / stem / "hand_crop.json"
+            if not mip_path.exists() or not crop_path.exists():
+                return
+            d = _np.load(mip_path)
+            _hrnet_mip["L"] = d["heatmaps_L_mip"] if "heatmaps_L_mip" in d.files else None
+            _hrnet_mip["R"] = d["heatmaps_R_mip"] if "heatmaps_R_mip" in d.files else None
+            with open(crop_path) as f:
+                cj = _jjson.load(f)
+            _hrnet_mip["bbox_L"] = cj.get("crop_L_perframe") or [cj.get("crop_L")]
+            _hrnet_mip["bbox_R"] = cj.get("crop_R_perframe") or [cj.get("crop_R")]
+            _hrnet_mip["trial_start"] = int(tdef.get("start_frame", 0))
+            _hrnet_mip["n_trial"] = int(tdef.get("frame_count", 0))
+        except Exception as e:
+            logger.warning(f"HRnet MIP load failed for {subject_name}: {e}")
+
+    def _build_hand_mask_from_hrnet(side_label, w_side, h_side, global_frame, thresh, smooth_px):
+        """Threshold the HRnet MIP at the given frame, place into bbox,
+        smooth via Gaussian blur + threshold.  Returns (h, w) bool mask
+        or None if no HRnet data is available for this side / frame.
+        """
+        import numpy as _np
+        if not _hrnet_mip["loaded"]:
+            _load_hrnet_mip()
+        # Side keys: in deidentify.py the renderer uses 'left'/'right'
+        # for stereo halves (matching frame layout); the HRnet MIP has
+        # 'L'/'R' keyed to the same OS/OD split.
+        mip = _hrnet_mip["L"] if side_label in ("left", "full") else _hrnet_mip["R"]
+        bboxes = _hrnet_mip["bbox_L"] if side_label in ("left", "full") else _hrnet_mip["bbox_R"]
+        if mip is None or not bboxes:
+            return _np.zeros((h_side, w_side), dtype=bool)
+        f_in_trial = global_frame - _hrnet_mip["trial_start"]
+        if f_in_trial < 0 or f_in_trial >= mip.shape[0]:
+            return _np.zeros((h_side, w_side), dtype=bool)
+        bbox = bboxes[f_in_trial] if f_in_trial < len(bboxes) else bboxes[-1]
+        if bbox is None or len(bbox) != 4:
+            return _np.zeros((h_side, w_side), dtype=bool)
+        bx1, by1, bx2, by2 = (int(round(v)) for v in bbox)
+        bw, bh = bx2 - bx1, by2 - by1
+        if bw <= 0 or bh <= 0:
+            return _np.zeros((h_side, w_side), dtype=bool)
+        # Re-normalise the per-frame MIP: anchor low end at the
+        # MEDIAN (background) and high end at the max.  See comment in
+        # the module-level ``build_hand_mask_from_hrnet_mip`` for why
+        # the min anchor created a cliff in the slider response.
+        frame_mip = mip[f_in_trial].astype(_np.float32)
+        _baseline = float(_np.median(frame_mip))
+        _hi = float(frame_mip.max())
+        if _hi - _baseline > 1e-6:
+            frame_mip = _np.clip((frame_mip - _baseline) / (_hi - _baseline), 0.0, 1.0)
+        else:
+            frame_mip = _np.zeros_like(frame_mip)
+        # Threshold + resize the 64×64 MIP to the bbox.
+        small = (frame_mip > thresh).astype(np_uint8 := __import__('numpy').uint8) * 255
+        big = cv2.resize(small, (bw, bh), interpolation=cv2.INTER_LINEAR)
+        big = (big > 127).astype(__import__('numpy').uint8) * 255
+        out = __import__('numpy').zeros((h_side, w_side), dtype=__import__('numpy').uint8)
+        # Place big into out, clipping at frame edges.
+        sx1, sy1 = max(0, bx1), max(0, by1)
+        sx2, sy2 = min(w_side, bx2), min(h_side, by2)
+        if sx2 > sx1 and sy2 > sy1:
+            out[sy1:sy2, sx1:sx2] = big[sy1 - by1:sy2 - by1, sx1 - bx1:sx2 - bx1]
+        if smooth_px and smooth_px > 0:
+            k = max(1, int(smooth_px) | 1)
+            out = cv2.GaussianBlur(out, (k, k), 0)
+            out = (out > 127).astype(__import__('numpy').uint8) * 255
+        return out > 0
+
+    # Per-frame hand-mask dispatch — used by the per-side render code below.
+    def _get_hand_mask_for_render(side_label, lms, w_side, h_side, r, sm, fa_r, fa_e, sm2,
+                                   dlc_rad=0, global_frame=0):
+        if mask_source == "hrnet":
+            return _build_hand_mask_from_hrnet(
+                side_label, w_side, h_side, global_frame,
+                hrnet_mask_thresh, int(round(hrnet_mask_smooth * 2)),
+            )
+        return _get_hand_mask_cached(side_label, lms, w_side, h_side, r, sm, fa_r, fa_e, sm2, dlc_rad=dlc_rad)
+
+    # Always pipe raw frames into ffmpeg → H.264 yuv420p.  Browsers refuse
+    # to decode the MPEG-4 ASP files cv2.VideoWriter('mp4v') produces on
+    # Windows, which broke the Auto page video pane for any subject whose
+    # de-identification ran on the Windows GPU host.  H.264 yuv420p is
+    # universally supported in HTML5 <video>.
+    #
+    # On Windows the child ffmpeg process is detached from our SSH session
+    # (DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP) so it survives if a
+    # remote launcher exits early — same fix we use for HRnet.
+    _popen_kwargs = {"stdin": subprocess.PIPE,
+                      "stdout": subprocess.DEVNULL,
+                      "stderr": subprocess.PIPE}
+    if os.name == 'nt':
+        _popen_kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0) |
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
     proc = subprocess.Popen([
         ffmpeg, "-y",
         "-f", "rawvideo", "-vcodec", "rawvideo",
@@ -725,8 +1112,11 @@ def render_with_blur_specs(input_path: str, output_path: str,
         "-i", "-",
         "-c:v", "libx264", "-preset", "slow", "-crf", "18",
         "-pix_fmt", "yuv420p", "-an",
+        # +faststart moves the moov atom to the front so HTML5 <video>
+        # can start playing before the entire file is downloaded.
+        "-movflags", "+faststart",
         output_path,
-    ], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    ], **_popen_kwargs)
 
     frames_written = 0
     try:
@@ -763,22 +1153,29 @@ def render_with_blur_specs(input_path: str, output_path: str,
                         left_mask = _build_blur_mask(left_specs, half_w, fh, global_frame, face_by_frame, "left")
                         hand_mask_l = np.zeros((fh, half_w), dtype=bool)
                         hand_active_l, active_radius_l, active_smooth_l = _hand_active_for_side("left")
-                        if hand_active_l and hand_lm_data and global_frame in hand_lm_data:
-                            lms_l = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "left"]
-                            hand_mask_l = _get_hand_mask_cached(
-                                "left", lms_l, half_w, fh, active_radius_l, active_smooth_l,
-                                forearm_radius, forearm_extent, hand_smooth2)
+                        if hand_active_l:
+                            lms_l = ([lm for lm in hand_lm_data[global_frame] if lm["side"] == "left"]
+                                     if hand_lm_data and global_frame in hand_lm_data else [])
+                            # MP path needs landmarks; HRnet path doesn't (uses MIP).
+                            if mask_source == "hrnet" or lms_l:
+                                hand_mask_l = _get_hand_mask_for_render(
+                                    "left", lms_l, half_w, fh, active_radius_l, active_smooth_l,
+                                    forearm_radius, forearm_extent, hand_smooth2,
+                                    dlc_rad=dlc_radius_val, global_frame=global_frame)
                         left = _apply_blur_roi(left, left_mask, hand_mask_l)
 
                     if right_specs:
                         right_mask = _build_blur_mask(right_specs, full_w - half_w, fh, global_frame, face_by_frame, "right")
                         hand_mask_r = np.zeros((fh, full_w - half_w), dtype=bool)
                         hand_active_r, active_radius_r, active_smooth_r = _hand_active_for_side("right")
-                        if hand_active_r and hand_lm_data and global_frame in hand_lm_data:
-                            lms_r = [lm for lm in hand_lm_data[global_frame] if lm["side"] == "right"]
-                            hand_mask_r = _get_hand_mask_cached(
-                                "right", lms_r, full_w - half_w, fh, active_radius_r, active_smooth_r,
-                                forearm_radius, forearm_extent, hand_smooth2)
+                        if hand_active_r:
+                            lms_r = ([lm for lm in hand_lm_data[global_frame] if lm["side"] == "right"]
+                                     if hand_lm_data and global_frame in hand_lm_data else [])
+                            if mask_source == "hrnet" or lms_r:
+                                hand_mask_r = _get_hand_mask_for_render(
+                                    "right", lms_r, full_w - half_w, fh, active_radius_r, active_smooth_r,
+                                    forearm_radius, forearm_extent, hand_smooth2,
+                                    dlc_rad=dlc_radius_val, global_frame=global_frame)
                         right = _apply_blur_roi(right, right_mask, hand_mask_r)
 
                     frame = np.concatenate([left, right], axis=1)
@@ -786,13 +1183,17 @@ def render_with_blur_specs(input_path: str, output_path: str,
                     blur_mask = _build_blur_mask(active_specs, full_w, fh, global_frame, face_by_frame, "full")
                     hand_mask = np.zeros((fh, full_w), dtype=bool)
                     hand_active_f, active_radius_f, active_smooth_f = _hand_active_for_side("full")
-                    if hand_active_f and hand_lm_data and global_frame in hand_lm_data:
-                        hand_mask = _get_hand_mask_cached(
-                            "full", hand_lm_data[global_frame], full_w, fh, active_radius_f, active_smooth_f,
-                            forearm_radius, forearm_extent, hand_smooth2, dlc_radius_val)
+                    if hand_active_f:
+                        lms_f = (hand_lm_data[global_frame]
+                                 if hand_lm_data and global_frame in hand_lm_data else [])
+                        if mask_source == "hrnet" or lms_f:
+                            hand_mask = _get_hand_mask_for_render(
+                                "full", lms_f, full_w, fh, active_radius_f, active_smooth_f,
+                                forearm_radius, forearm_extent, hand_smooth2,
+                                dlc_rad=dlc_radius_val, global_frame=global_frame)
                     frame = _apply_blur_roi(frame, blur_mask, hand_mask)
 
-            # Write raw BGR frame to ffmpeg stdin
+            # Write frame to ffmpeg's stdin (raw bgr24 bytes).
             proc.stdin.write(frame.tobytes())
             frames_written += 1
 
@@ -922,20 +1323,22 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
             if j not in existing_joints:
                 hand_lms.append({**dlc, "type": "hand"})
 
-    # Slider values are in screen pixels (CSS px at typical canvas zoom).
-    # Convert to image pixels: value * (imageWidth / typicalCanvasWidth).
-    # The frontend draws at (value * canvasScale) screen px, where
-    # canvasScale ≈ canvasWidth / imageWidth. Both produce the same
-    # fractional coverage: value / imageWidth * (imageWidth / canvasWidth) = value / canvasWidth.
-    canvas_w = kwargs.get("canvas_w", 700)
-    scale_factor = max(1.0, w / canvas_w)
-    radius = max(1, int(radius * scale_factor))
-    smooth = max(0, int(smooth * scale_factor))
-    forearm_radius = max(1, int(forearm_radius * scale_factor))
-    smooth2 = max(0, int(smooth2 * scale_factor))
+    # Slider values are in image pixel units — the same coordinate space as the
+    # stored landmarks.  The frontend draws circles at (radius * canvasScale)
+    # canvas pixels, where canvasScale = canvasWidth / imageWidth, which means
+    # the effective image-pixel coverage is just `radius` unchanged.  No
+    # conversion is needed here; applying image_w/canvas_w was a factor-of-2–3
+    # overscaling that caused the preview to look larger than the masks overlay.
 
-    # Interpolate midpoints along each finger segment for smoother coverage
-    # MediaPipe joints: 0=wrist, 1-4=thumb, 5-8=index, 9-12=middle, 13-16=ring, 17-20=pinky
+    # Interpolate midpoints along each finger segment for smoother coverage.
+    # MediaPipe joints: 0=wrist, 1-4=thumb, 5-8=index, 9-12=middle,
+    #                   13-16=ring, 17-20=pinky.
+    # Finger inter-joint segments (e.g. MCP→PIP) get a single 1/2 fill —
+    # fingers are thin so one extra circle is enough.  The wrist→MCP
+    # segment (the "palm" — segment 0 of each chain) gets three rows of
+    # fills at 1/4, 1/2, and 3/4 the distance from the wrist toward the
+    # knuckle so the wider palm region is fully covered without leaving
+    # gaps between rows.
     finger_chains = [
         [0, 1, 2, 3, 4],
         [0, 5, 6, 7, 8],
@@ -949,10 +1352,15 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
         for ci in range(len(chain) - 1):
             a = by_joint.get(chain[ci])
             b = by_joint.get(chain[ci + 1])
-            if a and b:
+            if not (a and b):
+                continue
+            # Three palm-fill rows on the wrist→MCP segment (ci=0); one
+            # midpoint elsewhere.
+            fracs = (0.25, 0.5, 0.75) if ci == 0 else (0.5,)
+            for f in fracs:
                 all_points.append({
-                    "x": (a["x"] + b["x"]) / 2,
-                    "y": (a["y"] + b["y"]) / 2,
+                    "x": a["x"] + f * (b["x"] - a["x"]),
+                    "y": a["y"] + f * (b["y"] - a["y"]),
                     "type": "interp",
                 })
 
@@ -1013,20 +1421,14 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
         cv2.line(mask, (int(pinky_mcp["x"]), int(pinky_mcp["y"])),
                  (int(ext_x), int(ext_y)), 255, forearm_radius * 2)
 
-    # Unified smooth: apply blur + threshold on combined hand circles + forearm
+    # Unified smooth: apply blur + threshold on combined hand circles + forearm.
+    # Use sigma=smooth directly (matching frontend CSS blur(smooth px)).
+    # Threshold=5 approximates the frontend's 8-draw amplification which lowers
+    # the effective threshold from 30/255 to ~4/255, spreading the mask to
+    # ~2.16 * sigma pixels beyond painted areas (vs 2.26 * sigma at threshold=5).
     if smooth > 0 and mask.any():
-        pre_count = np.count_nonzero(mask)
-        k = 2 * smooth + 1
-        if k % 2 == 0:
-            k += 1
-        blurred = cv2.GaussianBlur(mask, (k, k), 0)
-        for thresh in (30, 15, 5, 1):
-            candidate = (blurred > thresh).astype(np.uint8) * 255
-            if np.count_nonzero(candidate) >= pre_count * 0.5:
-                mask = candidate
-                break
-        else:
-            mask = (blurred > 0).astype(np.uint8) * 255
+        blurred = cv2.GaussianBlur(mask.astype(np.float32), (0, 0), smooth)
+        mask = (blurred > 5).astype(np.uint8) * 255
 
     return mask > 0
 

@@ -36,7 +36,7 @@
         <div style="display:flex;align-items:center;gap:16px;">
             <h1 style="margin:0;"><a href="/" style="font-size:18px;">Movement Tracker</a></h1>
             <div style="display:flex;align-items:center;gap:8px;">
-                <span id="sessionTypeLabel" style="font-size:18px;font-weight:600;"></span>
+                <span id="sessionTypeLabel" style="display:none;"></span>
                 <select id="subjectSelect" class="subject-select"></select>
                 <!-- Subject prev/next navigation -->
                 <button class="btn btn-sm" id="prevSubjectBtn" onclick="labeler.prevSubject()" title="Previous subject">&larr;</button>
@@ -47,18 +47,16 @@
                 <span style="font-size:12px;color:var(--text-muted);margin-right:4px;">Mode:</span>
                 <button class="btn btn-sm" id="modeLabel" onclick="switchMode('initial')" title="Label mode">Label</button>
                 <button class="btn btn-sm" id="modeCorrect" onclick="switchMode('corrections')" title="Correct mode">Correct</button>
-                <button class="btn btn-sm" id="modeEvents" onclick="switchMode('events')" title="Events mode">Events</button>
             </div>
         </div>
         <nav>
             <a href="/videos" class="nav-browse">Browse Videos</a>
             <a href="/subjects">Subjects</a>
             <span class="nav-dropdown">
-                <a href="/analyze">Analyze</a>
+                <a href="/mano">Analyze</a>
                 <div class="nav-dropdown-menu">
-                    <a href="/analyze">Detect</a>
+                    <a href="/mano">Auto</a>
                     <a href="/labeling-select">DLC</a>
-                    <a href="/mano">MANO</a>
                     <a href="/events">Events</a>
                     <a href="/deidentify">Deidentify</a>
                 </div>
@@ -287,9 +285,9 @@
         </div>
     </div>
 
-    <script src="/static/js/nav.js?v=2"></script>
+    <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js?v=10"></script>
-    <script src="/static/js/labeler.js?v=55"></script>
+    <script src="/static/js/labeler.js?v=56"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

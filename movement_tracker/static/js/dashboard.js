@@ -100,9 +100,16 @@ function _drawSparklines(previews) {
             ctx.stroke();
         }
 
-        // Gray out canvases with no data
+        // Gray out canvases with no data — covers two cases:
+        //   * No entry in previews[] (preview wasn't computed)
+        //   * Entry exists but every value is null (preview computed but
+        //     all-NaN — silently produced a blank canvas before this fix,
+        //     making the subject row look "blank" on the dashboard).
         subjects.forEach(s => {
-            if (!previews[String(s.id)]) {
+            const info = previews[String(s.id)];
+            const vals = info && info.values;
+            const hasAnyValue = Array.isArray(vals) && vals.some(v => v != null);
+            if (!hasAnyValue) {
                 const canvas = document.getElementById(`spark_${s.id}`);
                 if (canvas) {
                     const ctx = canvas.getContext('2d');
@@ -183,9 +190,8 @@ function renderDiagnosisGroups() {
                                 onclick="sessionStorage.setItem('dlc_lastSubjectId','${s.id}');window.location.href='/results?subject=${s.id}&tab=individual&from=dashboard'"></canvas>
                         <div style="display:flex;gap:2px;flex-wrap:nowrap;">
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="showDetail(${s.id})">Info</button>
-                            <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/analyze?subject=${s.id}'">Detect</button>
+                            <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/mano?subject=${s.id}'">Auto</button>
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="openLabeling(${s.id})">DLC</button>
-                            <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/mano?subject=${s.id}'">MANO</button>
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/results?subject=${s.id}&from=dashboard'">Results</button>
                         </div>
                     </div>
@@ -197,6 +203,42 @@ function renderDiagnosisGroups() {
     });
 
     html += '</div>';
+
+    // Subjects whose group_label isn't one of the configured diagnosis
+    // groups — rendered in a separate "Ungrouped" section below the grid
+    // so they're easy to find and reassign.
+    const ungrouped = filtered.filter(s => {
+        const g = s.group_label || s.diagnosis || "Control";
+        return !diagnosisGroups.includes(g);
+    });
+    if (ungrouped.length > 0) {
+        html += `
+            <div style="margin-top:16px;background: var(--bg-card); border-radius: var(--radius); padding: 12px; border: 1px solid var(--border);">
+                <h3 style="margin: 0 0 8px 0; font-size: 14px; color: var(--text); display: flex; justify-content: space-between; align-items: center;">
+                    Ungrouped
+                    <span style="font-weight: 400; font-size: 12px; color: var(--text-muted);">n=${ungrouped.length}</span>
+                </h3>
+                <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 8px;">
+                    These subjects don't match any of the configured diagnosis groups.  Click <strong>Info</strong> to reassign.
+                </div>
+                <div style="display:flex;flex-direction:column;gap:4px;">`;
+        ungrouped.forEach(s => {
+            const g = s.group_label || s.diagnosis || "Control";
+            const stageColor = `badge-${s.stage}`;
+            html += `
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;background: var(--bg); border-radius: 4px; border: 1px solid var(--border);">
+                    <span style="font-weight:600;font-size:13px;">${s.name}</span>
+                    <span style="font-size:11px;color:var(--text-muted);flex:1;">
+                        group: <strong style="color:var(--text);">${g}</strong>
+                        &nbsp;·&nbsp; diagnosis: ${s.diagnosis || '—'}
+                    </span>
+                    <span class="badge ${stageColor}" style="font-size:11px;">${stageLabel(s.stage)}</span>
+                    <button class="btn btn-sm" style="padding:2px 8px;font-size:11px;" onclick="showDetail(${s.id})">Info</button>
+                </div>`;
+        });
+        html += '</div></div>';
+    }
+
     container.innerHTML = html;
 }
 
@@ -404,7 +446,7 @@ async function showDetail(subjectId) {
             { key: 'dlc_refine', label: 'DLC Refine' },
             { key: 'dlc_corrections', label: 'Corrections' },
             { key: 'events', label: 'Events' },
-            { key: 'mano', label: 'MANO' },
+            { key: 'mano', label: 'Auto' },
         ];
         const noFaceList = detail.no_face_videos || [];
         let trialChart = '';

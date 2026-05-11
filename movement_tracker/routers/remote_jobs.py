@@ -21,12 +21,19 @@ class LaunchRequest(BaseModel):
     subjects: List[str] = []
     execution_target: str = "remote"  # "local-cpu", "local-gpu", or "remote"
     gpu_index: int = 0  # Which GPU to use if execution_target is "local-gpu"
+    extra_params: Optional[dict] = None  # Per-job params (fit weights, trial_idx, etc.)
 
 
 class RedownloadRequest(BaseModel):
     job_type: str
     subject_ids: List[int] = []
     subjects: List[str] = []
+    # Optional: when present, the redownload helper targets only the
+    # trials in that batch job's ``params_json.trials`` list, prioritising
+    # outcome=remote_only trials and falling back to outcome=ok if none
+    # need download.  Without it, the legacy "scan remote dirs" path is
+    # used and every trial dir on the remote is mirrored locally.
+    parent_job_id: Optional[int] = None
 
 
 @router.get("/steps")
@@ -76,7 +83,8 @@ def launch_job(req: LaunchRequest) -> dict:
         req.subject_ids,
         subject_names,
         execution_target=req.execution_target,
-        gpu_index=req.gpu_index
+        gpu_index=req.gpu_index,
+        extra_params=req.extra_params,
     )
     return result
 
@@ -85,6 +93,154 @@ def launch_job(req: LaunchRequest) -> dict:
 def get_queue() -> dict:
     """Get current queue state."""
     return queue_manager.get_state()
+
+
+# ─── Pending-result downloads (banner + Re-download button) ────────────
+
+class _IgnoreReq(BaseModel):
+    job_ids: List[int] = []
+
+
+_pending_cache: dict = {"at": 0.0, "data": None}
+
+
+@router.get("/pending-downloads")
+def list_pending_downloads(force: int = 0) -> dict:
+    """Per-job list of remote outputs that exist on the remote but haven't
+    been downloaded locally (and aren't ignored).  Drives the Jobs-page
+    banner and the nav-dropdown flag.
+
+    Cached for ~15 s so the nav-dropdown's 3 s poll doesn't pay the
+    remote SSH cost every tick.  Pass ``?force=1`` to bypass the cache
+    (used after a download / ignore action).
+    """
+    import time as _time
+    from ..config import get_settings
+    from ..services.remote_results import pending_for_job
+
+    if not force and _pending_cache["data"] is not None and \
+            (_time.time() - _pending_cache["at"]) < 15.0:
+        return _pending_cache["data"]
+
+    settings = get_settings()
+    rcfg = settings.get_remote_config()
+    if not rcfg:
+        return {"pending": [], "available": False, "reason": "Remote not configured"}
+    remote_output_dir = f"{rcfg.work_dir}/preprocess_output"
+
+    with get_db_ctx() as db:
+        # Only consider REMOTE MP jobs — local jobs can't have anything
+        # to download.  Pre-routing single-trial MP to local CPU made the
+        # local rows trigger spurious "pending download" flags for
+        # whatever stale remote npz happened to still exist on the host.
+        rows = db.execute(
+            "SELECT id, job_type, status, subject_id FROM jobs "
+            "WHERE status IN ('running','completed','failed') "
+            "AND job_type='mediapipe' "
+            "AND remote_host IS NOT NULL AND remote_host != '' "
+            "AND created_at >= datetime('now','-30 days') "
+            "ORDER BY id DESC"
+        ).fetchall()
+
+    items: list[dict] = []
+    # Dedupe: many jobs for the same subject all point to the SAME
+    # remote npz path.  Keep one entry per unique (subject_id,
+    # remote_path) and attribute it to the most-recent job that
+    # produced it (rows are ordered by id DESC so the first hit wins).
+    seen: set = set()
+    for j in rows:
+        try:
+            for entry in pending_for_job(int(j["id"]), rcfg, remote_output_dir):
+                if not entry["available"]:
+                    continue
+                key = (entry.get("subject_id"), entry.get("remote_path"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                entry["job_status"] = j["status"]
+                items.append(entry)
+        except Exception:
+            continue
+    payload = {"pending": items, "available": True}
+    _pending_cache["at"] = _time.time()
+    _pending_cache["data"] = payload
+    return payload
+
+
+def _invalidate_pending_cache() -> None:
+    _pending_cache["at"] = 0.0
+    _pending_cache["data"] = None
+
+
+@router.post("/download-pending")
+def download_pending(req: _IgnoreReq | None = None) -> dict:
+    """Kick off a background-thread download of pending results.  Returns
+    immediately with a ``download_id`` that the UI can poll via
+    ``GET /api/remote/download-progress``.  Each individual file is
+    recorded in ``remote_downloads`` as it completes, so an interrupted
+    download (server restart, etc.) won't re-flag already-pulled files
+    on the next session."""
+    from ..config import get_settings
+    from ..services.remote_results import start_background_download
+
+    settings = get_settings()
+    rcfg = settings.get_remote_config()
+    if not rcfg:
+        raise HTTPException(400, "Remote not configured")
+    remote_output_dir = f"{rcfg.work_dir}/preprocess_output"
+
+    target_job_ids = list(req.job_ids) if req else []
+    if not target_job_ids:
+        with get_db_ctx() as db:
+            rows = db.execute(
+                "SELECT id FROM jobs WHERE status IN ('running','completed','failed') "
+                "AND job_type='mediapipe' "
+                "AND created_at >= datetime('now','-30 days')"
+            ).fetchall()
+            target_job_ids = [r["id"] for r in rows]
+    if not target_job_ids:
+        return {"download_id": None, "total": 0}
+
+    did = start_background_download(target_job_ids, rcfg, remote_output_dir)
+    _invalidate_pending_cache()
+    return {"download_id": did, "total": len(target_job_ids)}
+
+
+@router.get("/download-progress")
+def download_progress() -> dict:
+    """Current state of all in-flight + recently-completed batch downloads."""
+    from ..services.remote_results import get_download_state
+    return {"downloads": get_download_state(active_only=False)}
+
+
+@router.post("/ignore-pending")
+def ignore_pending(req: _IgnoreReq) -> dict:
+    """Mark every output of the given jobs as ``ignored`` so they no
+    longer surface in the banner."""
+    from ..services.remote_results import mark_ignored, output_specs
+    from ..config import get_settings
+    settings = get_settings()
+    rcfg = settings.get_remote_config()
+    remote_output_dir = (f"{rcfg.work_dir}/preprocess_output" if rcfg else "")
+    if not req.job_ids:
+        return {"ignored": 0}
+    with get_db_ctx() as db:
+        placeholders = ",".join("?" * len(req.job_ids))
+        jrows = db.execute(
+            f"SELECT j.id, j.job_type, j.subject_id, s.name AS subject_name "
+            f"FROM jobs j LEFT JOIN subjects s ON j.subject_id=s.id "
+            f"WHERE j.id IN ({placeholders})",
+            req.job_ids,
+        ).fetchall()
+    n = 0
+    for j in jrows:
+        if not j.get("subject_id"): continue
+        if not j.get("subject_name"): continue
+        for spec in output_specs(j["job_type"], j["subject_name"], remote_output_dir):
+            mark_ignored(j["subject_id"], j["job_type"], str(spec.local_path))
+            n += 1
+    _invalidate_pending_cache()
+    return {"ignored": n}
 
 
 @router.post("/cancel/{queue_id}")
@@ -109,7 +265,9 @@ def redownload_results(req: RedownloadRequest) -> dict:
     if not remote_cfg:
         raise HTTPException(400, "Remote not configured")
 
-    # Resolve subject names
+    # Resolve subject names.  When ``parent_job_id`` is given, prefer the
+    # subjects recorded in that job's queue row (since the request payload
+    # may have been truncated by the "+N more" UI collapse).
     subject_names = list(req.subjects)
     if req.subject_ids and not subject_names:
         with get_db_ctx() as db:
@@ -119,6 +277,21 @@ def redownload_results(req: RedownloadRequest) -> dict:
                 req.subject_ids,
             ).fetchall()
             subject_names = [r["name"] for r in rows]
+
+    if req.parent_job_id is not None:
+        with get_db_ctx() as db:
+            row = db.execute(
+                "SELECT subject_ids FROM job_queue WHERE job_id = ?",
+                (req.parent_job_id,),
+            ).fetchone()
+        if row and row["subject_ids"]:
+            try:
+                import json as _json
+                full = _json.loads(row["subject_ids"])
+                if isinstance(full, list) and full:
+                    subject_names = full
+            except (ValueError, TypeError):
+                pass
 
     if not subject_names:
         raise HTTPException(400, "No subjects specified")
@@ -138,11 +311,34 @@ def redownload_results(req: RedownloadRequest) -> dict:
         subj_label += f"_+{len(subject_names) - 3}"
     log_path = str(log_dir / f"job_redownload_{req.job_type}_{subj_label}.log")
 
+    # Build a rich params_json so the Jobs-page queue lane shows the full
+    # scope of the re-download (all subjects + per-trial chips), not just
+    # the first subject we used for the jobs.subject_id foreign key.
+    import json as _json
+    redl_params: dict = {"subjects": list(subject_names)}
+    if req.parent_job_id is not None:
+        with get_db_ctx() as db:
+            prow = db.execute(
+                "SELECT params_json FROM jobs WHERE id = ?", (req.parent_job_id,)
+            ).fetchone()
+        if prow and prow["params_json"]:
+            try:
+                pp = _json.loads(prow["params_json"])
+                if isinstance(pp, dict) and isinstance(pp.get("trials"), list):
+                    redl_params["trials"] = pp["trials"]
+                    redl_params["trial_name"] = pp.get("trial_name") or f"{len(pp['trials'])} trials"
+            except (ValueError, TypeError):
+                pass
+    if "trial_name" not in redl_params:
+        redl_params["trial_name"] = (f"{len(subject_names)} subjects"
+                                      if len(subject_names) > 1 else subject_names[0])
+
     with get_db_ctx() as db:
         db.execute(
-            """INSERT INTO jobs (subject_id, job_type, status, remote_host, log_path)
-               VALUES (?, ?, 'running', ?, ?)""",
-            (subj["id"], f"redownload_{req.job_type}", remote_cfg.host, log_path),
+            """INSERT INTO jobs (subject_id, job_type, status, remote_host, log_path, params_json)
+               VALUES (?, ?, 'running', ?, ?, ?)""",
+            (subj["id"], f"redownload_{req.job_type}", remote_cfg.host, log_path,
+             _json.dumps(redl_params)),
         )
         job = db.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 1").fetchone()
 
@@ -195,6 +391,41 @@ def redownload_results(req: RedownloadRequest) -> dict:
 
         return {"job_id": job["id"], "status": "running"}
 
+    if req.job_type == "hrnet":
+        from ..services.remote import remote_hrnet_redownload
+        thread = threading.Thread(
+            target=remote_hrnet_redownload,
+            kwargs=dict(
+                job_id=job["id"],
+                cfg=remote_cfg,
+                subject_names=subject_names,
+                log_path=log_path,
+                registry=registry,
+                parent_job_id=req.parent_job_id,
+            ),
+            daemon=True,
+        )
+        thread.start()
+        registry._threads[job["id"]] = thread
+        return {"job_id": job["id"], "status": "running"}
+
+    if req.job_type == "deidentify":
+        from ..services.remote import remote_deidentify_download
+        thread = threading.Thread(
+            target=remote_deidentify_download,
+            kwargs=dict(
+                job_id=job["id"],
+                cfg=remote_cfg,
+                subject_name=subject_names[0],
+                log_path=log_path,
+                registry=registry,
+            ),
+            daemon=True,
+        )
+        thread.start()
+        registry._threads[job["id"]] = thread
+        return {"job_id": job["id"], "status": "running"}
+
     raise HTTPException(400, f"Re-download not supported for job type: {req.job_type}")
 
 
@@ -203,18 +434,20 @@ async def stream_queue() -> StreamingResponse:
     """SSE stream that emits queue state changes every 2s."""
     async def event_generator():
         last_state = None
-        while True:
-            try:
-                state = queue_manager.get_state()
-                state_json = json.dumps(state, default=str)
-                has_running = len(state.get("running", [])) > 0
-                # Always send when jobs are running (progress_pct / elapsed time may change)
-                if state_json != last_state or has_running:
-                    last_state = state_json
-                    yield f"data: {state_json}\n\n"
-            except Exception:
-                pass  # skip this tick; retry on next iteration
-            await asyncio.sleep(2)
+        try:
+            while True:
+                try:
+                    state = queue_manager.get_state()
+                    state_json = json.dumps(state, default=str)
+                    has_running = len(state.get("running", [])) > 0
+                    if state_json != last_state or has_running:
+                        last_state = state_json
+                        yield f"data: {state_json}\n\n"
+                except Exception:
+                    pass
+                await asyncio.sleep(2)
+        except asyncio.CancelledError:
+            return
 
     return StreamingResponse(
         event_generator(),

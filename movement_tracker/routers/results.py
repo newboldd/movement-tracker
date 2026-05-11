@@ -79,30 +79,127 @@ def _load_events(
     return auto, "auto"
 
 
-def _load_distances_and_trials(subject_name: str) -> tuple[list, list[dict], str]:
+def _load_distances_and_trials(subject_name: str, source: str | None = None) -> tuple[list, list[dict], str]:
     """Return (distances, trials, source) for a subject.
 
     distances: list[float|None] across all frames.
     trials: list of {name, fps, start_frame, end_frame, frame_count}.
-    source: 'dlc', 'mediapipe', or 'none'.
+    source: 'dlc', 'mediapipe', 'vision', 'skeleton_v1', 'skeleton_v2',
+    'skeleton_v3', 'corrections', or 'none'.
     """
     trials = build_trial_map(subject_name)
     if not trials:
         return [], [], "none"
 
-    # Try DLC predictions first (corrections > v2 > v1)
-    preds = get_dlc_predictions_for_session(subject_name)
-    distances = preds.get("distances") if preds else None
-    if distances:
-        return distances, trials, "dlc"
+    settings = get_settings()
 
-    # Fall back to MediaPipe prelabels
-    mp = get_mediapipe_for_session(subject_name)
-    distances = mp.get("distances") if mp else None
-    if distances:
-        return distances, trials, "mediapipe"
+    def _try_source(src):
+        if src == "corrections":
+            from ..services.dlc_predictions import get_dlc_predictions_for_stage
+            data = get_dlc_predictions_for_stage(subject_name, "corrections")
+            return data.get("distances") if data else None
+        elif src == "dlc":
+            preds = get_dlc_predictions_for_session(subject_name)
+            return preds.get("distances") if preds else None
+        elif src == "mediapipe":
+            mp = get_mediapipe_for_session(subject_name)
+            return mp.get("distances") if mp else None
+        elif src == "vision":
+            vision_path = settings.dlc_path / subject_name / "vision_prelabels.npz"
+            if not vision_path.exists():
+                return None
+            try:
+                v_data = np.load(str(vision_path))
+                v_os = v_data.get("OS_landmarks")
+                v_od = v_data.get("OD_landmarks")
+                from ..services.calibration import get_calibration_for_subject, triangulate_points
+                calib = get_calibration_for_subject(subject_name)
+                if calib is not None and v_os is not None and v_od is not None:
+                    # Triangulate thumb-index distance
+                    thumb_3d = triangulate_points(v_os[:, 4, :], v_od[:, 4, :], calib)
+                    index_3d = triangulate_points(v_os[:, 8, :], v_od[:, 8, :], calib)
+                    dist = np.linalg.norm(thumb_3d - index_3d, axis=1)
+                    return [round(float(d), 2) if not np.isnan(d) else None for d in dist]
+                elif v_os is not None:
+                    # 2D fallback
+                    dist = np.linalg.norm(v_os[:, 4, :] - v_os[:, 8, :], axis=1)
+                    return [round(float(d), 2) if not np.isnan(d) else None for d in dist]
+            except Exception:
+                return None
+            return None
+        elif src in ("skeleton_v1", "skeleton_v2", "skeleton_v3"):
+            # v1 = original stage-1 fit (mano_fit.npz),
+            # v2 = frozen legacy smoothing (mano_fit_v2_legacy.npz),
+            # v3 = corrections pipeline (mano_fit_v2.npz).
+            _NPZ_MAP = {"skeleton_v1": "mano_fit.npz",
+                        "skeleton_v2": "mano_fit_v2_legacy.npz",
+                        "skeleton_v3": "mano_fit_v2.npz"}
+            from ..services.mano_data import _mano_dir
+            import numpy as np
+            mano_root = _mano_dir(subject_name)
+            all_dists = [None] * sum(t["frame_count"] for t in trials)
+            for t in trials:
+                npz_path = mano_root / t["trial_name"] / _NPZ_MAP[src]
+                if not npz_path.exists():
+                    continue
+                data = np.load(str(npz_path), allow_pickle=True)
+                j3d = data.get("joints_3d")
+                if j3d is None:
+                    continue
+                for i in range(j3d.shape[0]):
+                    gi = t["start_frame"] + i
+                    if gi < len(all_dists) and not np.isnan(j3d[i, 4, 0]) and not np.isnan(j3d[i, 8, 0]):
+                        all_dists[gi] = round(float(np.linalg.norm(j3d[i, 4] - j3d[i, 8])), 2)
+            return all_dists if any(d is not None for d in all_dists) else None
+        return None
+
+    # If a specific source is requested, try only that
+    if source and source != "auto":
+        distances = _try_source(source)
+        if distances:
+            return distances, trials, source
+        return [], trials, "none"
+
+    # Auto: try sources in priority order
+    for src in ("corrections", "dlc", "skeleton_v3", "skeleton_v2", "skeleton_v1",
+                "vision", "mediapipe"):
+        distances = _try_source(src)
+        if distances:
+            return distances, trials, src
 
     return [], trials, "none"
+
+
+def _try_source_quick(subject_name: str, src: str) -> bool:
+    """Quick check if a distance source has data for a subject (no full load)."""
+    settings = get_settings()
+    try:
+        if src == "corrections":
+            return (settings.dlc_path / subject_name / "corrections").is_dir()
+        elif src == "dlc":
+            for d in ("corrections", "labels_v2", "labels_v1", "labels_v1.0"):
+                if (settings.dlc_path / subject_name / d).is_dir():
+                    return True
+            return False
+        elif src == "mediapipe":
+            return (settings.dlc_path / subject_name / "mediapipe_prelabels.npz").exists()
+        elif src == "vision":
+            return (settings.dlc_path / subject_name / "vision_prelabels.npz").exists()
+        elif src in ("skeleton_v1", "skeleton_v2", "skeleton_v3"):
+            _QNPZ = {"skeleton_v1": "mano_fit.npz",
+                     "skeleton_v2": "mano_fit_v2_legacy.npz",
+                     "skeleton_v3": "mano_fit_v2.npz"}
+            mano_dir = settings.dlc_path / subject_name / "mano"
+            if not mano_dir.is_dir():
+                return False
+            want = _QNPZ[src]
+            for d in mano_dir.iterdir():
+                if d.is_dir() and (d / want).exists():
+                    return True
+            return False
+    except Exception:
+        return False
+    return False
 
 
 def _compute_velocity(dist: list, fps: float, half_win: int = 2) -> list:
@@ -287,24 +384,71 @@ def _preview_cache_path():
 
 
 def _compute_preview_for_subject(subj_name: str, subj_id: int) -> dict | None:
-    """Compute 10-second distance preview for one subject."""
+    """Compute 10-second distance preview for one subject.
+
+    Strategy: take the last 10 seconds of the last trial.  If that
+    window is entirely null (the chosen auto-source has no values in
+    that segment — common for ``corrections`` / ``skeleton_v1`` sources
+    where a subject's last trial was never corrected or fit), walk
+    backwards trial-by-trial until we find a trial whose last 10s has
+    any valid value.  As a final fallback, sample the 10s ending at
+    the *last frame with valid data* across the entire trace.
+    """
     try:
         distances, trials, source = _load_distances_and_trials(subj_name)
         if not distances or not trials:
             return None
 
-        trial = trials[-1]
-        fps = trial.get("fps", 60)
-        start = trial["start_frame"]
-        end = trial["end_frame"]
-        window_frames = int(10 * fps)
+        def _segment_for_trial(t):
+            fps = t.get("fps", 60)
+            start = t["start_frame"]
+            end = t["end_frame"]
+            window_frames = int(10 * fps)
+            win_start = max(start, end + 1 - window_frames)
+            win_end = min(end + 1, len(distances))
+            return fps, distances[win_start:win_end]
 
-        win_start = max(start, end + 1 - window_frames)
-        win_end = min(end + 1, len(distances))
-        segment = distances[win_start:win_end]
+        chosen_trial = None
+        segment = None
+        fps = 60
+
+        # 1. Last trial's last 10s (the historical default).
+        # 2. Walk backwards until a trial has any valid value in its
+        #    tail window.
+        for t in reversed(trials):
+            fps, seg = _segment_for_trial(t)
+            if seg and any(d is not None for d in seg):
+                chosen_trial = t
+                segment = seg
+                break
+
+        # 3. Fallback: locate the last frame with valid data anywhere
+        #    in the trace and sample 10s ending there.  Handles subjects
+        #    whose tail of every trial is empty (sparse mid-trial only).
+        if segment is None:
+            last_valid = None
+            for i in range(len(distances) - 1, -1, -1):
+                if distances[i] is not None:
+                    last_valid = i
+                    break
+            if last_valid is None:
+                return None
+            # Identify the trial containing that frame for fps + name.
+            containing = None
+            for t in trials:
+                if t["start_frame"] <= last_valid <= t["end_frame"]:
+                    containing = t
+                    break
+            if containing is None:
+                containing = trials[-1]
+            chosen_trial = containing
+            fps = containing.get("fps", 60)
+            window_frames = int(10 * fps)
+            win_start = max(0, last_valid + 1 - window_frames)
+            segment = distances[win_start:last_valid + 1]
 
         if len(segment) > 200:
-            step = len(segment) // 200
+            step = max(1, len(segment) // 200)
             segment = segment[::step]
 
         values = [round(d, 1) if d is not None else None for d in segment]
@@ -313,7 +457,7 @@ def _compute_preview_for_subject(subj_name: str, subj_id: int) -> dict | None:
             "values": values,
             "fps": fps,
             "source": source,
-            "trial_name": trial["trial_name"],
+            "trial_name": chosen_trial.get("trial_name", ""),
         }
     except Exception:
         return None
@@ -449,12 +593,12 @@ def invalidate_preview_cache():
 
 
 @router.get("/{subject_id}/traces")
-def get_traces(subject_id: int) -> dict:
+def get_traces(subject_id: int, source: str = Query("auto")) -> dict:
     """Distance and velocity traces split by trial for the Distances tab."""
     subj = _get_subject(subject_id)
     subject_name = subj["name"]
 
-    distances, trials, data_source = _load_distances_and_trials(subject_name)
+    distances, trials, data_source = _load_distances_and_trials(subject_name, source)
     if not distances:
         return {"trials": [], "subject": subject_name, "data_source": "none"}
 
@@ -488,16 +632,24 @@ def get_traces(subject_id: int) -> dict:
             "vel_max": round(max(all_vels), 2) if all_vels else 0,
         }
 
-    return {"trials": result_trials, "subject": subject_name, "y_range": y_range, "data_source": data_source}
+    # Check which sources are available
+    available_sources = []
+    for src in ("mediapipe", "vision", "skeleton_v1", "skeleton_v2",
+                "skeleton_v3", "dlc", "corrections"):
+        d = _try_source_quick(subject_name, src)
+        if d:
+            available_sources.append(src)
+
+    return {"trials": result_trials, "subject": subject_name, "y_range": y_range, "data_source": data_source, "available_sources": available_sources}
 
 
 @router.get("/{subject_id}/movements")
-def get_movements(subject_id: int) -> dict:
+def get_movements(subject_id: int, source: str = Query("auto")) -> dict:
     """Per-movement parameters for the Movements tab."""
     subj = _get_subject(subject_id)
     subject_name = subj["name"]
 
-    distances, trials, data_source = _load_distances_and_trials(subject_name)
+    distances, trials, data_source = _load_distances_and_trials(subject_name, source)
     events, event_source = _load_events(subject_name, distances, trials)
 
     movements, trial_names = _build_movement_params(distances, events, trials)

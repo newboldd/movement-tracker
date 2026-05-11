@@ -490,14 +490,56 @@ def get_trial_video(subject_id: int, trial_idx: int,
 # ── Run detection models ─────────────────────────────────────────────────
 
 @router.post("/{subject_id}/run-mediapipe")
-def run_mediapipe(subject_id: int) -> dict:
-    """Run MediaPipe hand detection on all trials. Creates a background job."""
+def run_mediapipe(subject_id: int, body: dict = Body(default={})) -> dict:
+    """Run MediaPipe hand detection on all trials. Creates a background job.
+
+    Optional body: {trial_idx: int, bbox_os: [x1,y1,x2,y2], bbox_od: [x1,y1,x2,y2]}
+    If bbox is provided it is merged with any saved boxes in mp_crop_boxes.
+    All saved boxes for this subject/model are loaded and applied per trial.
+    """
     import threading
     from ..services.jobs import registry
     from ..services.mediapipe_prelabel import run_mediapipe as run_mediapipe_all
 
     subj_name = _subject_name(subject_id)
     settings = get_settings()
+    cam_names = settings.camera_names
+    cam_OS = cam_names[0] if cam_names else "OS"
+    cam_OD = cam_names[1] if len(cam_names) > 1 else "OD"
+
+    # Load all saved crop boxes for this subject+model, merging any from the request body
+    with get_db_ctx() as db:
+        subj = db.execute("SELECT id FROM subjects WHERE name = ?", (subj_name,)).fetchone()
+        sid = subj["id"] if subj else subject_id
+        rows = db.execute(
+            "SELECT trial_idx, camera_name, x1, y1, x2, y2 FROM mp_crop_boxes "
+            "WHERE subject_id = ? AND model_name = 'run-mediapipe'",
+            (sid,),
+        ).fetchall()
+
+    # Build {trial_idx: {'OS': [x1,y1,x2,y2], 'OD': [x1,y1,x2,y2]}}
+    crop_boxes: dict[int, dict] = {}
+    for row in rows:
+        ti = row["trial_idx"]
+        if ti not in crop_boxes:
+            crop_boxes[ti] = {}
+        cam = row["camera_name"]
+        if cam == cam_OS:
+            crop_boxes[ti]["OS"] = [row["x1"], row["y1"], row["x2"], row["y2"]]
+        elif cam == cam_OD:
+            crop_boxes[ti]["OD"] = [row["x1"], row["y1"], row["x2"], row["y2"]]
+
+    # Merge bbox from request body (overrides saved box for that trial)
+    req_trial_idx = body.get("trial_idx")
+    req_bbox_os = body.get("bbox_os")
+    req_bbox_od = body.get("bbox_od")
+    if req_trial_idx is not None and (req_bbox_os or req_bbox_od):
+        if req_trial_idx not in crop_boxes:
+            crop_boxes[req_trial_idx] = {}
+        if req_bbox_os:
+            crop_boxes[req_trial_idx]["OS"] = req_bbox_os
+        if req_bbox_od:
+            crop_boxes[req_trial_idx]["OD"] = req_bbox_od
 
     with get_db_ctx() as db:
         log_dir = settings.dlc_path / ".logs"
@@ -522,7 +564,20 @@ def run_mediapipe(subject_id: int) -> dict:
                 if cancel.is_set(): raise InterruptedError
                 with get_db_ctx() as db:
                     db.execute("UPDATE jobs SET progress_pct = ? WHERE id = ?", (pct, job_id))
-            run_mediapipe_all(subj_name, progress_callback=progress)
+            # When the caller requested a specific trial (e.g. the per-
+            # trial Run-MediaPipe button on the Auto page sends
+            # ``trial_idx`` plus a fresh bbox), restrict the run to that
+            # trial so the other trials' slices in the existing npz are
+            # preserved.  Without ``trial_idx`` the function still runs
+            # all trials, matching the "Run on all trials" use case.
+            _ti = req_trial_idx
+            try:
+                _ti = int(_ti) if _ti is not None else None
+            except (TypeError, ValueError):
+                _ti = None
+            run_mediapipe_all(subj_name, progress_callback=progress,
+                              crop_boxes=crop_boxes if crop_boxes else None,
+                              trial_idx=_ti)
             with get_db_ctx() as db:
                 db.execute("UPDATE jobs SET status = 'completed', progress_pct = 100, finished_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
         except InterruptedError:
@@ -653,11 +708,33 @@ def hrnet_install(subject_id: int) -> dict:
 
 
 @router.get("/{subject_id}/hrnet/bbox")
-def hrnet_default_bbox(subject_id: int, trial_idx: int = Query(..., ge=0)) -> dict:
-    """Compute default bounding boxes from MediaPipe landmarks."""
-    from ..services.hrnet import compute_default_bbox
-
+def hrnet_default_bbox(subject_id: int, trial_idx: int = Query(..., ge=0), model: str = Query("default")) -> dict:
+    """Return saved bounding boxes for a model, or compute defaults from MediaPipe."""
     subj_name = _subject_name(subject_id)
+    settings = get_settings()
+    cam_names = settings.camera_names
+
+    # Check for saved per-model bbox first
+    with get_db_ctx() as db:
+        subj = db.execute("SELECT id FROM subjects WHERE name = ?", (subj_name,)).fetchone()
+        if subj:
+            rows = db.execute(
+                "SELECT camera_name, x1, y1, x2, y2 FROM mp_crop_boxes WHERE subject_id = ? AND trial_idx = ? AND model_name = ?",
+                (subj["id"], trial_idx, model),
+            ).fetchall()
+            if rows:
+                bbox_os = bbox_od = None
+                for r in rows:
+                    box = [r["x1"], r["y1"], r["x2"], r["y2"]]
+                    if r["camera_name"] == cam_names[0]:
+                        bbox_os = box
+                    elif len(cam_names) > 1 and r["camera_name"] == cam_names[1]:
+                        bbox_od = box
+                if bbox_os or bbox_od:
+                    return {"bbox_os": bbox_os, "bbox_od": bbox_od}
+
+    # Fall back to computing from MediaPipe landmarks
+    from ..services.hrnet import compute_default_bbox
     mp_data = _load_mediapipe(subj_name)
     if mp_data is None:
         raise HTTPException(400, "Run MediaPipe first — no landmarks available")
@@ -676,6 +753,121 @@ def hrnet_default_bbox(subject_id: int, trial_idx: int = Query(..., ge=0)) -> di
     bbox_od = compute_default_bbox(od_lm[start:min(end, od_lm.shape[0])]) if od_lm is not None else None
 
     return {"bbox_os": bbox_os, "bbox_od": bbox_od}
+
+
+@router.get("/hrnet/job-status")
+def hrnet_job_status(subject_ids: str = Query(...)) -> dict:
+    """Per-(subject, trial) HRnet job status used to color and gate the
+    cells on the Jobs page.  ``subject_ids`` is a comma-separated list.
+
+    Returns ``{ subjects: { "<id>": { name, trials: [...] } } }`` where
+    each trial has:
+        - trial_idx, trial_name
+        - has_saved_bbox: any saved row in ``mp_crop_boxes`` for this
+          (subject, trial) regardless of ``model_name``
+        - has_mp_labels: subject's MediaPipe prelabel npz exists
+          (allows the default bbox to be computed)
+        - has_hrnet_output: ``hrnet_w18_heatmaps.npz`` exists for this
+          trial (already-completed flag → green cell)
+    """
+    from pathlib import Path
+    from ..services.mano_data import _mano_dir
+    try:
+        ids = [int(x) for x in subject_ids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(400, "Invalid subject_ids")
+    if not ids:
+        return {"subjects": {}}
+
+    out: dict[str, dict] = {}
+    with get_db_ctx() as db:
+        placeholders = ",".join("?" * len(ids))
+        rows = db.execute(
+            f"SELECT id, name FROM subjects WHERE id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        name_by_id = {r["id"]: r["name"] for r in rows}
+
+        # Pre-pull all saved bbox rows in one query.
+        saved_rows = db.execute(
+            f"SELECT subject_id, trial_idx FROM mp_crop_boxes "
+            f"WHERE subject_id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        saved_by_subj: dict[int, set] = {}
+        for r in saved_rows:
+            saved_by_subj.setdefault(r["subject_id"], set()).add(r["trial_idx"])
+
+    for sid in ids:
+        name = name_by_id.get(sid)
+        if not name:
+            continue
+        try:
+            trials = build_trial_map(name)
+        except Exception:
+            trials = []
+        # Subject-level MP labels existence (per-trial validity check is
+        # left to runtime — ``compute_default_bbox`` will raise if a
+        # trial's slice is empty, which is rare).
+        try:
+            mp_data = _load_mediapipe(name)
+            has_mp = mp_data is not None and (
+                mp_data.get("OS") is not None or mp_data.get("OD") is not None)
+        except Exception:
+            has_mp = False
+        # Per-trial HRnet output existence.
+        try:
+            mano_root = _mano_dir(name)
+        except Exception:
+            mano_root = None
+        saved_set = saved_by_subj.get(sid, set())
+
+        trial_rows = []
+        for ti, t in enumerate(trials):
+            stem = t["trial_name"]
+            has_hrnet = False
+            if mano_root is not None:
+                hm = mano_root / stem / "hrnet_w18_heatmaps.npz"
+                has_hrnet = hm.exists()
+            trial_rows.append({
+                "trial_idx": ti,
+                "trial_name": stem,
+                "has_saved_bbox": ti in saved_set,
+                "has_mp_labels": bool(has_mp),
+                "has_hrnet_output": bool(has_hrnet),
+            })
+        out[str(sid)] = {"name": name, "trials": trial_rows}
+
+    return {"subjects": out}
+
+
+@router.post("/{subject_id}/hrnet/bbox")
+def save_bbox(subject_id: int, body: dict = Body(...)) -> dict:
+    """Save bounding boxes for a trial+model to the mp_crop_boxes table."""
+    subj_name = _subject_name(subject_id)
+    trial_idx = body.get("trial_idx", 0)
+    bbox_os = body.get("bbox_os")
+    bbox_od = body.get("bbox_od")
+    model_name = body.get("model", "default")
+    settings = get_settings()
+    cam_names = settings.camera_names
+
+    with get_db_ctx() as db:
+        subj = db.execute("SELECT id FROM subjects WHERE name = ?", (subj_name,)).fetchone()
+        if not subj:
+            raise HTTPException(404, "Subject not found")
+        sid = subj["id"]
+        for cam, bbox in [(cam_names[0], bbox_os), (cam_names[1] if len(cam_names) > 1 else cam_names[0], bbox_od)]:
+            if not bbox:
+                continue
+            db.execute(
+                """INSERT INTO mp_crop_boxes (subject_id, trial_idx, camera_name, model_name, x1, y1, x2, y2)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(subject_id, trial_idx, camera_name, model_name)
+                   DO UPDATE SET x1=excluded.x1, y1=excluded.y1, x2=excluded.x2, y2=excluded.y2""",
+                (sid, trial_idx, cam, model_name, int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])),
+            )
+    return {"status": "ok"}
 
 
 @router.post("/{subject_id}/run-hrnet")

@@ -144,11 +144,10 @@
             <a href="/videos" class="nav-browse">Browse Videos</a>
             <a href="/subjects">Subjects</a>
             <span class="nav-dropdown">
-                <a href="/analyze" class="active">Analyze</a>
+                <a href="/mano" class="active">Analyze</a>
                 <div class="nav-dropdown-menu">
-                    <a href="/analyze">Detect</a>
+                    <a href="/mano">Auto</a>
                     <a href="/labeling-select">DLC</a>
-                    <a href="/mano">MANO</a>
                     <a href="/events">Events</a>
                     <a href="/deidentify" class="active">Deidentify</a>
                 </div>
@@ -177,18 +176,19 @@
             <label style="font-size:12px;color:var(--text-muted);">Subject</label>
             <select id="subjectSelect"></select>
             <div id="trialBtns"></div>
-            <div style="display:flex;gap:2px;margin-left:auto;">
-                <button class="btn btn-sm" id="viewOriginal" onclick="deid.setViewMode('original')" title="Original video with mask overlays" style="background:var(--blue);color:#fff;">Masks</button>
-                <button class="btn btn-sm" id="viewPreview" onclick="deid.setViewMode('preview')" title="Preview blur areas (P)">Preview</button>
-                <button class="btn btn-sm" id="viewDeidentified" onclick="deid.setViewMode('deidentified')" title="Show rendered blurred video" disabled>Blurred</button>
-            </div>
-            <span id="statusMsg"></span>
+            <span id="statusMsg" style="margin-left:auto;"></span>
         </div>
 
         <div class="deid-main">
             <!-- Left sidebar -->
             <div class="deid-sidebar">
                 <!-- Face Detection (auto-runs on load) -->
+                <!-- Has Faces toggle — always visible -->
+                <label id="hasFacesLabel" style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:8px;">
+                    <input type="checkbox" id="hasFacesToggle" checked onchange="deid.toggleHasFaces(this.checked)">
+                    Has faces (needs deidentification)
+                </label>
+
                 <div class="section">
                     <h3>Face Detection</h3>
                     <div id="faceDetStatus" style="font-size:11px;color:var(--text-muted);"></div>
@@ -217,62 +217,117 @@
                     </div>
                 </div>
 
-                <!-- Hand Overlap Tool -->
+                <!-- Hand Mask Tool -->
                 <div class="section" id="handSection">
-                    <h3>Hand Overlap</h3>
-                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
+                    <h3>Hand Mask</h3>
+
+                    <!-- Source: MediaPipe (default) | HRnet -->
+                    <div style="display:flex;gap:14px;font-size:12px;margin-bottom:4px;">
+                        <label style="display:flex;align-items:center;gap:4px;cursor:pointer;">
+                            <input type="radio" name="handMaskSource" value="mediapipe" checked
+                                   onchange="deid.setHandMaskSource('mediapipe')"> MediaPipe
+                        </label>
+                        <label style="display:flex;align-items:center;gap:4px;cursor:pointer;">
+                            <input type="radio" name="handMaskSource" value="hrnet"
+                                   onchange="deid.setHandMaskSource('hrnet')"> HRnet
+                        </label>
+                    </div>
+
+                    <!-- Show landmarks toggle — only meaningful for the
+                         MediaPipe path (it draws the per-keypoint dots);
+                         the HRnet path renders the MIP-derived mask
+                         instead, with no individual keypoint overlay.
+                         Hidden in JS when HRnet is selected. -->
+                    <label id="handOverlayLabel" style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
                         <input type="checkbox" id="handOverlayToggle" checked onchange="deid.toggleHandOverlay(this.checked)">
                         Show hand landmarks
                     </label>
-                    <div class="slider-row" style="margin-top:6px;">
-                        <label>Marker size</label>
-                        <input type="range" id="handRadiusSlider" min="1" max="30" value="5"
-                               oninput="deid.updateHandRadius(this.value)">
-                        <span class="val" id="handRadiusVal">5</span>
+
+                    <!-- MediaPipe controls (current functionality) -->
+                    <div id="mpHandControls">
+                        <div class="slider-row" style="margin-top:6px;">
+                            <label>Marker size</label>
+                            <input type="range" id="handRadiusSlider" min="1" max="30" value="5"
+                                   oninput="deid.updateHandRadius(this.value)">
+                            <span class="val" id="handRadiusVal">5</span>
+                        </div>
+                        <div class="slider-row">
+                            <label>Wrist</label>
+                            <input type="range" id="handExtentSlider" min="0" max="2.0" step="0.05" value="0.4"
+                                   oninput="deid.updateForearmExtent(this.value)">
+                            <span class="val" id="handExtentVal">0.4</span>
+                        </div>
+                        <div class="slider-row">
+                            <label>Hand smooth</label>
+                            <input type="range" id="handSmoothSlider" min="0" max="30" value="7"
+                                   oninput="deid.updateHandSmooth(this.value)">
+                            <span class="val" id="handSmoothVal">7</span>
+                        </div>
+                        <!-- Arm smooth removed — unified with Smooth slider -->
+                        <div class="slider-row" style="display:none;">
+                            <label>Arm smooth</label>
+                            <input type="range" id="handSmooth2Slider" min="0" max="30" value="0"
+                                   oninput="deid.updateHandSmooth2(this.value)">
+                            <span class="val" id="handSmooth2Val">0</span>
+                        </div>
+                        <div class="slider-row">
+                            <label>Temporal</label>
+                            <input type="range" id="handTemporalSlider" min="0" max="15" value="0"
+                                   oninput="deid.updateHandTemporalSmooth(this.value)">
+                            <span class="val" id="handTemporalVal">0</span>
+                        </div>
                     </div>
-                    <div class="slider-row">
-                        <label>Wrist</label>
-                        <input type="range" id="handExtentSlider" min="0" max="2.0" step="0.05" value="0.4"
-                               oninput="deid.updateForearmExtent(this.value)">
-                        <span class="val" id="handExtentVal">0.4</span>
+
+                    <!-- HRnet controls — start from MIP-of-all-joints, threshold, smooth -->
+                    <div id="hrnetHandControls" style="display:none;">
+                        <div class="slider-row" style="margin-top:6px;">
+                            <label title="Pixels with HRnet MIP value above this threshold are included in the hand mask.">Threshold</label>
+                            <input type="range" id="hrnetMaskThreshSlider" min="0" max="1" step="0.01" value="0.30"
+                                   oninput="deid.updateHrnetMaskThresh(this.value)">
+                            <span class="val" id="hrnetMaskThreshVal">0.30</span>
+                        </div>
+                        <div class="slider-row">
+                            <label>Hand smooth</label>
+                            <input type="range" id="hrnetMaskSmoothSlider" min="0" max="30" value="7"
+                                   oninput="deid.updateHrnetMaskSmooth(this.value)">
+                            <span class="val" id="hrnetMaskSmoothVal">7</span>
+                        </div>
                     </div>
-                    <div class="slider-row">
-                        <label>Hand smooth</label>
-                        <input type="range" id="handSmoothSlider" min="0" max="30" value="7"
-                               oninput="deid.updateHandSmooth(this.value)">
-                        <span class="val" id="handSmoothVal">7</span>
-                    </div>
-                    <!-- Arm smooth removed — unified with Smooth slider -->
-                    <div class="slider-row" style="display:none;">
-                        <label>Arm smooth</label>
-                        <input type="range" id="handSmooth2Slider" min="0" max="30" value="0"
-                               oninput="deid.updateHandSmooth2(this.value)">
-                        <span class="val" id="handSmooth2Val">0</span>
-                    </div>
-                    <div class="slider-row">
-                        <label>Temporal</label>
-                        <input type="range" id="handTemporalSlider" min="0" max="15" value="0"
-                               oninput="deid.updateHandTemporalSmooth(this.value)">
-                        <span class="val" id="handTemporalVal">0</span>
-                    </div>
+
                     <!-- DLC slider removed: all hand keypoints use unified marker size -->
                     <div id="handHelpText" style="font-size:10px;color:var(--text-muted);margin-top:4px;">
                         Drag on the timeline hand row to create protection segments.
                     </div>
                     <button class="btn btn-sm" id="goAnalyzeBtn" onclick="deid.goToAnalyze()" style="width:100%;margin-top:6px;">
-                        Detect Hands (with bounding box)
+                        Detect Poses
                     </button>
                     <div id="handDisabledMsg" style="display:none;font-size:11px;color:var(--text-muted);margin-top:4px;font-style:italic;">
-                        Run hand detection from the Analyze page to enable hand overlap protection.
+                        Run hand detection from the Analyze page to enable hand mask protection.
                     </div>
                 </div>
 
-                <!-- Render -->
+                <!-- Workflow buttons (Preview / Render / View Deidentified) -->
                 <div class="section" id="renderSection">
-                    <h3>Render</h3>
-                    <button class="btn btn-sm btn-success" id="renderBtn" onclick="deid.renderTrial()" style="width:100%;">
-                        Render Trial
-                    </button>
+                    <!-- Mask-editing state -->
+                    <div id="workflowMaskBtns">
+                        <button class="btn btn-sm btn-success" id="previewBtn" onclick="deid.setViewMode('preview')" style="width:100%;">
+                            Preview
+                        </button>
+                        <button class="btn btn-sm" id="viewDeidBtn" onclick="deid.setViewMode('deidentified')" style="width:100%;margin-top:6px;" disabled>
+                            View Deidentified Video
+                        </button>
+                    </div>
+                    <!-- Preview state -->
+                    <div id="workflowPreviewBtns" style="display:none;">
+                        <div style="display:flex;gap:6px;">
+                            <button class="btn btn-sm btn-success" id="renderBtn" onclick="deid.renderTrial()" style="flex:1;">Render</button>
+                            <button class="btn btn-sm" onclick="deid.setViewMode('original')" style="flex:1;">Edit</button>
+                        </div>
+                    </div>
+                    <!-- Deidentified-viewing state -->
+                    <div id="workflowDeidBtns" style="display:none;">
+                        <button class="btn btn-sm" onclick="deid.setViewMode('original')" style="width:100%;">Edit</button>
+                    </div>
                     <div id="renderStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
                 </div>
             </div>
@@ -310,7 +365,7 @@
     </div>
 
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/nav.js?v=2"></script>
-    <script src="/static/js/deidentify.js?v=13"></script>
+    <script src="/static/js/nav.js?v=9"></script>
+    <script src="/static/js/deidentify.js?v=43"></script>
 </body>
 </html>

@@ -1,0 +1,19 @@
+{
+  "joints": [
+    {"name": "Thumb CMC",  "parent": 0,  "joint": 1,  "child": 2,  "flex_min": -90, "flex_max": 40, "flex_std": 19.4, "abd_min": -45, "abd_max": 45, "abd_std": 20.0},
+    {"name": "Thumb MCP",  "parent": 1,  "joint": 2,  "child": 3,  "flex_min": -85, "flex_max": 20, "flex_std": 18.3, "abd_min": -35, "abd_max": 35, "abd_std": 18.0},
+    {"name": "Thumb IP",   "parent": 2,  "joint": 3,  "child": 4,  "flex_min": -90, "flex_max": 15, "flex_std": 20.3, "abd_min": -15, "abd_max": 15, "abd_std": 10.0},
+    {"name": "Index MCP",  "parent": 0,  "joint": 5,  "child": 6,  "flex_min": -110, "flex_max": 35, "flex_std": 26.3, "abd_min": -25, "abd_max": 30, "abd_std": 15.0},
+    {"name": "Index PIP",  "parent": 5,  "joint": 6,  "child": 7,  "flex_min": -120, "flex_max": 10, "flex_std": 27.9, "abd_min": -10, "abd_max": 10, "abd_std": 8.0},
+    {"name": "Index DIP",  "parent": 6,  "joint": 7,  "child": 8,  "flex_min": -70, "flex_max": 10, "flex_std": 14.4, "abd_min": -10, "abd_max": 10, "abd_std": 8.0},
+    {"name": "Middle MCP", "parent": 0,  "joint": 9,  "child": 10, "flex_min": -130, "flex_max": 35, "flex_std": 35.8, "abd_min": -20, "abd_max": 25, "abd_std": 12.0},
+    {"name": "Middle PIP", "parent": 9,  "joint": 10, "child": 11, "flex_min": -135, "flex_max": 10, "flex_std": 36.4, "abd_min": -10, "abd_max": 10, "abd_std": 8.0},
+    {"name": "Middle DIP", "parent": 10, "joint": 11, "child": 12, "flex_min": -70, "flex_max": 10, "flex_std": 17.6, "abd_min": -10, "abd_max": 10, "abd_std": 8.0},
+    {"name": "Ring MCP",   "parent": 0,  "joint": 13, "child": 14, "flex_min": -135, "flex_max": 35, "flex_std": 38.8, "abd_min": -20, "abd_max": 25, "abd_std": 12.0},
+    {"name": "Ring PIP",   "parent": 13, "joint": 14, "child": 15, "flex_min": -130, "flex_max": 10, "flex_std": 35.8, "abd_min": -10, "abd_max": 10, "abd_std": 8.0},
+    {"name": "Ring DIP",   "parent": 14, "joint": 15, "child": 16, "flex_min": -75, "flex_max": 10, "flex_std": 18.2, "abd_min": -10, "abd_max": 10, "abd_std": 8.0},
+    {"name": "Pinky MCP",  "parent": 0,  "joint": 17, "child": 18, "flex_min": -135, "flex_max": 35, "flex_std": 37.8, "abd_min": -20, "abd_max": 25, "abd_std": 12.0},
+    {"name": "Pinky PIP",  "parent": 17, "joint": 18, "child": 19, "flex_min": -125, "flex_max": 10, "flex_std": 35.7, "abd_min": -10, "abd_max": 10, "abd_std": 8.0},
+    {"name": "Pinky DIP",  "parent": 18, "joint": 19, "child": 20, "flex_min": -75, "flex_max": 10, "flex_std": 19.7, "abd_min": -10, "abd_max": 10, "abd_std": 8.0}
+  ]
+}

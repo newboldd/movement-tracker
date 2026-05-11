@@ -219,7 +219,8 @@ class LocalExecutor:
         )
 
     def _launch_worker(self, job_type: str, subject_name: str, job_id: int,
-                       log_path: str, extra_args: list[str] | None = None):
+                       log_path: str, extra_args: list[str] | None = None,
+                       progress_parser=None):
         """Launch a worker subprocess for any CPU job type.
 
         Uses the universal worker script (services/worker.py) which runs as a
@@ -252,23 +253,53 @@ class LocalExecutor:
             job_id=job_id,
             cmd=cmd,
             log_path=log_path,
-            progress_parser=parse_worker_progress,
+            progress_parser=progress_parser or parse_worker_progress,
             on_complete=on_complete,
         )
 
-    def execute_mediapipe(self, subject_name: str, job_id: int, log_path: str):
-        """Execute MediaPipe preprocessing as a subprocess."""
-        self._launch_worker("mediapipe", subject_name, job_id, log_path)
+    def execute_mediapipe(self, subject_name: str, job_id: int, log_path: str,
+                           static_image_mode: bool = False,
+                           trial_idx: int | None = None):
+        """Execute MediaPipe preprocessing as a subprocess.
+
+        ``trial_idx`` (when set) restricts the run to a single trial,
+        leaving the other trials' landmarks in the saved npz untouched.
+        Omit (or pass ``None``) to re-process every trial.
+        """
+        extra = ["--static-image-mode"] if static_image_mode else []
+        if trial_idx is not None:
+            extra += ["--trial-idx", str(trial_idx)]
+        self._launch_worker("mediapipe", subject_name, job_id, log_path,
+                             extra_args=extra)
 
     def execute_pose(self, subject_name: str, job_id: int, log_path: str):
         """Execute Pose detection as a subprocess."""
         self._launch_worker("pose", subject_name, job_id, log_path)
 
     def execute_deidentify(self, subject_name: str, job_id: int, log_path: str,
-                           trial_idx: int | None = None):
-        """Execute deidentify render as a subprocess."""
+                           trial_idx: int | None = None,
+                           batch_idx: int = 0, batch_total: int = 1):
+        """Execute deidentify render as a subprocess.
+
+        ``batch_idx`` / ``batch_total`` scale the worker's per-trial 0-100
+        progress into batch-global progress so multi-trial deidentify jobs
+        report meaningful ETAs and don't appear to "go backwards" each
+        time a new trial starts.
+        """
+        from .worker import parse_worker_progress
         extra = ["--trial-idx", str(trial_idx)] if trial_idx is not None else []
-        self._launch_worker("deidentify", subject_name, job_id, log_path, extra_args=extra)
+        if batch_total > 1:
+            def _scaled(line, _i=batch_idx, _N=batch_total):
+                r = parse_worker_progress(line)
+                if r is None:
+                    return None
+                pct, ep, tot = r
+                return (round(100.0 * (_i + (pct or 0) / 100.0) / _N, 1), ep, tot)
+            self._launch_worker("deidentify", subject_name, job_id, log_path,
+                                 extra_args=extra, progress_parser=_scaled)
+        else:
+            self._launch_worker("deidentify", subject_name, job_id, log_path,
+                                 extra_args=extra)
 
     def execute_blur(self, subject_names: list[str], job_id: int, log_path: str):
         """Execute face blur preprocessing as a subprocess (first subject only)."""

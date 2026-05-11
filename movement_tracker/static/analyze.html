@@ -78,7 +78,6 @@
         <div style="display:flex;align-items:center;gap:16px;">
             <h1 style="margin:0;"><a href="/" style="font-size:18px;">Movement Tracker</a></h1>
             <div style="display:flex;align-items:center;gap:8px;">
-                <span style="font-size:18px;font-weight:600;">Analyze</span>
                 <select id="subjectSelect" class="subject-select"></select>
                 <button class="btn btn-sm" id="prevSubjectBtn" title="Previous subject">&larr;</button>
                 <button class="btn btn-sm" id="nextSubjectBtn" title="Next subject">&rarr;</button>
@@ -88,11 +87,11 @@
             <a href="/videos" class="nav-browse">Browse Videos</a>
             <a href="/subjects">Subjects</a>
             <span class="nav-dropdown">
-                <a href="/analyze" class="active">Analyze</a>
+                <a href="/mano" class="active">Analyze</a>
                 <div class="nav-dropdown-menu">
                     <a href="/analyze" class="active">Detect</a>
+                    <a href="/mano">Auto</a>
                     <a href="/labeling-select">DLC</a>
-                    <a href="/mano">MANO</a>
                     <a href="/events">Events</a>
                     <a href="/deidentify">Deidentify</a>
                 </div>
@@ -131,7 +130,7 @@
             </div>
             <div style="margin-bottom:6px;">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-                    <label style="font-size:12px;color:var(--text-muted);">Speed</label>
+                    <label for="speedSlider" style="font-size:12px;color:var(--text-muted);">Speed</label>
                     <span id="speedDisplay" style="font-size:12px;color:var(--accent);font-weight:bold;">1x</span>
                 </div>
                 <input type="range" id="speedSlider" min="0" max="10" value="4"
@@ -169,7 +168,7 @@
                     <span class="layer-swatch" style="background:#f80;"></span> Heatmap
                 </label>
                 <div id="heatmapControls" style="display:none;padding:4px 0 4px 20px;">
-                    <label style="font-size:11px;color:var(--text-muted);">Joint:</label>
+                    <label for="heatmapJointSelect" style="font-size:11px;color:var(--text-muted);">Joint:</label>
                     <select id="heatmapJointSelect" style="font-size:11px;padding:2px 4px;background:var(--bg);border:1px solid var(--border);border-radius:3px;color:var(--text);"></select>
                 </div>
             </div>
@@ -245,8 +244,8 @@
         </div>
     </div>
 
-    <script src="/static/js/nav.js?v=2"></script>
+    <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js?v=1"></script>
-    <script src="/static/js/analyze.js?v=4"></script>
+    <script src="/static/js/analyze.js?v=5"></script>
 </body>
 </html>

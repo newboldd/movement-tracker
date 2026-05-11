@@ -229,8 +229,14 @@ def triangulate_points(pts_L: np.ndarray, pts_R: np.ndarray,
     pL = pts_L[valid_idx].reshape(-1, 1, 2).astype(np.float64)
     pR = pts_R[valid_idx].reshape(-1, 1, 2).astype(np.float64)
 
-    pL_undist = cv2.undistortPoints(pL, calib['K1'], calib['dist1'], P=calib['P1'])
-    pR_undist = cv2.undistortPoints(pR, calib['K2'], calib['dist2'], P=calib['P2'])
+    # Use 3x3 camera matrices (K1, K2) as the new projection, NOT the 3x4 P1/P2.
+    # Passing a 3x4 matrix to undistortPoints yields a systematically offset
+    # output (observed +6px shift in OD), which propagates as a depth bias
+    # through cv2.triangulatePoints.  With P=K, the undistorted points stay in
+    # each camera's own pixel space and triangulation works correctly because
+    # P1=[K1|0] and P2=K2@[R|T] expect pixel coordinates that match K1 / K2.
+    pL_undist = cv2.undistortPoints(pL, calib['K1'], calib['dist1'], P=calib['K1'])
+    pR_undist = cv2.undistortPoints(pR, calib['K2'], calib['dist2'], P=calib['K2'])
 
     # Triangulate each point
     for i, idx in enumerate(valid_idx):

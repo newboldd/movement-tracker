@@ -35,6 +35,8 @@ def get_trials(subject_id: int) -> dict:
     settings = get_settings()
     npz_path = settings.dlc_path / subj["name"] / "mediapipe_prelabels.npz"
     has_mediapipe = npz_path.exists()
+    pose_path = settings.dlc_path / subj["name"] / "pose_prelabels.npz"
+    has_pose = pose_path.exists()
 
     deident_dir = Path(str(settings.video_path)) / "deidentified"
 
@@ -89,6 +91,7 @@ def get_trials(subject_id: int) -> dict:
         "subject": subj,
         "trials": trial_list,
         "has_mediapipe": has_mediapipe,
+        "has_pose": has_pose,
         "camera_names": settings.camera_names,
     }
 
@@ -103,7 +106,6 @@ def get_frame(
     side: str = Query("full"),
     blurred: bool = Query(False),
     preview: bool = Query(False),
-    canvas_w: int = Query(700, description="Frontend canvas width for scaling hand mask params"),
 ) -> Response:
     """Serve a single JPEG frame.
 
@@ -137,10 +139,20 @@ def get_frame(
         else:
             deident_name = f"{trial['trial_name']}.mp4"
         deident_path = deident_dir / deident_name
-        if deident_path.exists():
-            video_path = str(deident_path)
-        else:
+        if deident_path.exists() and deident_path.stat().st_size > 4096:
+            # Don't serve a file that's currently being written by a render job
+            with get_db_ctx() as _db2:
+                rendering = _db2.execute(
+                    "SELECT id FROM jobs WHERE job_type = 'deidentify' "
+                    "AND status = 'running' AND subject_id = ?",
+                    (subject_id,),
+                ).fetchone()
+            if not rendering:
+                video_path = str(deident_path)
+            # else: rendering in progress — fall through and serve original video
+        elif not deident_path.exists():
             raise HTTPException(404, f"Deidentified video not found: {deident_name}")
+        # else: file exists but too small/corrupt — fall through to original
 
     if camera_mode == "multicam" and side != "full" and not blurred:
         for cam in trial.get("cameras", []):
@@ -164,7 +176,10 @@ def get_frame(
 
     # Preview mode: apply blur using the same pipeline as the full render
     if preview:
-        from ..services.deidentify import _build_blur_mask, _build_hand_mask_from_landmarks, _apply_blur_roi
+        from ..services.deidentify import (
+            _build_blur_mask, _build_hand_mask_from_landmarks, _apply_blur_roi,
+            build_hand_mask_from_hrnet_mip,
+        )
         import numpy as np
 
         half_w = fw // 2 if is_stereo else fw
@@ -204,6 +219,9 @@ def get_frame(
         hand_smooth2_val = 5
         dlc_radius_val = 15
         hand_segments = []
+        mask_source = "mediapipe"
+        hrnet_mask_thresh = 0.30
+        hrnet_mask_smooth = 7
         if hs_row:
             hand_mask_radius = hs_row.get("hand_mask_radius", 10) or 10
             hand_smooth = hs_row.get("hand_smooth", 10) or 10
@@ -216,6 +234,42 @@ def get_frame(
                 hand_segments = _json.loads(seg_json) if isinstance(seg_json, str) else (seg_json or [])
             except (ValueError, TypeError):
                 hand_segments = []
+            # HRnet alternative hand-mask source — see services.deidentify.
+            mask_source = hs_row.get("mask_source") or "mediapipe"
+            if mask_source not in ("mediapipe", "hrnet"):
+                mask_source = "mediapipe"
+            try:
+                hrnet_mask_thresh = float(hs_row.get("hrnet_mask_thresh", 0.30) or 0.30)
+            except (TypeError, ValueError):
+                hrnet_mask_thresh = 0.30
+            try:
+                hrnet_mask_smooth = int(hs_row.get("hrnet_mask_smooth", 7) or 7)
+            except (TypeError, ValueError):
+                hrnet_mask_smooth = 7
+        else:
+            # No DB row — mirror the client-side default behaviour: cover
+            # the whole trial with a per-camera segment.  Without this,
+            # the preview blur skipped hand protection while the Masks
+            # view showed the auto-generated default mask, making the
+            # two appear inconsistent for any never-configured subject
+            # (e.g. MSA10 — which had no blur_hand_settings row at all).
+            _t_start = trial.get("start_frame", 0)
+            _t_end = _t_start + trial.get("frame_count", 0) - 1
+            if is_stereo:
+                hand_segments = [
+                    {"start": _t_start, "end": _t_end,
+                     "radius": hand_mask_radius, "smooth": hand_smooth,
+                     "side": "left"},
+                    {"start": _t_start, "end": _t_end,
+                     "radius": hand_mask_radius, "smooth": hand_smooth,
+                     "side": "right"},
+                ]
+            else:
+                hand_segments = [{
+                    "start": _t_start, "end": _t_end,
+                    "radius": hand_mask_radius, "smooth": hand_smooth,
+                    "side": "full",
+                }]
 
         # Check if hand protection is active for this frame
         hand_active = False
@@ -228,13 +282,33 @@ def get_frame(
                 active_smooth = seg.get("smooth", hand_smooth)
                 break
 
-        # Load hand landmarks from npz
+        # Load hand landmarks via the SAME helper the bulk-landmarks
+        # endpoint uses (``load_mediapipe_prelabels``) so the preview
+        # respects the per-subject pre-roll trim from ``_detect_frame_offset``.
+        # The previous direct ``np.load`` skipped this trim — for any
+        # subject built on a machine that exposed negative-PTS pre-roll
+        # frames (e.g. MSA10), ``os_lm[frame_num]`` actually read frame
+        # ``frame_num + offset``, so the preview's hand mask was anchored
+        # to the wrong frame and looked completely unrelated to the green
+        # outline shown in the Masks view.
         hand_lm_data = {}
-        npz_path = settings.dlc_path / subject_name / "mediapipe_prelabels.npz"
-        if npz_path.exists() and hand_active:
-            npz = np.load(str(npz_path))
-            os_lm = npz.get("OS_landmarks")
-            od_lm = npz.get("OD_landmarks")
+        from ..services.mediapipe_prelabel import load_mediapipe_prelabels, load_pose_prelabels
+        _hand_npz = load_mediapipe_prelabels(subject_name) if hand_active else None
+        if _hand_npz is not None and hand_active:
+            os_lm = _hand_npz.get("OS_landmarks")
+            od_lm = _hand_npz.get("OD_landmarks")
+            # Interpolate NaN gaps inside this trial's frame range so the
+            # hand protection mask stays active on every frame, including
+            # frames where MediaPipe lost detection.
+            from ..services.deidentify import interpolate_landmarks_inplace
+            _t_start = trial.get("start_frame", 0)
+            _t_end = _t_start + trial.get("frame_count", 0) - 1
+            if os_lm is not None:
+                os_lm = np.array(os_lm, copy=True)
+                interpolate_landmarks_inplace(os_lm, _t_start, _t_end)
+            if od_lm is not None:
+                od_lm = np.array(od_lm, copy=True)
+                interpolate_landmarks_inplace(od_lm, _t_start, _t_end)
             if os_lm is not None and frame_num < os_lm.shape[0]:
                 for j in range(os_lm.shape[1]):
                     x, y = os_lm[frame_num, j, 0], os_lm[frame_num, j, 1]
@@ -249,12 +323,20 @@ def get_frame(
                         if frame_num not in hand_lm_data:
                             hand_lm_data[frame_num] = []
                         hand_lm_data[frame_num].append({"x": float(x), "y": float(y), "side": "right", "type": "hand", "joint": j})
-            # Also load pose landmarks
-            pose_path = settings.dlc_path / subject_name / "pose_prelabels.npz"
-            if pose_path.exists():
-                pose_npz = np.load(str(pose_path))
+            # Also load pose landmarks via the offset-aware helper, then
+            # interpolate the trial's slice so the forearm-triangle
+            # elbow stays anchored when MediaPipe Pose drops out.
+            pose_npz_data = load_pose_prelabels(subject_name)
+            if pose_npz_data is not None:
+                _pose_interpolated = {}
+                for cam_key in ("OS_pose", "OD_pose"):
+                    _src = pose_npz_data.get(cam_key)
+                    if _src is not None:
+                        _src = np.array(_src, copy=True)
+                        interpolate_landmarks_inplace(_src, _t_start, _t_end)
+                    _pose_interpolated[cam_key] = _src
                 for cam_key, side_label in [("OS_pose", "left"), ("OD_pose", "right")]:
-                    plm = pose_npz.get(cam_key)
+                    plm = _pose_interpolated.get(cam_key)
                     if plm is not None and frame_num < plm.shape[0]:
                         for j in range(plm.shape[1]):
                             x, y = plm[frame_num, j, 0], plm[frame_num, j, 1]
@@ -262,6 +344,58 @@ def get_frame(
                                 if frame_num not in hand_lm_data:
                                     hand_lm_data[frame_num] = []
                                 hand_lm_data[frame_num].append({"x": float(x), "y": float(y), "side": side_label, "type": "pose", "joint": j})
+            # Also load DLC labels (thumb tip / index tip, plus any other
+            # bodyparts).  ``_build_hand_mask_from_landmarks`` merges
+            # type=='dlc' entries: matching joints REPLACE the MP joint
+            # coordinates (more accurate fingertip positions); novel
+            # joints are added on top.  Without this load, the preview
+            # blur would diverge from the live overlay — the overlay
+            # uses DLC tips (via a separate /landmarks endpoint), the
+            # preview was stuck on raw MP.
+            try:
+                from ..services.dlc_predictions import get_dlc_predictions_for_session
+                _dlc_data = get_dlc_predictions_for_session(subject_name)
+            except Exception:
+                _dlc_data = None
+            if _dlc_data:
+                _cam_names = settings.camera_names or []
+                # DLC data layout: {camera_name: {bodypart: [[x, y]|None, ...]}}
+                for _cam_idx, _cam_name in enumerate(_cam_names):
+                    _cam = _dlc_data.get(_cam_name, {})
+                    if is_stereo:
+                        _side = "left" if _cam_idx == 0 else "right"
+                    else:
+                        _side = "full"
+                    for _bp, _coords in _cam.items():
+                        # Map known body parts to MP joint indices.
+                        # Extend as DLC dictionary grows (e.g. nailbed,
+                        # extra fingertip markers).
+                        _joint = None
+                        _bp_l = _bp.lower()
+                        if _bp_l == "thumb":
+                            _joint = 4
+                        elif _bp_l == "index":
+                            _joint = 8
+                        elif _bp_l == "middle":
+                            _joint = 12
+                        elif _bp_l == "ring":
+                            _joint = 16
+                        elif _bp_l == "pinky":
+                            _joint = 20
+                        if _joint is None:
+                            continue
+                        if frame_num < 0 or frame_num >= len(_coords):
+                            continue
+                        _c = _coords[frame_num]
+                        if _c is None:
+                            continue
+                        if frame_num not in hand_lm_data:
+                            hand_lm_data[frame_num] = []
+                        hand_lm_data[frame_num].append({
+                            "x": float(_c[0]), "y": float(_c[1]),
+                            "side": _side, "type": "dlc", "joint": _joint,
+                            "bodypart": _bp,
+                        })
 
         if active_specs:
             if is_stereo:
@@ -273,26 +407,52 @@ def get_frame(
                 right_mask = _build_blur_mask(right_specs, fw - half_w, fh, frame_num, face_by_frame, "right")
                 hand_mask_l = np.zeros((fh, half_w), dtype=bool)
                 hand_mask_r = np.zeros((fh, fw - half_w), dtype=bool)
-                if hand_active and frame_num in hand_lm_data:
-                    lms_l = [lm for lm in hand_lm_data[frame_num] if lm["side"] == "left"]
-                    lms_r = [lm for lm in hand_lm_data[frame_num] if lm["side"] == "right"]
-                    hand_mask_l = _build_hand_mask_from_landmarks(lms_l, half_w, fh, active_radius, active_smooth,
-                                                                  forearm_radius_val, forearm_extent_val, hand_smooth2_val,
-                                                                  dlc_radius=dlc_radius_val, canvas_w=canvas_w)
-                    hand_mask_r = _build_hand_mask_from_landmarks(lms_r, fw - half_w, fh, active_radius, active_smooth,
-                                                                  forearm_radius_val, forearm_extent_val, hand_smooth2_val,
-                                                                  dlc_radius=dlc_radius_val, canvas_w=canvas_w)
+                if hand_active:
+                    if mask_source == "hrnet":
+                        # HRnet MIP path — same code the full renderer
+                        # uses.  Reads the per-frame bbox from hand_crop
+                        # .json so the mask follows the hand even when MP
+                        # labels are wrong or missing.
+                        m_l = build_hand_mask_from_hrnet_mip(
+                            subject_name, trial_idx, frame_num,
+                            "left", half_w, fh,
+                            hrnet_mask_thresh, int(round(hrnet_mask_smooth * 2)),
+                        )
+                        m_r = build_hand_mask_from_hrnet_mip(
+                            subject_name, trial_idx, frame_num,
+                            "right", fw - half_w, fh,
+                            hrnet_mask_thresh, int(round(hrnet_mask_smooth * 2)),
+                        )
+                        if m_l is not None: hand_mask_l = m_l
+                        if m_r is not None: hand_mask_r = m_r
+                    elif frame_num in hand_lm_data:
+                        lms_l = [lm for lm in hand_lm_data[frame_num] if lm["side"] == "left"]
+                        lms_r = [lm for lm in hand_lm_data[frame_num] if lm["side"] == "right"]
+                        hand_mask_l = _build_hand_mask_from_landmarks(lms_l, half_w, fh, active_radius, active_smooth,
+                                                                      forearm_radius_val, forearm_extent_val, hand_smooth2_val,
+                                                                      dlc_radius=dlc_radius_val)
+                        hand_mask_r = _build_hand_mask_from_landmarks(lms_r, fw - half_w, fh, active_radius, active_smooth,
+                                                                      forearm_radius_val, forearm_extent_val, hand_smooth2_val,
+                                                                      dlc_radius=dlc_radius_val)
                 left = _apply_blur_roi(left, left_mask, hand_mask_l)
                 right = _apply_blur_roi(right, right_mask, hand_mask_r)
                 frame = np.concatenate([left, right], axis=1)
             else:
                 blur_mask = _build_blur_mask(active_specs, fw, fh, frame_num, face_by_frame, "full")
                 hand_mask = np.zeros((fh, fw), dtype=bool)
-                if hand_active and frame_num in hand_lm_data:
-                    hand_mask = _build_hand_mask_from_landmarks(
-                        hand_lm_data[frame_num], fw, fh, active_radius, active_smooth,
-                        forearm_radius_val, forearm_extent_val, hand_smooth2_val,
-                        dlc_radius=dlc_radius_val, canvas_w=canvas_w)
+                if hand_active:
+                    if mask_source == "hrnet":
+                        m = build_hand_mask_from_hrnet_mip(
+                            subject_name, trial_idx, frame_num,
+                            "full", fw, fh,
+                            hrnet_mask_thresh, int(round(hrnet_mask_smooth * 2)),
+                        )
+                        if m is not None: hand_mask = m
+                    elif frame_num in hand_lm_data:
+                        hand_mask = _build_hand_mask_from_landmarks(
+                            hand_lm_data[frame_num], fw, fh, active_radius, active_smooth,
+                            forearm_radius_val, forearm_extent_val, hand_smooth2_val,
+                            dlc_radius=dlc_radius_val)
                 frame = _apply_blur_roi(frame, blur_mask, hand_mask)
 
     # Stereo: crop to left or right half based on camera name
@@ -337,10 +497,20 @@ def stream_video(
         else:
             deident_name = f"{trial['trial_name']}.mp4"
         deident_path = deident_dir / deident_name
-        if deident_path.exists():
-            video_path = str(deident_path)
-        else:
+        if deident_path.exists() and deident_path.stat().st_size > 4096:
+            # Don't serve a file that's currently being written by a render job
+            with get_db_ctx() as _db2:
+                rendering = _db2.execute(
+                    "SELECT id FROM jobs WHERE job_type = 'deidentify' "
+                    "AND status = 'running' AND subject_id = ?",
+                    (subject_id,),
+                ).fetchone()
+            if not rendering:
+                video_path = str(deident_path)
+            # else: rendering in progress — fall through and serve original video
+        elif not deident_path.exists():
             raise HTTPException(404, f"Deidentified video not found: {deident_name}")
+        # else: file exists but too small/corrupt — fall through to original
 
     # For multicam, resolve per-camera file
     if camera_mode == "multicam" and not blurred:
@@ -507,6 +677,18 @@ def get_hand_landmarks_bulk(subject_id: int, trial_idx: int = Query(...)) -> dic
     end = trial["end_frame"]
     is_stereo = camera_mode == "stereo"
 
+    # Interpolate NaN gaps inside this trial's frame range so every
+    # frame has hand-landmark values for the protection mask, even on
+    # frames where MediaPipe failed to detect.  Restricted to the trial
+    # range so we don't bridge across trial boundaries.
+    from ..services.deidentify import interpolate_landmarks_inplace
+    if hand_data:
+        interpolate_landmarks_inplace(hand_data.get("OS_landmarks"), start, end)
+        interpolate_landmarks_inplace(hand_data.get("OD_landmarks"), start, end)
+    if pose_data:
+        interpolate_landmarks_inplace(pose_data.get("OS_pose"), start, end)
+        interpolate_landmarks_inplace(pose_data.get("OD_pose"), start, end)
+
     result = {}
 
     # Hand landmarks (21 keypoints per hand)
@@ -612,6 +794,92 @@ def get_hand_landmarks_bulk(subject_id: int, trial_idx: int = Query(...)) -> dic
     return {"landmarks": result, "has_pose": pose_data is not None, "has_dlc": has_dlc}
 
 
+@router.get("/{subject_id}/hrnet-mask-data")
+def get_hrnet_mask_data(subject_id: int, trial_idx: int = Query(...)) -> dict:
+    """Return HRnet MIP + per-frame bboxes for client-side mask building.
+
+    Used by the deidentify page when ``mask_source = "hrnet"`` so the green-
+    outline preview can update instantly when the threshold/smooth sliders
+    move (no per-slider HTTP round-trip).
+
+    Returns either ``{"available": true, ...}`` with the MIP + bbox arrays
+    serialised as base64-encoded float16 / float32 buffers, or
+    ``{"available": false, "reason": "..."}`` when no HRnet output exists
+    for the requested trial.
+    """
+    import base64
+    import json as _json
+    import numpy as np
+
+    from ..config import get_settings
+    from ..services.video import build_trial_map
+    from ..services.mano_data import _mano_dir
+
+    with get_db_ctx() as db:
+        subj = db.execute("SELECT name FROM subjects WHERE id=?", (subject_id,)).fetchone()
+    if not subj:
+        raise HTTPException(404, "Subject not found")
+    name = subj["name"]
+    trials = build_trial_map(name)
+    if trial_idx >= len(trials):
+        raise HTTPException(404, "trial_idx out of range")
+    stem = trials[trial_idx]["trial_name"]
+    n_frames = int(trials[trial_idx]["frame_count"])
+    start_frame = int(trials[trial_idx].get("start_frame", 0))
+
+    mip_path = _mano_dir(name) / stem / "hrnet_w18_mip.npz"
+    crop_path = _mano_dir(name) / stem / "hand_crop.json"
+    if not mip_path.exists():
+        return {"available": False, "reason": f"No HRnet MIP for {stem}"}
+    if not crop_path.exists():
+        return {"available": False, "reason": f"No hand_crop.json for {stem}"}
+
+    try:
+        npz = np.load(mip_path)
+        mip_L = npz["heatmaps_L_mip"] if "heatmaps_L_mip" in npz.files else None
+        mip_R = npz["heatmaps_R_mip"] if "heatmaps_R_mip" in npz.files else None
+    except Exception as e:
+        return {"available": False, "reason": f"Failed to load MIP: {e}"}
+
+    try:
+        with open(crop_path) as f:
+            crop = _json.load(f)
+    except Exception as e:
+        return {"available": False, "reason": f"Failed to load hand_crop.json: {e}"}
+
+    # Per-frame bboxes — fall back to broadcasting union when missing.
+    def _bbox_pf(side_key: str) -> list[list[float]]:
+        pf_key = f"{side_key}_perframe"
+        arr = crop.get(pf_key)
+        if isinstance(arr, list) and arr and isinstance(arr[0], list) and len(arr[0]) == 4:
+            return arr
+        union = crop.get(side_key)
+        if isinstance(union, list) and len(union) == 4:
+            return [union] * n_frames
+        return []
+
+    bbox_L = _bbox_pf("crop_L")
+    bbox_R = _bbox_pf("crop_R")
+
+    def _b64_arr(a) -> str:
+        if a is None:
+            return ""
+        return base64.b64encode(np.ascontiguousarray(a, dtype=np.float16).tobytes()).decode("ascii")
+
+    return {
+        "available": True,
+        "n_frames": n_frames,
+        "start_frame": start_frame,
+        "mip_size": 64,
+        "mip_L_b64": _b64_arr(mip_L),
+        "mip_L_shape": list(mip_L.shape) if mip_L is not None else None,
+        "mip_R_b64": _b64_arr(mip_R),
+        "mip_R_shape": list(mip_R.shape) if mip_R is not None else None,
+        "bbox_L": bbox_L,
+        "bbox_R": bbox_R,
+    }
+
+
 # ── Hand detection (single frame) ─────────────────────────────────────────
 
 @router.post("/{subject_id}/detect-hands")
@@ -693,6 +961,12 @@ def save_blur_specs(subject_id: int, body: dict = Body(...)) -> dict:
     return {"status": "ok", "count": len(specs)}
 
 
+# Same handler for POST (used by navigator.sendBeacon on page unload)
+@router.post("/{subject_id}/blur-specs")
+def save_blur_specs_post(subject_id: int, body: dict = Body(...)) -> dict:
+    return save_blur_specs(subject_id, body)
+
+
 # ── Hand settings ─────────────────────────────────────────────────────────
 
 @router.get("/{subject_id}/hand-settings")
@@ -717,6 +991,7 @@ def get_hand_settings(subject_id: int, trial_idx: int = Query(0)) -> dict:
             segments = [{"start": row["hand_frame_start"], "end": row["hand_frame_end"],
                          "radius": row["hand_mask_radius"]}]
         return {
+            "has_row": True,
             "enabled": bool(row["hand_mask_enabled"]),
             "mask_radius": row["hand_mask_radius"],
             "hand_smooth": row.get("hand_smooth", 10),
@@ -726,11 +1001,16 @@ def get_hand_settings(subject_id: int, trial_idx: int = Query(0)) -> dict:
             "dlc_radius": row.get("dlc_radius", 15),
             "hand_temporal": row.get("hand_temporal", 0),
             "show_landmarks": bool(row.get("show_landmarks", 0)),
+            "mask_source": row.get("mask_source") or "mediapipe",
+            "hrnet_mask_thresh": row.get("hrnet_mask_thresh") if row.get("hrnet_mask_thresh") is not None else 0.30,
+            "hrnet_mask_smooth": row.get("hrnet_mask_smooth") if row.get("hrnet_mask_smooth") is not None else 7,
             "segments": segments,
         }
-    return {"enabled": True, "mask_radius": 10, "hand_smooth": 10,
+    # No DB row — trial has never been configured
+    return {"has_row": False, "enabled": True, "mask_radius": 10, "hand_smooth": 10,
             "forearm_radius": 10, "forearm_extent": 0.5, "hand_smooth2": 0,
             "dlc_radius": 15, "hand_temporal": 0, "show_landmarks": False,
+            "mask_source": "mediapipe", "hrnet_mask_thresh": 0.30, "hrnet_mask_smooth": 7,
             "segments": []}
 
 
@@ -753,14 +1033,34 @@ def save_hand_settings(subject_id: int, body: dict = Body(...)) -> dict:
     show_landmarks = 1 if body.get("show_landmarks", False) else 0
     segments = body.get("segments", [])
     segments_json = _json.dumps(segments) if segments else None
+    mask_source = body.get("mask_source") or "mediapipe"
+    if mask_source not in ("mediapipe", "hrnet"):
+        mask_source = "mediapipe"
+    try:
+        hrnet_mask_thresh = float(body.get("hrnet_mask_thresh", 0.30))
+    except (TypeError, ValueError):
+        hrnet_mask_thresh = 0.30
+    try:
+        hrnet_mask_smooth = int(body.get("hrnet_mask_smooth", 7))
+    except (TypeError, ValueError):
+        hrnet_mask_smooth = 7
 
     with get_db_ctx() as db:
+        # Lazily add the new columns when this is the first save under
+        # the new schema (avoids a startup migration just for these).
+        cols = {r["name"] for r in db.execute("PRAGMA table_info(blur_hand_settings)").fetchall()}
+        if "mask_source" not in cols:
+            db.execute("ALTER TABLE blur_hand_settings ADD COLUMN mask_source TEXT")
+        if "hrnet_mask_thresh" not in cols:
+            db.execute("ALTER TABLE blur_hand_settings ADD COLUMN hrnet_mask_thresh REAL")
+        if "hrnet_mask_smooth" not in cols:
+            db.execute("ALTER TABLE blur_hand_settings ADD COLUMN hrnet_mask_smooth INTEGER")
         db.execute(
             """INSERT INTO blur_hand_settings
                (subject_id, trial_idx, hand_mask_enabled, hand_mask_radius, hand_smooth,
                 forearm_radius, forearm_extent, hand_smooth2, dlc_radius, hand_temporal,
-                show_landmarks, segments_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                show_landmarks, segments_json, mask_source, hrnet_mask_thresh, hrnet_mask_smooth)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(subject_id, trial_idx)
                DO UPDATE SET hand_mask_enabled=excluded.hand_mask_enabled,
                              hand_mask_radius=excluded.hand_mask_radius,
@@ -771,10 +1071,14 @@ def save_hand_settings(subject_id: int, body: dict = Body(...)) -> dict:
                              dlc_radius=excluded.dlc_radius,
                              hand_temporal=excluded.hand_temporal,
                              show_landmarks=excluded.show_landmarks,
-                             segments_json=excluded.segments_json""",
+                             segments_json=excluded.segments_json,
+                             mask_source=excluded.mask_source,
+                             hrnet_mask_thresh=excluded.hrnet_mask_thresh,
+                             hrnet_mask_smooth=excluded.hrnet_mask_smooth""",
             (subject_id, trial_idx, enabled, mask_radius, hand_smooth,
              forearm_radius, forearm_extent, hand_smooth2, dlc_radius_val,
-             hand_temporal, show_landmarks, segments_json),
+             hand_temporal, show_landmarks, segments_json,
+             mask_source, hrnet_mask_thresh, hrnet_mask_smooth),
         )
     return {"status": "ok"}
 
@@ -791,6 +1095,7 @@ def render_deidentified(subject_id: int, body: dict = Body(default={})) -> dict:
     Returns {job_id, queue_id} for SSE tracking.
     """
     from ..services.queue_manager import queue_manager
+    from ..services.video import build_trial_map
 
     with get_db_ctx() as db:
         subj = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
@@ -798,17 +1103,33 @@ def render_deidentified(subject_id: int, body: dict = Body(default={})) -> dict:
             raise HTTPException(404, "Subject not found")
 
     subject_name = subj["name"]
+    trial_idx = body.get("trial_idx")
+    execution_target = body.get("execution_target", "local-cpu")
 
-    # Enqueue via queue manager — it creates the job record when it starts.
-    # The frontend polls for the job_id.
+    # Resolve trial name for display in job queue
+    extra_params: dict | None = None
+    if trial_idx is not None:
+        try:
+            camera_mode = subj.get("camera_mode") or "stereo"
+            trials = build_trial_map(subject_name, camera_mode=camera_mode)
+            if 0 <= trial_idx < len(trials):
+                tn = trials[trial_idx]["trial_name"]
+                trial_name = tn.split("_", 1)[1] if "_" in tn else tn
+                extra_params = {"trial_idx": trial_idx, "trial_name": trial_name}
+        except Exception:
+            extra_params = {"trial_idx": trial_idx}
+
+    # Enqueue — the queue manager stores extra_params in job_queue and propagates
+    # trial_idx to the worker subprocess so only that trial is rendered.
     result = queue_manager.enqueue(
         "deidentify",
         [subject_id],
         [subject_name],
-        execution_target="local-cpu",
+        execution_target=execution_target,
+        extra_params=extra_params,
     )
 
-    # Wait briefly for the queue manager to create a NEW job record
+    # Wait briefly for the queue manager to create the job record
     import time
     job_id = None
     for _ in range(20):
@@ -824,10 +1145,8 @@ def render_deidentified(subject_id: int, body: dict = Body(default={})) -> dict:
                 break
         time.sleep(0.3)
 
-    # If still no pending/running job, check if queue item exists
     queue_id = result.get("queue_id")
     if not job_id and queue_id:
-        # Job hasn't been created yet — return queue_id for frontend to poll
         return {"job_id": None, "queue_id": queue_id, "status": "queued"}
 
     return {"job_id": job_id, "queue_id": queue_id, "status": "queued"}

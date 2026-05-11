@@ -52,11 +52,14 @@ class JobRegistry:
 
         self._processes[job_id] = proc
 
-        # Update DB with PID
+        # Update DB with PID.  Preserve any existing started_at so multi-
+        # trial batch jobs (HRnet / deidentify) keep the original batch
+        # start time across per-trial subprocess launches — needed for
+        # the ETA math, which extrapolates from total-elapsed × global-pct.
         with get_db_ctx() as db:
             db.execute(
                 """UPDATE jobs SET status = 'running', pid = ?,
-                   started_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                   started_at = COALESCE(started_at, CURRENT_TIMESTAMP) WHERE id = ?""",
                 (proc.pid, job_id),
             )
 

@@ -22,9 +22,42 @@ def _progress_printer(job_id: int):
     return cb
 
 
-def run_mediapipe(subject_name: str, job_id: int):
+def run_mediapipe(subject_name: str, job_id: int, static_image_mode: bool = False,
+                  trial_idx: int | None = None):
     from movement_tracker.services.mediapipe_prelabel import run_mediapipe as _run_mp
-    _run_mp(subject_name, progress_callback=_progress_printer(job_id))
+    # Load any saved per-trial crop boxes for this subject (under
+    # model_name='run-mediapipe') so MP runs honour the bbox the user
+    # set in the Auto / MANO page.  Same logic as
+    # routers/analyze.py::run_mediapipe.
+    from movement_tracker.db import get_db_ctx
+    from movement_tracker.config import get_settings
+    settings = get_settings()
+    cam_names = settings.camera_names or ["OS", "OD"]
+    cam_OS = cam_names[0]
+    cam_OD = cam_names[1] if len(cam_names) > 1 else cam_names[0]
+    crop_boxes: dict = {}
+    try:
+        with get_db_ctx() as db:
+            subj = db.execute("SELECT id FROM subjects WHERE name = ?", (subject_name,)).fetchone()
+            if subj:
+                rows = db.execute(
+                    "SELECT trial_idx, camera_name, x1, y1, x2, y2 FROM mp_crop_boxes "
+                    "WHERE subject_id = ? AND model_name = 'run-mediapipe'",
+                    (subj["id"],),
+                ).fetchall()
+                for r in rows:
+                    ti = r["trial_idx"]
+                    crop_boxes.setdefault(ti, {})
+                    if r["camera_name"] == cam_OS:
+                        crop_boxes[ti]["OS"] = [r["x1"], r["y1"], r["x2"], r["y2"]]
+                    elif r["camera_name"] == cam_OD:
+                        crop_boxes[ti]["OD"] = [r["x1"], r["y1"], r["x2"], r["y2"]]
+    except Exception as _e:
+        print(f"WARN: could not load mp_crop_boxes for {subject_name}: {_e}", flush=True)
+    _run_mp(subject_name, progress_callback=_progress_printer(job_id),
+            crop_boxes=crop_boxes if crop_boxes else None,
+            static_image_mode=static_image_mode,
+            trial_idx=trial_idx)
 
 
 def run_pose(subject_name: str, job_id: int):
@@ -153,6 +186,7 @@ def run_deidentify(subject_name: str, job_id: int, trial_idx: int | None = None)
             face_detections=face_list,
             subject_name=subject_name,
             start_frame=trial["start_frame"],
+            frame_count=trial["frame_count"],
             progress_callback=progress_cb,
         )
 
@@ -169,7 +203,9 @@ def run_vision(subject_name: str, job_id: int):
 
 
 JOB_DISPATCH = {
-    "mediapipe": lambda args: run_mediapipe(args.subject, args.job_id),
+    "mediapipe": lambda args: run_mediapipe(args.subject, args.job_id,
+                                              static_image_mode=bool(getattr(args, "static_image_mode", False)),
+                                              trial_idx=getattr(args, "trial_idx", None)),
     "pose": lambda args: run_pose(args.subject, args.job_id),
     "blur": lambda args: run_blur(args.subject, args.job_id),
     "deidentify": lambda args: run_deidentify(args.subject, args.job_id, args.trial_idx),
@@ -200,6 +236,8 @@ def main():
     parser.add_argument("--job-id", type=int, required=True)
     parser.add_argument("--log-path", default="")
     parser.add_argument("--trial-idx", type=int, default=None)
+    parser.add_argument("--static-image-mode", action="store_true",
+                        help="MediaPipe only: disable between-frame tracker (per-frame palm detection)")
 
     # Set MT_DATA_DIR if passed (for subprocess to find DB/settings)
     parser.add_argument("--data-dir", default=None)

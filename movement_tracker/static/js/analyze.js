@@ -120,6 +120,12 @@ const analyzeViewer = (() => {
     async function init() {
         const params = new URLSearchParams(window.location.search);
         const subjectParam = params.get('subject');
+        // Optional ?trial=N param: jump straight to a specific trial after
+        // loading the subject.  Used by Job-page history links.
+        const trialParam = params.get('trial');
+        const trialIdxFromUrl = trialParam != null && trialParam !== ''
+            ? parseInt(trialParam, 10)
+            : null;
 
         // Load camera names from settings
         try {
@@ -153,7 +159,13 @@ const analyzeViewer = (() => {
             sel.value = allSubjects[0].id;
         }
 
-        sel.addEventListener('change', () => loadSubject(parseInt(sel.value)));
+        sel.addEventListener('change', () => {
+            loadSubject(parseInt(sel.value));
+            // Drop focus from the <select> so keyboard shortcuts (Space,
+            // arrow keys, etc.) control the video instead of re-opening
+            // the dropdown.
+            sel.blur();
+        });
 
         // Setup canvases
         canvas = $('videoCanvas');
@@ -176,7 +188,12 @@ const analyzeViewer = (() => {
         if (sel.value) {
             const navState = typeof getNavState === 'function' ? getNavState() : {};
             await loadSubject(parseInt(sel.value));
-            if (navState.subjectId === parseInt(sel.value)) {
+            // ?trial=N takes precedence over nav-state restoration so links
+            // from the Jobs page always land on the requested trial.
+            if (trialIdxFromUrl != null && Number.isFinite(trialIdxFromUrl)
+                && trialIdxFromUrl >= 0 && trialIdxFromUrl < trials.length) {
+                await loadTrial(trialIdxFromUrl);
+            } else if (navState.subjectId === parseInt(sel.value)) {
                 if (navState.trialIdx != null && navState.trialIdx >= 0 && navState.trialIdx < trials.length) {
                     await loadTrial(navState.trialIdx);
                     if (navState.frame != null && trialData && navState.frame >= 0 && navState.frame < trialData.n_frames) {
@@ -202,6 +219,20 @@ const analyzeViewer = (() => {
         subjectName = subj ? subj.name : '';
         if (subj && subj.camera_mode) cameraMode = subj.camera_mode;
 
+        // Clear the previous subject's video + canvas BEFORE we try to
+        // load the new one — otherwise an early-return below (no
+        // trials, API error, etc.) leaves the old subject's content
+        // visible.
+        try {
+            videoEl.pause();
+            videoEl.removeAttribute('src');
+            videoEl.load();
+        } catch {}
+        if (canvas && ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+        trialData = null;
+        currentTrialIdx = -1;
+        $('trialName').textContent = '';
+
         try {
             trials = await api(`/api/analyze/${sid}/trials`);
         } catch {
@@ -212,7 +243,6 @@ const analyzeViewer = (() => {
         trialBtns.innerHTML = '';
         if (!trials.length) {
             trialBtns.innerHTML = '<span style="font-size:12px;color:var(--text-muted);">No data</span>';
-            trialData = null;
             render();
             return;
         }

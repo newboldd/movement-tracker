@@ -162,64 +162,70 @@ body {
     50% { opacity: 0.3; }
 }
 
-/* Wider jobs dropdown with side-by-side queues */
+/* In-process trial chip — yellow pulse matching the job-pulse rhythm.
+   Used by the Remote queue rows, trial-detail modal, AND nav-dropdown
+   active-job rows so the "currently running on GPU" trial is obvious
+   wherever it's shown. */
+.trial-current {
+    animation: job-pulse 1.5s ease-in-out infinite;
+}
+
+/* Jobs nav dropdown — mirrors the Queue block on the Jobs page */
 .nav-jobs-dropdown {
-    min-width: 360px !important;
+    min-width: 420px !important;
     padding: 8px 12px !important;
     right: 0;
     left: auto !important;
 }
-.nav-jobs-dropdown .jobs-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-}
-.nav-jobs-dropdown h4 {
-    font-size: 11px;
-    color: var(--text-muted);
-    margin: 0 0 6px 0;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-.nav-jobs-dropdown .job-item {
-    font-size: 12px;
-    padding: 4px 0;
+/* Compact queue item rows inside nav dropdown */
+.nav-qi {
     display: flex;
     align-items: center;
     gap: 4px;
+    padding: 2px 3px;
+    border-radius: 3px;
+    margin-bottom: 2px;
+    border-left: 2px solid transparent;
 }
-.nav-jobs-dropdown .job-item .job-dot {
-    width: 6px;
-    height: 6px;
+.nav-qi.nav-qi-run { border-left-color: var(--orange, #FF9800); }
+.nav-qi-dot {
+    width: 5px;
+    height: 5px;
     border-radius: 50%;
     flex-shrink: 0;
 }
-.nav-jobs-dropdown .job-dot.running { background: #4CAF50; }
-.nav-jobs-dropdown .job-dot.queued { background: #FF9800; }
-.nav-jobs-dropdown .job-dot.failed { background: #F44336; }
-.nav-jobs-dropdown .job-actions {
-    margin-left: 2px;
-    display: flex;
-    gap: 4px;
-}
-.nav-jobs-dropdown .job-actions button {
+.nav-qi-type {
     font-size: 10px;
-    padding: 1px 5px;
-    cursor: pointer;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 3px;
     color: var(--text-muted);
+    flex-shrink: 0;
+    white-space: nowrap;
 }
-.nav-jobs-dropdown .job-actions button:hover {
-    color: var(--text);
-    border-color: var(--text-muted);
+.nav-qi-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    gap: 3px;
 }
-.nav-jobs-dropdown .empty-msg {
+.nav-qi-name > span:first-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: 11px;
-    color: var(--text-muted);
-    padding: 4px 0;
 }
+.nav-qi button {
+    font-size: 10px;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 0 2px;
+    margin-left: auto;
+    line-height: 1;
+    flex-shrink: 0;
+}
+.nav-qi button:hover { color: var(--red, #f44336); }
 
 .container {
     max-width: 1400px;
@@ -279,6 +285,7 @@ body {
 .badge-errors_detected,
 .badge-error_labeling,
 .badge-error_labeled { background: #b71c1c; color: #ef9a9a; }      /* red — errors */
+.badge-warn        { background: #b8860b; color: #ffe082; }        /* amber — partial / download incomplete */
 
 /* ── Subject table ──────────────────────────────────── */
 .subject-table {
@@ -348,6 +355,7 @@ body {
     vertical-align: middle;
 }
 .job-running  { background: var(--orange); animation: pulse 1.5s infinite; }
+.job-pending  { background: var(--accent); animation: pulse 2s infinite; }
 .job-completed { background: var(--green); }
 .job-failed   { background: var(--red); }
 
@@ -648,10 +656,56 @@ body {
     pointer-events: none;
 }
 
+/* ── Sidebar toggle (iPad / narrow) ────────────────── */
+.sidebar-toggle {
+    display: none;
+    position: fixed;
+    top: 60px; left: 8px;
+    z-index: 50;
+    width: 40px; height: 40px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+}
+.sidebar-toggle:active { background: var(--accent); }
+
 /* ── Responsive ─────────────────────────────────────── */
 @media (max-width: 900px) {
     .detail-grid { grid-template-columns: 1fr; }
     .labeling-sidebar { width: 180px; }
+}
+
+/* iPad / narrow devices — slide-in sidebar */
+@media (max-width: 1100px) and (pointer: coarse),
+       (max-width: 820px) {
+    .sidebar-toggle { display: block; }
+    .labeling-sidebar {
+        position: fixed;
+        top: 52px;
+        left: 0;
+        height: calc(100vh - 52px);
+        width: 280px;
+        z-index: 40;
+        transform: translateX(-100%);
+        transition: transform 0.2s ease-out;
+        box-shadow: 2px 0 12px rgba(0,0,0,0.5);
+    }
+    .labeling-sidebar.open { transform: translateX(0); }
+    .labeling-main { margin-left: 0; }
+    /* Results / dashboard: fluid horizontal padding */
+    .results-container { padding: 12px; max-width: 100%; }
+    /* Nav: let it wrap on narrow width */
+    .header nav { flex-wrap: wrap; }
+    /* Give on-screen tap targets a bit more room */
+    .btn-sm { min-height: 32px; padding: 4px 10px; }
+    button, .btn, .trial-btn { touch-action: manipulation; }
+    input[type="range"] { height: 24px; }
+    input[type="checkbox"] { width: 20px; height: 20px; }
 }
 
 /* ── Results page: dark header, white body ─────────── */

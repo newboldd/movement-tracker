@@ -27,7 +27,13 @@ from starlette.requests import Request
 # Suppress noisy access logs for polling endpoints
 class _QuietPollFilter(logging.Filter):
     """Filter out high-frequency polling requests from uvicorn access log."""
-    _QUIET = ("/api/jobs", "/api/remote/queue")
+    _QUIET = (
+        "/api/jobs",
+        "/api/remote/queue",
+        "/api/remote/pending-downloads",
+        "/api/remote/download-progress",
+        "/api/remote/stream",
+    )
     def filter(self, record):
         msg = record.getMessage()
         return not any(p in msg for p in self._QUIET)
@@ -39,7 +45,7 @@ class NoCacheMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
         if request.url.path.startswith("/static") or request.url.path in (
-            "/", "/labeling", "/mediapipe", "/deidentify", "/mano", "/oscillations", "/results", "/settings", "/onboarding", "/remote", "/videos", "/calibration", "/tutorials", "/tutorial", "/events"
+            "/", "/labeling", "/labeling-select", "/mediapipe", "/deidentify", "/mano", "/oscillations", "/results", "/settings", "/onboarding", "/remote", "/videos", "/calibration", "/tutorials", "/tutorial", "/events"
         ):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return response
@@ -109,8 +115,20 @@ def _recover_stale_jobs(s):
             except (ValueError, IndexError):
                 pass
 
+        LOCAL_JOB_TYPES = {"hrnet", "mano_fit", "mano_fit_v2", "mano_fit_v3", "vision", "pose", "deidentify"}
+        if not remote_host and job_type in LOCAL_JOB_TYPES:
+            # Local in-process job interrupted by server restart — mark failed
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status = 'failed', error_msg = 'Server restarted (job interrupted)', "
+                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (job["id"],),
+                )
+            failed += 1
+            continue
+
         if not (session_info and remote_host and remote_cfg):
-            # No remote info — mark failed
+            # Remote job with missing config — mark failed
             with get_db_ctx() as db:
                 db.execute(
                     "UPDATE jobs SET status = 'failed', error_msg = 'Server restarted (no remote config)', "
@@ -139,6 +157,236 @@ def _recover_stale_jobs(s):
                     (job["subject_id"],),
                 ).fetchone()
             status_file = f"{remote_cfg.work_dir}/{subj['name']}/status.json" if subj else None
+        elif job_type == "deidentify":
+            # Single-trial remote deidentify recovery: the worker is
+            # detached on the remote, so it survives our restart — just
+            # the local poll-and-download loop dies.  Reattach a fresh
+            # monitor thread that picks up exactly where the dead one
+            # left off (reads remote status.json, downloads outputs when
+            # complete, marks job done).
+            #
+            # Identification: the job has a remote_pid (in tmux_session)
+            # and a remote_host other than 'localhost'.  Skip the batch
+            # recovery branch below if so.
+            if remote_pid and remote_host and remote_host != "localhost":
+                from .services.remote import resume_remote_deidentify_monitor
+                with get_db_ctx() as db:
+                    subj = db.execute(
+                        "SELECT name FROM subjects WHERE id = ?",
+                        (job["subject_id"],),
+                    ).fetchone()
+                if subj:
+                    import json as _json2
+                    _params2 = _json2.loads(job.get("params_json") or "{}") if job.get("params_json") else {}
+                    _ti = _params2.get("trial_idx") if isinstance(_params2, dict) else None
+                    logger.info(
+                        f"Job {job['id']} (deidentify): reattaching monitor for remote PID {remote_pid}"
+                    )
+                    t = threading.Thread(
+                        target=resume_remote_deidentify_monitor,
+                        kwargs=dict(
+                            job_id=job["id"], cfg=remote_cfg,
+                            subject_name=subj["name"], remote_pid=remote_pid,
+                            trial_idx=_ti, log_path=log_path, registry=registry,
+                        ),
+                        daemon=True,
+                    )
+                    t.start()
+                    registry._threads[job["id"]] = t
+                    resumed += 1
+                    continue
+            # (Fallthrough) Batch deidentify recovery: completion signal
+            # is the per-trial deidentified video on disk under
+            # videos/deidentified/.
+            import json as _json
+            _params = _json.loads(job.get("params_json") or "{}") if job.get("params_json") else {}
+            _trials_batch = _params.get("trials")
+            if _trials_batch and isinstance(_trials_batch, list):
+                from .services.video import build_trial_map as _btm
+                _deident_dir = s.video_path / "deidentified"
+                completed_trials = []
+                missing_trials = []
+                for _t in _trials_batch:
+                    _sub = _t.get("subject_name") or ""
+                    _tn = _t.get("trial_name") or ""
+                    if not (_sub and _tn):
+                        continue
+                    # Renderer writes <subject>_<trial>.mp4 (full stem).
+                    # Check both naming conventions to be robust.
+                    _candidates = [
+                        _deident_dir / f"{_sub}_{_tn}.mp4",
+                        _deident_dir / f"{_tn}.mp4",
+                    ]
+                    if any(p.exists() and p.stat().st_size > 4096 for p in _candidates):
+                        completed_trials.append(f"{_sub} {_tn}")
+                        # Stamp outcome so Resume button knows to skip.
+                        _t["outcome"] = "ok"
+                    else:
+                        missing_trials.append(f"{_sub} {_tn}")
+                        _t["outcome"] = "failed"
+                        _t["outcome_error"] = "interrupted by server restart"
+                _n_done = len(completed_trials)
+                _n_total = len(_trials_batch)
+                logger.info(
+                    f"Job {job['id']} (deidentify batch): {_n_done}/{_n_total} trials done before restart"
+                )
+                # Persist updated outcomes back to params_json so the Jobs
+                # page Resume button has a per-trial status to filter on.
+                _params["trials"] = _trials_batch
+                _new_pjson = _json.dumps(_params)
+                if _n_done == _n_total and _n_total > 0:
+                    with get_db_ctx() as db:
+                        db.execute(
+                            "UPDATE jobs SET status='completed', progress_pct=100, "
+                            "params_json=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                            (_new_pjson, job["id"]),
+                        )
+                    resumed += 1
+                else:
+                    _preview = ", ".join(missing_trials[:5])
+                    if len(missing_trials) > 5:
+                        _preview += f", +{len(missing_trials) - 5} more"
+                    _msg = (
+                        f"Batch interrupted by restart: {_n_done}/{_n_total} trials "
+                        f"completed. Re-submit remaining: {_preview}"
+                    )
+                    with get_db_ctx() as db:
+                        db.execute(
+                            "UPDATE jobs SET status='failed', error_msg=?, "
+                            "progress_pct=?, params_json=?, "
+                            "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                            (_msg[:500], round(100.0 * _n_done / max(1, _n_total), 1),
+                             _new_pjson, job["id"]),
+                        )
+                    failed += 1
+                continue
+            # Single-trial deidentify falls through to default handling
+            # (status_file = None, then proc_alive check or fail).
+            status_file = None
+
+        elif job_type == "hrnet":
+            # Reconstruct the status file path from job params.  Batch jobs
+            # store a ``trials`` list rather than a single trial_name; in
+            # that case we handle them below in the batch-aware branch.
+            import json as _json
+            _params = _json.loads(job.get("params_json") or "{}") if job.get("params_json") else {}
+            _trials_batch = _params.get("trials")
+            _batch_id = _params.get("_batch_id")
+
+            # ── Long-lived remote batch runner recovery ───────────────
+            # Submit Batch jobs store ``_batch_id`` in params_json.  The
+            # remote runner is detached and keeps going through local
+            # restarts; we just need to reattach a poller thread so the
+            # local UI catches up on completed trials.
+            if _batch_id:
+                from .services.remote import poll_remote_batch
+                logger.info(f"Job {job['id']} (batch {_batch_id}): reattaching poller")
+                # Marker line in the job's own log file so we can confirm
+                # via tail whether this branch fired (vs. recovery
+                # silently skipping the job).
+                try:
+                    with open(log_path, "a") as _diag:
+                        _diag.write(
+                            f"[recovery] reattaching poller for batch {_batch_id} "
+                            f"(job_id={job['id']})\n"
+                        )
+                except Exception as _e_diag:
+                    logger.warning(f"recovery marker write failed: {_e_diag}")
+                t = threading.Thread(
+                    target=poll_remote_batch,
+                    kwargs=dict(
+                        job_id=job["id"], cfg=remote_cfg,
+                        batch_id=_batch_id, log_path=log_path,
+                        registry=registry, parent_extra=_params,
+                    ),
+                    daemon=True,
+                )
+                try:
+                    t.start()
+                except Exception as _e_start:
+                    try:
+                        with open(log_path, "a") as _diag:
+                            _diag.write(f"[recovery] thread start failed: {_e_start!r}\n")
+                    except Exception:
+                        pass
+                    raise
+                registry._threads[job["id"]] = t
+                resumed += 1
+                continue
+
+            if _trials_batch and isinstance(_trials_batch, list):
+                # ── Batch HRnet recovery ──────────────────────────────
+                # For each trial in the batch, check whether its output
+                # files exist locally.  A heatmaps.npz on disk means the
+                # full pipeline (inference → SCP-back) finished for that
+                # trial.  Tally completed vs missing and set the parent
+                # job status accordingly with an accurate error_msg.
+                from .services.mano_data import _mano_dir
+                completed_trials = []
+                missing_trials = []
+                for _t in _trials_batch:
+                    _sub = _t.get("subject_name") or ""
+                    _tn = _t.get("trial_name") or ""
+                    if not (_sub and _tn):
+                        continue
+                    # Local trial dir is built by remote_hrnet_job from
+                    # build_trial_map's full stem (e.g. "Con03_L1") even
+                    # though extra_params stores the short name ("L1").
+                    # Check both forms to be robust.
+                    _candidates = [
+                        _mano_dir(_sub) / _tn / "hrnet_w18_heatmaps.npz",
+                        _mano_dir(_sub) / f"{_sub}_{_tn}" / "hrnet_w18_heatmaps.npz",
+                    ]
+                    if any(p.exists() and p.stat().st_size > 0 for p in _candidates):
+                        completed_trials.append(f"{_sub} {_tn}")
+                        _t["outcome"] = "ok"
+                    else:
+                        missing_trials.append(f"{_sub} {_tn}")
+                        _t["outcome"] = "failed"
+                        _t["outcome_error"] = "interrupted by server restart"
+                _n_done = len(completed_trials)
+                _n_total = len(_trials_batch)
+                logger.info(
+                    f"Job {job['id']} (hrnet batch): {_n_done}/{_n_total} trials completed before restart"
+                )
+                _params["trials"] = _trials_batch
+                _new_pjson = _json.dumps(_params)
+                if _n_done == _n_total and _n_total > 0:
+                    with get_db_ctx() as db:
+                        db.execute(
+                            "UPDATE jobs SET status='completed', progress_pct=100, "
+                            "params_json=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                            (_new_pjson, job["id"]),
+                        )
+                    resumed += 1
+                else:
+                    # Show first few missing trials for context.
+                    _preview = ", ".join(missing_trials[:5])
+                    if len(missing_trials) > 5:
+                        _preview += f", +{len(missing_trials) - 5} more"
+                    _msg = (
+                        f"Batch interrupted by restart: {_n_done}/{_n_total} trials "
+                        f"completed. Re-submit remaining: {_preview}"
+                    )
+                    with get_db_ctx() as db:
+                        db.execute(
+                            "UPDATE jobs SET status='failed', error_msg=?, "
+                            "progress_pct=?, params_json=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                            (_msg[:500], round(100.0 * _n_done / max(1, _n_total), 1),
+                             _new_pjson, job["id"]),
+                        )
+                    failed += 1
+                continue
+            _trial_name = _params.get("trial_name", "")
+            with get_db_ctx() as db:
+                subj = db.execute(
+                    "SELECT name FROM subjects WHERE id = ?",
+                    (job["subject_id"],),
+                ).fetchone()
+            if subj and _trial_name:
+                status_file = f"{remote_cfg.work_dir}/hrnet_jobs/{subj['name']}_{subj['name']}_{_trial_name}/status.json"
+            else:
+                status_file = None
         else:
             status_file = None
 
@@ -163,6 +411,31 @@ def _recover_stale_jobs(s):
                 _spawn_preprocess_download(job, remote_cfg, log_path, registry)
             elif job_type in TRAIN_JOB_TYPES and subj:
                 _spawn_train_download(job, subj, s, remote_cfg, log_path, registry)
+            elif job_type == "hrnet" and subj:
+                # Download HRNet results in background.  (Don't `import
+                # threading` here — module-level import at line 4 already
+                # provides it; a local import would shadow the global and
+                # turn `threading` into an unbound local in the rest of
+                # the function.)
+                def _dl_hrnet():
+                    try:
+                        from .services.mano_data import _mano_dir
+                        _params = _json.loads(job.get("params_json") or "{}") if job.get("params_json") else {}
+                        _tn = _params.get("trial_name", "")
+                        local_dir = _mano_dir(subj["name"]) / f"{subj['name']}_{_tn}"
+                        local_dir.mkdir(parents=True, exist_ok=True)
+                        remote_base = f"{remote_cfg.work_dir}/hrnet_jobs/{subj['name']}_{subj['name']}_{_tn}/output/{subj['name']}_{_tn}"
+                        from .services.remote import _scp_base_args
+                        import subprocess
+                        for fname in ["hrnet_w18_heatmaps.npz", "hand_crop.json"]:
+                            subprocess.run(
+                                _scp_base_args(remote_cfg) + [f"{remote_cfg.host}:{remote_base}/{fname}", str(local_dir / fname)],
+                                capture_output=True, timeout=300,
+                            )
+                        logger.info(f"Downloaded HRNet results for {subj['name']}")
+                    except Exception as e:
+                        logger.warning(f"HRNet download failed: {e}")
+                threading.Thread(target=_dl_hrnet, daemon=True).start()
 
             resumed += 1
             continue
@@ -456,6 +729,21 @@ def startup():
     queue_manager.start()
 
 
+@app.get("/favicon.ico")
+def favicon():
+    """Return an empty 204 so browsers stop logging a 404 for /favicon.ico."""
+    from fastapi.responses import Response
+    return Response(status_code=204)
+
+
+@app.get("/.well-known/appspecific/com.chrome.devtools.json")
+def chrome_devtools_probe():
+    """Chrome DevTools probes this path when it's open.  Return 204 to keep
+    the log clean."""
+    from fastapi.responses import Response
+    return Response(status_code=204)
+
+
 @app.get("/")
 def index():
     """Smart landing page: videos browser if no subjects, dashboard otherwise."""
@@ -481,19 +769,46 @@ def subjects_page():
 
 
 @app.get("/labeling")
-def labeling_page():
-    """Serve the labeling page."""
+def labeling_page(session: Optional[int] = None):
+    """Serve the labeling page. Redirect to events page if session is events type."""
+    if session:
+        from fastapi.responses import RedirectResponse
+        from .db import get_db_ctx
+        with get_db_ctx() as db:
+            row = db.execute(
+                "SELECT session_type, subject_id FROM label_sessions WHERE id = ?", (session,)
+            ).fetchone()
+            if row and row["session_type"] == "events":
+                # Redirect events sessions to the events page
+                return RedirectResponse(
+                    url=f"/labeling-select?mode=initial&subject={row['subject_id']}", status_code=302
+                )
     return FileResponse(str(STATIC_DIR / "labeling.html"))
 
 
 @app.get("/events")
-def events_page(subject: Optional[int] = None):
-    """Redirect to the labeling page in events mode."""
+def events_page(session: Optional[int] = None, subject: Optional[int] = None):
+    """Serve the standalone events page."""
+    if session:
+        return FileResponse(str(STATIC_DIR / "events.html"))
+    # No session — find a subject and redirect through labeling-select
     from fastapi.responses import RedirectResponse
-    url = "/labeling-select?mode=events"
+    from .db import get_db_ctx
+    if subject is None:
+        # Use last subject from any active session, or first subject
+        with get_db_ctx() as db:
+            recent = db.execute(
+                "SELECT subject_id FROM label_sessions WHERE status = 'active' ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+            if recent:
+                subject = recent["subject_id"]
+            else:
+                first = db.execute("SELECT id FROM subjects ORDER BY id LIMIT 1").fetchone()
+                if first:
+                    subject = first["id"]
     if subject is not None:
-        url += f"&subject={subject}"
-    return RedirectResponse(url=url, status_code=302)
+        return RedirectResponse(url=f"/labeling-select?mode=events&dest=events&subject={subject}", status_code=302)
+    return RedirectResponse(url="/", status_code=302)
 
 
 @app.get("/mediapipe")
@@ -509,9 +824,20 @@ def deidentify_page():
 
 
 @app.get("/analyze")
-def analyze_page():
-    """Serve the Analyze page (keypoint viewer + distance comparison)."""
-    return FileResponse(str(STATIC_DIR / "analyze.html"))
+def analyze_page(subject: Optional[int] = None, trial: Optional[int] = None):
+    """Redirect /analyze to /mano (Auto page).
+
+    Preserves both ``subject`` and ``trial`` query params so deep-links
+    (e.g. from the Jobs-page trial chips) land on the right trial.
+    """
+    from fastapi.responses import RedirectResponse
+    parts = []
+    if subject is not None:
+        parts.append(f"subject={subject}")
+    if trial is not None:
+        parts.append(f"trial={trial}")
+    qs = ("?" + "&".join(parts)) if parts else ""
+    return RedirectResponse(url=f"/mano{qs}", status_code=302)
 
 
 @app.get("/mano")
@@ -527,7 +853,7 @@ def oscillations_page():
 
 
 @app.get("/labeling-select")
-def labeling_select_page(subject: Optional[int] = None, mode: Optional[str] = None):
+def labeling_select_page(subject: Optional[int] = None, mode: Optional[str] = None, dest: Optional[str] = None):
     """Smart redirect to labeling page.
 
     If ``subject`` is given, create a session for that subject with the
@@ -576,15 +902,19 @@ def labeling_select_page(subject: Optional[int] = None, mode: Optional[str] = No
         ).fetchone()
         return row["id"] if row else None
 
-    def _smart_mode(stage: str) -> str:
+    def _smart_mode(stage: str, target_dest: str | None = None) -> str:
         """Pick the best labeling mode based on the subject's pipeline stage.
 
-        Default to events for all subjects past the initial labeling stages.
+        When dest is 'events', default to events mode for post-analysis subjects.
+        Otherwise default to 'initial' (Label tab) for the DLC page.
         """
+        if target_dest == "events" and stage not in _PRE_DLC_STAGES:
+            return "events"
         if stage in _PRE_DLC_STAGES:
             return "initial"
-        # All post-analysis stages default to events mode
-        return "events"
+        if stage in _PRE_CORRECTIONS_STAGES:
+            return "corrections"
+        return "initial"
 
     with get_db_ctx() as db:
         # ── Subject explicitly requested ──────────────────────────
@@ -599,13 +929,14 @@ def labeling_select_page(subject: Optional[int] = None, mode: Optional[str] = No
             if mode and mode in _VALID_MODES:
                 session_type = mode
             else:
-                session_type = _smart_mode(row["stage"] or "created")
+                session_type = _smart_mode(row["stage"] or "created", dest)
 
             try:
                 sid = _get_or_create_session(db, subject, session_type)
                 if sid:
+                    page = dest if dest else "labeling"
                     return RedirectResponse(
-                        url=f"/labeling?session={sid}", status_code=302
+                        url=f"/{page}?session={sid}", status_code=302
                     )
                 else:
                     logger.warning("labeling-select: _create_session returned None for subject=%s type=%s", subject, session_type)
@@ -615,19 +946,22 @@ def labeling_select_page(subject: Optional[int] = None, mode: Optional[str] = No
 
         # ── No subject param — fall back to most recent active session ──
         # Prefer sessions with labels (actual work), then most recent
+        # When loading DLC page (not events), exclude events sessions
+        _type_filter = "" if dest == "events" else "AND ls.session_type != 'events'"
         recent_session = db.execute(
-            """SELECT ls.id, COUNT(fl.id) AS label_count
+            f"""SELECT ls.id, COUNT(fl.id) AS label_count
                FROM label_sessions ls
                LEFT JOIN frame_labels fl ON fl.session_id = ls.id
-               WHERE ls.status = 'active'
+               WHERE ls.status = 'active' {_type_filter}
                GROUP BY ls.id
                ORDER BY label_count DESC, ls.created_at DESC
                LIMIT 1"""
         ).fetchone()
 
         if recent_session:
+            page = dest if dest else "labeling"
             return RedirectResponse(
-                url=f"/labeling?session={recent_session['id']}", status_code=302
+                url=f"/{page}?session={recent_session['id']}", status_code=302
             )
 
         # No session found — get first subject
@@ -639,13 +973,14 @@ def labeling_select_page(subject: Optional[int] = None, mode: Optional[str] = No
             return RedirectResponse(url="/", status_code=302)
 
         subject_id = first_subject["id"]
-        session_type = _smart_mode(first_subject["stage"] or "created")
+        session_type = _smart_mode(first_subject["stage"] or "created", dest)
 
         try:
             sid = _get_or_create_session(db, subject_id, session_type)
             if sid:
+                page = dest if dest else "labeling"
                 return RedirectResponse(
-                    url=f"/labeling?session={sid}", status_code=302
+                    url=f"/{page}?session={sid}", status_code=302
                 )
         except Exception:
             pass
@@ -658,8 +993,8 @@ def mediapipe_select_page(subject: Optional[int] = None):
     """Redirect to the new Analyze page."""
     from fastapi.responses import RedirectResponse
     if subject:
-        return RedirectResponse(url=f"/analyze?subject={subject}", status_code=302)
-    return RedirectResponse(url="/analyze", status_code=302)
+        return RedirectResponse(url=f"/mano?subject={subject}", status_code=302)
+    return RedirectResponse(url="/mano", status_code=302)
 
 
 @app.get("/results")

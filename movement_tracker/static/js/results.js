@@ -110,14 +110,19 @@ async function loadDistances(subjectId) {
 
     container.innerHTML = '<div class="results-no-data">Loading...</div>';
 
+    const selectedSource = document.getElementById('distSourceSelect')?.value || 'auto';
+
     try {
         // Load traces and movements in parallel
         const [traceData, movData] = await Promise.all([
-            API.get(`/api/results/${subjectId}/traces`),
-            API.get(`/api/results/${subjectId}/movements`).catch(() => null),
+            API.get(`/api/results/${subjectId}/traces?source=${selectedSource}`),
+            API.get(`/api/results/${subjectId}/movements?source=${selectedSource}`).catch(() => null),
         ]);
 
         cachedTraces = traceData;
+
+        // Update source selector with available sources
+        _updateSourceSelector(traceData.available_sources || [], traceData.data_source);
 
         if (!traceData.trials || traceData.trials.length === 0) {
             container.innerHTML = '<div class="results-no-data">No distance data available for this subject</div>';
@@ -198,6 +203,37 @@ function getYAxisConfig() {
     return { locked, customMin, customMax };
 }
 
+function _updateSourceSelector(availableSources, activeSource) {
+    let sel = document.getElementById('distSourceSelect');
+    if (!sel) {
+        // Create the selector above the distance plots
+        const container = document.getElementById('distancePlots');
+        if (!container) return;
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'margin-bottom:8px;display:flex;align-items:center;gap:8px;';
+        wrap.innerHTML = `<label style="font-size:12px;color:var(--text-muted);">Distance source:</label>
+            <select id="distSourceSelect" style="padding:3px 6px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:12px;"></select>`;
+        container.parentElement.insertBefore(wrap, container);
+        sel = document.getElementById('distSourceSelect');
+        sel.addEventListener('change', () => loadDistances(currentSubjectId));
+    }
+    const labels = { auto: 'Auto (best available)', mediapipe: 'MediaPipe', vision: 'Vision', skeleton_v1: 'Skeleton v1', skeleton_v2: 'Skeleton v2', skeleton_v3: 'Skeleton v3', dlc: 'DLC', corrections: 'Corrections' };
+    const prev = sel.value;
+    sel.innerHTML = '<option value="auto">Auto (best available)</option>';
+    for (const src of availableSources) {
+        const opt = document.createElement('option');
+        opt.value = src;
+        opt.textContent = labels[src] || src;
+        sel.appendChild(opt);
+    }
+    // Restore previous selection if still available
+    if (prev && [...sel.options].some(o => o.value === prev)) {
+        sel.value = prev;
+    } else if (activeSource && activeSource !== 'none') {
+        sel.value = activeSource;
+    }
+}
+
 function renderAllDistancePlots() {
     const container = document.getElementById('distancePlots');
     const data = cachedTraces;
@@ -205,15 +241,12 @@ function renderAllDistancePlots() {
 
     container.innerHTML = '';
 
-    // Show data source badge if using MediaPipe fallback
-    if (data.data_source && data.data_source !== 'dlc') {
+    // Show active source badge
+    if (data.data_source && data.data_source !== 'none') {
         const badge = document.createElement('div');
-        badge.style.cssText = 'padding:6px 12px;margin-bottom:8px;border-radius:4px;font-size:12px;display:inline-block;';
-        if (data.data_source === 'mediapipe') {
-            badge.style.background = 'rgba(255,152,0,0.15)';
-            badge.style.color = 'var(--orange)';
-            badge.textContent = 'Showing MediaPipe prelabel data (no DLC labels available)';
-        }
+        badge.style.cssText = 'padding:4px 10px;margin-bottom:8px;border-radius:4px;font-size:11px;display:inline-block;background:rgba(100,180,255,0.15);color:var(--accent);';
+        const labels = { mediapipe: 'MediaPipe', vision: 'Vision', skeleton_v1: 'Skeleton v1', skeleton_v2: 'Skeleton v2', skeleton_v3: 'Skeleton v3', dlc: 'DLC', corrections: 'Corrections' };
+        badge.textContent = `Source: ${labels[data.data_source] || data.data_source}`;
         container.appendChild(badge);
     }
 
@@ -1329,8 +1362,34 @@ document.getElementById('subjectSelect').addEventListener('change', (e) => {
     cachedSequenceAssignments = null;
     updateNavLinks();
 
-    if (currentTab === 'distances' || currentTab === 'movements') {
+    // Purge any Plotly plots from the previous subject so there's no
+    // flash of stale data while the new subject's API calls are in-flight.
+    const _purge = (el) => {
+        if (!el) return;
+        if (window.Plotly) {
+            el.querySelectorAll('.js-plotly-plot').forEach(p => {
+                try { Plotly.purge(p); } catch {}
+            });
+        }
+        el.innerHTML = '';
+    };
+    _purge(document.getElementById('distancePlots'));
+    _purge(document.getElementById('distMovementPlots'));
+    _purge(document.getElementById('movementPlots'));
+
+    // Always reload distances for the new subject — regardless of which
+    // tab was last active — so switching subjects never leaves stale
+    // content behind.  Force the tab to 'distances' for the visible
+    // individual-subject view.
+    if (currentTab !== 'group') {
         currentTab = 'distances';
+        // Update tab-button highlighting to match.
+        document.querySelectorAll('#tabSwitcher .btn').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.tab === 'distances');
+        });
+        document.querySelectorAll('.results-tab').forEach(el => {
+            el.classList.toggle('active', el.id === 'tabDistances');
+        });
         loadDistances(currentSubjectId);
     }
 });
@@ -1414,9 +1473,13 @@ loadSubjects().then(() => {
     }
 
     // 2. Determine which tab to show
-    if (initTab && ['distances', 'movements', 'group'].includes(initTab)) {
+    // 'individual' is a legacy alias used by the dashboard — map it to
+    // 'distances' so the individual-subject view renders.
+    const _tabAlias = { individual: 'distances' };
+    const _normTab = _tabAlias[initTab] || initTab;
+    if (_normTab && ['distances', 'movements', 'group'].includes(_normTab)) {
         // Explicit tab param takes highest priority
-        switchTab(initTab);
+        switchTab(_normTab);
     } else if (!initSubject && !initFrom) {
         // No subject param and no source context → group comparison
         switchTab('group');

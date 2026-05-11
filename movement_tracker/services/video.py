@@ -77,15 +77,17 @@ def _get_actual_frame_count(video_path: str) -> int:
     file_size = p.stat().st_size
     entry = cache.get(p.name)
 
-    # Fast path: count + offset both cached and valid
+    # Fast path: count + offset both cached and valid.
+    # NOTE: we no longer key on cv2_version — different cv2 versions
+    # produce identical actual frame counts in practice for these videos,
+    # and pinning a single cv2 version across all environments is brittle
+    # (older opencv-python releases lack wheels for newer Python).
     if (entry and entry.get("size") == file_size
-            and entry.get("cv2_version") == _CV2_VERSION
             and "frame_offset" in entry):
         return entry["count"]
 
     # Semi-fast path: count is valid but frame_offset missing — only run ffprobe
     if (entry and entry.get("size") == file_size
-            and entry.get("cv2_version") == _CV2_VERSION
             and "frame_offset" not in entry):
         actual = entry["count"]
         frame_offset = _compute_frame_offset(video_path, actual)
@@ -230,12 +232,15 @@ def get_subject_videos(subject_name: str, *, prefer_deidentified: bool = False,
         cam_suffix_lower = cam_suffix.lower()
         videos = [v for v in videos if Path(v).name.lower().endswith(cam_suffix_lower)]
 
-    # Optionally swap in deidentified versions
+    # Optionally swap in deidentified versions (skip corrupt stubs ≤4 KB)
     if prefer_deidentified and deident_dir.is_dir():
         result = []
         for v in videos:
             deident_path = deident_dir / Path(v).name
-            result.append(str(deident_path) if deident_path.exists() else v)
+            if deident_path.exists() and deident_path.stat().st_size > 4096:
+                result.append(str(deident_path))
+            else:
+                result.append(v)
         return result
 
     return videos
@@ -401,10 +406,16 @@ def _extract_frame_cached(video_path: str, frame_num: int, side: str,
 
 
 def _deidentified_path(video_path: str) -> str | None:
-    """Return the deidentified version of a video if it exists."""
+    """Return the deidentified version of a video if it exists and is not corrupt.
+
+    An output file under 4 KB is almost certainly an empty ffmpeg container
+    (261-byte stub produced when zero frames are piped to ffmpeg).
+    """
     p = Path(video_path)
     deident = p.parent / "deidentified" / p.name
-    return str(deident) if deident.exists() else None
+    if deident.exists() and deident.stat().st_size > 4096:
+        return str(deident)
+    return None
 
 
 def _resolve_camera_path(trial: dict, side: str) -> str | None:
