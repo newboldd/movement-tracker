@@ -190,7 +190,8 @@ function renderDiagnosisGroups() {
                                 onclick="sessionStorage.setItem('dlc_lastSubjectId','${s.id}');window.location.href='/results?subject=${s.id}&tab=individual&from=dashboard'"></canvas>
                         <div style="display:flex;gap:2px;flex-wrap:nowrap;">
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="showDetail(${s.id})">Info</button>
-                            <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/mano?subject=${s.id}'">Auto</button>
+                            <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/preproc?subject=${s.id}'">Preproc</button>
+                            <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/mano?subject=${s.id}'">Labels</button>
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="openLabeling(${s.id})">DLC</button>
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/results?subject=${s.id}&from=dashboard'">Results</button>
                         </div>
@@ -446,7 +447,7 @@ async function showDetail(subjectId) {
             { key: 'dlc_refine', label: 'DLC Refine' },
             { key: 'dlc_corrections', label: 'Corrections' },
             { key: 'events', label: 'Events' },
-            { key: 'mano', label: 'Auto' },
+            { key: 'mano', label: 'Labels' },
         ];
         const noFaceList = detail.no_face_videos || [];
         let trialChart = '';
