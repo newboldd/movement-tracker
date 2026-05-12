@@ -740,6 +740,7 @@ class QueueManager:
                         from ..services.background import compute_background
                         from ..services.jobs import registry as job_registry
                         from ..services.video import build_trial_map
+                        from ..services.job_history import stage_timer, finalize_job_record
                         ep = extra_params or {}
                         cancel_event = threading.Event()
                         job_registry._cancel_events[job_id] = cancel_event
@@ -765,46 +766,61 @@ class QueueManager:
                                     (round(global_pct, 1), job_id),
                                 )
 
+                        had_failure = False
+                        was_cancelled = False
                         for i, t in enumerate(trials_batch):
                             if cancel_event.is_set():
+                                was_cancelled = True
                                 break
                             sub = t.get("subject_name") or subject_names[0]
                             tidx = int(t.get("trial_idx", 0))
-                            tname = t.get("trial_name")
+                            tname = t.get("trial_name") or f"trial_{tidx}"
                             try:
                                 # Phase A: trajectory (~30% of the trial's work)
                                 def _on_traj(pct, _i=i):
                                     _preproc_progress(_i, pct * 0.30, 0.30)
-                                compute_camera_trajectory(
-                                    sub, tidx,
-                                    progress_callback=_on_traj,
-                                    cancel_event=cancel_event,
-                                )
+                                with stage_timer(job_id, "compute_trajectory",
+                                                  subject=sub, trial=tname,
+                                                  target="local"):
+                                    compute_camera_trajectory(
+                                        sub, tidx,
+                                        progress_callback=_on_traj,
+                                        cancel_event=cancel_event,
+                                    )
                                 # Phase B: background + masks (~70%)
                                 def _on_bg(pct, _i=i):
                                     _preproc_progress(_i, 30 + pct * 0.70, 0.70)
-                                compute_background(
-                                    sub, tidx,
-                                    progress_callback=_on_bg,
-                                    cancel_event=cancel_event,
-                                )
+                                with stage_timer(job_id, "compute_background",
+                                                  subject=sub, trial=tname,
+                                                  target="local"):
+                                    compute_background(
+                                        sub, tidx,
+                                        progress_callback=_on_bg,
+                                        cancel_event=cancel_event,
+                                    )
                             except InterruptedError:
-                                logger.info(f"preproc cancelled at trial {sub}/{tname or tidx}")
+                                was_cancelled = True
+                                logger.info(f"preproc cancelled at trial {sub}/{tname}")
                                 break
                             except Exception as e:
-                                logger.exception(f"preproc trial {sub}/{tname or tidx} failed: {e}")
+                                had_failure = True
+                                logger.exception(f"preproc trial {sub}/{tname} failed: {e}")
                                 with get_db_ctx() as _db:
                                     _db.execute(
                                         "UPDATE jobs SET error_msg = ? WHERE id = ?",
                                         (str(e)[:500], job_id),
                                     )
                         job_registry._cancel_events.pop(job_id, None)
+                        final_status = ("cancelled" if was_cancelled else
+                                         "failed"    if had_failure else
+                                         "completed")
                         with get_db_ctx() as _db:
                             _db.execute(
-                                "UPDATE jobs SET status='completed', progress_pct=100, "
+                                f"UPDATE jobs SET status='{final_status}', progress_pct=100, "
                                 "finished_at=CURRENT_TIMESTAMP WHERE id=?",
                                 (job_id,),
                             )
+                        finalize_job_record(job_id)
 
                 elif job_type == "train":
                     # GPU lane: training on local GPU
