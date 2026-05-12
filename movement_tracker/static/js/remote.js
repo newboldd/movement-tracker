@@ -1334,6 +1334,122 @@ function renderQueue(state) {
     renderHistory(state.history);
 }
 
+
+// ─── Lifetime job history (append-only JSONL log) ──────────────────────
+
+async function refreshLifetimeHistory() {
+    const jt = document.getElementById('lifetimeJobType')?.value || '';
+    const st = document.getElementById('lifetimeStatus')?.value || '';
+    const params = new URLSearchParams({ limit: '200' });
+    if (jt) params.set('job_type', jt);
+    if (st) params.set('status', st);
+    let data;
+    try {
+        data = await API.get('/api/remote/history?' + params.toString());
+    } catch (e) {
+        document.getElementById('lifetimeContent').innerHTML =
+            `<span class="empty-state">Error loading history: ${e.message}</span>`;
+        return;
+    }
+    const summary = data?.summary || {};
+    const rows = data?.rows || [];
+
+    const summaryEl = document.getElementById('lifetimeSummary');
+    if (summaryEl) {
+        if (summary.count) {
+            const parts = [
+                `${summary.count} total`,
+                `${summary.ok} ok`,
+            ];
+            if (summary.failed)    parts.push(`${summary.failed} failed`);
+            if (summary.cancelled) parts.push(`${summary.cancelled} cancelled`);
+            if (summary.median_duration_sec != null) {
+                parts.push(`median ${_fmtDuration(summary.median_duration_sec)}`);
+            }
+            summaryEl.textContent = '— ' + parts.join(' · ');
+        } else {
+            summaryEl.textContent = '';
+        }
+    }
+
+    const el = document.getElementById('lifetimeContent');
+    if (!rows.length) {
+        el.innerHTML = '<span class="empty-state">No matching records.</span>';
+        return;
+    }
+    // Compact table.  Hover row to see full params + per-stage timings.
+    const fmt = (s) => s ? s.toString().replace('T', ' ').slice(0, 19) : '';
+    el.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:11px;">'
+        + '<thead><tr style="text-align:left;color:var(--text-muted);">'
+            + '<th style="padding:4px 6px;">Finished</th>'
+            + '<th style="padding:4px 6px;">Type</th>'
+            + '<th style="padding:4px 6px;">Subj</th>'
+            + '<th style="padding:4px 6px;">Status</th>'
+            + '<th style="padding:4px 6px;">Total</th>'
+            + '<th style="padding:4px 6px;">Stages</th>'
+            + '<th style="padding:4px 6px;">git</th>'
+            + '<th style="padding:4px 6px;">host</th>'
+        + '</tr></thead><tbody>'
+        + rows.map((r, i) => {
+            const dur = r.duration_sec != null ? _fmtDuration(r.duration_sec) : '—';
+            const colour = r.status === 'completed' ? '#4caf50'
+                         : r.status === 'failed'   ? '#e53935'
+                         : r.status === 'cancelled'? '#ffa94d' : 'var(--text-muted)';
+            const gitShort = r.git_version ? r.git_version.slice(0, 8) : '—';
+            const subjStr = r.subject_id != null ? `#${r.subject_id}` : '—';
+            return `<tr id="lifeRow_${i}" style="border-top:1px solid var(--border);cursor:pointer;"
+                          onclick="_toggleLifeDetail(${i})">
+                <td style="padding:4px 6px;font-family:monospace;">${fmt(r.finished_at || r.ts)}</td>
+                <td style="padding:4px 6px;">${r.job_type || '—'}</td>
+                <td style="padding:4px 6px;">${subjStr}</td>
+                <td style="padding:4px 6px;color:${colour};">${r.status || '—'}</td>
+                <td style="padding:4px 6px;">${dur}</td>
+                <td style="padding:4px 6px;">${r.n_stages || 0}</td>
+                <td style="padding:4px 6px;font-family:monospace;color:var(--text-muted);">${gitShort}</td>
+                <td style="padding:4px 6px;color:var(--text-muted);">${r.host || '—'}</td>
+            </tr>
+            <tr id="lifeDetail_${i}" style="display:none;">
+                <td colspan="8" style="padding:6px 12px;background:var(--bg);">
+                    <pre style="margin:0;font-size:11px;white-space:pre-wrap;word-break:break-word;">${_escape(JSON.stringify(r, null, 2))}</pre>
+                </td>
+            </tr>`;
+        }).join('')
+        + '</tbody></table>';
+    // Stash rows for the toggle helper.
+    window._lifetimeRows = rows;
+}
+
+function _toggleLifeDetail(i) {
+    const d = document.getElementById('lifeDetail_' + i);
+    if (!d) return;
+    d.style.display = d.style.display === 'none' ? 'table-row' : 'none';
+}
+
+function _fmtDuration(sec) {
+    if (sec == null || isNaN(sec)) return '—';
+    if (sec < 60)   return sec.toFixed(1) + 's';
+    if (sec < 3600) return (sec / 60).toFixed(1) + 'm';
+    return (sec / 3600).toFixed(2) + 'h';
+}
+
+function _escape(s) {
+    return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Refresh when filters change.
+document.addEventListener('DOMContentLoaded', () => {
+    const jt = document.getElementById('lifetimeJobType');
+    const st = document.getElementById('lifetimeStatus');
+    if (jt) jt.addEventListener('change', refreshLifetimeHistory);
+    if (st) st.addEventListener('change', refreshLifetimeHistory);
+    // Initial load.
+    refreshLifetimeHistory();
+});
+
+// Refresh after a job completes (the queue poll picks up new completions).
+setInterval(() => { if (document.visibilityState === 'visible') refreshLifetimeHistory(); }, 15000);
+
+
 // Tick elapsed time every second for running jobs
 setInterval(() => {
     if (_lastQueueState && _lastQueueState.running && _lastQueueState.running.length > 0) {

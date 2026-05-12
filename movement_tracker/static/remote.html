@@ -384,6 +384,48 @@
             </div>
         </div>
 
+        <!-- Lifetime History (append-only JSONL log) -->
+        <div class="card">
+            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
+                <h2 style="margin:0;">Lifetime History</h2>
+                <span id="lifetimeSummary" style="font-size:12px;color:var(--text-muted);"></span>
+                <div style="margin-left:auto;display:flex;align-items:center;gap:6px;">
+                    <label style="font-size:11px;color:var(--text-muted);">Filter:</label>
+                    <select id="lifetimeJobType" style="font-size:12px;">
+                        <option value="">All job types</option>
+                        <option value="preproc">preproc</option>
+                        <option value="deidentify">deidentify</option>
+                        <option value="hrnet">hrnet</option>
+                        <option value="mediapipe">mediapipe</option>
+                        <option value="vision">vision</option>
+                        <option value="pose">pose</option>
+                        <option value="train">train</option>
+                        <option value="refine">refine</option>
+                        <option value="analyze_v1">analyze_v1</option>
+                        <option value="analyze_v2">analyze_v2</option>
+                        <option value="mano_fit">mano_fit</option>
+                        <option value="mano_fit_v2">mano_fit_v2</option>
+                    </select>
+                    <select id="lifetimeStatus" style="font-size:12px;">
+                        <option value="">Any status</option>
+                        <option value="completed">completed</option>
+                        <option value="failed">failed</option>
+                        <option value="cancelled">cancelled</option>
+                    </select>
+                    <button class="btn btn-sm" onclick="refreshLifetimeHistory()">Refresh</button>
+                </div>
+            </div>
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">
+                Append-only log at <code>&lt;DATA_DIR&gt;/job_history.jsonl</code>.
+                Each row pairs a job's metadata with per-stage timings and the
+                git commit hash that was running — useful for correlating
+                performance changes with code changes.
+            </div>
+            <div id="lifetimeContent" style="font-size:12px;max-height:50vh;overflow-y:auto;">
+                <span class="empty-state">Loading...</span>
+            </div>
+        </div>
+
         <!-- Re-download section removed — use Re-download buttons in Job History -->
     </div>
 
@@ -461,6 +503,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js?v=13"></script>
-    <script src="/static/js/remote.js?v=54"></script>
+    <script src="/static/js/remote.js?v=55"></script>
 </body>
 </html>
