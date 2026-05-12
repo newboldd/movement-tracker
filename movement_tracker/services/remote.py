@@ -4399,6 +4399,8 @@ def remote_preproc(
             db.execute("UPDATE jobs SET progress_pct=? WHERE id=?",
                        (round(float(pct), 1), job_id))
 
+    from .job_history import stage_timer, add_stage, finalize_job_record
+
     def _fail(msg):
         logger.error(f"Job {job_id} remote preproc failed: {msg}")
         with get_db_ctx() as db:
@@ -4407,6 +4409,7 @@ def remote_preproc(
                 "finished_at=CURRENT_TIMESTAMP WHERE id=?",
                 (msg, job_id),
             )
+        finalize_job_record(job_id)
 
     try:
         local_dlc_dir = settings.dlc_path / subject_name
@@ -4480,6 +4483,10 @@ def remote_preproc(
                 _py_cmd(cfg, f"\"import os; os.makedirs(r'{videos_dir_remote}', exist_ok=True)\""),
                 capture_output=True, timeout=15,
             )
+            _videos_t0 = time.perf_counter()
+            _bytes_uploaded = 0
+            _videos_uploaded = 0
+            _videos_reused = 0
             for bt in bundle_trials:
                 vname = bt["video_name"]
                 remote_video = f"{videos_dir_remote}/{vname}"
@@ -4499,18 +4506,21 @@ def remote_preproc(
                 where = (probe.stdout or "").strip()
                 if where == "A":
                     logfile.write(f"  video {vname}: already in preproc dir\n")
+                    _videos_reused += 1
                 elif where == "B":
                     # Cross-link to avoid duplicating: just point the
                     # bundle at the deidentify location.
                     video_path_map[vname] = deidentify_video
                     logfile.write(f"  video {vname}: reusing deidentify upload\n")
+                    _videos_reused += 1
                 else:
                     # Upload from local
                     local_vp = str(settings.video_path / vname)
                     if not os.path.exists(local_vp):
                         _fail(f"Local video not found: {local_vp}")
                         return
-                    logfile.write(f"  uploading {vname}...\n")
+                    _file_size = os.path.getsize(local_vp)
+                    logfile.write(f"  uploading {vname} ({_file_size/1e6:.1f} MB)...\n")
                     logfile.flush()
                     up = subprocess.run(
                         _scp_base_args(cfg) + [local_vp, f"{cfg.host}:{remote_video}"],
@@ -4519,10 +4529,19 @@ def remote_preproc(
                     if up.returncode != 0:
                         _fail(f"Video upload failed: {up.stderr[:200]}")
                         return
+                    _bytes_uploaded += _file_size
+                    _videos_uploaded += 1
                 _check_cancel()
+            add_stage(job_id, "upload_videos",
+                       time.perf_counter() - _videos_t0,
+                       outcome="ok", uploaded=_videos_uploaded,
+                       reused=_videos_reused, bytes=int(_bytes_uploaded))
             _set_progress(15)
 
             # ── Phase 3: upload mediapipe + pose npz if available ────
+            _npz_t0 = time.perf_counter()
+            _npz_bytes = 0
+            _npz_uploaded = 0
             for npz_name in ("mediapipe_prelabels.npz", "pose_prelabels.npz"):
                 local_npz = local_dlc_dir / npz_name
                 if not local_npz.exists():
@@ -4552,10 +4571,18 @@ def remote_preproc(
                     )
                     if up.returncode != 0:
                         logfile.write(f"  WARN: {npz_name} upload failed: {up.stderr[:200]}\n")
+                    else:
+                        _npz_bytes += local_size
+                        _npz_uploaded += 1
                 _check_cancel()
+            add_stage(job_id, "upload_npz",
+                       time.perf_counter() - _npz_t0,
+                       outcome="ok", uploaded=_npz_uploaded,
+                       bytes=int(_npz_bytes))
             _set_progress(25)
 
             # ── Phase 4: upload source modules (always refresh) ──────
+            _mods_t0 = time.perf_counter()
             service_dir = Path(__file__).parent
             modules_dir = f"{remote_work}/modules"
             for mod_file in ("camera_motion.py", "background.py", "ffmpeg.py"):
@@ -4572,6 +4599,8 @@ def remote_preproc(
                     logfile.write(f"  uploaded module {mod_file}\n")
                 logfile.flush()
             _check_cancel()
+            add_stage(job_id, "upload_modules",
+                       time.perf_counter() - _mods_t0, outcome="ok")
             _set_progress(30)
 
             # ── Phase 5: write + upload bundle and worker script ─────
@@ -4631,6 +4660,10 @@ def remote_preproc(
 
             # ── Phase 7: poll status.json ────────────────────────────
             import time as _t
+            _bake_t0 = time.perf_counter()
+            _seen_trials: set[str] = set()
+            _trial_t0_by_name: dict[str, float] = {}
+            _trial_phase_by_name: dict[str, str] = {}
             poll_iv = 3.0
             last_pct = 35.0
             while True:
@@ -4659,22 +4692,58 @@ def remote_preproc(
                     _set_progress(shown)
                     last_pct = shown
                 cur = st.get("current_trial")
+                cur_phase = st.get("phase")    # "trajectory" | "background" | "setup"
+                if cur and cur_phase:
+                    # Track per-(trial, phase) timings: stamp a t0 on
+                    # first sight, close out on transition.
+                    key = f"{cur}::{cur_phase}"
+                    prev_phase = _trial_phase_by_name.get(cur)
+                    if prev_phase and prev_phase != cur_phase:
+                        # Previous phase wrapped — emit a stage record.
+                        prev_key = f"{cur}::{prev_phase}"
+                        if prev_key in _trial_t0_by_name:
+                            add_stage(job_id,
+                                       f"compute_{prev_phase}",
+                                       time.perf_counter() - _trial_t0_by_name.pop(prev_key),
+                                       outcome="ok", trial=cur, target="remote")
+                    if key not in _trial_t0_by_name:
+                        _trial_t0_by_name[key] = time.perf_counter()
+                        _seen_trials.add(cur)
+                    _trial_phase_by_name[cur] = cur_phase
                 if cur:
                     logfile.write(f"  progress: trial={cur} {pct:.1f}%\n")
                     logfile.flush()
                 if phase == "completed":
+                    # Flush whichever stage was still open at the moment
+                    # the worker called itself done.
+                    for cur, last_phase in _trial_phase_by_name.items():
+                        key = f"{cur}::{last_phase}"
+                        if key in _trial_t0_by_name:
+                            add_stage(job_id, f"compute_{last_phase}",
+                                       time.perf_counter() - _trial_t0_by_name.pop(key),
+                                       outcome="ok", trial=cur, target="remote")
+                    add_stage(job_id, "remote_bake_total",
+                               time.perf_counter() - _bake_t0,
+                               outcome="ok", n_trials=len(_seen_trials))
                     logfile.write("  worker completed\n")
                     break
                 if phase == "failed":
+                    add_stage(job_id, "remote_bake_total",
+                               time.perf_counter() - _bake_t0,
+                               outcome="failed", n_trials=len(_seen_trials))
                     _fail(f"Worker failed: {st.get('error', 'unknown')}")
                     return
                 if phase == "cancelled":
+                    add_stage(job_id, "remote_bake_total",
+                               time.perf_counter() - _bake_t0,
+                               outcome="cancelled", n_trials=len(_seen_trials))
                     _fail("Worker cancelled")
                     return
 
             _set_progress(95)
 
             # ── Phase 8: download outputs back ───────────────────────
+            _dl_t0 = time.perf_counter()
             local_preproc_root = settings.dlc_path / subject_name / "preproc"
             local_preproc_root.mkdir(parents=True, exist_ok=True)
             n_ok = 0
@@ -4683,6 +4752,7 @@ def remote_preproc(
                 remote_stem_dir = f"{remote_work}/{subject_name}/preproc/{stem}/"
                 local_stem_dir  = local_preproc_root / stem
                 local_stem_dir.mkdir(parents=True, exist_ok=True)
+                _trial_dl_t0 = time.perf_counter()
                 logfile.write(f"  downloading {stem}/\n"); logfile.flush()
                 _dl = subprocess.run(
                     _scp_base_args(cfg) + ["-r", f"{cfg.host}:{remote_stem_dir}",
@@ -4691,9 +4761,27 @@ def remote_preproc(
                 )
                 if _dl.returncode != 0:
                     logfile.write(f"    WARN: download failed: {_dl.stderr[:200]}\n")
+                    add_stage(job_id, "download_trial",
+                               time.perf_counter() - _trial_dl_t0,
+                               outcome="failed", trial=stem)
                 else:
                     n_ok += 1
+                    # Sum downloaded bytes for the trial dir (best-effort).
+                    _dl_bytes = 0
+                    try:
+                        for f in local_stem_dir.iterdir():
+                            if f.is_file():
+                                _dl_bytes += f.stat().st_size
+                    except OSError:
+                        pass
+                    add_stage(job_id, "download_trial",
+                               time.perf_counter() - _trial_dl_t0,
+                               outcome="ok", trial=stem,
+                               bytes=int(_dl_bytes))
                 _check_cancel()
+            add_stage(job_id, "download_outputs",
+                       time.perf_counter() - _dl_t0,
+                       outcome="ok", n_trials=n_ok)
             logfile.write(f"  downloaded {n_ok}/{len(bundle_trials)} trial dirs\n")
             logfile.flush()
 
@@ -4703,6 +4791,7 @@ def remote_preproc(
                     "finished_at=CURRENT_TIMESTAMP WHERE id=?",
                     (job_id,),
                 )
+            finalize_job_record(job_id)
 
     except InterruptedError:
         logger.info(f"Job {job_id} remote preproc cancelled")
@@ -4712,6 +4801,7 @@ def remote_preproc(
                 "finished_at=CURRENT_TIMESTAMP WHERE id=?",
                 (job_id,),
             )
+        finalize_job_record(job_id)
     except Exception as e:
         logger.exception(f"Job {job_id} remote preproc exception: {e}")
         _fail(str(e)[:500])
