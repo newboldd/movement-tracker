@@ -817,66 +817,128 @@ def render_with_blur_specs(input_path: str, output_path: str,
         if not hand_segments:
             hand_segments = []
 
-        # Load from npz if subject_name provided.
-        # Accepts pre-loaded data via mp_data/pose_data kwargs (used by remote worker
-        # to avoid relative import failures in standalone context).
-        if subject_name and hand_segments:
-            import numpy as np2
+    # No ``blur_hand_settings`` row at all — mirror the preview's
+    # default-synthesis behaviour (see routers/deidentify.py preview path):
+    # cover the whole trial with a per-camera segment so hand protection
+    # is on by default.  Without this, the renderer skipped hand
+    # protection entirely while the preview overlay showed the
+    # auto-generated default mask, making remote-render output diverge
+    # from what the user saw in the preview.
+    if hand_settings is None:
+        _t_start = int(start_frame or 0)
+        _t_end = _t_start + (int(frame_count) if frame_count else 0) - 1
+        if _t_end >= _t_start:
+            if is_stereo:
+                hand_segments = [
+                    {"start": _t_start, "end": _t_end,
+                     "radius": hand_mask_radius, "smooth": hand_smooth,
+                     "side": "left"},
+                    {"start": _t_start, "end": _t_end,
+                     "radius": hand_mask_radius, "smooth": hand_smooth,
+                     "side": "right"},
+                ]
+            else:
+                hand_segments = [{
+                    "start": _t_start, "end": _t_end,
+                    "radius": hand_mask_radius, "smooth": hand_smooth,
+                    "side": "full",
+                }]
 
-            def _build_lm_data(os_lm, od_lm, existing=None):
-                """Build hand_lm_data dict from OS/OD landmark arrays."""
-                lm_data = existing or {}
-                if os_lm is not None:
-                    for f in range(os_lm.shape[0]):
-                        if f not in lm_data:
-                            lm_data[f] = []
-                        for j in range(os_lm.shape[1]):
-                            x, y = os_lm[f, j, 0], os_lm[f, j, 1]
-                            if not np.isnan(x):
-                                lm_data[f].append({"x": float(x), "y": float(y), "side": "left", "type": "hand", "joint": j})
-                if od_lm is not None:
-                    for f in range(od_lm.shape[0]):
-                        if f not in lm_data:
-                            lm_data[f] = []
-                        for j in range(od_lm.shape[1]):
-                            x, y = od_lm[f, j, 0], od_lm[f, j, 1]
-                            if not np.isnan(x):
-                                lm_data[f].append({"x": float(x), "y": float(y), "side": "right", "type": "hand", "joint": j})
-                return lm_data
+    # Load from npz if subject_name provided.
+    # Accepts pre-loaded data via mp_data/pose_data kwargs (used by remote worker
+    # to avoid relative import failures in standalone context).
+    if subject_name and hand_segments:
+        import numpy as np2
 
-            def _build_pose_data(pose_os, pose_od, existing):
-                """Merge pose landmarks into existing lm_data dict."""
-                lm_data = existing
+        def _build_lm_data(os_lm, od_lm, existing=None):
+            """Build hand_lm_data dict from OS/OD landmark arrays."""
+            lm_data = existing or {}
+            if os_lm is not None:
+                for f in range(os_lm.shape[0]):
+                    if f not in lm_data:
+                        lm_data[f] = []
+                    for j in range(os_lm.shape[1]):
+                        x, y = os_lm[f, j, 0], os_lm[f, j, 1]
+                        if not np.isnan(x):
+                            lm_data[f].append({"x": float(x), "y": float(y), "side": "left", "type": "hand", "joint": j})
+            if od_lm is not None:
+                for f in range(od_lm.shape[0]):
+                    if f not in lm_data:
+                        lm_data[f] = []
+                    for j in range(od_lm.shape[1]):
+                        x, y = od_lm[f, j, 0], od_lm[f, j, 1]
+                        if not np.isnan(x):
+                            lm_data[f].append({"x": float(x), "y": float(y), "side": "right", "type": "hand", "joint": j})
+            return lm_data
+
+        def _build_pose_data(pose_os, pose_od, existing):
+            """Merge pose landmarks into existing lm_data dict."""
+            lm_data = existing
+            if pose_os is not None:
+                for f in range(pose_os.shape[0]):
+                    if f not in lm_data:
+                        lm_data[f] = []
+                    for j in range(pose_os.shape[1]):
+                        x, y = pose_os[f, j, 0], pose_os[f, j, 1]
+                        if not np.isnan(x):
+                            lm_data[f].append({"x": float(x), "y": float(y), "side": "left", "type": "pose", "joint": j})
+            if pose_od is not None:
+                for f in range(pose_od.shape[0]):
+                    if f not in lm_data:
+                        lm_data[f] = []
+                    for j in range(pose_od.shape[1]):
+                        x, y = pose_od[f, j, 0], pose_od[f, j, 1]
+                        if not np.isnan(x):
+                            lm_data[f].append({"x": float(x), "y": float(y), "side": "right", "type": "pose", "joint": j})
+            return lm_data
+
+        # Interpolate NaN gaps inside this trial's frame range so the
+        # hand mask stays active when MediaPipe drops detection on
+        # individual frames.  ``start_frame`` and ``total`` come from
+        # the renderer scope above.
+        _interp_start = int(start_frame)
+        _interp_end = _interp_start + int(total) - 1
+
+        if mp_data is not None:
+            # Pre-loaded data provided (e.g., remote worker) — use directly,
+            # no file I/O or relative imports needed.
+            os_lm = mp_data.get("OS_landmarks")
+            od_lm = mp_data.get("OD_landmarks")
+            if os_lm is not None:
+                os_lm = np2.array(os_lm, copy=True)
+                interpolate_landmarks_inplace(os_lm, _interp_start, _interp_end)
+            if od_lm is not None:
+                od_lm = np2.array(od_lm, copy=True)
+                interpolate_landmarks_inplace(od_lm, _interp_start, _interp_end)
+            hand_lm_data = _build_lm_data(os_lm, od_lm)
+            if pose_data is not None:
+                pose_os = pose_data.get("OS_pose")
+                pose_od = pose_data.get("OD_pose")
                 if pose_os is not None:
-                    for f in range(pose_os.shape[0]):
-                        if f not in lm_data:
-                            lm_data[f] = []
-                        for j in range(pose_os.shape[1]):
-                            x, y = pose_os[f, j, 0], pose_os[f, j, 1]
-                            if not np.isnan(x):
-                                lm_data[f].append({"x": float(x), "y": float(y), "side": "left", "type": "pose", "joint": j})
+                    pose_os = np2.array(pose_os, copy=True)
+                    interpolate_landmarks_inplace(pose_os, _interp_start, _interp_end)
                 if pose_od is not None:
-                    for f in range(pose_od.shape[0]):
-                        if f not in lm_data:
-                            lm_data[f] = []
-                        for j in range(pose_od.shape[1]):
-                            x, y = pose_od[f, j, 0], pose_od[f, j, 1]
-                            if not np.isnan(x):
-                                lm_data[f].append({"x": float(x), "y": float(y), "side": "right", "type": "pose", "joint": j})
-                return lm_data
-
-            # Interpolate NaN gaps inside this trial's frame range so the
-            # hand mask stays active when MediaPipe drops detection on
-            # individual frames.  ``start_frame`` and ``total`` come from
-            # the renderer scope above.
-            _interp_start = int(start_frame)
-            _interp_end = _interp_start + int(total) - 1
-
-            if mp_data is not None:
-                # Pre-loaded data provided (e.g., remote worker) — use directly,
-                # no file I/O or relative imports needed.
-                os_lm = mp_data.get("OS_landmarks")
-                od_lm = mp_data.get("OD_landmarks")
+                    pose_od = np2.array(pose_od, copy=True)
+                    interpolate_landmarks_inplace(pose_od, _interp_start, _interp_end)
+                hand_lm_data = _build_pose_data(pose_os, pose_od, hand_lm_data)
+        else:
+            from ..config import get_settings
+            from .mediapipe_prelabel import _detect_frame_offset
+            settings = get_settings()
+            npz_path = settings.dlc_path / subject_name / "mediapipe_prelabels.npz"
+            if npz_path.exists():
+                npz = np2.load(str(npz_path))
+                os_lm = npz.get("OS_landmarks")
+                od_lm = npz.get("OD_landmarks")
+                # Trim pre-roll frames if NPZ was built on a machine with different
+                # codec frame-counting behaviour (e.g. OpenCV exposing negative-PTS frames).
+                _mp_offset = _detect_frame_offset(subject_name, npz)
+                if _mp_offset > 0 and os_lm is not None:
+                    os_lm = os_lm[_mp_offset:]
+                if _mp_offset > 0 and od_lm is not None:
+                    od_lm = od_lm[_mp_offset:]
+                # Interpolate AFTER the offset trim (so frame indices
+                # align with the renderer's start_frame/total range).
                 if os_lm is not None:
                     os_lm = np2.array(os_lm, copy=True)
                     interpolate_landmarks_inplace(os_lm, _interp_start, _interp_end)
@@ -884,9 +946,19 @@ def render_with_blur_specs(input_path: str, output_path: str,
                     od_lm = np2.array(od_lm, copy=True)
                     interpolate_landmarks_inplace(od_lm, _interp_start, _interp_end)
                 hand_lm_data = _build_lm_data(os_lm, od_lm)
-                if pose_data is not None:
-                    pose_os = pose_data.get("OS_pose")
-                    pose_od = pose_data.get("OD_pose")
+
+                # Also load pose landmarks for forearm triangle (elbow)
+                pose_npz_path = settings.dlc_path / subject_name / "pose_prelabels.npz"
+                if pose_npz_path.exists():
+                    pose_npz = np2.load(str(pose_npz_path))
+                    pose_os = pose_npz.get("OS_pose")
+                    pose_od = pose_npz.get("OD_pose")
+                    # Apply same pre-roll trim to pose data
+                    _pose_offset = _detect_frame_offset(subject_name, pose_npz)
+                    if _pose_offset > 0 and pose_os is not None:
+                        pose_os = pose_os[_pose_offset:]
+                    if _pose_offset > 0 and pose_od is not None:
+                        pose_od = pose_od[_pose_offset:]
                     if pose_os is not None:
                         pose_os = np2.array(pose_os, copy=True)
                         interpolate_landmarks_inplace(pose_os, _interp_start, _interp_end)
@@ -894,51 +966,6 @@ def render_with_blur_specs(input_path: str, output_path: str,
                         pose_od = np2.array(pose_od, copy=True)
                         interpolate_landmarks_inplace(pose_od, _interp_start, _interp_end)
                     hand_lm_data = _build_pose_data(pose_os, pose_od, hand_lm_data)
-            else:
-                from ..config import get_settings
-                from .mediapipe_prelabel import _detect_frame_offset
-                settings = get_settings()
-                npz_path = settings.dlc_path / subject_name / "mediapipe_prelabels.npz"
-                if npz_path.exists():
-                    npz = np2.load(str(npz_path))
-                    os_lm = npz.get("OS_landmarks")
-                    od_lm = npz.get("OD_landmarks")
-                    # Trim pre-roll frames if NPZ was built on a machine with different
-                    # codec frame-counting behaviour (e.g. OpenCV exposing negative-PTS frames).
-                    _mp_offset = _detect_frame_offset(subject_name, npz)
-                    if _mp_offset > 0 and os_lm is not None:
-                        os_lm = os_lm[_mp_offset:]
-                    if _mp_offset > 0 and od_lm is not None:
-                        od_lm = od_lm[_mp_offset:]
-                    # Interpolate AFTER the offset trim (so frame indices
-                    # align with the renderer's start_frame/total range).
-                    if os_lm is not None:
-                        os_lm = np2.array(os_lm, copy=True)
-                        interpolate_landmarks_inplace(os_lm, _interp_start, _interp_end)
-                    if od_lm is not None:
-                        od_lm = np2.array(od_lm, copy=True)
-                        interpolate_landmarks_inplace(od_lm, _interp_start, _interp_end)
-                    hand_lm_data = _build_lm_data(os_lm, od_lm)
-
-                    # Also load pose landmarks for forearm triangle (elbow)
-                    pose_npz_path = settings.dlc_path / subject_name / "pose_prelabels.npz"
-                    if pose_npz_path.exists():
-                        pose_npz = np2.load(str(pose_npz_path))
-                        pose_os = pose_npz.get("OS_pose")
-                        pose_od = pose_npz.get("OD_pose")
-                        # Apply same pre-roll trim to pose data
-                        _pose_offset = _detect_frame_offset(subject_name, pose_npz)
-                        if _pose_offset > 0 and pose_os is not None:
-                            pose_os = pose_os[_pose_offset:]
-                        if _pose_offset > 0 and pose_od is not None:
-                            pose_od = pose_od[_pose_offset:]
-                        if pose_os is not None:
-                            pose_os = np2.array(pose_os, copy=True)
-                            interpolate_landmarks_inplace(pose_os, _interp_start, _interp_end)
-                        if pose_od is not None:
-                            pose_od = np2.array(pose_od, copy=True)
-                            interpolate_landmarks_inplace(pose_od, _interp_start, _interp_end)
-                        hand_lm_data = _build_pose_data(pose_os, pose_od, hand_lm_data)
 
     import os, subprocess
 
