@@ -32,6 +32,14 @@ const manoViewer = (() => {
     let showManoSkel = true;
     let showMP2D = false;
     let showMP3D = false;
+    // Stereo (cross-camera image-alignment) overlay.  Only 2D —
+    // there's no 3D representation; the partner-camera MP label is
+    // translated into the current view by the per-frame per-joint
+    // phase-correlation shift, drawn as pink crosses next to the cyan
+    // MP markers.
+    let showStereo2D = false;
+    let stereoSelectedJoint = null;   // joint whose per-joint bbox to draw
+    let stereoConfThreshold = 0;      // hide markers with response < this
     let showVision2D = false;
     let showVision3D = false;
     let showVisionSkel = true;
@@ -1302,6 +1310,86 @@ const manoViewer = (() => {
             renderDistanceTrace();
         }
         $('showMP2D').addEventListener('change', e => { showMP2D = e.target.checked; updateLayerFlags(); });
+        $('showStereo2D')?.addEventListener('change', e => {
+            showStereo2D = e.target.checked;
+            if (!showStereo2D) stereoSelectedJoint = null;
+            const wrap = $('stereoConfWrap');
+            if (wrap) wrap.style.display = showStereo2D ? 'flex' : 'none';
+            updateLayerFlags();
+        });
+        $('stereoConfSlider')?.addEventListener('input', e => {
+            stereoConfThreshold = parseFloat(e.target.value);
+            const lbl = $('stereoConfVal');
+            if (lbl) lbl.textContent = stereoConfThreshold.toFixed(2);
+            render();
+        });
+        // Stereo button: toggle panel (Run + Close).  Mirrors HRnet Correct.
+        $('runStereoBtn')?.addEventListener('click', () => {
+            const open = $('stereoPanel').style.display !== 'block';
+            $('stereoPanel').style.display = open ? 'block' : 'none';
+            $('runStereoBtn').classList.toggle('active', open);
+        });
+        $('stereoCloseBtn')?.addEventListener('click', () => {
+            $('stereoPanel').style.display = 'none';
+            $('runStereoBtn').classList.remove('active');
+        });
+        $('runStereoGoBtn')?.addEventListener('click', async () => {
+            const st = $('stereoStatus');
+            const goBtn = $('runStereoGoBtn');
+            if (!subjectId || currentTrialIdx < 0 || !trials?.[currentTrialIdx]) {
+                if (st) st.textContent = 'Select a trial first.';
+                return;
+            }
+            const target = await _promptExecTarget(goBtn);
+            if (target === 'remote' && st) {
+                st.textContent = 'Remote not wired for Stereo yet — running locally.';
+            } else if (st) {
+                st.textContent = 'Submitting…';
+            }
+            try {
+                const res = await api(`/api/mano/${subjectId}/run_stereo`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ trial_idx: trials[currentTrialIdx].trial_idx }),
+                });
+                const jobId = res.job_id;
+                if (st) st.textContent = `Job ${jobId} running…`;
+                const savedSid = subjectId;
+                const evt = new EventSource(`/api/jobs/${jobId}/stream`);
+                _activeEventSources.add(evt);
+                evt.onmessage = async (e) => {
+                    if (subjectId !== savedSid) {
+                        evt.close(); _activeEventSources.delete(evt); return;
+                    }
+                    const data = JSON.parse(e.data);
+                    if (data.status === 'running') {
+                        const pct = data.progress_pct ? Math.round(data.progress_pct) : 0;
+                        if (st) st.textContent = `Running… ${pct}%`;
+                    } else if (data.status === 'completed') {
+                        evt.close(); _activeEventSources.delete(evt);
+                        if (st) st.textContent = 'Complete. Reloading…';
+                        await loadTrial(currentTrialIdx);
+                        const cb = $('showStereo2D');
+                        if (cb && !cb.checked) {
+                            cb.checked = true;
+                            showStereo2D = true;
+                            const wrap = $('stereoConfWrap');
+                            if (wrap) wrap.style.display = 'flex';
+                            updateLayerFlags();
+                        }
+                        if (st) st.textContent = 'Done.';
+                    } else if (data.status === 'failed') {
+                        evt.close(); _activeEventSources.delete(evt);
+                        if (st) st.textContent = `Failed: ${data.error_msg || ''}`;
+                    } else if (data.status === 'cancelled') {
+                        evt.close(); _activeEventSources.delete(evt);
+                        if (st) st.textContent = 'Cancelled.';
+                    }
+                };
+            } catch (e) {
+                if (st) st.textContent = `Error: ${e.message || e}`;
+            }
+        });
         $('showMP3D').addEventListener('change', e => { showMP3D = e.target.checked; updateLayerFlags(); });
         $('showMano2D').addEventListener('change', e => { showMano2D = e.target.checked; updateLayerFlags(); _updateHandDiagramColor(); });
         $('showMano3D').addEventListener('change', e => { showMano3D = e.target.checked; updateLayerFlags(); _updateHandDiagramColor(); });
@@ -3434,6 +3522,77 @@ const manoViewer = (() => {
             }
         }
 
+        // Stereo: partner-camera MP label translated into this camera
+        // by the phase-correlation shift discovered by ``run_stereo``.
+        // Pink (#e91e63) crosses; size scaled by per-joint confidence.
+        // Also overlays the crop windows: solid pink rect = hand-wide
+        // (pass-1) crop, dashed pink rect = per-joint (pass-2) crop
+        // for the currently-selected joint.
+        if (showStereo2D && trialData?.has_stereo) {
+            const stereoKp = isLeft ? trialData.stereo_tracked_L
+                                    : trialData.stereo_tracked_R;
+            const mpHere = isLeft ? trialData.mp_tracked_L
+                                  : trialData.mp_tracked_R;
+            // Hand-wide bbox (solid).
+            if (mpHere && mpHere[fn]) {
+                let sx = 0, sy = 0, n = 0;
+                for (let j = 0; j < 21; j++) {
+                    const pt = mpHere[fn][j];
+                    if (!pt) continue;
+                    sx += pt[0]; sy += pt[1]; n += 1;
+                }
+                const hch = (trialData.stereo_hand_crop_half != null
+                             ? trialData.stereo_hand_crop_half : 80);
+                if (n > 0) {
+                    const cx = (sx / n) * pixelScale;
+                    const cy = (sy / n) * pixelScale;
+                    const w = (2 * hch + 1) * pixelScale;
+                    ctx.save();
+                    ctx.strokeStyle = '#e91e63';
+                    ctx.lineWidth = 1.5;
+                    ctx.strokeRect(cx - w / 2, cy - w / 2, w, w);
+                    ctx.restore();
+                }
+            }
+            // Per-joint bbox for selected joint (dashed).
+            if (stereoSelectedJoint != null && mpHere && mpHere[fn]) {
+                const pt = mpHere[fn][stereoSelectedJoint];
+                if (pt) {
+                    const perJoint = trialData.stereo_crop_halves_per_joint;
+                    const ch = (Array.isArray(perJoint) && perJoint[stereoSelectedJoint] != null)
+                        ? perJoint[stereoSelectedJoint]
+                        : (trialData.stereo_crop_half != null ? trialData.stereo_crop_half : 40);
+                    const cx = pt[0] * pixelScale;
+                    const cy = pt[1] * pixelScale;
+                    const w = (2 * ch + 1) * pixelScale;
+                    ctx.save();
+                    ctx.strokeStyle = '#e91e63';
+                    ctx.lineWidth = 1.2;
+                    ctx.setLineDash([4, 3]);
+                    ctx.strokeRect(cx - w / 2, cy - w / 2, w, w);
+                    ctx.setLineDash([]);
+                    ctx.restore();
+                }
+            }
+            // Pink crosses, sized by per-joint confidence; conf below
+            // the slider threshold are hidden entirely.
+            if (stereoKp && stereoKp[fn]) {
+                const respFrame = trialData.stereo_response?.[fn];
+                for (let j = 0; j < 21; j++) {
+                    if (!isJointVisible(j) || !stereoKp[fn][j]) continue;
+                    const rawConf = (respFrame && respFrame[j] != null) ? respFrame[j] : 0;
+                    if (rawConf < stereoConfThreshold) continue;
+                    const x = stereoKp[fn][j][0] * pixelScale;
+                    const y = stereoKp[fn][j][1] * pixelScale;
+                    let conf = rawConf;
+                    if (conf < 0) conf = 0;
+                    if (conf > 1) conf = 1;
+                    const size = 4 * (0.3 + 0.7 * conf);
+                    drawCross(x, y, '#e91e63', size);
+                }
+            }
+        }
+
         // Vision joints (blue)
         if (showVision2D && visionKp?.[fn]) {
             for (let j = 0; j < 21; j++) {
@@ -5076,6 +5235,43 @@ const manoViewer = (() => {
             const raycaster = new THREE.Raycaster();
             raycaster.setFromCamera(mouse, camera3d);
 
+            // Stereo 2D hit-test (no 3D sphere to raycast against).
+            // Pink crosses sit on the video canvas below this overlay,
+            // so we have to do the hit-test HERE rather than on the
+            // videoCanvas (whose click handler the overlay blocks).
+            if (showStereo2D && trialData?.has_stereo) {
+                const cRect = canvas.getBoundingClientRect();
+                const cmx = (e.clientX - cRect.left - offsetX) / scale;
+                const cmy = (e.clientY - cRect.top  - offsetY) / scale;
+                const _isLeft = currentSide === cameraNames[0];
+                const sArr = _isLeft ? trialData.stereo_tracked_L
+                                      : trialData.stereo_tracked_R;
+                const _midline = vidW / 2;
+                const _pixelScale = canvas.width / (cameraMode === 'stereo'
+                    ? (_isLeft ? _midline : vidW - _midline)
+                    : vidW);
+                const HIT_R = 12 / _pixelScale;
+                const HIT_R2 = HIT_R * HIT_R;
+                const fn = currentFrame;
+                if (sArr?.[fn]) {
+                    let sBest = null;
+                    for (let j = 0; j < 21; j++) {
+                        if (!isJointVisible(j) || !sArr[fn][j]) continue;
+                        const jx = sArr[fn][j][0], jy = sArr[fn][j][1];
+                        const d2 = (jx - cmx / _pixelScale) ** 2
+                                 + (jy - cmy / _pixelScale) ** 2;
+                        if (d2 < HIT_R2 && (!sBest || d2 < sBest.d2)) {
+                            sBest = { j, d2 };
+                        }
+                    }
+                    if (sBest) {
+                        stereoSelectedJoint = (stereoSelectedJoint === sBest.j) ? null : sBest.j;
+                        render();
+                        return;
+                    }
+                }
+            }
+
             // Raycast against all model groups, find closest sphere
             const groups = [
                 ['skel_v2', skelV2Group],
@@ -6369,6 +6565,20 @@ const manoViewer = (() => {
             if ($('showMP3D')) { $('showMP3D').checked = false; showMP3D = false; }
         }
         showMP = showMP2D || showMP3D;
+
+        // Stereo — dim + reset when no saved alignment exists.  Trial
+        // load also clears the per-joint bbox selection so a stale
+        // joint index from the previous trial doesn't paint a phantom
+        // box at the same index here.
+        const hasStereo = !!(trialData && trialData.has_stereo);
+        _setLayerAvail('showStereo2D', hasStereo);
+        if (!hasStereo && $('showStereo2D')) {
+            $('showStereo2D').checked = false;
+            showStereo2D = false;
+        }
+        stereoSelectedJoint = null;
+        const _scw = $('stereoConfWrap');
+        if (_scw) _scw.style.display = (showStereo2D && hasStereo) ? 'flex' : 'none';
 
         // Vision
         _setLayerAvail('showVision2D', hasVision);

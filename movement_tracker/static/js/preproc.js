@@ -1,0 +1,1278 @@
+/* Pre-proc page (Phase A): camera-trajectory extraction + visualisation. */
+(() => {
+    const $ = id => document.getElementById(id);
+    const api = (url, opts) => fetch(url, opts).then(async r => {
+        if (!r.ok) throw new Error(`${url}: HTTP ${r.status} — ${await r.text()}`);
+        return r.json();
+    });
+
+    let subjects = [];
+    let subjectId = null;
+    let subjectName = null;
+    let trials = [];
+    let currentTrialIdx = -1;
+    let trialMeta = null;
+    let trajectory = null;
+    let currentFrame = 0;
+    let nFrames = 0;
+    let isStabilised = false;
+    let showJerks = true;
+    let playing = false;
+    let playTimer = null;
+    // Hidden <video> element with the trial's source video.  All
+    // playback and scrubbing seeks against this element — same pattern
+    // as mano.js / videos.js, which is what makes smooth playback work.
+    let liveVideoEl = null;
+    let liveVideoReady = false;
+    let vidW = 0, vidH = 0;     // video native dimensions (stereo: full 3840×1080)
+    let isStereo = false;
+    const _hasRVFC = typeof HTMLVideoElement !== 'undefined'
+                     && 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
+    let activeJobId = null;
+    let activeEvtSource = null;
+    // Background+bake state.  The compute job is independent of the
+    // trajectory job — it uses a second SSE source.  The "overlay" is
+    // one of three modes: 'off' (live frame), 'stable' (read from
+    // baked stable.mp4 by seeking a hidden video element), or 'fg'
+    // (same but reading fg.mp4).
+    let backgroundData = null;
+    let bgJobId = null;
+    let bgEvtSource = null;
+    let overlayMode = 'off';    // 'off' | 'stable' | 'bg' | 'fg' | 'isolated'
+    let stableVideoEl = null;   // hidden <video> tied to stable.mp4
+    let fgVideoEl = null;       // hidden <video> tied to fg.mp4
+    let handVideoEl = null;     // hidden <video> tied to hand.mp4 (kpt-only mask)
+    let outlineVideoEl = null;  // hidden <video> tied to outline.mp4 (contour)
+    let showOutline = false;    // checkbox: overlay segmentation outline on canvas
+    // Stereo controls: side toggle alternates between 'OS' and 'OD'.
+    // The /api/deidentify/{id}/frame endpoint does the half-crop
+    // server-side via the ``side=`` query param.
+    let currentSide = 'OS';
+    const CAMERA_NAMES = ['OS', 'OD'];
+    // Playback speed presets — slider index maps to a multiplier.
+    // Default index = 3 (1x).  Frame fetches are async, so speeds above
+    // 4x will skip frames rather than queueing up loads.
+    const SPEED_PRESETS = [0.25, 0.5, 1, 2, 4, 8, 16, 32];
+    let playbackRate = 1;
+
+    // Zoom/pan — same conventions as videos.js/mano.js.  Offsets are in
+    // canvas pixels relative to the base-centered origin (computed in
+    // getBaseMetrics()).  Scale stacks on top of the base fit-scale.
+    let scale = 1, offsetX = 0, offsetY = 0;
+    let dragging = false;
+    let dragStartX = 0, dragStartY = 0;
+    let panStartOX = 0, panStartOY = 0;
+
+    const canvas = $('canvas');
+    const ctx    = canvas.getContext('2d');
+    const plot   = $('trajPlot');
+    const pctx   = plot.getContext('2d');
+
+    async function loadSubjects() {
+        try { subjects = await api('/api/subjects'); }
+        catch (e) { subjects = []; }
+        const sel = $('subjectSelect');
+        sel.innerHTML = subjects.map(s =>
+            `<option value="${s.id}">${s.name}</option>`).join('');
+        // Subject pre-selection priority:
+        //   1. ``?subject=N`` URL param  (deep-link from the Subjects page)
+        //   2. ``sessionStorage.lastSubjectId`` (cross-page persistence)
+        //   3. first subject in the list
+        const fromUrl = new URLSearchParams(window.location.search).get('subject');
+        const saved   = sessionStorage.getItem('lastSubjectId');
+        const initialId = (fromUrl && subjects.some(s => String(s.id) === fromUrl))
+            ? fromUrl
+            : (saved && subjects.some(s => String(s.id) === saved) ? saved : null);
+        if (initialId) sel.value = initialId;
+        sel.addEventListener('change', () => onSubjectChange(parseInt(sel.value)));
+        if (sel.value) await onSubjectChange(parseInt(sel.value));
+    }
+
+    async function onSubjectChange(id) {
+        subjectId = id;
+        const subj = subjects.find(s => s.id === id);
+        subjectName = subj ? subj.name : '';
+        sessionStorage.setItem('lastSubjectId', String(id));
+        try { trials = await api(`/api/mano/${id}/trials`); }
+        catch (e) { trials = []; }
+        const wrap = $('trialBtns');
+        // /api/mano/{id}/trials returns `trial_stem` (e.g. "Con01_R1").
+        // Strip the "{subject}_" prefix for a compact label like "R1" —
+        // same convention as the video browser.  Fall back to the stem.
+        const _trialLabel = (t) => {
+            const stem = t.trial_stem || t.trial_name || '';
+            if (subjectName && stem.startsWith(subjectName + '_')) {
+                return stem.slice(subjectName.length + 1);
+            }
+            return stem || '?';
+        };
+        wrap.innerHTML = trials.map((t, i) =>
+            `<button class="trial-btn" data-i="${i}" title="${t.trial_stem || ''}">${_trialLabel(t)}</button>`).join('');
+        wrap.querySelectorAll('.trial-btn').forEach(b => {
+            b.addEventListener('click', () => selectTrial(parseInt(b.dataset.i)));
+        });
+        if (trials.length > 0) {
+            // Restore the previously-selected trial across page reloads.
+            // Look up by trial_stem so we survive trial-order changes.
+            const savedStem = sessionStorage.getItem('preprocLastTrialStem');
+            let idx = 0;
+            if (savedStem) {
+                const i = trials.findIndex(t => t.trial_stem === savedStem);
+                if (i >= 0) idx = i;
+            }
+            await selectTrial(idx);
+        } else {
+            $('statusMsg').textContent = 'no trials for this subject';
+        }
+    }
+
+    async function selectTrial(idx) {
+        currentTrialIdx = idx;
+        trialMeta = trials[idx];
+        if (trialMeta?.trial_stem) {
+            sessionStorage.setItem('preprocLastTrialStem', trialMeta.trial_stem);
+        }
+        nFrames = trialMeta.n_frames || trialMeta.frame_count || 0;
+        currentFrame = 0;
+        // New trial → reset zoom/pan so the image fits the viewport.
+        scale = 1; offsetX = 0; offsetY = 0;
+        document.querySelectorAll('.trial-btn').forEach((b, i) =>
+            b.classList.toggle('active', i === idx));
+        $('frameDisplay').textContent = `Frame: 0 / ${nFrames}`;
+        $('trajectoryStatus').textContent = '';
+        $('trajectoryStats').textContent = '';
+        $('osodAgree').textContent = '';
+        trajectory = null;
+        // Default to OS on every trial open.  ``updateCameraControls``
+        // collapses to 'full' for non-stereo trials (single-camera).
+        currentSide = 'OS';
+        updateCameraControls();
+        await _loadTrialVideo();
+        await refreshTrajectoryFromServer();
+        await refreshBackgroundFromServer();
+        drawPlot();
+    }
+
+    function _loadTrialVideo() {
+        // Point the hidden <video> element at the trial's source mp4.
+        // We seek into it for scrubbing and let the browser decode at
+        // native speed for playback — same pattern as videos.js / mano.js.
+        liveVideoReady = false;
+        if (!liveVideoEl) {
+            liveVideoEl = document.createElement('video');
+            liveVideoEl.muted = true;
+            liveVideoEl.playsInline = true;
+            liveVideoEl.preload = 'auto';
+            liveVideoEl.crossOrigin = 'anonymous';
+            liveVideoEl.style.display = 'none';
+            document.body.appendChild(liveVideoEl);
+        }
+        const src = `/api/mano/${subjectId}/trial/${trialMeta.trial_idx}/video`;
+        liveVideoEl.src = src;
+        return new Promise(resolve => {
+            const onMd = () => {
+                vidW = liveVideoEl.videoWidth;
+                vidH = liveVideoEl.videoHeight;
+                // Stereo heuristic — same as videos.js: aspect > 1.7 ⇒ side-by-side.
+                isStereo = (vidW / vidH) > 1.7;
+                liveVideoReady = true;
+                _refreshActiveVideo();
+                // Seek to mid-frame-0 so the first frame is decodable (t=0 isn't
+                // always decodable on H.264 streams that start at a non-zero PTS).
+                const fps = trialMeta?.fps || 30;
+                liveVideoEl.currentTime = 0.5 / fps;
+                liveVideoEl.addEventListener('seeked', () => {
+                    render();
+                    resolve();
+                }, { once: true });
+            };
+            liveVideoEl.addEventListener('loadedmetadata', onMd, { once: true });
+        });
+    }
+
+    function updateCameraControls() {
+        // Show the OS/OD toggle only for stereo trials.  Single-camera
+        // trials force ``side=full`` (the only sensible request) and
+        // hide the toggle button.
+        const isStereo = trajectory ? trajectory.is_stereo
+                                      : (trialMeta?.is_stereo !== false);
+        const wrap = $('cameraControls');
+        if (!wrap) return;
+        if (isStereo) {
+            wrap.style.display = 'inline-flex';
+            // Re-normalise away from any legacy 'full' state.
+            if (currentSide !== 'OS' && currentSide !== 'OD') currentSide = 'OS';
+            $('cameraLabel').textContent = currentSide;
+        } else {
+            wrap.style.display = 'none';
+            currentSide = 'full';
+        }
+    }
+
+    function switchCamera() {
+        // Alternate OS ↔ OD.  No 'full' state in the rotation — single-
+        // camera trials hide the toggle entirely.  All sources are
+        // <video> elements now, so switching sides is just a re-render
+        // with a different sub-rect crop.
+        currentSide = (currentSide === 'OS') ? 'OD' : 'OS';
+        updateCameraControls();
+        render();
+    }
+
+    async function refreshTrajectoryFromServer() {
+        if (subjectId == null || currentTrialIdx < 0) return;
+        try {
+            const t = await api(`/api/preproc/${subjectId}/trial/${trialMeta.trial_idx}/trajectory`);
+            if (t.available) {
+                trajectory = t;
+                $('dot-trajectory').classList.add('done');
+                $('dot-trajectory').classList.remove('running', 'failed');
+                showTrajectoryStats();
+            } else {
+                trajectory = null;
+                $('dot-trajectory').classList.remove('done', 'running', 'failed');
+                $('trajectoryStatus').textContent = 'Not computed yet.';
+            }
+        } catch (e) {
+            $('trajectoryStatus').textContent = `Load error: ${e.message}`;
+        }
+        updateCameraControls();
+        // Trajectory readiness gates the Background button.
+        const bgBtn = $('runBackgroundBtn');
+        if (bgBtn) bgBtn.disabled = !trajectory;
+        drawPlot();
+        render();
+    }
+
+    async function refreshBackgroundFromServer() {
+        if (subjectId == null || currentTrialIdx < 0) return;
+        // Reset cached overlay videos so any pending overlay redraw won't use stale data.
+        if (stableVideoEl)  { stableVideoEl.removeAttribute('src');  stableVideoEl.load(); }
+        if (fgVideoEl)      { fgVideoEl.removeAttribute('src');      fgVideoEl.load(); }
+        if (handVideoEl)    { handVideoEl.removeAttribute('src');    handVideoEl.load(); }
+        if (outlineVideoEl) { outlineVideoEl.removeAttribute('src'); outlineVideoEl.load(); }
+        $('bgThumbOS').src = '';
+        $('bgThumbOD').src = '';
+        $('bgThumbOD').style.display = 'none';
+        try {
+            const b = await api(`/api/preproc/${subjectId}/trial/${trialMeta.trial_idx}/background`);
+            if (b.available) {
+                backgroundData = b;
+                $('dot-background').classList.add('done');
+                $('dot-background').classList.remove('running', 'failed');
+                showBackgroundStats();
+                _loadBackgroundArtifacts();
+            } else {
+                backgroundData = null;
+                $('dot-background').classList.remove('done', 'running', 'failed');
+                $('backgroundStatus').textContent = trajectory
+                    ? 'Not computed yet.'
+                    : 'Waiting for trajectory (run step 1 first).';
+                $('backgroundStats').textContent = '';
+                $('backgroundPreview').style.display = 'none';
+                // Force overlay back to live frame.
+                overlayMode = 'off';
+                if ($('ovOff'))    $('ovOff').checked = true;
+                if ($('ovStable'))     $('ovStable').disabled = true;
+                if ($('ovBg'))         $('ovBg').disabled = true;
+                if ($('ovFg'))         $('ovFg').disabled = true;
+                if ($('ovIsolated'))   $('ovIsolated').disabled = true;
+                if ($('cbShowOutline')) $('cbShowOutline').disabled = true;
+            }
+        } catch (e) {
+            $('backgroundStatus').textContent = `Load error: ${e.message}`;
+        }
+        // Enable the Compute button only once a trajectory exists.
+        $('runBackgroundBtn').disabled = !trajectory;
+    }
+
+    function showBackgroundStats() {
+        if (!backgroundData) return;
+        const b = backgroundData;
+        const lines = [
+            `Bake: <strong>${b.frames_written}</strong> / ${b.n_frames} frames`,
+            `BG sampled from: <strong>${b.n_samples_used}</strong> frames`,
+        ];
+        if (b.stable_mp4_exists) {
+            lines.push(`stable.mp4: <strong>${b.stable_mp4_size_mb.toFixed(1)} MB</strong>`);
+        } else {
+            lines.push(`<span style="color:var(--red);">stable.mp4 missing</span>`);
+        }
+        if (b.fg_mp4_exists) {
+            lines.push(`fg.mp4: <strong>${b.fg_mp4_size_mb.toFixed(1)} MB</strong>`);
+        } else {
+            lines.push(`<span style="color:var(--red);">fg.mp4 missing</span>`);
+        }
+        lines.push(`OS MAD: p95=<strong>${b.mad_OS_p95.toFixed(1)}</strong>  mean=${b.mad_OS_mean.toFixed(1)}`);
+        if (b.is_stereo) {
+            lines.push(`OD MAD: p95=<strong>${b.mad_OD_p95.toFixed(1)}</strong>  mean=${b.mad_OD_mean.toFixed(1)}`);
+        }
+        $('backgroundStats').innerHTML = lines.join('<br>');
+    }
+
+    function _loadBackgroundArtifacts() {
+        if (!backgroundData) return;
+        const base = `/api/preproc/${subjectId}/trial/${trialMeta.trial_idx}`;
+        const t = Date.now();   // bust HTTP cache after recompute
+        // BG/MAD thumbnails (sidebar preview).  Also used as the source
+        // for the 'bg' overlay's canvas render, so enable that radio
+        // once at least the OS thumbnail has loaded.
+        $('ovBg').disabled = true;
+        $('bgThumbOS').addEventListener('load', () => {
+            $('ovBg').disabled = false;
+        }, { once: true });
+        $('bgThumbOS').src = `${base}/background_image?side=OS&kind=bg&_=${t}`;
+        if (backgroundData.is_stereo) {
+            $('bgThumbOD').src = `${base}/background_image?side=OD&kind=bg&_=${t}`;
+            $('bgThumbOD').style.display = '';
+        } else {
+            $('bgThumbOD').style.display = 'none';
+        }
+        $('backgroundPreview').style.display = '';
+
+        // Lazily create the hidden video elements that back the overlay
+        // modes.  We seek into them frame-by-frame in render().
+        const _makeVideo = () => {
+            const v = document.createElement('video');
+            v.muted = true; v.playsInline = true;
+            v.preload = 'auto'; v.crossOrigin = 'anonymous';
+            v.style.display = 'none';
+            document.body.appendChild(v);
+            return v;
+        };
+        if (!stableVideoEl)  stableVideoEl  = _makeVideo();
+        if (!fgVideoEl)      fgVideoEl      = _makeVideo();
+        if (!handVideoEl)    handVideoEl    = _makeVideo();
+        if (!outlineVideoEl) outlineVideoEl = _makeVideo();
+        stableVideoEl.src  = `${base}/stable_video?_=${t}`;
+        fgVideoEl.src      = `${base}/fg_video?_=${t}`;
+        handVideoEl.src    = `${base}/hand_video?_=${t}`;
+        outlineVideoEl.src = `${base}/outline_video?_=${t}`;
+        // The 'isolated' composite needs hand.mp4 (strict keypoint mask)
+        // — disable the radio until it's actually loaded.  Outline
+        // checkbox needs outline.mp4 likewise.
+        const _updateIsolatedAvailability = () => {
+            $('ovIsolated').disabled = !(backgroundData?.stable_mp4_exists
+                                          && backgroundData?.hand_mp4_exists);
+        };
+        stableVideoEl.addEventListener('loadedmetadata', () => {
+            $('ovStable').disabled = !backgroundData?.stable_mp4_exists;
+            _updateIsolatedAvailability();
+        }, { once: true });
+        fgVideoEl.addEventListener('loadedmetadata', () => {
+            $('ovFg').disabled = !backgroundData?.fg_mp4_exists;
+        }, { once: true });
+        handVideoEl.addEventListener('loadedmetadata', () => {
+            _updateIsolatedAvailability();
+        }, { once: true });
+        outlineVideoEl.addEventListener('loadedmetadata', () => {
+            $('cbShowOutline').disabled = !backgroundData?.outline_mp4_exists;
+        }, { once: true });
+    }
+
+    async function computeBackground() {
+        if (subjectId == null || currentTrialIdx < 0) return;
+        if (!trajectory) {
+            $('backgroundStatus').textContent = 'Run Compute Trajectory first.';
+            return;
+        }
+        try {
+            const res = await api(`/api/preproc/${subjectId}/compute_background`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ trial_idx: trialMeta.trial_idx }),
+            });
+            bgJobId = res.job_id;
+            $('dot-background').classList.add('running');
+            $('dot-background').classList.remove('done', 'failed');
+            $('backgroundStatus').textContent = `Job ${bgJobId} starting…`;
+            if (bgEvtSource) bgEvtSource.close();
+            bgEvtSource = new EventSource(`/api/jobs/${bgJobId}/stream`);
+            bgEvtSource.onmessage = async ev => {
+                const d = JSON.parse(ev.data);
+                if (d.status === 'running') {
+                    const pct = d.progress_pct ? Math.round(d.progress_pct) : 0;
+                    $('backgroundStatus').textContent = `Running… ${pct}%`;
+                } else if (d.status === 'completed') {
+                    bgEvtSource.close(); bgEvtSource = null;
+                    $('backgroundStatus').textContent = 'Done.';
+                    await refreshBackgroundFromServer();
+                } else if (d.status === 'failed') {
+                    bgEvtSource.close(); bgEvtSource = null;
+                    $('dot-background').classList.remove('running');
+                    $('dot-background').classList.add('failed');
+                    $('backgroundStatus').textContent = `Failed: ${d.error_msg || ''}`;
+                } else if (d.status === 'cancelled') {
+                    bgEvtSource.close(); bgEvtSource = null;
+                    $('dot-background').classList.remove('running');
+                    $('backgroundStatus').textContent = 'Cancelled.';
+                }
+            };
+        } catch (e) {
+            $('backgroundStatus').textContent = `Error: ${e.message}`;
+        }
+    }
+
+    function showTrajectoryStats() {
+        if (!trajectory) return;
+        const njerk = trajectory.jerk_flag.filter(Boolean).length;
+        const inlMedL = median(trajectory.n_inliers_L.filter(x => x > 0));
+        const inlMedR = median(trajectory.n_inliers_R.filter(x => x > 0));
+        const rotRange = (() => { const r = trajectory.OS.rot_deg;
+            return [Math.min(...r), Math.max(...r)]; })();
+        const txRange = (() => { const x = trajectory.OS.tx;
+            return [Math.min(...x), Math.max(...x)]; })();
+        const tyRange = (() => { const y = trajectory.OS.ty;
+            return [Math.min(...y), Math.max(...y)]; })();
+        $('trajectoryStats').innerHTML = [
+            `Reference frame: <strong>${trajectory.reference_frame}</strong>`,
+            `Jerk-flagged frames: <strong>${njerk}/${trajectory.n_frames}</strong>`,
+            `Median inliers (OS / OD): <strong>${inlMedL} / ${inlMedR}</strong>`,
+            `OS tx range: ${txRange[0].toFixed(1)} … ${txRange[1].toFixed(1)} px`,
+            `OS ty range: ${tyRange[0].toFixed(1)} … ${tyRange[1].toFixed(1)} px`,
+            `OS rotation range: ${rotRange[0].toFixed(2)} … ${rotRange[1].toFixed(2)}°`,
+        ].join('<br>');
+        if (typeof trajectory.os_od_rms_disagreement_px === 'number') {
+            const r = trajectory.os_od_rms_disagreement_px;
+            $('osodAgree').textContent = `OS/OD disagreement: ${r.toFixed(2)} px RMS`;
+            $('osodAgree').style.color = r > 1.5 ? 'var(--red)' : (r > 0.5 ? 'var(--yellow)' : 'var(--green)');
+        }
+    }
+
+    function median(arr) {
+        if (!arr.length) return 0;
+        const s = [...arr].sort((a, b) => a - b);
+        const m = Math.floor(s.length / 2);
+        return s.length % 2 ? s[m] : Math.round((s[m - 1] + s[m]) / 2);
+    }
+
+    async function computeTrajectory() {
+        if (subjectId == null || currentTrialIdx < 0) return;
+        try {
+            const res = await api(`/api/preproc/${subjectId}/compute_trajectory`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ trial_idx: trialMeta.trial_idx }),
+            });
+            activeJobId = res.job_id;
+            $('dot-trajectory').classList.add('running');
+            $('dot-trajectory').classList.remove('done', 'failed');
+            $('trajectoryStatus').textContent = `Job ${activeJobId} starting…`;
+            if (activeEvtSource) activeEvtSource.close();
+            activeEvtSource = new EventSource(`/api/jobs/${activeJobId}/stream`);
+            activeEvtSource.onmessage = async ev => {
+                const d = JSON.parse(ev.data);
+                if (d.status === 'running') {
+                    const pct = d.progress_pct ? Math.round(d.progress_pct) : 0;
+                    $('trajectoryStatus').textContent = `Running… ${pct}%`;
+                } else if (d.status === 'completed') {
+                    activeEvtSource.close(); activeEvtSource = null;
+                    $('trajectoryStatus').textContent = 'Done.';
+                    await refreshTrajectoryFromServer();
+                } else if (d.status === 'failed') {
+                    activeEvtSource.close(); activeEvtSource = null;
+                    $('dot-trajectory').classList.remove('running');
+                    $('dot-trajectory').classList.add('failed');
+                    $('trajectoryStatus').textContent = `Failed: ${d.error_msg || ''}`;
+                } else if (d.status === 'cancelled') {
+                    activeEvtSource.close(); activeEvtSource = null;
+                    $('dot-trajectory').classList.remove('running');
+                    $('trajectoryStatus').textContent = 'Cancelled.';
+                }
+            };
+        } catch (e) {
+            $('trajectoryStatus').textContent = `Error: ${e.message}`;
+        }
+    }
+
+    function loadFrame(frameNum) {
+        // Seek the active video to the requested frame and trigger a
+        // redraw once the new frame is presented.  Returns a Promise that
+        // resolves after the seek (or immediately if no video).
+        currentFrame = frameNum;
+        if (!trialMeta) return Promise.resolve();
+        $('frameDisplay').textContent = `Frame: ${frameNum} / ${nFrames}`;
+        _refreshActiveVideo();
+        const companions = _companionVideos();
+        if (!videoEl || videoEl.readyState < 1) return Promise.resolve();
+        const fps = trialMeta?.fps || 30;
+        const t = Math.max(0, Math.min((frameNum + 0.5) / fps,
+                                        (videoEl.duration || 1) - 1e-3));
+        // Keep all companion tracks (hand in isolated mode, outline
+        // when its checkbox is on) seeked alongside.  No need to await
+        // their 'seeked' events — render() reads from them lazily and
+        // any catch-up paint happens within a frame or two.
+        for (const c of companions) c.currentTime = t;
+        return new Promise(resolve => {
+            videoEl.currentTime = t;
+            videoEl.addEventListener('seeked', () => {
+                render();
+                resolve();
+            }, { once: true });
+        });
+    }
+
+    // Step to an absolute frame (clamped).  Pauses playback so the user
+    // takes over from the new position.
+    function goToFrame(f) {
+        if (!nFrames) return;
+        f = Math.max(0, Math.min(nFrames - 1, f | 0));
+        if (f === currentFrame) return;
+        // If we're playing and the user manually steps, pause first —
+        // otherwise the rAF loop fights with the seek for currentTime.
+        if (playing) togglePlay();
+        loadFrame(f);
+        drawPlot();
+    }
+
+    // Base placement metrics: fit-scale + centered offsets for an image
+    // of size (w, h) inside the canvas.  Zoom/pan transforms layer on top.
+    function _getBaseMetrics(w, h) {
+        const cw = canvas.width, ch = canvas.height;
+        const bps = Math.min(cw / w, ch / h);
+        return {
+            bps,
+            baseOX: (cw - w * bps) / 2,
+            baseOY: (ch - h * bps) / 2,
+        };
+    }
+
+    function render() {
+        const rect = canvas.getBoundingClientRect();
+        canvas.width  = rect.width  || 1;
+        canvas.height = rect.height || 1;
+        ctx.fillStyle = '#111';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Pick the source image + dimensions based on overlay mode.
+        // The stabilised + fg videos are already in reference coords so
+        // no warp matrix is applied at draw time.  Either side of the
+        // stereo pair is cropped from the source via a sub-rect draw.
+        let srcImage = null, srcW = 0, srcH = 0, applyWarpH = false, labelText = null;
+        let drawSx = 0, drawSy = 0, drawSw = 0, drawSh = 0;   // sub-rect of srcImage
+        let compositeFg = false;   // 'isolated' mode → multiply by fg afterwards
+        if (overlayMode === 'bg' && backgroundData) {
+            // Static background PNG — the existing sidebar thumbnail
+            // <img> is the same per-side PNG served by the API, already
+            // loaded at full natural resolution.  drawImage on it uses
+            // the natural dimensions regardless of CSS display size.
+            const isOD = (currentSide === 'OD');
+            const img = (isOD && backgroundData.is_stereo)
+                ? $('bgThumbOD') : $('bgThumbOS');
+            if (img && img.complete && img.naturalWidth > 0) {
+                srcImage = img;
+                drawSx = 0; drawSy = 0;
+                drawSw = img.naturalWidth; drawSh = img.naturalHeight;
+                srcW = drawSw; srcH = drawSh;
+                labelText = 'Background  (temporal median)';
+            }
+        } else if (overlayMode !== 'off' && backgroundData) {
+            // Use readyState >= 1 (HAVE_METADATA) — drawImage will paint
+            // whatever frame is currently decoded.  Stricter checks here
+            // caused the canvas to silently fall through to the live
+            // video during mid-seek (e.g., when the user stepped
+            // frame-by-frame in isolated mode), even though the overlay
+            // radio was still selected.  If the video isn't even at
+            // metadata yet (cold load), we simply skip rendering this
+            // tick — the next 'seeked'/'loadedmetadata' will trigger
+            // another render with valid state.
+            const vid = (overlayMode === 'fg') ? fgVideoEl : stableVideoEl;
+            if (vid && vid.readyState >= 1 && vid.videoWidth > 0) {
+                const isStereo = backgroundData.is_stereo;
+                const fullW = vid.videoWidth, fullH = vid.videoHeight;
+                const half = isStereo ? Math.floor(fullW / 2) : fullW;
+                const isOD = (currentSide === 'OD');
+                drawSx = (isStereo && isOD) ? half : 0;
+                drawSy = 0;
+                drawSw = isStereo ? half : fullW;
+                drawSh = fullH;
+                srcImage = vid;
+                srcW = drawSw; srcH = drawSh;
+                if (overlayMode === 'fg') {
+                    labelText = 'Foreground mask  (|frame − BG|)';
+                } else if (overlayMode === 'isolated') {
+                    labelText = 'Hand isolated  (stable × hand-mask)';
+                    // Multiply by hand.mp4 (strict keypoint-only mask).
+                    // Distant motion / skin-toned background never
+                    // lights up because hand.mp4 is dark everywhere
+                    // except within ~σ of an MP landmark.
+                    compositeFg = (handVideoEl?.readyState >= 1
+                                    && handVideoEl.videoWidth > 0);
+                } else {
+                    labelText = 'Stabilised  (warped to reference frame)';
+                }
+            } else {
+                // Overlay video not ready yet — skip this paint instead of
+                // falling through to the live frame.  The seek's 'seeked'
+                // listener (or canplay) will re-render shortly.
+                return;
+            }
+        } else if (overlayMode === 'off'
+                    && liveVideoEl && liveVideoReady
+                    && liveVideoEl.readyState >= 2) {
+            // Live source.  Stereo: crop the OS / OD half via sub-rect.
+            const fullW = liveVideoEl.videoWidth;
+            const fullH = liveVideoEl.videoHeight;
+            const half = isStereo ? Math.floor(fullW / 2) : fullW;
+            const isOD = (currentSide === 'OD');
+            drawSx = (isStereo && isOD) ? half : 0;
+            drawSy = 0;
+            drawSw = isStereo ? half : fullW;
+            drawSh = fullH;
+            srcImage = liveVideoEl;
+            srcW = drawSw; srcH = drawSh;
+            applyWarpH = isStabilised && !!trajectory;
+        }
+        if (!srcImage) return;
+
+        const { bps, baseOX, baseOY } = _getBaseMetrics(srcW, srcH);
+
+        ctx.save();
+        // Zoom/pan transform — pivot is the centered base placement.
+        ctx.translate(baseOX + offsetX, baseOY + offsetY);
+        ctx.scale(scale, scale);
+        // After this transform, (0,0) is the top-left of the centered
+        // base image (in unscaled image coords × bps).
+        ctx.scale(bps, bps);
+
+        if (applyWarpH) {
+            const H = trajectoryWarpForCurrentFrame();
+            if (H) {
+                ctx.transform(H[0][0], H[1][0], H[0][1], H[1][1], H[0][2], H[1][2]);
+            }
+        }
+        // Sub-rect draw — overlay-video sources need the OS/OD half
+        // cropped out; live-frame source draws the whole image.
+        ctx.drawImage(srcImage, drawSx, drawSy, drawSw, drawSh,
+                                0,      0,      drawSw, drawSh);
+
+        // Isolated-hand composite: multiply by hand.mp4 (the strict
+        // keypoint-only mask).  Hand mask is already amplified at bake
+        // time so a 1.3× brightness here saturates the hand interior
+        // while leaving background pixels (mask ≈ 0) at black.
+        if (compositeFg && handVideoEl) {
+            ctx.globalCompositeOperation = 'multiply';
+            ctx.filter = 'brightness(1.3)';
+            ctx.drawImage(handVideoEl, drawSx, drawSy, drawSw, drawSh,
+                                       0,      0,      drawSw, drawSh);
+            ctx.filter = 'none';
+            ctx.globalCompositeOperation = 'source-over';
+        }
+
+        // Segmentation outline overlay — draws on top of whatever the
+        // current overlay produced.  outline.mp4 is white-on-black, so
+        // 'screen' blend mode adds the white pixels without dimming
+        // the underlying frame.  Tinted yellow via a CSS filter.
+        if (showOutline && outlineVideoEl?.readyState >= 1
+            && outlineVideoEl.videoWidth > 0
+            && backgroundData?.outline_mp4_exists) {
+            ctx.globalCompositeOperation = 'screen';
+            // Brightness + hue-rotate tints white edges to yellow-green.
+            ctx.filter = 'brightness(1.0) sepia(1) hue-rotate(0deg) saturate(5)';
+            ctx.drawImage(outlineVideoEl, drawSx, drawSy, drawSw, drawSh,
+                                          0,      0,      drawSw, drawSh);
+            ctx.filter = 'none';
+            ctx.globalCompositeOperation = 'source-over';
+        }
+        ctx.restore();
+
+        if (labelText) {
+            ctx.fillStyle = '#fff';
+            ctx.font = 'bold 11px sans-serif';
+            ctx.fillText(labelText, 10, 16);
+        }
+        if (showJerks && trajectory && trajectory.jerk_flag[currentFrame]) {
+            ctx.save();
+            ctx.strokeStyle = '#e53935';
+            ctx.lineWidth = 4;
+            ctx.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
+            ctx.fillStyle = '#e53935';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('jerk frame', 10, 18);
+            ctx.restore();
+        }
+        if (trajectory && currentFrame === trajectory.reference_frame) {
+            ctx.save();
+            ctx.fillStyle = 'rgba(76,175,80,0.85)';
+            ctx.font = 'bold 12px sans-serif';
+            ctx.fillText('REFERENCE FRAME', 10, canvas.height - 10);
+            ctx.restore();
+        }
+    }
+
+    function _resetZoom() {
+        scale = 1; offsetX = 0; offsetY = 0;
+        render();
+    }
+
+    function trajectoryWarpForCurrentFrame() {
+        if (!trajectory) return null;
+        // Pick the per-camera homography matching the displayed side.
+        // OD camera uses H_to_ref_R; OS or full uses H_to_ref_L.
+        const useOD = (currentSide === 'OD' && trajectory.OD);
+        const series = useOD ? trajectory.OD : trajectory.OS;
+        if (!series) return null;
+        const i = currentFrame;
+        const tx = series.tx[i] || 0;
+        const ty = series.ty[i] || 0;
+        const rotRad = (series.rot_deg[i] || 0) * Math.PI / 180;
+        const c = Math.cos(rotRad), s = Math.sin(rotRad);
+        return [[c, -s, tx], [s, c, ty], [0, 0, 1]];
+    }
+
+    function drawPlot() {
+        const rect = plot.getBoundingClientRect();
+        plot.width  = rect.width  || 1;
+        plot.height = rect.height || 1;
+        pctx.fillStyle = getCss('--bg-card', '#1a1a1a');
+        pctx.fillRect(0, 0, plot.width, plot.height);
+        if (!trajectory) {
+            pctx.fillStyle = getCss('--text-muted', '#888');
+            pctx.font = '12px sans-serif';
+            pctx.fillText('No trajectory yet — click "Compute Trajectory" to extract.',
+                          10, plot.height / 2);
+            return;
+        }
+        const N = trajectory.n_frames;
+        if (N < 2) return;
+        const w = plot.width, h = plot.height;
+        const pad = { l: 30, r: 5, t: 8, b: 18 };
+        const innerW = w - pad.l - pad.r;
+        const innerH = h - pad.t - pad.b;
+
+        const series = [];
+        series.push({ vals: trajectory.OS.tx, color: '#ff6b6b' });
+        series.push({ vals: trajectory.OS.ty, color: '#ffa94d' });
+        if (trajectory.OD) {
+            series.push({ vals: trajectory.OD.tx, color: '#4dabf7' });
+            series.push({ vals: trajectory.OD.ty, color: '#74c0fc' });
+        }
+        const rotSeries = trajectory.OS.rot_deg;
+
+        let ymin = Infinity, ymax = -Infinity;
+        for (const s of series) {
+            for (const v of s.vals) {
+                if (v < ymin) ymin = v;
+                if (v > ymax) ymax = v;
+            }
+        }
+        if (!isFinite(ymin) || !isFinite(ymax) || ymin === ymax) { ymin -= 1; ymax += 1; }
+        const yPad = (ymax - ymin) * 0.05;
+        ymin -= yPad; ymax += yPad;
+
+        const xToPx = i => pad.l + (i / (N - 1)) * innerW;
+        const yToPx = v => pad.t + ((ymax - v) / (ymax - ymin)) * innerH;
+
+        pctx.strokeStyle = getCss('--border', '#333');
+        pctx.lineWidth = 1;
+        pctx.beginPath();
+        pctx.moveTo(pad.l, pad.t); pctx.lineTo(pad.l, h - pad.b);
+        pctx.lineTo(w - pad.r, h - pad.b);
+        pctx.stroke();
+
+        // ── X-axis tick marks + labels (seconds) ────────────────────
+        // Pick a tick step that gives ~6–10 labelled ticks across the
+        // trial duration.  Falls back to frame indices if fps is
+        // missing or non-positive.
+        const fps = trialMeta?.fps || 0;
+        const totalSec = fps > 0 ? (N - 1) / fps : 0;
+        let tickStepSec = 1;
+        if (totalSec > 0) {
+            const candidates = [0.5, 1, 2, 5, 10, 15, 30, 60];
+            for (const c of candidates) {
+                if (totalSec / c <= 10) { tickStepSec = c; break; }
+                tickStepSec = c;  // fall through, keep widening
+            }
+        }
+        pctx.fillStyle = getCss('--text-muted', '#888');
+        pctx.font = '10px sans-serif';
+        pctx.strokeStyle = getCss('--border', '#333');
+        pctx.lineWidth = 1;
+        pctx.textAlign = 'center';
+        pctx.textBaseline = 'top';
+        if (fps > 0) {
+            for (let sec = 0; sec <= totalSec + 1e-6; sec += tickStepSec) {
+                const f = sec * fps;
+                if (f < 0 || f > N - 1) continue;
+                const px = pad.l + (f / (N - 1)) * innerW;
+                pctx.beginPath();
+                pctx.moveTo(px, h - pad.b);
+                pctx.lineTo(px, h - pad.b + 4);
+                pctx.stroke();
+                const label = tickStepSec >= 1 ? `${sec.toFixed(0)}s` : `${sec.toFixed(1)}s`;
+                pctx.fillText(label, px, h - pad.b + 5);
+            }
+        } else {
+            // Frame-index fallback: ~8 evenly-spaced labelled ticks.
+            const steps = 8;
+            for (let i = 0; i <= steps; i++) {
+                const f = Math.round((i / steps) * (N - 1));
+                const px = pad.l + (f / (N - 1)) * innerW;
+                pctx.beginPath();
+                pctx.moveTo(px, h - pad.b);
+                pctx.lineTo(px, h - pad.b + 4);
+                pctx.stroke();
+                pctx.fillText(`f${f}`, px, h - pad.b + 5);
+            }
+        }
+        pctx.textAlign = 'left';
+        pctx.textBaseline = 'alphabetic';
+
+        if (ymin < 0 && ymax > 0) {
+            const zy = yToPx(0);
+            pctx.strokeStyle = 'rgba(255,255,255,0.15)';
+            pctx.beginPath(); pctx.moveTo(pad.l, zy); pctx.lineTo(w - pad.r, zy); pctx.stroke();
+        }
+        pctx.fillStyle = getCss('--text-muted', '#888');
+        pctx.font = '10px sans-serif';
+        pctx.fillText(ymax.toFixed(1), 2, pad.t + 8);
+        pctx.fillText(ymin.toFixed(1), 2, h - pad.b);
+
+        if (showJerks) {
+            pctx.strokeStyle = 'rgba(229,57,53,0.45)';
+            pctx.lineWidth = 1;
+            for (let i = 0; i < N; i++) {
+                if (trajectory.jerk_flag[i]) {
+                    const x = xToPx(i);
+                    pctx.beginPath();
+                    pctx.moveTo(x, pad.t); pctx.lineTo(x, h - pad.b);
+                    pctx.stroke();
+                }
+            }
+        }
+
+        const refX = xToPx(trajectory.reference_frame);
+        pctx.strokeStyle = 'rgba(76,175,80,0.9)';
+        pctx.lineWidth = 1.5;
+        pctx.setLineDash([4, 3]);
+        pctx.beginPath(); pctx.moveTo(refX, pad.t); pctx.lineTo(refX, h - pad.b); pctx.stroke();
+        pctx.setLineDash([]);
+
+        for (const s of series) {
+            pctx.strokeStyle = s.color;
+            pctx.lineWidth = 1.2;
+            pctx.beginPath();
+            let started = false;
+            for (let i = 0; i < N; i++) {
+                const v = s.vals[i];
+                if (!isFinite(v)) { started = false; continue; }
+                const px = xToPx(i), py = yToPx(v);
+                if (!started) { pctx.moveTo(px, py); started = true; }
+                else           pctx.lineTo(px, py);
+            }
+            pctx.stroke();
+        }
+
+        let rmin = Infinity, rmax = -Infinity;
+        for (const v of rotSeries) { if (v < rmin) rmin = v; if (v > rmax) rmax = v; }
+        if (rmax - rmin < 0.001) { rmin -= 0.5; rmax += 0.5; }
+        const rotPad = 0.05 * (rmax - rmin);
+        const rotMin = rmin - rotPad, rotMax = rmax + rotPad;
+        const rotY = v => pad.t + ((rotMax - v) / (rotMax - rotMin)) * innerH;
+        pctx.strokeStyle = '#fbc02d';
+        pctx.lineWidth = 1.2;
+        pctx.setLineDash([2, 2]);
+        pctx.beginPath();
+        let started = false;
+        for (let i = 0; i < N; i++) {
+            const v = rotSeries[i];
+            if (!isFinite(v)) { started = false; continue; }
+            const px = xToPx(i), py = rotY(v);
+            if (!started) { pctx.moveTo(px, py); started = true; }
+            else           pctx.lineTo(px, py);
+        }
+        pctx.stroke();
+        pctx.setLineDash([]);
+        pctx.fillStyle = '#fbc02d';
+        pctx.fillText(`rot ${rmin.toFixed(2)}° … ${rmax.toFixed(2)}°`, w - 130, pad.t + 10);
+
+        const cx = xToPx(currentFrame);
+        pctx.strokeStyle = '#fff';
+        pctx.lineWidth = 1;
+        pctx.beginPath(); pctx.moveTo(cx, pad.t); pctx.lineTo(cx, h - pad.b); pctx.stroke();
+    }
+
+    function getCss(name, fallback) {
+        try {
+            const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+            return v || fallback;
+        } catch { return fallback; }
+    }
+
+    // The one video element we're currently displaying & controlling.
+    // Set by _refreshActiveVideo() whenever overlayMode changes.  All
+    // playback ops (play, pause, seek, rate) target this and only this.
+    let videoEl = null;
+
+    function _refreshActiveVideo() {
+        const prev = videoEl;
+        if (overlayMode === 'stable' && stableVideoEl?.readyState >= 1) videoEl = stableVideoEl;
+        else if (overlayMode === 'fg' && fgVideoEl?.readyState >= 1)    videoEl = fgVideoEl;
+        // 'isolated' = composite stable × fg client-side; use stable as
+        // the primary (drives play loop / frame display), fg follows via
+        // _companionVideo() — both must be kept in sync during play/seek.
+        else if (overlayMode === 'isolated' && stableVideoEl?.readyState >= 1) videoEl = stableVideoEl;
+        else                                                             videoEl = liveVideoEl;
+        return prev !== videoEl;
+    }
+
+    /** Videos that must be seeked / played in lockstep with ``videoEl``.
+     *  - 'isolated' composite needs the hand-mask track (hand.mp4).
+     *  - 'show outline' checkbox needs the outline track (outline.mp4)
+     *    regardless of which overlay is active.
+     *  Returns the list (possibly empty). */
+    function _companionVideos() {
+        const out = [];
+        if (overlayMode === 'isolated' && handVideoEl?.readyState >= 1) {
+            out.push(handVideoEl);
+        }
+        if (showOutline && outlineVideoEl?.readyState >= 1
+            && outlineVideoEl !== videoEl) {
+            out.push(outlineVideoEl);
+        }
+        return out;
+    }
+
+    // Mirrors mano.js exactly — one videoEl, rVFC when available,
+    // playbackRate clamped to 16 (browsers get unreliable above that).
+    function _cancelPlayTimer() {
+        if (!playTimer) return;
+        if (_hasRVFC && videoEl) {
+            try { videoEl.cancelVideoFrameCallback(playTimer); } catch {}
+        } else {
+            cancelAnimationFrame(playTimer);
+        }
+        playTimer = null;
+    }
+
+    function togglePlay() {
+        _refreshActiveVideo();
+        const companions = _companionVideos();
+        if (playing) {
+            playing = false;
+            if (videoEl) videoEl.pause();
+            for (const c of companions) c.pause();
+            _cancelPlayTimer();
+            $('playBtn').innerHTML = '&#9654;';
+            // Re-sync currentFrame from the video's final position.
+            if (videoEl && trialMeta) {
+                const fps = trialMeta.fps || 30;
+                const f = Math.round(videoEl.currentTime * fps);
+                currentFrame = Math.max(0, Math.min(f, nFrames - 1));
+                $('frameDisplay').textContent = `Frame: ${currentFrame} / ${nFrames}`;
+                drawPlot();
+                render();
+            }
+            return;
+        }
+        if (!videoEl || videoEl.readyState < 2 || !nFrames) return;
+        if (currentFrame >= nFrames - 1) currentFrame = 0;
+        playing = true;
+        $('playBtn').innerHTML = '&#9646;&#9646;';
+        const fps = trialMeta?.fps || 30;
+        const rate = Math.min(playbackRate, 16);
+        const t = (currentFrame + 0.5) / fps;
+        videoEl.currentTime = t;
+        videoEl.playbackRate = rate;
+        for (const c of companions) {
+            c.currentTime = t;
+            c.playbackRate = rate;
+        }
+        // play() returns a Promise that resolves once playback actually
+        // starts.  Re-apply playbackRate then — setting it pre-play()
+        // doesn't always stick across the seek→play state transition.
+        videoEl.play().then(() => {
+            if (videoEl) videoEl.playbackRate = rate;
+        }).catch(() => {
+            playing = false; $('playBtn').innerHTML = '&#9654;';
+        });
+        for (const c of companions) c.play().catch(() => {});
+        _schedulePlayLoop();
+    }
+
+    function _schedulePlayLoop() {
+        if (_hasRVFC && videoEl) {
+            playTimer = videoEl.requestVideoFrameCallback(_playLoopRVFC);
+        } else {
+            playTimer = requestAnimationFrame(_playLoopRAF);
+        }
+    }
+
+    function _playLoopRVFC(now, metadata) {
+        if (!playing) return;
+        _playUpdate(metadata.mediaTime);
+        _schedulePlayLoop();
+    }
+
+    function _playLoopRAF() {
+        if (!playing) return;
+        _playUpdate(videoEl ? videoEl.currentTime : 0);
+        _schedulePlayLoop();
+    }
+
+    function _playUpdate(mediaTime) {
+        if (!trialMeta) return;
+        const fps = trialMeta.fps || 30;
+        const f = Math.round(mediaTime * fps);
+        if (f > nFrames - 1) {
+            togglePlay();
+            return;
+        }
+        if (f !== currentFrame && f >= 0 && f < nFrames) {
+            currentFrame = f;
+            $('frameDisplay').textContent = `Frame: ${currentFrame} / ${nFrames}`;
+            drawPlot();
+        }
+        render();
+    }
+
+    function prevSubject() {
+        const sel = $('subjectSelect');
+        const idx = subjects.findIndex(s => s.id === subjectId);
+        if (idx > 0) {
+            sel.value = subjects[idx - 1].id;
+            onSubjectChange(subjects[idx - 1].id);
+        }
+    }
+
+    function nextSubject() {
+        const sel = $('subjectSelect');
+        const idx = subjects.findIndex(s => s.id === subjectId);
+        if (idx < subjects.length - 1) {
+            sel.value = subjects[idx + 1].id;
+            onSubjectChange(subjects[idx + 1].id);
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', async () => {
+        await loadSubjects();
+        $('prevSubjectBtn').addEventListener('click', prevSubject);
+        $('nextSubjectBtn').addEventListener('click', nextSubject);
+        $('runTrajectoryBtn').addEventListener('click', computeTrajectory);
+        $('runBackgroundBtn').addEventListener('click', computeBackground);
+        // Overlay radio group → mutually exclusive: live, stable.mp4, fg.mp4.
+        // Switching swaps which video element is the active source.  If
+        // playback was running, transfer it to the new source seamlessly.
+        const _setOverlay = (mode) => {
+            const wasPlaying = playing;
+            const fps = trialMeta?.fps || 30;
+            const t = (currentFrame + 0.5) / fps;
+            // Pause the prior source so it doesn't keep running invisibly.
+            if (wasPlaying && videoEl) {
+                videoEl.pause();
+                _cancelPlayTimer();
+                playing = false;
+            }
+            overlayMode = mode;
+            _refreshActiveVideo();
+            // Seek the new active video to the current frame and render
+            // once the seek completes — otherwise we paint while the
+            // video is still in seeking state, leaving the canvas blank
+            // until something else triggers a render.
+            const _onReady = () => {
+                if (wasPlaying) togglePlay();
+                else render();
+            };
+            if (videoEl && videoEl.readyState >= 1) {
+                const targetT = Math.max(0, Math.min(t, (videoEl.duration || t) - 1e-3));
+                // Already there? render synchronously.  Otherwise wait for seeked.
+                if (Math.abs(videoEl.currentTime - targetT) < 1 / (fps * 2)) {
+                    _onReady();
+                } else {
+                    videoEl.addEventListener('seeked', _onReady, { once: true });
+                    videoEl.currentTime = targetT;
+                }
+            } else {
+                _onReady();
+            }
+        };
+        $('ovOff').addEventListener('change',      e => e.target.checked && _setOverlay('off'));
+        $('ovStable').addEventListener('change',   e => e.target.checked && _setOverlay('stable'));
+        $('ovBg').addEventListener('change',       e => e.target.checked && _setOverlay('bg'));
+        $('ovFg').addEventListener('change',       e => e.target.checked && _setOverlay('fg'));
+        $('ovIsolated').addEventListener('change', e => e.target.checked && _setOverlay('isolated'));
+        // Segmentation outline checkbox — independent of overlay mode.
+        // When toggled on, seek the outline track to the current frame
+        // so the first paint isn't from a stale time, then render.
+        $('cbShowOutline').addEventListener('change', e => {
+            showOutline = e.target.checked;
+            if (showOutline && outlineVideoEl?.readyState >= 1 && trialMeta) {
+                const fps = trialMeta.fps || 30;
+                outlineVideoEl.currentTime = (currentFrame + 0.5) / fps;
+                outlineVideoEl.addEventListener('seeked', () => render(),
+                                                 { once: true });
+            } else {
+                render();
+            }
+        });
+        $('cbStabilizedView').addEventListener('change', e => {
+            isStabilised = e.target.checked; render();
+        });
+        $('cbShowJerks').addEventListener('change', e => {
+            showJerks = e.target.checked; render(); drawPlot();
+        });
+        // Plot click + drag scrubs frames.  Pointer-x is mapped from
+        // the canvas's pixel-padding to a frame index using the same
+        // ``pad.l`` margin the plot uses.
+        let scrubbing = false;
+        const _frameAtClientX = (clientX) => {
+            const N = trajectory ? trajectory.n_frames : nFrames;
+            if (!N || N < 2) return 0;
+            const rect = plot.getBoundingClientRect();
+            const padL = 30, padR = 5;
+            const x = clientX - rect.left;
+            const innerW = (rect.width - padL - padR) || 1;
+            const frac = (x - padL) / innerW;
+            const f = Math.round(Math.max(0, Math.min(1, frac)) * (N - 1));
+            return f;
+        };
+        plot.addEventListener('mousedown', e => {
+            scrubbing = true;
+            const f = _frameAtClientX(e.clientX);
+            loadFrame(f); drawPlot();
+        });
+        plot.addEventListener('mousemove', e => {
+            if (!scrubbing) return;
+            const f = _frameAtClientX(e.clientX);
+            if (f !== currentFrame) { loadFrame(f); drawPlot(); }
+        });
+        window.addEventListener('mouseup', () => { scrubbing = false; });
+        plot.addEventListener('mouseleave', () => { scrubbing = false; });
+        $('playBtn').addEventListener('click', togglePlay);
+        $('prevFrameBtn').addEventListener('click', () => goToFrame(currentFrame - 1));
+        $('nextFrameBtn').addEventListener('click', () => goToFrame(currentFrame + 1));
+        $('sideToggle').addEventListener('click', switchCamera);
+
+        // Speed slider (matches videos.js / mano.js pattern).
+        const speedSlider = $('speedSlider');
+        const speedDisplay = $('speedDisplay');
+        if (speedSlider) {
+            speedSlider.value = 2;  // default → 1x (SPEED_PRESETS[2])
+            playbackRate = SPEED_PRESETS[2];
+            speedDisplay.textContent = playbackRate + 'x';
+            speedSlider.max = String(SPEED_PRESETS.length - 1);
+            speedSlider.addEventListener('input', () => {
+                const idx = parseInt(speedSlider.value);
+                playbackRate = SPEED_PRESETS[idx] ?? 1;
+                speedDisplay.textContent = playbackRate + 'x';
+                // Browsers cap reliable playbackRate around 16×; clamp to match.
+                _refreshActiveVideo();
+                const rate = Math.min(playbackRate, 16);
+                if (videoEl) videoEl.playbackRate = rate;
+                for (const c of _companionVideos()) c.playbackRate = rate;
+            });
+            speedSlider.addEventListener('change', () => speedSlider.blur());
+        }
+
+        // Sidebar buttons / radios / checkboxes shouldn't trap keyboard
+        // focus — otherwise Space re-clicks the button instead of
+        // toggling play.  Mirror mano.js: blur after pointerup so the
+        // page-level shortcuts keep working.
+        ['pointerup', 'mouseup', 'touchend'].forEach(evt => {
+            document.addEventListener(evt, e => {
+                const t = e.target;
+                if (t instanceof HTMLButtonElement) { t.blur(); return; }
+                if (t instanceof HTMLInputElement &&
+                    (t.type === 'range' || t.type === 'checkbox' || t.type === 'radio')) {
+                    t.blur();
+                }
+            }, true);
+        });
+        // If a range slider still has focus when arrow keys are pressed
+        // (clicked but mouse not yet released), prevent the slider's
+        // native arrow-key handler from consuming them.
+        document.addEventListener('keydown', e => {
+            const t = e.target;
+            if (t instanceof HTMLInputElement && t.type === 'range' &&
+                ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',
+                 'PageUp','PageDown','Home','End'].includes(e.key)) {
+                e.preventDefault();
+                t.blur();
+            }
+        }, true);
+
+        // Keyboard shortcuts:
+        //   Space          → play/pause
+        //   ← / a          → prev frame   ( Shift = jump 10 )
+        //   → / s          → next frame   ( Shift = jump 10 )
+        //   Home / End     → jump to first / last frame
+        //   E              → toggle camera side
+        //   R              → reset zoom
+        // Skip text inputs and selects, but keep shortcuts working when a
+        // checkbox / radio / range is focused (and blur it after).
+        document.addEventListener('keydown', e => {
+            const t = e.target;
+            if (t.tagName === 'INPUT' &&
+                !['checkbox', 'radio', 'range'].includes(t.type)) return;
+            if (t.tagName === 'SELECT' || t.tagName === 'TEXTAREA') return;
+            const step = e.shiftKey ? 10 : 1;
+            let handled = false;
+            switch (e.key) {
+                case ' ':
+                    togglePlay(); handled = true; break;
+                case 'ArrowLeft': case 'a': case 'A':
+                    goToFrame(currentFrame - step); handled = true; break;
+                case 'ArrowRight': case 's': case 'S':
+                    goToFrame(currentFrame + step); handled = true; break;
+                case 'Home':
+                    goToFrame(0); handled = true; break;
+                case 'End':
+                    goToFrame(nFrames - 1); handled = true; break;
+                case 'e': case 'E':
+                    switchCamera(); handled = true; break;
+                case 'r': case 'R':
+                    _resetZoom(); handled = true; break;
+            }
+            if (handled) {
+                e.preventDefault();
+                if (t.tagName === 'INPUT' || t.tagName === 'BUTTON') t.blur();
+            }
+        });
+        // Zoom (mouse wheel) + pan (drag) on the video canvas — same
+        // conventions as the video browser and mano page.
+        canvas.addEventListener('wheel', e => {
+            e.preventDefault();
+            // Pick dimensions matching whatever the renderer is showing.
+            let srcW = 0, srcH = 0;
+            _refreshActiveVideo();
+            if (videoEl && videoEl.videoWidth > 0) {
+                srcW = isStereo ? Math.floor(videoEl.videoWidth / 2) : videoEl.videoWidth;
+                srcH = videoEl.videoHeight;
+            }
+            if (!srcW || !srcH) return;
+            const rect = canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
+            const { baseOX, baseOY } = _getBaseMetrics(srcW, srcH);
+            const lx = mx - baseOX;
+            const ly = my - baseOY;
+            const factor = e.deltaY < 0 ? 1.05 : 1 / 1.05;
+            const ns = Math.max(0.1, Math.min(scale * factor, 50));
+            offsetX = lx - (lx - offsetX) * (ns / scale);
+            offsetY = ly - (ly - offsetY) * (ns / scale);
+            scale = ns;
+            render();
+        }, { passive: false });
+
+        canvas.addEventListener('mousedown', e => {
+            if (e.button === 0 || e.button === 1) {
+                dragging = true;
+                dragStartX = e.clientX; dragStartY = e.clientY;
+                panStartOX = offsetX;   panStartOY = offsetY;
+                canvas.style.cursor = 'grabbing';
+                e.preventDefault();
+            }
+        });
+        document.addEventListener('mousemove', e => {
+            if (!dragging) return;
+            offsetX = panStartOX + (e.clientX - dragStartX);
+            offsetY = panStartOY + (e.clientY - dragStartY);
+            render();
+        });
+        document.addEventListener('mouseup', () => {
+            if (dragging) { dragging = false; canvas.style.cursor = ''; }
+        });
+        canvas.style.cursor = 'grab';
+        window.addEventListener('resize', () => { render(); drawPlot(); });
+    });
+})();

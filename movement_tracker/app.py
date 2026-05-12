@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 
 from .config import get_settings
 from .db import init_db
-from .routers import subjects, labeling, pipeline, jobs, results, settings, filebrowser, video_tools, batch, remote_jobs, mano, export, camera_setups, updater, deidentify, analyze
+from .routers import subjects, labeling, pipeline, jobs, results, settings, filebrowser, video_tools, batch, remote_jobs, mano, export, camera_setups, updater, deidentify, analyze, preproc
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ class NoCacheMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
         if request.url.path.startswith("/static") or request.url.path in (
-            "/", "/labeling", "/labeling-select", "/mediapipe", "/deidentify", "/mano", "/oscillations", "/results", "/settings", "/onboarding", "/remote", "/videos", "/calibration", "/tutorials", "/tutorial", "/events"
+            "/", "/labeling", "/labeling-select", "/mediapipe", "/deidentify", "/mano", "/preproc", "/oscillations", "/results", "/settings", "/onboarding", "/remote", "/videos", "/calibration", "/tutorials", "/tutorial", "/events"
         ):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return response
@@ -71,6 +71,7 @@ app.include_router(camera_setups.router)
 app.include_router(updater.router)
 app.include_router(deidentify.router)
 app.include_router(analyze.router)
+app.include_router(preproc.router)
 
 # Mount static files
 STATIC_DIR = Path(__file__).parent / "static"
@@ -844,6 +845,12 @@ def analyze_page(subject: Optional[int] = None, trial: Optional[int] = None):
 def mano_page():
     """Serve the MANO viewer page."""
     return FileResponse(str(STATIC_DIR / "mano.html"))
+
+
+@app.get("/preproc")
+def preproc_page():
+    """Serve the Pre-proc page (camera trajectory etc.)."""
+    return FileResponse(str(STATIC_DIR / "preproc.html"))
 
 
 @app.get("/oscillations")

@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pre-proc — Movement Tracker</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+    <style>
+        body { overflow: hidden; }
+        .pp-outer { display: flex; flex-direction: column; height: calc(100vh - 49px); overflow: hidden; }
+
+        #trialBtns { display: flex; gap: 4px; flex-wrap: wrap; }
+        .trial-btn {
+            padding: 3px 10px; border-radius: 4px;
+            border: 1px solid var(--border); background: var(--bg);
+            color: var(--text-muted); cursor: pointer; font-size: 12px;
+            font-family: inherit; transition: all 0.15s;
+        }
+        .trial-btn:hover { border-color: var(--blue); color: var(--text); }
+        .trial-btn.active { background: var(--blue); border-color: var(--blue); color: #fff; }
+
+        .pp-main { flex: 1; display: flex; min-height: 0; overflow: hidden; }
+        .pp-sidebar {
+            width: 280px; flex-shrink: 0;
+            background: var(--bg-card);
+            border-right: 1px solid var(--border);
+            overflow-y: auto; padding: 12px;
+        }
+        .pp-sidebar h3 { font-size: 13px; color: var(--text-muted); margin: 0 0 8px; }
+        .pp-sidebar .section { margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+        .pp-sidebar .section:last-child { border-bottom: none; }
+        .pp-step { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+        .pp-step .step-dot {
+            display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+            background: var(--text-muted); flex-shrink: 0;
+        }
+        .pp-step .step-dot.done    { background: var(--green); }
+        .pp-step .step-dot.running { background: var(--orange); animation: pulse 1.5s infinite; }
+        .pp-step .step-dot.failed  { background: var(--red); }
+        .pp-step .step-name { font-size: 13px; flex: 1; }
+        .pp-stat { font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+        .pp-stat strong { color: var(--text); font-weight: 600; }
+        .small-note { font-size: 10px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+
+        .pp-viewport {
+            flex: 1; position: relative; min-height: 0;
+            background: #111; overflow: hidden;
+        }
+        .pp-viewport canvas { display: block; width: 100%; height: 100%; }
+
+        .pp-plotpanel {
+            height: 200px; flex-shrink: 0;
+            background: var(--bg-card);
+            border-top: 1px solid var(--border);
+            padding: 4px 14px;
+            display: flex; align-items: stretch; gap: 12px;
+        }
+        .pp-plotpanel canvas { flex: 1; min-width: 0; cursor: ew-resize; }
+        .pp-plot-legend {
+            font-size: 10px; color: var(--text-muted);
+            width: 130px; flex-shrink: 0; display: flex; flex-direction: column; justify-content: center;
+            line-height: 1.5;
+        }
+        .pp-plot-legend .sw {
+            display: inline-block; width: 10px; height: 3px;
+            margin-right: 4px; vertical-align: middle;
+        }
+
+        .pp-controls {
+            flex-shrink: 0; background: var(--bg-card);
+            border-top: 1px solid var(--border);
+            padding: 8px 14px 10px;
+        }
+        .pp-controls-row { display: flex; align-items: center; gap: 10px; }
+        .frame-display { font-size: 12px; color: var(--text-muted); min-width: 130px; }
+        .play-btn {
+            width: 32px; height: 32px; border-radius: 50%;
+            border: 1px solid var(--border); background: var(--bg);
+            color: var(--text); font-size: 16px; cursor: pointer;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .play-btn:hover { border-color: var(--blue); }
+        .step-btn {
+            width: 28px; height: 28px; border-radius: 4px;
+            border: 1px solid var(--border); background: var(--bg);
+            color: var(--text); font-size: 14px; cursor: pointer;
+            display: flex; align-items: center; justify-content: center;
+            padding: 0;
+        }
+        .step-btn:hover { border-color: var(--blue); }
+        #speedSlider { width: 100px; }
+        #speedDisplay { font-size: 11px; color: var(--text-muted); min-width: 38px; text-align: right; }
+        .kbd-hint { font-size: 10px; color: var(--text-muted); margin-left: auto; }
+        .kbd-hint code {
+            background: var(--bg); padding: 1px 4px; border-radius: 3px;
+            border: 1px solid var(--border); font-size: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div style="display:flex;align-items:center;gap:16px;flex:1;min-width:0;">
+            <h1 style="margin:0;"><a href="/" style="font-size:18px;">Movement Tracker</a></h1>
+            <div style="display:flex;align-items:center;gap:8px;">
+                <select id="subjectSelect" class="subject-select"></select>
+                <button class="btn btn-sm" id="prevSubjectBtn" title="Previous subject">&larr;</button>
+                <button class="btn btn-sm" id="nextSubjectBtn" title="Next subject">&rarr;</button>
+            </div>
+            <div id="trialBtns" style="display:flex;gap:4px;flex-wrap:wrap;"></div>
+            <span id="statusMsg" style="font-size:11px;color:var(--text-muted);"></span>
+        </div>
+        <nav>
+            <a href="/videos" class="nav-browse">Browse Videos</a>
+            <a href="/subjects">Subjects</a>
+            <span class="nav-dropdown">
+                <a href="/preproc" class="active">Analyze</a>
+                <div class="nav-dropdown-menu">
+                    <a href="/preproc" class="active">Pre-proc</a>
+                    <a href="/mano">Labels</a>
+                    <a href="/labeling-select">DLC</a>
+                    <a href="/events">Events</a>
+                    <a href="/deidentify">Deidentify</a>
+                </div>
+            </span>
+            <span class="nav-dropdown">
+                <a href="/results">Results</a>
+                <div class="nav-dropdown-menu">
+                    <a href="/results?tab=distances">Individual</a>
+                    <a href="/results?tab=group">Group Comparison</a>
+                    <a href="/oscillations">Oscillations</a>
+                </div>
+            </span>
+            <span class="nav-dropdown" id="navJobQueue">
+                <a href="/remote"><span id="navJobDot" class="nav-job-dot" style="display:none;"></span>Jobs</a>
+                <div class="nav-dropdown-menu nav-jobs-dropdown" id="navJobsPanel">
+                    <div style="padding:8px 12px;font-size:11px;color:var(--text-muted);">Loading...</div>
+                </div>
+            </span>
+            <a href="/settings">Settings</a>
+        </nav>
+    </div>
+
+    <div class="pp-outer">
+        <div class="pp-main">
+            <div class="pp-sidebar">
+                <div class="section">
+                    <h3>Pipeline Status</h3>
+                    <div class="pp-step"><span class="step-dot" id="dot-trajectory"></span><span class="step-name">1. Camera trajectory</span></div>
+                    <div class="pp-step"><span class="step-dot" id="dot-background"></span><span class="step-name">2. Background</span></div>
+                    <div class="pp-step"><span class="step-dot" id="dot-quality"></span><span class="step-name" style="color:var(--text-muted);">3. Frame quality  (later)</span></div>
+                    <div class="pp-step"><span class="step-dot" id="dot-calib"></span><span class="step-name" style="color:var(--text-muted);">4. Calibration check  (later)</span></div>
+                </div>
+
+                <div class="section">
+                    <h3>Camera Motion</h3>
+                    <div class="small-note">
+                        ORB+RANSAC homography per frame.  Background dominates the
+                        match; hand pixels reject as outliers.  Reference frame
+                        picked as the most-stable view of the trial.
+                    </div>
+                    <button class="btn btn-sm btn-success" id="runTrajectoryBtn" style="width:100%;margin-top:8px;">Compute Trajectory</button>
+                    <div id="trajectoryStatus" class="pp-stat" style="margin-top:6px;"></div>
+                    <div id="trajectoryStats" class="pp-stat" style="margin-top:8px;"></div>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);margin-top:10px;">
+                        <input type="checkbox" id="cbStabilizedView">
+                        Stabilised view
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);margin-top:4px;">
+                        <input type="checkbox" id="cbShowJerks" checked>
+                        Mark jerks
+                    </label>
+                </div>
+
+                <div class="section">
+                    <h3>Stabilise + Mask</h3>
+                    <div class="small-note">
+                        Bakes two artifacts for downstream consumers:
+                        <strong>stable.mp4</strong> (every frame warped into
+                        the reference camera so the scene is stationary) and
+                        <strong>fg.mp4</strong> (per-pixel |frame − background|
+                        — bright = moving / hand, dark = static).  Requires
+                        trajectory first.
+                    </div>
+                    <button class="btn btn-sm btn-success" id="runBackgroundBtn" style="width:100%;margin-top:8px;" disabled>Compute Stable + Mask</button>
+                    <div id="backgroundStatus" class="pp-stat" style="margin-top:6px;"></div>
+                    <div id="backgroundStats" class="pp-stat" style="margin-top:8px;"></div>
+                    <div id="backgroundPreview" style="margin-top:8px;display:none;">
+                        <div style="display:flex;gap:4px;align-items:flex-start;">
+                            <img id="bgThumbOS" style="width:48%;border:1px solid var(--border);border-radius:4px;" title="OS background">
+                            <img id="bgThumbOD" style="width:48%;border:1px solid var(--border);border-radius:4px;display:none;" title="OD background">
+                        </div>
+                        <div style="margin-top:8px;font-size:11px;color:var(--text-muted);">Overlay on the viewport:</div>
+                        <label style="display:block;margin-top:2px;font-size:11px;color:var(--text-muted);">
+                            <input type="radio" name="bgOverlay" id="ovOff" checked> Off (live frame)
+                        </label>
+                        <label style="display:block;margin-top:2px;font-size:11px;color:var(--text-muted);">
+                            <input type="radio" name="bgOverlay" id="ovStable"> Stabilised (stable.mp4)
+                        </label>
+                        <label style="display:block;margin-top:2px;font-size:11px;color:var(--text-muted);">
+                            <input type="radio" name="bgOverlay" id="ovBg"> Background (background.png)
+                        </label>
+                        <label style="display:block;margin-top:2px;font-size:11px;color:var(--text-muted);">
+                            <input type="radio" name="bgOverlay" id="ovFg"> Foreground mask (fg.mp4)
+                        </label>
+                        <label style="display:block;margin-top:2px;font-size:11px;color:var(--text-muted);">
+                            <input type="radio" name="bgOverlay" id="ovIsolated"> Hand isolated (stable × fg)
+                        </label>
+                        <label style="display:block;margin-top:8px;font-size:11px;color:var(--text-muted);">
+                            <input type="checkbox" id="cbShowOutline" disabled> Show segmentation outline
+                        </label>
+                    </div>
+                </div>
+
+                <div class="section">
+                    <h3>Exclude Trial</h3>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-muted);">
+                        <input type="checkbox" id="cbExcludeTrial" disabled>
+                        Mark as unusable
+                    </label>
+                    <div class="small-note">Flags this trial for downstream filters.  Non-destructive — no results are deleted.  (wiring in phase E)</div>
+                </div>
+            </div>
+
+            <div class="pp-viewport"><canvas id="canvas"></canvas></div>
+        </div>
+
+        <div class="pp-plotpanel">
+            <canvas id="trajPlot"></canvas>
+            <div class="pp-plot-legend">
+                <div><span class="sw" style="background:#ff6b6b;"></span>tx OS</div>
+                <div><span class="sw" style="background:#4dabf7;"></span>tx OD</div>
+                <div><span class="sw" style="background:#ffa94d;"></span>ty OS</div>
+                <div><span class="sw" style="background:#74c0fc;"></span>ty OD</div>
+                <div><span class="sw" style="background:#fbc02d;"></span>rot°</div>
+                <div style="margin-top:6px;">
+                    <span style="display:inline-block;width:8px;height:8px;background:#e53935;vertical-align:middle;"></span>
+                    jerk frame
+                </div>
+                <div id="osodAgree" style="margin-top:6px;color:var(--text);"></div>
+            </div>
+        </div>
+
+        <div class="pp-controls">
+            <div class="pp-controls-row">
+                <button class="step-btn" id="prevFrameBtn" title="Previous frame (←/A)">&#9664;</button>
+                <button class="play-btn" id="playBtn" title="Play/Pause (Space)">&#9654;</button>
+                <button class="step-btn" id="nextFrameBtn" title="Next frame (→/S)">&#9654;</button>
+                <span class="frame-display" id="frameDisplay">Frame: 0 / 0</span>
+                <!-- Stereo camera controls — hidden for mono trials. -->
+                <span id="cameraControls" style="display:none;align-items:center;gap:6px;margin-left:8px;font-size:12px;color:var(--text-muted);">
+                    <span style="font-weight:600;color:var(--text);min-width:24px;text-align:right;" id="cameraLabel">OS</span>
+                    <button class="btn btn-sm" id="sideToggle" title="Toggle camera (E)">Switch</button>
+                </span>
+                <label style="font-size:11px;color:var(--text-muted);display:flex;align-items:center;gap:6px;margin-left:8px;">
+                    Speed
+                    <input type="range" id="speedSlider" min="0" max="7" step="1" value="3">
+                </label>
+                <span id="speedDisplay">1x</span>
+                <span class="kbd-hint">
+                    <code>Space</code> play &nbsp;
+                    <code>←</code>/<code>→</code> step &nbsp;
+                    <code>Shift+←/→</code> 10 frames &nbsp;
+                    <code>Home</code>/<code>End</code> jump &nbsp;
+                    <code>E</code> camera &nbsp;
+                    <code>R</code> reset zoom &nbsp;
+                    <code>wheel</code>/<code>drag</code> zoom·pan
+                </span>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/nav.js?v=9"></script>
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/preproc.js?v=21"></script>
+</body>
+</html>

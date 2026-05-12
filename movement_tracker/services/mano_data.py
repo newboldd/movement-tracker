@@ -1567,6 +1567,12 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         "mp_tracked_L": _points_to_list(mp_tracked_L),
         "mp_tracked_R": _points_to_list(mp_tracked_R),
         "mp_joints_3d": _points_to_list(mp_joints_3d),
+        # Stereo (image-based cross-camera alignment) — populated below
+        # if a saved ``stereo_align.npz`` exists for this trial.
+        "stereo_tracked_L": None,
+        "stereo_tracked_R": None,
+        "stereo_response": None,
+        "has_stereo": False,
         # Vision (Apple Vision)
         "vision_tracked_L": _points_to_list(vision_tracked_L),
         "vision_tracked_R": _points_to_list(vision_tracked_R),
@@ -1703,6 +1709,49 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     if mp_weights_R is not None:
         result["mp_weights_R"] = [[_nan_to_none(round(float(mp_weights_R[t, j]), 3))
                                     for j in range(21)] for t in range(N)]
+
+    # ── Stereo image-based cross-camera label alignment ─────────────
+    # Loads ``<mano>/<stem>/stereo_align.npz`` if present and emits the
+    # OS / OD labels translated by the per-frame per-joint phase-corr
+    # shift discovered between the two crops — the Stereo model on the
+    # Auto page renders these alongside the local MP labels to surface
+    # cross-camera disagreement at a glance.
+    try:
+        from .stereo_align import (
+            load_stereo_align, crop_halves_per_joint as _default_per_joint,
+            _DEFAULT_CROP_HALF, _HAND_CROP_HALF,
+        )
+        _stereo_trial_idx = next(
+            (i for i, t in enumerate(build_trial_map(subject_name))
+             if t.get("trial_name") == trial_stem),
+            None,
+        )
+        sa = (load_stereo_align(subject_name, _stereo_trial_idx)
+              if _stereo_trial_idx is not None else None)
+        if sa is not None:
+            shifts = sa["shifts"]                 # (N_sa, 21, 2)
+            resp = sa["response"]                 # (N_sa, 21)
+            n_sa = min(N, shifts.shape[0])
+            stereo_R = np.full((N, 21, 2), np.nan)  # shown on R camera
+            stereo_L = np.full((N, 21, 2), np.nan)  # shown on L camera
+            stereo_R[:n_sa, :, 0] = mp_tracked_R[:n_sa, :, 0] + shifts[:n_sa, :, 0]
+            stereo_R[:n_sa, :, 1] = mp_tracked_R[:n_sa, :, 1] + shifts[:n_sa, :, 1]
+            stereo_L[:n_sa, :, 0] = mp_tracked_L[:n_sa, :, 0] - shifts[:n_sa, :, 0]
+            stereo_L[:n_sa, :, 1] = mp_tracked_L[:n_sa, :, 1] - shifts[:n_sa, :, 1]
+            result["stereo_tracked_L"] = _points_to_list(stereo_L)
+            result["stereo_tracked_R"] = _points_to_list(stereo_R)
+            result["stereo_response"] = [[_nan_to_none(round(float(resp[t, j]), 3))
+                                           for j in range(21)]
+                                          for t in range(n_sa)]
+            result["has_stereo"] = bool(np.any(~np.isnan(shifts)))
+            result["stereo_crop_half"] = int(sa.get("crop_half", _DEFAULT_CROP_HALF))
+            result["stereo_hand_crop_half"] = int(sa.get("hand_crop_half", _HAND_CROP_HALF))
+            result["stereo_crop_halves_per_joint"] = [
+                int(x) for x in (sa.get("crop_halves_per_joint")
+                                  or _default_per_joint(21))
+            ]
+    except Exception as _e:
+        logger.debug(f"stereo_align load skipped: {_e}")
 
     return result
 

@@ -419,6 +419,89 @@ def run_fit(subject_id: int, req: FitRequest) -> dict:
     return {"job_id": job_id, "trial_stem": trial_stem}
 
 
+class StereoAlignRequest(BaseModel):
+    trial_idx: int
+
+
+@router.post("/{subject_id}/run_stereo")
+def run_stereo(subject_id: int, req: StereoAlignRequest) -> dict:
+    """Submit a cross-camera image-alignment job for one trial.
+
+    For each frame and joint, crops a small window around the MediaPipe
+    label in each camera and runs phase correlation (no label info used)
+    to find the translation that best image-aligns OS onto OD.  Saves
+    the per-frame per-joint shifts + correlation responses to
+    ``<mano>/<stem>/stereo_align.npz``.  The Stereo model on the Auto
+    page then draws the opposite-camera label, translated by the
+    discovered shift, alongside the MP label of the current camera.
+    """
+    from ..services.stereo_align import run_stereo_align
+    from ..services.jobs import registry
+
+    name = _subject_name(subject_id)
+    trials = build_trial_map(name)
+    if req.trial_idx < 0 or req.trial_idx >= len(trials):
+        raise HTTPException(400, "trial_idx out of range")
+    trial_stem = trials[req.trial_idx]["trial_name"]
+
+    with get_db_ctx() as db:
+        db.execute(
+            "INSERT INTO jobs (subject_id, job_type, status, params_json) "
+            "VALUES (?, 'stereo_align', 'pending', ?)",
+            (subject_id, json.dumps({"trial_idx": req.trial_idx,
+                                      "trial_name": trial_stem})),
+        )
+        job = db.execute(
+            "SELECT * FROM jobs WHERE subject_id = ? ORDER BY id DESC LIMIT 1",
+            (subject_id,),
+        ).fetchone()
+    job_id = job["id"]
+    cancel_event = threading.Event()
+    registry._cancel_events[job_id] = cancel_event
+
+    def _run():
+        try:
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status='running', started_at=CURRENT_TIMESTAMP "
+                    "WHERE id=?", (job_id,),
+                )
+            def on_progress(pct):
+                if cancel_event.is_set():
+                    raise _JobCancelled()
+                with get_db_ctx() as db:
+                    db.execute("UPDATE jobs SET progress_pct=? WHERE id=?",
+                               (int(pct), job_id))
+            run_stereo_align(name, req.trial_idx,
+                             progress_callback=on_progress,
+                             cancel_event=cancel_event)
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status='completed', progress_pct=100, "
+                    "finished_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,),
+                )
+        except _JobCancelled:
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status='cancelled', "
+                    "finished_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,),
+                )
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).exception(f"Stereo align job {job_id} failed")
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status='failed', error_msg=?, "
+                    "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (str(e), job_id),
+                )
+        finally:
+            registry._cancel_events.pop(job_id, None)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"job_id": job_id, "trial_stem": trial_stem}
+
+
 class HRnetFitRequest(BaseModel):
     trial_idx: int
     cluster_size: int = 1
