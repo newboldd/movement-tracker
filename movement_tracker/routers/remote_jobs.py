@@ -95,6 +95,32 @@ def get_queue() -> dict:
     return queue_manager.get_state()
 
 
+# ─── Lifetime job history ─────────────────────────────────────────────
+
+
+@router.get("/history")
+def get_job_history(
+    limit: int = 500,
+    job_type: Optional[str] = None,
+    subject_id: Optional[int] = None,
+    status: Optional[str] = None,
+) -> dict:
+    """Read recent records from ``<DATA_DIR>/job_history.jsonl``.
+
+    Newest-first.  Filterable by job_type / subject_id / status before
+    the ``limit`` cap is applied, so e.g. ``?job_type=preproc&limit=50``
+    returns the 50 newest preproc records regardless of how many of
+    other job types intervened.
+    """
+    from ..services.job_history import read_history, summary
+    rows = read_history(limit=limit, job_type=job_type,
+                         subject_id=subject_id, status=status)
+    return {
+        "rows":    rows,
+        "summary": summary(job_type=job_type),
+    }
+
+
 # ─── Pending-result downloads (banner + Re-download button) ────────────
 
 class _IgnoreReq(BaseModel):
