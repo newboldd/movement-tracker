@@ -1417,6 +1417,19 @@ class QueueManager:
                 if self._running_remote_cpu == queue_id:
                     self._running_remote_cpu = None
             self._job_threads.pop(queue_id, None)
+            # Lifetime job-history flush.  Runs once per job no matter
+            # which branch the dispatcher took; some branches also call
+            # finalize_job_record themselves (preproc local + remote),
+            # which is fine — the second call here is a no-op because
+            # the in-memory stage list was already cleared.  Catches
+            # any branch we haven't instrumented yet (deidentify, hrnet,
+            # mediapipe, train, etc.) so every job lands in the file
+            # with at least its basic metadata + total duration.
+            try:
+                from .job_history import finalize_job_record
+                finalize_job_record(job_id)
+            except Exception:
+                logger.exception(f"job_history flush failed for job {job_id}")
             # Signal drain thread to check for next item
             self._drain_event.set()
 
