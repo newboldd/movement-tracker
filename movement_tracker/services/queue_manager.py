@@ -41,12 +41,16 @@ RESOURCE_MAP = {
     "mano_fit": "cpu",
     "mano_fit_v2": "cpu",
     "mano_fit_v3": "cpu",
+    # Per-trial pre-processing: camera trajectory + background/mask bake.
+    # Pure CPU (OpenCV + numpy + ffmpeg).  No GPU needed.
+    "preproc": "cpu",
 }
 
 STEP_DEFINITIONS = [
     {"name": "mediapipe", "resource": "cpu", "label": "MediaPipe (Hands)"},
     {"name": "vision", "resource": "cpu", "label": "Vision (Hands)"},
     {"name": "pose", "resource": "cpu", "label": "Pose Detection"},
+    {"name": "preproc",    "resource": "cpu", "label": "Preproc (Trajectory + Mask)"},
     {"name": "deidentify", "resource": "cpu", "label": "Deidentify (Render)"},
     {"name": "blur", "resource": "cpu", "label": "Face Blur"},
     {"name": "mediapipe+blur", "resource": "cpu", "label": "MediaPipe + Blur"},
@@ -542,7 +546,7 @@ class QueueManager:
             # Route based on execution target
             if execution_target in ("local-cpu", "local-gpu"):
                 # Local execution
-                if job_type in ("mediapipe", "vision", "blur", "mediapipe+blur", "pose", "hrnet", "deidentify"):
+                if job_type in ("mediapipe", "vision", "blur", "mediapipe+blur", "pose", "hrnet", "deidentify", "preproc"):
                     # CPU lane: preprocessing
                     if job_type == "mediapipe":
                         _sim = bool((extra_params or {}).get("static_image_mode"))
@@ -726,6 +730,81 @@ class QueueManager:
                         import time
                         time.sleep(1)
                         local_executor.execute_blur(subject_names, job_id, log_path)
+
+                    elif job_type == "preproc":
+                        # Per-trial preproc: camera trajectory followed by
+                        # background + stable.mp4 + fg.mp4 + hand.mp4 +
+                        # outline.mp4 bake.  Same one-job-many-trials
+                        # batching pattern as the hrnet branch above.
+                        from ..services.camera_motion import compute_camera_trajectory
+                        from ..services.background import compute_background
+                        from ..services.jobs import registry as job_registry
+                        from ..services.video import build_trial_map
+                        ep = extra_params or {}
+                        cancel_event = threading.Event()
+                        job_registry._cancel_events[job_id] = cancel_event
+
+                        trials_batch = ep.get("trials")
+                        if not trials_batch:
+                            trials_batch = [{
+                                "subject_name": subject_names[0],
+                                "trial_idx": int(ep.get("trial_idx", 0)),
+                                "trial_name": ep.get("trial_name"),
+                            }]
+                        n_total = max(1, len(trials_batch))
+
+                        def _preproc_progress(trial_i, sub_pct, phase_weight):
+                            # Map (trial_i + phase_local_pct) into the 0–100
+                            # range scaled by the batch size.  phase_weight is
+                            # the fraction of one trial's work the current
+                            # sub-step (trajectory vs background) accounts for.
+                            global_pct = 100.0 * (trial_i + sub_pct / 100.0 * 1.0) / n_total
+                            with get_db_ctx() as _db:
+                                _db.execute(
+                                    "UPDATE jobs SET progress_pct = ? WHERE id = ?",
+                                    (round(global_pct, 1), job_id),
+                                )
+
+                        for i, t in enumerate(trials_batch):
+                            if cancel_event.is_set():
+                                break
+                            sub = t.get("subject_name") or subject_names[0]
+                            tidx = int(t.get("trial_idx", 0))
+                            tname = t.get("trial_name")
+                            try:
+                                # Phase A: trajectory (~30% of the trial's work)
+                                def _on_traj(pct, _i=i):
+                                    _preproc_progress(_i, pct * 0.30, 0.30)
+                                compute_camera_trajectory(
+                                    sub, tidx,
+                                    progress_callback=_on_traj,
+                                    cancel_event=cancel_event,
+                                )
+                                # Phase B: background + masks (~70%)
+                                def _on_bg(pct, _i=i):
+                                    _preproc_progress(_i, 30 + pct * 0.70, 0.70)
+                                compute_background(
+                                    sub, tidx,
+                                    progress_callback=_on_bg,
+                                    cancel_event=cancel_event,
+                                )
+                            except InterruptedError:
+                                logger.info(f"preproc cancelled at trial {sub}/{tname or tidx}")
+                                break
+                            except Exception as e:
+                                logger.exception(f"preproc trial {sub}/{tname or tidx} failed: {e}")
+                                with get_db_ctx() as _db:
+                                    _db.execute(
+                                        "UPDATE jobs SET error_msg = ? WHERE id = ?",
+                                        (str(e)[:500], job_id),
+                                    )
+                        job_registry._cancel_events.pop(job_id, None)
+                        with get_db_ctx() as _db:
+                            _db.execute(
+                                "UPDATE jobs SET status='completed', progress_pct=100, "
+                                "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                                (job_id,),
+                            )
 
                 elif job_type == "train":
                     # GPU lane: training on local GPU
@@ -1084,6 +1163,37 @@ class QueueManager:
                             "finished_at=CURRENT_TIMESTAMP WHERE id=?",
                             (_final_status, job_id),
                         )
+
+                elif job_type == "preproc":
+                    # Remote preproc: per-trial trajectory + background bake.
+                    # Reuses videos and mediapipe_prelabels.npz already on
+                    # the remote in the subject-scoped work dir (uploaded
+                    # by prior MP / deidentify runs).  Outputs are
+                    # downloaded back into <dlc>/<subject>/preproc/<stem>/.
+                    from .remote import remote_preproc
+                    ep = extra_params or {}
+                    trials_batch = ep.get("trials") or [{
+                        "subject_name": subject_names[0],
+                        "trial_idx": ep.get("trial_idx"),
+                        "trial_name": ep.get("trial_name"),
+                    }]
+                    try:
+                        remote_preproc(
+                            job_id=job_id,
+                            cfg=remote_cfg,
+                            subject_name=subject_names[0],
+                            log_path=log_path,
+                            registry=registry,
+                            trials=trials_batch,
+                        )
+                    except Exception as _e:
+                        logger.exception(f"remote preproc job {job_id} failed: {_e}")
+                        with get_db_ctx() as _db:
+                            _db.execute(
+                                "UPDATE jobs SET status='failed', error_msg=?, "
+                                "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                                (str(_e)[:500], job_id),
+                            )
 
                 elif job_type in ("vision", "pose", "mano_fit", "mano_fit_v2"):
                     # These don't have remote handlers yet — run locally

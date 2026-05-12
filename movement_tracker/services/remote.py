@@ -4153,6 +4153,29 @@ def _patch_deidentify_imports(work_dir):
     # Create a stub 'ffmpeg' module with get_ffmpeg_path
     ffmpeg_mod = types.ModuleType("ffmpeg")
 
+    def _try_pip_install_imageio_ffmpeg():
+        """One-shot self-install on the remote when ``imageio_ffmpeg`` is
+        missing.  The package ships a small (~20 MB) ffmpeg binary — far
+        less friction than asking the user to put ffmpeg on PATH manually.
+        Returns the module on success, None on failure."""
+        import subprocess as _sp
+        try:
+            print("[worker] imageio_ffmpeg not found; pip-installing now...",
+                  flush=True)
+            _sp.check_call([
+                sys.executable, "-m", "pip", "install",
+                "--disable-pip-version-check", "--quiet",
+                "imageio-ffmpeg",
+            ])
+            import imageio_ffmpeg
+            print(f"[worker] imageio_ffmpeg installed at {imageio_ffmpeg.__file__}",
+                  flush=True)
+            return imageio_ffmpeg
+        except Exception as _e:
+            print(f"[worker] pip install imageio-ffmpeg failed: {_e}",
+                  flush=True)
+            return None
+
     def get_ffmpeg_path():
         p = shutil.which("ffmpeg")
         if p:
@@ -4162,22 +4185,43 @@ def _patch_deidentify_imports(work_dir):
             return imageio_ffmpeg.get_ffmpeg_exe()
         except (ImportError, RuntimeError):
             pass
-        raise FileNotFoundError("ffmpeg not found")
+        mod = _try_pip_install_imageio_ffmpeg()
+        if mod is not None:
+            try:
+                return mod.get_ffmpeg_exe()
+            except Exception:
+                pass
+        raise FileNotFoundError(
+            "ffmpeg not found on remote.  Put ffmpeg on PATH or run "
+            f"'{sys.executable}' -m pip install imageio-ffmpeg"
+        )
 
     def get_ffprobe_path():
         p = shutil.which("ffprobe")
         if p:
             return p
+        from pathlib import Path
         try:
             import imageio_ffmpeg
-            from pathlib import Path
             fp = Path(imageio_ffmpeg.get_ffmpeg_exe())
             probe = fp.parent / fp.name.replace("ffmpeg", "ffprobe")
             if probe.exists():
                 return str(probe)
         except (ImportError, RuntimeError):
             pass
-        raise FileNotFoundError("ffprobe not found")
+        mod = _try_pip_install_imageio_ffmpeg()
+        if mod is not None:
+            try:
+                fp = Path(mod.get_ffmpeg_exe())
+                probe = fp.parent / fp.name.replace("ffmpeg", "ffprobe")
+                if probe.exists():
+                    return str(probe)
+            except Exception:
+                pass
+        raise FileNotFoundError(
+            "ffprobe not found on remote.  Put ffprobe on PATH or run "
+            f"'{sys.executable}' -m pip install imageio-ffmpeg"
+        )
 
     ffmpeg_mod.get_ffmpeg_path = get_ffmpeg_path
     ffmpeg_mod.get_ffprobe_path = get_ffprobe_path
@@ -4304,4 +4348,578 @@ if __name__ == "__main__":
         print(f"Usage: {sys.argv[0]} bundle.json work_dir output_dir status_file")
         sys.exit(1)
     main(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4])
+'''
+
+
+# ─── Remote preproc (camera trajectory + background/mask bake) ─────────
+
+
+def remote_preproc(
+    job_id: int,
+    cfg: RemoteConfig,
+    subject_name: str,
+    log_path: str,
+    registry,
+    trials: list[dict],
+) -> None:
+    """Remote preproc: per-trial camera-trajectory + background/mask bake.
+
+    Layout under ``cfg.work_dir/preproc_<subject>/``:
+      videos/                 — source mp4s (skip-if-already-uploaded)
+      <subject>/mediapipe_prelabels.npz  — copied from local
+      modules/                — uploaded source files (camera_motion.py,
+                                 background.py, ffmpeg.py, plus stubs)
+      run_<job_id>/bundle.json, status.json, render.log
+
+    Outputs the worker writes (each trial):
+      <subject>/preproc/<trial_stem>/{camera_trajectory.npz, background.npz,
+        stable.mp4, fg.mp4, hand.mp4, outline.mp4, background_*.png, mad_*.png}
+
+    Each output dir is downloaded back to the local
+    ``<dlc>/<subject>/preproc/<trial_stem>/``.
+    """
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    from ..config import get_settings
+    from .video import build_trial_map
+
+    settings = get_settings()
+    remote_work = f"{cfg.work_dir}/preproc_{subject_name}"
+    remote_run  = f"{remote_work}/run_{job_id}"
+    remote_status = f"{remote_run}/status.json"
+    remote_log    = f"{remote_run}/render.log"
+
+    cancel_event = registry.register_cancel_event(job_id)
+
+    def _check_cancel():
+        if cancel_event.is_set():
+            raise InterruptedError("Job cancelled")
+
+    def _set_progress(pct):
+        with get_db_ctx() as db:
+            db.execute("UPDATE jobs SET progress_pct=? WHERE id=?",
+                       (round(float(pct), 1), job_id))
+
+    def _fail(msg):
+        logger.error(f"Job {job_id} remote preproc failed: {msg}")
+        with get_db_ctx() as db:
+            db.execute(
+                "UPDATE jobs SET status='failed', error_msg=?, "
+                "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                (msg, job_id),
+            )
+
+    try:
+        local_dlc_dir = settings.dlc_path / subject_name
+        all_trials = build_trial_map(subject_name)
+        if not all_trials:
+            _fail("No trials found locally")
+            return
+
+        # Filter to the trial indices the caller wants.  Each entry in
+        # ``trials`` is ``{trial_idx, trial_name?, subject_name?}``.
+        wanted_idxs = []
+        for t in trials:
+            ti = t.get("trial_idx")
+            if ti is None:
+                continue
+            ti = int(ti)
+            if 0 <= ti < len(all_trials):
+                wanted_idxs.append(ti)
+        if not wanted_idxs:
+            _fail("No valid trial indices in request")
+            return
+
+        # Build the trial entries the remote worker needs.  We bake the
+        # video filename (not the local absolute path) because the file
+        # lives under the remote work dir.
+        bundle_trials = []
+        for ti in wanted_idxs:
+            tr = all_trials[ti]
+            bundle_trials.append({
+                "trial_idx": int(ti),
+                "trial_name": tr["trial_name"],
+                "video_name": Path(tr["video_path"]).name,
+                "frame_count": int(tr["frame_count"]),
+                "start_frame": int(tr.get("start_frame", 0)),
+                "fps": float(tr.get("fps", 30.0)),
+            })
+
+        with open(log_path, "w") as logfile:
+            logfile.write(f"=== Remote preproc for {subject_name} "
+                          f"({len(bundle_trials)} trials) ===\n")
+            logfile.flush()
+
+            # ── Phase 1: create remote dirs, probe existing files ────
+            subprocess.run(
+                _py_cmd(cfg, f"\"import os; os.makedirs(r'{remote_run}', exist_ok=True); "
+                              f"os.makedirs(r'{remote_work}/{subject_name}', exist_ok=True); "
+                              f"os.makedirs(r'{remote_work}/modules', exist_ok=True)\""),
+                capture_output=True, timeout=20,
+            )
+            # List existing files under remote_work for skip-if-present.
+            existing = set()
+            res = subprocess.run(
+                _py_cmd(cfg,
+                    f"\"import os; d=r'{remote_work}'; "
+                    f"out=[]; \\\n"
+                    f"  [out.extend([f'{{root}}/{{f}}' for f in files]) "
+                    f"for root,_,files in os.walk(d)]; print('\\n'.join(out))\""),
+                capture_output=True, text=True, timeout=30,
+            )
+            if res.returncode == 0:
+                existing = set(res.stdout.strip().splitlines())
+            logfile.write(f"  remote dir scan: {len(existing)} files already present\n")
+            logfile.flush()
+            _check_cancel()
+            _set_progress(2)
+
+            # ── Phase 2: upload source videos that aren't already there ──
+            video_path_map = {}   # video_name → remote absolute path
+            videos_dir_remote = f"{remote_work}/videos"
+            subprocess.run(
+                _py_cmd(cfg, f"\"import os; os.makedirs(r'{videos_dir_remote}', exist_ok=True)\""),
+                capture_output=True, timeout=15,
+            )
+            for bt in bundle_trials:
+                vname = bt["video_name"]
+                remote_video = f"{videos_dir_remote}/{vname}"
+                video_path_map[vname] = remote_video
+                # Also check the legacy deidentify_<subject> work dir —
+                # that's where Render/Deidentify jobs have already
+                # uploaded videos for the same subject.
+                deidentify_video = f"{cfg.work_dir}/deidentify_{subject_name}/{vname}"
+                # Probe both candidate locations on the remote.
+                probe = subprocess.run(
+                    _py_cmd(cfg,
+                        f"\"import os; "
+                        f"print('A' if os.path.exists(r'{remote_video}') else "
+                        f"('B' if os.path.exists(r'{deidentify_video}') else 'N'))\""),
+                    capture_output=True, text=True, timeout=15,
+                )
+                where = (probe.stdout or "").strip()
+                if where == "A":
+                    logfile.write(f"  video {vname}: already in preproc dir\n")
+                elif where == "B":
+                    # Cross-link to avoid duplicating: just point the
+                    # bundle at the deidentify location.
+                    video_path_map[vname] = deidentify_video
+                    logfile.write(f"  video {vname}: reusing deidentify upload\n")
+                else:
+                    # Upload from local
+                    local_vp = str(settings.video_path / vname)
+                    if not os.path.exists(local_vp):
+                        _fail(f"Local video not found: {local_vp}")
+                        return
+                    logfile.write(f"  uploading {vname}...\n")
+                    logfile.flush()
+                    up = subprocess.run(
+                        _scp_base_args(cfg) + [local_vp, f"{cfg.host}:{remote_video}"],
+                        capture_output=True, text=True, timeout=600,
+                    )
+                    if up.returncode != 0:
+                        _fail(f"Video upload failed: {up.stderr[:200]}")
+                        return
+                _check_cancel()
+            _set_progress(15)
+
+            # ── Phase 3: upload mediapipe + pose npz if available ────
+            for npz_name in ("mediapipe_prelabels.npz", "pose_prelabels.npz"):
+                local_npz = local_dlc_dir / npz_name
+                if not local_npz.exists():
+                    logfile.write(f"  {npz_name} not present locally — skipping\n")
+                    continue
+                remote_npz = f"{remote_work}/{subject_name}/{npz_name}"
+                # Probe; skip if present and the local file is the same size.
+                probe = subprocess.run(
+                    _py_cmd(cfg,
+                        f"\"import os; "
+                        f"print(os.path.getsize(r'{remote_npz}') if "
+                        f"os.path.exists(r'{remote_npz}') else 0)\""),
+                    capture_output=True, text=True, timeout=15,
+                )
+                remote_size = 0
+                try: remote_size = int((probe.stdout or "0").strip())
+                except ValueError: remote_size = 0
+                local_size = local_npz.stat().st_size
+                if remote_size == local_size:
+                    logfile.write(f"  {npz_name}: already up to date on remote\n")
+                else:
+                    logfile.write(f"  uploading {npz_name} ({local_size/1e6:.1f} MB)...\n")
+                    logfile.flush()
+                    up = subprocess.run(
+                        _scp_base_args(cfg) + [str(local_npz), f"{cfg.host}:{remote_npz}"],
+                        capture_output=True, text=True, timeout=600,
+                    )
+                    if up.returncode != 0:
+                        logfile.write(f"  WARN: {npz_name} upload failed: {up.stderr[:200]}\n")
+                _check_cancel()
+            _set_progress(25)
+
+            # ── Phase 4: upload source modules (always refresh) ──────
+            service_dir = Path(__file__).parent
+            modules_dir = f"{remote_work}/modules"
+            for mod_file in ("camera_motion.py", "background.py", "ffmpeg.py"):
+                mp = service_dir / mod_file
+                if not mp.exists():
+                    continue
+                up = subprocess.run(
+                    _scp_base_args(cfg) + [str(mp), f"{cfg.host}:{modules_dir}/"],
+                    capture_output=True, text=True, timeout=60,
+                )
+                if up.returncode != 0:
+                    logfile.write(f"  WARN: module {mod_file} upload failed\n")
+                else:
+                    logfile.write(f"  uploaded module {mod_file}\n")
+                logfile.flush()
+            _check_cancel()
+            _set_progress(30)
+
+            # ── Phase 5: write + upload bundle and worker script ─────
+            import tempfile as _tf
+            bundle = {
+                "subject_name": subject_name,
+                "modules_dir":  modules_dir,
+                "data_dir":     remote_work,           # holds <subject>/mediapipe_prelabels.npz
+                "trials": [
+                    {**bt, "video_remote_path": video_path_map[bt["video_name"]]}
+                    for bt in bundle_trials
+                ],
+            }
+            bundle_path = os.path.join(_tf.gettempdir(), f"preproc_bundle_{job_id}.json")
+            with open(bundle_path, "w") as bf:
+                json.dump(bundle, bf)
+            up = subprocess.run(
+                _scp_base_args(cfg) + [bundle_path, f"{cfg.host}:{remote_run}/bundle.json"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if up.returncode != 0:
+                _fail(f"Bundle upload failed: {up.stderr[:200]}")
+                return
+
+            worker_path = os.path.join(_tf.gettempdir(), f"remote_preproc_worker_{job_id}.py")
+            with open(worker_path, "w") as wf:
+                wf.write(_REMOTE_PREPROC_WORKER)
+            subprocess.run(
+                _scp_base_args(cfg) + [worker_path,
+                                        f"{cfg.host}:{remote_work}/remote_preproc_worker.py"],
+                capture_output=True, timeout=30,
+            )
+            logfile.write("  uploaded worker script\n"); logfile.flush()
+            _check_cancel()
+            _set_progress(35)
+
+            # ── Phase 6: launch the worker as a detached process ─────
+            launch = (
+                f"\"import subprocess, os, time; "
+                f"log_fh = open(r'{remote_log}', 'w'); "
+                f"args = [r'{cfg.python_executable}', '-u', "
+                f"r'{remote_work}/remote_preproc_worker.py', "
+                f"r'{remote_run}/bundle.json', "
+                f"r'{remote_status}']; "
+                f"flags = 0x01000200 if os.name == 'nt' else 0; "
+                f"p = subprocess.Popen(args, creationflags=flags, "
+                f"stdin=subprocess.DEVNULL, stdout=log_fh, stderr=log_fh); "
+                f"print(p.pid); time.sleep(2)\""
+            )
+            launch_res = subprocess.run(_py_cmd(cfg, launch),
+                                         capture_output=True, text=True, timeout=30)
+            if launch_res.returncode != 0:
+                _fail(f"Worker launch failed: {launch_res.stderr[:200]}")
+                return
+            logfile.write(f"  worker started (pid {launch_res.stdout.strip()})\n")
+            logfile.flush()
+
+            # ── Phase 7: poll status.json ────────────────────────────
+            import time as _t
+            poll_iv = 3.0
+            last_pct = 35.0
+            while True:
+                _check_cancel()
+                _t.sleep(poll_iv)
+                # Pull status.json
+                local_status = os.path.join(_tf.gettempdir(),
+                                              f"preproc_status_{job_id}.json")
+                _dl = subprocess.run(
+                    _scp_base_args(cfg) + [f"{cfg.host}:{remote_status}", local_status],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if _dl.returncode != 0 or not os.path.exists(local_status):
+                    continue   # status.json not written yet
+                try:
+                    with open(local_status) as f:
+                        st = json.load(f)
+                except (OSError, json.JSONDecodeError):
+                    continue
+                phase = st.get("status", "running")
+                pct = float(st.get("progress_pct", last_pct))
+                # Map worker 0–100 into our 35–95 window so upload + download
+                # phases get visible progress around it.
+                shown = 35.0 + 0.60 * pct
+                if abs(shown - last_pct) > 0.5:
+                    _set_progress(shown)
+                    last_pct = shown
+                cur = st.get("current_trial")
+                if cur:
+                    logfile.write(f"  progress: trial={cur} {pct:.1f}%\n")
+                    logfile.flush()
+                if phase == "completed":
+                    logfile.write("  worker completed\n")
+                    break
+                if phase == "failed":
+                    _fail(f"Worker failed: {st.get('error', 'unknown')}")
+                    return
+                if phase == "cancelled":
+                    _fail("Worker cancelled")
+                    return
+
+            _set_progress(95)
+
+            # ── Phase 8: download outputs back ───────────────────────
+            local_preproc_root = settings.dlc_path / subject_name / "preproc"
+            local_preproc_root.mkdir(parents=True, exist_ok=True)
+            n_ok = 0
+            for bt in bundle_trials:
+                stem = bt["trial_name"]
+                remote_stem_dir = f"{remote_work}/{subject_name}/preproc/{stem}/"
+                local_stem_dir  = local_preproc_root / stem
+                local_stem_dir.mkdir(parents=True, exist_ok=True)
+                logfile.write(f"  downloading {stem}/\n"); logfile.flush()
+                _dl = subprocess.run(
+                    _scp_base_args(cfg) + ["-r", f"{cfg.host}:{remote_stem_dir}",
+                                            str(local_stem_dir.parent) + os.sep],
+                    capture_output=True, text=True, timeout=900,
+                )
+                if _dl.returncode != 0:
+                    logfile.write(f"    WARN: download failed: {_dl.stderr[:200]}\n")
+                else:
+                    n_ok += 1
+                _check_cancel()
+            logfile.write(f"  downloaded {n_ok}/{len(bundle_trials)} trial dirs\n")
+            logfile.flush()
+
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status='completed', progress_pct=100, "
+                    "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (job_id,),
+                )
+
+    except InterruptedError:
+        logger.info(f"Job {job_id} remote preproc cancelled")
+        with get_db_ctx() as db:
+            db.execute(
+                "UPDATE jobs SET status='cancelled', "
+                "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                (job_id,),
+            )
+    except Exception as e:
+        logger.exception(f"Job {job_id} remote preproc exception: {e}")
+        _fail(str(e)[:500])
+
+
+# Worker script — uploaded to the remote and executed there.
+_REMOTE_PREPROC_WORKER = r'''#!/usr/bin/env python3
+"""Remote preproc worker — runs camera trajectory + background bake for trials.
+
+Reads bundle.json (subject_name, modules_dir, data_dir, trials).  Imports
+the uploaded camera_motion.py + background.py + ffmpeg.py modules from
+modules_dir, rewriting their relative imports to flat imports as needed,
+and runs the compute functions per trial.
+
+Stubs ``config.get_settings`` to point dlc_path/video_path at data_dir, and
+``video.build_trial_map`` to return the bundled trial map — that's enough
+for compute_camera_trajectory and compute_background to resolve their
+paths without ever reaching out to the original package.
+"""
+import json
+import os
+import sys
+import time as _time
+import traceback
+import types
+from pathlib import Path
+
+
+def _write_status(path, **kwargs):
+    """Atomic status write, retrying on Windows file-locking errors."""
+    import tempfile
+    path = os.path.normpath(path)
+    d = os.path.dirname(path)
+    with tempfile.NamedTemporaryFile(mode="w", dir=d, suffix=".tmp", delete=False) as f:
+        json.dump({**kwargs, "pid": os.getpid()}, f)
+        tmp = f.name
+    for attempt in range(10):
+        try:
+            os.replace(tmp, path); return
+        except (PermissionError, OSError):
+            _time.sleep(min(0.05 * (1 + attempt), 0.5))
+    try: os.replace(tmp, path)
+    except (PermissionError, OSError):
+        try: os.unlink(tmp)
+        except OSError: pass
+
+
+def _rewrite_relative_imports(modules_dir):
+    """In-place rewrite of ``from ..config / .video / ...`` to flat
+    imports so the modules load when placed at sys.path[0]."""
+    rewrites = [
+        ("from ..config import",            "from config import"),
+        ("from .config import",             "from config import"),
+        ("from .ffmpeg import",             "from ffmpeg import"),
+        ("from .video import",              "from video import"),
+        ("from .camera_motion import",      "from camera_motion import"),
+        ("from .background import",         "from background import"),
+        ("from .mediapipe_prelabel import", "from mediapipe_prelabel import"),
+        ("from .calibration import",        "from calibration import"),
+        ("from ..services.",                "from "),
+    ]
+    for fname in os.listdir(modules_dir):
+        if not fname.endswith(".py"):
+            continue
+        p = os.path.join(modules_dir, fname)
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                src = f.read()
+            new = src
+            for old, repl in rewrites:
+                new = new.replace(old, repl)
+            if new != src:
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(new)
+        except OSError:
+            pass
+
+
+def _install_stubs(data_dir, bundled_trials):
+    """Install stub ``config`` + ``video`` + ``mediapipe_prelabel``
+    modules in sys.modules so compute_X can resolve their imports.
+
+    config.get_settings returns dlc_path = video_path = data_dir.  The
+    compute functions read settings.dlc_path / <subject>/<file> to find
+    the MP npz and to write outputs under preproc/<stem>/.
+
+    video.build_trial_map returns the pre-baked trial map from the
+    bundle (so compute_camera_trajectory doesn't need ffprobe on the
+    remote).
+    """
+    data_path = Path(data_dir)
+    settings = types.SimpleNamespace(
+        dlc_path=data_path,
+        video_path=data_path,
+        calibration_path=data_path,
+        camera_names=["OS", "OD"],
+        default_camera_mode="stereo",
+    )
+    config_mod = types.ModuleType("config")
+    config_mod.get_settings = lambda: settings
+    sys.modules["config"] = config_mod
+
+    # video.build_trial_map: return the bundle's pre-computed trial info
+    # but with absolute remote video paths so cv2.VideoCapture finds them.
+    # build_trial_map indexes by trial position; we re-build the full list
+    # in order, dropping in the bundled entries by trial_idx and leaving
+    # the rest as plausible stubs (compute functions only ever access the
+    # indices we passed in).
+    trial_by_idx = {int(t["trial_idx"]): t for t in bundled_trials}
+    max_idx = max(trial_by_idx) if trial_by_idx else -1
+    tmap = []
+    for i in range(max_idx + 1):
+        if i in trial_by_idx:
+            t = trial_by_idx[i]
+            tmap.append({
+                "trial_name":  t["trial_name"],
+                "video_path":  t["video_remote_path"],
+                "frame_count": int(t["frame_count"]),
+                "start_frame": int(t.get("start_frame", 0)),
+                "fps":         float(t.get("fps", 30.0)),
+            })
+        else:
+            tmap.append({"trial_name": f"trial_{i}", "video_path": "",
+                          "frame_count": 0, "start_frame": 0, "fps": 30.0})
+    video_mod = types.ModuleType("video")
+    video_mod.build_trial_map = lambda subject_name, **_kw: tmap
+    sys.modules["video"] = video_mod
+
+    # mediapipe_prelabel.load_mediapipe_prelabels: minimal loader.
+    import numpy as _np
+    def _load_mp(subject_name):
+        npz_path = data_path / subject_name / "mediapipe_prelabels.npz"
+        if not npz_path.exists():
+            return None
+        d = _np.load(str(npz_path))
+        out = {}
+        for k in ("OS_landmarks", "OD_landmarks", "confidence_OS",
+                  "confidence_OD", "total_frames"):
+            if k in d.files:
+                out[k] = d[k] if k != "total_frames" else int(d[k])
+        return out
+    mp_mod = types.ModuleType("mediapipe_prelabel")
+    mp_mod.load_mediapipe_prelabels = _load_mp
+    sys.modules["mediapipe_prelabel"] = mp_mod
+
+
+def main():
+    if len(sys.argv) != 3:
+        print(f"Usage: {sys.argv[0]} bundle.json status.json", flush=True)
+        sys.exit(1)
+    bundle_path, status_file = sys.argv[1], sys.argv[2]
+    with open(bundle_path) as f:
+        bundle = json.load(f)
+
+    subject_name = bundle["subject_name"]
+    modules_dir  = bundle["modules_dir"]
+    data_dir     = bundle["data_dir"]
+    trials       = bundle["trials"]
+
+    try:
+        _write_status(status_file, status="running", phase="setup", progress_pct=0)
+
+        _rewrite_relative_imports(modules_dir)
+        sys.path.insert(0, modules_dir)
+        _install_stubs(data_dir, trials)
+
+        # Now safe to import the real compute modules.
+        from camera_motion import compute_camera_trajectory
+        from background    import compute_background
+
+        n_total = len(trials)
+        for i, t in enumerate(trials):
+            tname = t["trial_name"]
+            ti = int(t["trial_idx"])
+            _write_status(status_file, status="running", phase="trajectory",
+                          current_trial=tname,
+                          progress_pct=100.0 * i / max(1, n_total))
+            print(f"=== [{i+1}/{n_total}] {tname}: trajectory ===", flush=True)
+
+            def _on_traj(pct, _i=i, _n=n_total):
+                local = 100.0 * (_i + (pct / 100.0) * 0.30) / _n
+                _write_status(status_file, status="running", phase="trajectory",
+                              current_trial=tname, progress_pct=local)
+            compute_camera_trajectory(
+                subject_name, ti, progress_callback=_on_traj)
+
+            _write_status(status_file, status="running", phase="background",
+                          current_trial=tname,
+                          progress_pct=100.0 * (i + 0.3) / max(1, n_total))
+            print(f"=== [{i+1}/{n_total}] {tname}: background+mask ===", flush=True)
+
+            def _on_bg(pct, _i=i, _n=n_total):
+                local = 100.0 * (_i + 0.30 + (pct / 100.0) * 0.70) / _n
+                _write_status(status_file, status="running", phase="background",
+                              current_trial=tname, progress_pct=local)
+            compute_background(
+                subject_name, ti, progress_callback=_on_bg)
+
+        _write_status(status_file, status="completed", progress_pct=100)
+        print("=== All trials done ===", flush=True)
+
+    except Exception as e:
+        traceback.print_exc()
+        _write_status(status_file, status="failed",
+                      error=f"{type(e).__name__}: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
 '''

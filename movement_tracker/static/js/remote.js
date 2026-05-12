@@ -348,7 +348,7 @@ async function loadSubjects() {
 }
 
 // Steps that support per-trial selection
-const TRIAL_STEPS = new Set(['deidentify', 'hrnet']);
+const TRIAL_STEPS = new Set(['deidentify', 'hrnet', 'preproc']);
 // Cache: subjectId (number) -> trial array from /api/deidentify/{id}/trials
 const cachedTrialData = {};
 // Cache: subjectId (number) -> trial array from /api/analyze/hrnet/job-status
@@ -622,6 +622,14 @@ function renderTrialGrid(checkedSubjects) {
                         ? 'No HRnet output yet — default bbox will be derived from MediaPipe labels'
                         : 'No HRnet output yet — will run on full per-camera frame';
                 }
+            } else if (selectedStep === 'preproc') {
+                // No per-trial bake-status flag yet — colour everything
+                // neutral.  (We could later add ``t.has_stable_mp4`` from
+                // the API and mark those green like 'done'.)
+                colorClass = t.has_stable_mp4 ? 'done' : '';
+                title = t.has_stable_mp4
+                    ? 'stable.mp4 already exists for this trial'
+                    : 'No preproc outputs yet';
             } else {
                 // deidentify (existing behavior)
                 colorClass = (!t.has_faces || t.has_blurred) ? 'done' : 'needs-deident';
@@ -818,7 +826,54 @@ async function submitJob() {
             return;
         }
         try {
-            if (jobType === 'deidentify') {
+            if (jobType === 'preproc') {
+                // Per-trial preproc: same one-job-many-trials pattern as
+                // deidentify.  ``extra_params.trials = [{subject_name,
+                // trial_idx, trial_name}]`` is iterated by the queue
+                // manager (local branch) or shipped to remote_preproc as
+                // a single bundle (remote branch).
+                const trialEntries = [];
+                const subjectIdSet = new Set();
+                const subjectIdToName = new Map();
+                for (const cb of trialChecks) {
+                    const subjectId = parseInt(cb.dataset.subjectId);
+                    const trialIdx = parseInt(cb.dataset.trialIdx);
+                    const subjName = cb.closest('.trial-item')?.parentElement
+                        ?.parentElement?.querySelector('.trial-group-label')?.textContent
+                        || (subjectNames.length === 1 ? subjectNames[0] : null);
+                    const fullStem = cb.dataset.trialName || '';
+                    const shortTrial = fullStem.includes('_')
+                        ? fullStem.slice(fullStem.indexOf('_') + 1)
+                        : fullStem;
+                    subjectIdSet.add(subjectId);
+                    if (subjName) subjectIdToName.set(subjectId, subjName);
+                    trialEntries.push({
+                        subject_name: subjName,
+                        trial_idx: trialIdx,
+                        trial_name: shortTrial,
+                    });
+                }
+                if (!trialEntries.length) return;
+                const subjIds = [...subjectIdSet];
+                const subjNames = subjIds.map(id => subjectIdToName.get(id)).filter(Boolean);
+                await API.post('/api/remote/launch', {
+                    job_type: 'preproc',
+                    subject_ids: subjIds,
+                    subjects: subjNames,
+                    execution_target: executionTarget,
+                    extra_params: {
+                        trials: trialEntries,
+                        trial_name: (() => {
+                            if (trialEntries.length === 1) return trialEntries[0].trial_name;
+                            if (trialEntries.length >= 5) return `${trialEntries.length} trials`;
+                            const multiSubj = subjIds.length > 1;
+                            return trialEntries.map(t =>
+                                multiSubj ? `${t.subject_name} ${t.trial_name}` : t.trial_name
+                            ).join(', ');
+                        })(),
+                    },
+                });
+            } else if (jobType === 'deidentify') {
                 // Single batched submit: collect every (subject, trial)
                 // selection into one ``extra_params.trials`` array — same
                 // pattern as HRnet so the queue manager runs them

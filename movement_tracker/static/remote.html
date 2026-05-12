@@ -228,7 +228,8 @@
             <span class="nav-dropdown">
                 <a href="/mano">Analyze</a>
                 <div class="nav-dropdown-menu">
-                    <a href="/mano">Auto</a>
+                    <a href="/preproc">Pre-proc</a>
+                    <a href="/mano">Labels</a>
                     <a href="/labeling-select">DLC</a>
                     <a href="/events">Events</a>
                     <a href="/deidentify">Deidentify</a>
@@ -267,6 +268,13 @@
                             <button class="btn btn-sm step-btn" data-step="vision" onclick="selectStep('vision')">Vision</button>
                             <button class="btn btn-sm step-btn" data-step="pose" onclick="selectStep('pose')">Pose</button>
                             <button class="btn btn-sm step-btn" data-step="hrnet" onclick="selectStep('hrnet')">HRNet</button>
+                        </div>
+                    </div>
+                    <div style="display:flex;flex-direction:column;gap:3px;">
+                        <span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">Pre-proc</span>
+                        <div style="display:flex;gap:3px;">
+                            <button class="btn btn-sm step-btn" data-step="preproc" onclick="selectStep('preproc')"
+                                    title="Run camera trajectory + background/mask bake for the selected trials.  Remote target reuses already-uploaded videos and the MP npz.">Preproc</button>
                         </div>
                     </div>
                     <div style="display:flex;flex-direction:column;gap:3px;">
