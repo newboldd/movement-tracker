@@ -181,7 +181,7 @@ def compute_background_endpoint(subject_id: int, body: dict = Body(...)) -> dict
     registry._cancel_events[job_id] = cancel_event
 
     kwargs = {}
-    for k in ("max_samples", "downscale"):
+    for k in ("max_samples", "downscale", "dilation_px"):
         if body.get(k) is not None:
             kwargs[k] = int(body[k])
 
@@ -348,6 +348,91 @@ def get_outline_video(subject_id: int, trial_idx: int):
     if p is None:
         raise HTTPException(404, "no outline.mp4 — run Compute Stable + Mask")
     return FileResponse(str(p), media_type="video/mp4")
+
+
+@router.get("/{subject_id}/trial/{trial_idx}/mp_keypoints")
+def get_mp_keypoints(subject_id: int, trial_idx: int) -> dict:
+    """Per-frame MP hand keypoints for this trial -- both raw (frame
+    pixel coords) and warped into the reference camera's coordinate
+    system using the camera trajectory.  Used by the preproc page to
+    draw a dilated-skeleton preview on the canvas.
+
+    Returns ``{n_frames, raw_OS, raw_OD, ref_OS, ref_OD}``.  Each array
+    has shape ``(N, 21, 2)`` serialised as nested lists, with ``null``
+    in place of NaN.  Missing if MediaPipe prelabels aren't available.
+    """
+    import numpy as np
+    from ..services.mediapipe_prelabel import load_mediapipe_prelabels
+    from ..services.camera_motion import load_camera_trajectory
+
+    name = _subject_name(subject_id)
+    trials = build_trial_map(name)
+    if trial_idx < 0 or trial_idx >= len(trials):
+        raise HTTPException(400, f"trial_idx out of range")
+    trial = trials[trial_idx]
+    trial_stem = trial["trial_name"]
+    start_frame = int(trial.get("start_frame", 0))
+    n_frames = int(trial["frame_count"])
+
+    mp = load_mediapipe_prelabels(name)
+    if mp is None or mp.get("OS_landmarks") is None:
+        return {"available": False, "reason": "no MP prelabels"}
+
+    os_lm = mp["OS_landmarks"]
+    od_lm = mp.get("OD_landmarks")
+    end = min(start_frame + n_frames, os_lm.shape[0])
+    raw_os = os_lm[start_frame:end].astype(float)
+    raw_od = (od_lm[start_frame:end].astype(float)
+              if od_lm is not None else None)
+
+    # Apply the saved trajectory (if any) to land the keypoints in ref
+    # coords -- so the client can overlay the dilated skeleton on the
+    # stabilised view without re-doing the warp math.
+    traj = load_camera_trajectory(name, trial_stem)
+    ref_os = None; ref_od = None
+    if traj is not None:
+        H_L = traj["H_to_ref_L"]
+        H_R = traj.get("H_to_ref_R")
+
+        def _warp(lm, H):
+            if lm is None or H is None:
+                return None
+            out = np.full_like(lm, np.nan)
+            N = min(lm.shape[0], H.shape[0])
+            for f in range(N):
+                pts = lm[f]                                # (21, 2)
+                valid = ~np.isnan(pts).any(axis=-1)
+                if not valid.any():
+                    continue
+                pts_h = np.column_stack([pts[valid], np.ones(int(valid.sum()))]).T   # (3, V)
+                w = H[f].astype(np.float64) @ pts_h
+                zs = w[2]
+                ok = np.abs(zs) > 1e-9
+                xy = np.full((int(valid.sum()), 2), np.nan)
+                xy[ok] = (w[:2, ok] / zs[ok]).T
+                out_frame = out[f]
+                out_frame[valid] = xy
+                out[f] = out_frame
+            return out
+
+        ref_os = _warp(raw_os, H_L)
+        ref_od = _warp(raw_od, H_R)
+
+    def _to_json(arr):
+        if arr is None:
+            return None
+        a = np.where(np.isnan(arr), None, np.round(arr, 1))
+        # nested-list with None in place of NaN
+        return a.tolist()
+
+    return {
+        "available": True,
+        "n_frames":  int(end - start_frame),
+        "raw_OS":    _to_json(raw_os),
+        "raw_OD":    _to_json(raw_od),
+        "ref_OS":    _to_json(ref_os),
+        "ref_OD":    _to_json(ref_od),
+    }
 
 
 @router.get("/{subject_id}/trial/{trial_idx}/warp_at_frame")

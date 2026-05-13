@@ -44,6 +44,26 @@
     let handVideoEl = null;     // hidden <video> tied to hand.mp4 (kpt-only mask)
     let outlineVideoEl = null;  // hidden <video> tied to outline.mp4 (contour)
     let showOutline = false;    // checkbox: overlay segmentation outline on canvas
+    // MP keypoints for the current trial — used to draw the dilated-
+    // skeleton preview on the canvas while the Compute Stable + Mask
+    // panel is open.  Two coordinate spaces:
+    //   raw_OS / raw_OD : frame pixel coords (1920×1080 per half).
+    //                     Used when the canvas shows the live video.
+    //   ref_OS / ref_OD : same keypoints warped into stable.mp4 ref
+    //                     coords via the saved trajectory.  Used for
+    //                     stable / fg / bg / isolated overlays.
+    let mpKeypoints = null;     // { raw_OS, raw_OD, ref_OS, ref_OD, n_frames }
+    // MediaPipe finger chain joint indices (same convention as the
+    // service module).
+    const _MP_FINGER_CHAINS = [
+        [0, 1, 2, 3, 4],     // thumb
+        [0, 5, 6, 7, 8],     // index
+        [0, 9, 10, 11, 12],  // middle
+        [0, 13, 14, 15, 16], // ring
+        [0, 17, 18, 19, 20], // pinky
+    ];
+    // Palm-arc (MCP chain) for closing the silhouette.
+    const _MP_PALM_CHAIN = [1, 5, 9, 13, 17];
     // Stereo controls: side toggle alternates between 'OS' and 'OD'.
     // The /api/deidentify/{id}/frame endpoint does the half-crop
     // server-side via the ``side=`` query param.
@@ -150,6 +170,14 @@
         await _loadTrialVideo();
         await refreshTrajectoryFromServer();
         await refreshBackgroundFromServer();
+        // MP keypoints for the dilated-skeleton preview.  Best-effort —
+        // returns ``{available: false}`` if MP hasn't been run yet, in
+        // which case the preview just won't draw.
+        mpKeypoints = null;
+        try {
+            const k = await api(`/api/preproc/${subjectId}/trial/${trialMeta.trial_idx}/mp_keypoints`);
+            if (k && k.available) mpKeypoints = k;
+        } catch (_e) {}
         drawPlot();
     }
 
@@ -376,11 +404,19 @@
             $('backgroundStatus').textContent = 'Run Compute Trajectory first.';
             return;
         }
+        // Skeleton-dilation slider in the inline panel controls the
+        // hand-mask gate radius (in image pixels).  Default 14 ≈ deidentify
+        // hand_mask_radius + smooth ≈ 1 cm in a typical 1080p hand crop.
+        const dilSlider = $('bgDilateSlider');
+        const dilationPx = dilSlider ? parseInt(dilSlider.value, 10) : 14;
         try {
             const res = await api(`/api/preproc/${subjectId}/compute_background`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ trial_idx: trialMeta.trial_idx }),
+                body: JSON.stringify({
+                    trial_idx: trialMeta.trial_idx,
+                    dilation_px: dilationPx,
+                }),
             });
             bgJobId = res.job_id;
             $('dot-background').classList.add('running');
@@ -673,6 +709,59 @@
                                           0,      0,      drawSw, drawSh);
             ctx.filter = 'none';
             ctx.globalCompositeOperation = 'source-over';
+        }
+
+        // Dilated MP-skeleton preview while the Compute Stable + Mask
+        // panel is open.  Draws the same shape the bake will use as
+        // its hand-mask gate: thick lines along every adjacent joint
+        // pair in each finger chain, plus the palm-MCP arc, with line
+        // thickness = 2 × dilation_px and joint dots at the same radius.
+        const _bgPanel = document.getElementById('bgRunPanel');
+        if (_bgPanel && _bgPanel.style.display === 'block' && mpKeypoints) {
+            const dilSlider = document.getElementById('bgDilateSlider');
+            const dilation = dilSlider ? parseInt(dilSlider.value, 10) : 14;
+            // Choose coord system: live frame uses raw MP, every other
+            // overlay (stable / fg / bg / isolated) draws on ref-space
+            // pixels so we need the warped keypoints.
+            const useRef = overlayMode !== 'off';
+            const isOD = (currentSide === 'OD');
+            const arr = useRef
+                ? (isOD ? mpKeypoints.ref_OD : mpKeypoints.ref_OS)
+                : (isOD ? mpKeypoints.raw_OD : mpKeypoints.raw_OS);
+            const f = arr && currentFrame < arr.length ? arr[currentFrame] : null;
+            if (f) {
+                ctx.save();
+                ctx.strokeStyle = 'rgba(255, 235, 59, 0.85)';   // MP-yellow
+                ctx.fillStyle   = 'rgba(255, 235, 59, 0.85)';
+                ctx.lineCap     = 'round';
+                ctx.lineJoin    = 'round';
+                ctx.lineWidth   = Math.max(1, dilation * 2);
+                const _hasPt = j => f[j] && f[j][0] != null && f[j][1] != null;
+                const _drawSeg = (a, b) => {
+                    if (!_hasPt(a) || !_hasPt(b)) return;
+                    ctx.beginPath();
+                    ctx.moveTo(f[a][0], f[a][1]);
+                    ctx.lineTo(f[b][0], f[b][1]);
+                    ctx.stroke();
+                };
+                for (const chain of _MP_FINGER_CHAINS) {
+                    for (let ci = 0; ci < chain.length - 1; ci++) {
+                        _drawSeg(chain[ci], chain[ci + 1]);
+                    }
+                }
+                for (let i = 0; i < _MP_PALM_CHAIN.length - 1; i++) {
+                    _drawSeg(_MP_PALM_CHAIN[i], _MP_PALM_CHAIN[i + 1]);
+                }
+                // Dots at each joint (radius = dilation so the dot
+                // matches the line-end semicircle visually).
+                for (let j = 0; j < 21; j++) {
+                    if (!_hasPt(j)) continue;
+                    ctx.beginPath();
+                    ctx.arc(f[j][0], f[j][1], dilation, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.restore();
+            }
         }
         ctx.restore();
 
@@ -1049,7 +1138,38 @@
         $('prevSubjectBtn').addEventListener('click', prevSubject);
         $('nextSubjectBtn').addEventListener('click', nextSubject);
         $('runTrajectoryBtn').addEventListener('click', computeTrajectory);
-        $('runBackgroundBtn').addEventListener('click', computeBackground);
+        // Compute Stable + Mask is now an inline menu toggle (matches the
+        // Skeleton v3 button on the Labels page).  Clicking the title
+        // button expands a panel with the dilation slider, Run, and Close.
+        const _bgRunBtn   = $('runBackgroundBtn');
+        const _bgRunPanel = $('bgRunPanel');
+        const _bgRunActual = $('bgRunActualBtn');
+        const _bgRunClose  = $('bgRunCloseBtn');
+        const _bgDilateSlider = $('bgDilateSlider');
+        const _bgDilateVal    = $('bgDilateVal');
+        function _setBgPanelOpen(open) {
+            _bgRunPanel.style.display = open ? 'block' : 'none';
+            _bgRunBtn.classList.toggle('active', open);
+            // Need a redraw so the dilated-skeleton preview appears /
+            // disappears on the canvas.
+            try { render(); } catch (_e) {}
+        }
+        _bgRunBtn.addEventListener('click', () => {
+            const isOpen = _bgRunPanel.style.display === 'block';
+            _setBgPanelOpen(!isOpen);
+        });
+        _bgRunClose.addEventListener('click', () => _setBgPanelOpen(false));
+        _bgRunActual.addEventListener('click', () => {
+            _setBgPanelOpen(false);    // collapse panel as the job kicks off
+            computeBackground();
+        });
+        if (_bgDilateSlider && _bgDilateVal) {
+            _bgDilateSlider.addEventListener('input', () => {
+                _bgDilateVal.textContent = _bgDilateSlider.value;
+                // Re-render so the on-canvas preview tracks the slider.
+                try { render(); } catch (_e) {}
+            });
+        }
         // Overlay radio group → mutually exclusive: live, stable.mp4, fg.mp4.
         // Switching swaps which video element is the active source.  If
         // playback was running, transfer it to the new source seamlessly.

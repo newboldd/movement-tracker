@@ -361,15 +361,21 @@ def _build_image_aware_hand_mask(
         image_score = motion
 
     # 3. Gate + threshold + feather.
+    #    The mask is HARD-CLIPPED to the gate before AND after the feather:
+    #    the feather alone would blur the binary outside the gate by a
+    #    pixel or two, smearing motion / colour activity past the
+    #    dilation boundary.  Multiplying the feathered result by the
+    #    gate again guarantees the mask is strictly zero everywhere
+    #    outside the dilated MP skeleton.
     gated = kpt_gate * image_score
     binary = (gated > image_thresh).astype(np.uint8) * 255
 
     if feather_sigma > 0:
-        # Small Gaussian blur turns the hard binary into a 1–2 pixel
-        # alpha-style feather so the canvas multiply transitions cleanly.
-        out = cv2.GaussianBlur(binary, (0, 0), float(feather_sigma))
+        feathered = cv2.GaussianBlur(binary, (0, 0), float(feather_sigma))
     else:
-        out = binary
+        feathered = binary
+    # Final strict clip: zero outside the gate, original value inside.
+    out = (feathered.astype(np.float32) * kpt_gate).clip(0, 255).astype(np.uint8)
     return out
 
 
@@ -518,6 +524,7 @@ def compute_background(
     cancel_event=None,
     max_samples: int = _DEFAULT_MAX_SAMPLES,
     downscale:   int = _DEFAULT_DOWNSCALE,
+    dilation_px: int = 14,
 ) -> str:
     """Compute the temporal-median background image for one trial.
 
@@ -872,7 +879,8 @@ def compute_background(
             # plain FG mask when MP keypoints aren't usable.
             if use_kpt_mask_L and kpts_L_now is not None:
                 hand_L_u8 = _build_image_aware_hand_mask(
-                    warp_L, bg_L_full, kpts_L_now, skin_model_L)
+                    warp_L, bg_L_full, kpts_L_now, skin_model_L,
+                    stamp_radius=int(dilation_px))
             else:
                 hand_L_u8 = fg_L
             # Outline = thin contour at the 'hand vs not-hand' threshold.
@@ -898,7 +906,8 @@ def compute_background(
 
                 if use_kpt_mask_R and kpts_R_now is not None:
                     hand_R_u8 = _build_image_aware_hand_mask(
-                        warp_R, bg_R_full, kpts_R_now, skin_model_R)
+                        warp_R, bg_R_full, kpts_R_now, skin_model_R,
+                        stamp_radius=int(dilation_px))
                 else:
                     hand_R_u8 = fg_R
                 binary_R = (hand_R_u8 > _OUTLINE_THRESH).astype(np.uint8) * 255

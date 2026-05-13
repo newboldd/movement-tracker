@@ -181,7 +181,33 @@
                         — bright = moving / hand, dark = static).  Requires
                         trajectory first.
                     </div>
-                    <button class="btn btn-sm btn-success" id="runBackgroundBtn" style="width:100%;margin-top:8px;" disabled>Compute Stable + Mask</button>
+                    <!-- Toggle button (same look + interaction as the
+                         Skeleton v3 button on the Labels page): clicking
+                         expands the panel below with a dilation slider,
+                         a Run button, and a Close button. -->
+                    <button class="btn btn-sm" id="runBackgroundBtn" style="width:100%;margin-top:8px;" disabled>Compute Stable + Mask</button>
+                    <div id="bgRunPanel" style="display:none;margin-top:6px;padding:8px;background:var(--bg);border-radius:var(--radius);border:1px solid var(--border);">
+                        <div style="font-size:10px;color:var(--text-muted);margin-bottom:6px;line-height:1.4;">
+                            Hand-segmentation mask stays strictly inside a
+                            dilation of the MP skeleton; the actual mask
+                            boundary inside that gate is image-driven
+                            (motion + skin colour).  Adjust the dilation
+                            below to widen or tighten the gate.
+                        </div>
+                        <div style="font-size:11px;margin-bottom:4px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;">
+                                <label style="color:var(--text-muted);">Skeleton dilation (px)</label>
+                                <span id="bgDilateVal" style="color:var(--text);font-weight:bold;">14</span>
+                            </div>
+                            <input type="range" id="bgDilateSlider" min="4" max="60" step="1" value="14"
+                                   title="Total dilation of the MP skeleton in image pixels.  ~14 px ≈ deidentify default (~1 cm in a typical 1080p clip)."
+                                   style="width:100%;cursor:pointer;height:5px;">
+                        </div>
+                        <div style="display:flex;gap:6px;margin-top:8px;">
+                            <button class="btn btn-sm btn-success" id="bgRunActualBtn" style="flex:1;">Run</button>
+                            <button class="btn btn-sm" id="bgRunCloseBtn">Close</button>
+                        </div>
+                    </div>
                     <div id="backgroundStatus" class="pp-stat" style="margin-top:6px;"></div>
                     <div id="backgroundStats" class="pp-stat" style="margin-top:8px;"></div>
                     <div id="backgroundPreview" style="margin-top:8px;display:none;">
@@ -271,6 +297,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/preproc.js?v=21"></script>
+    <script src="/static/js/preproc.js?v=22"></script>
 </body>
 </html>
