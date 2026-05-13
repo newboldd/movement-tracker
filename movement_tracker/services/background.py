@@ -551,6 +551,7 @@ def compute_background(
     is_stereo = bool(traj["is_stereo"])
     n_frames  = int(traj["n_frames"])
     ref       = int(traj["reference_frame"])
+    start_frame = int(trial.get("start_frame", 0))
 
     if downscale < 1:
         downscale = 1
@@ -686,14 +687,13 @@ def compute_background(
     bg_L = np.median(stack_L, axis=0).astype(np.uint8)
     dev_L = np.abs(stack_L.astype(np.int16) - bg_L.astype(np.int16))
     mad_L = np.median(dev_L, axis=0).max(axis=-1).astype(np.uint8)
-    # Free the sampling stacks; they're not needed for the bake pass.
-    del stack_L, dev_L
+    del dev_L   # stack_L kept alive for Phase 1.5 skin-model fit
 
     if is_stereo:
         bg_R = np.median(stack_R, axis=0).astype(np.uint8)
         dev_R = np.abs(stack_R.astype(np.int16) - bg_R.astype(np.int16))
         mad_R = np.median(dev_R, axis=0).max(axis=-1).astype(np.uint8)
-        del stack_R, dev_R
+        del dev_R
     else:
         bg_R = np.zeros_like(bg_L)
         mad_R = np.zeros_like(mad_L)
@@ -775,6 +775,14 @@ def compute_background(
         logger.warning(f"Enhanced fg mask setup failed; motion-only: {e}")
         mp_kpts_ref_L = mp_kpts_ref_R = None
         skin_model_L = skin_model_R = None
+
+    # Sampling stacks are large (n_samples × H × W × 3) — free them now
+    # that the skin model has been fit; the bake pass below reads frames
+    # one at a time from disk.
+    try: del stack_L
+    except NameError: pass
+    try: del stack_R
+    except NameError: pass
 
     if progress_callback is not None:
         try: progress_callback(12.0)
