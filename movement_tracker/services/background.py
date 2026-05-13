@@ -216,6 +216,152 @@ def _warp_kpts_2d(kpts: np.ndarray, H: np.ndarray) -> np.ndarray:
     return out
 
 
+# MediaPipe finger chains (joint indices).  Used to draw filled
+# segments between adjacent joints so the kpt-hand-region covers each
+# finger as a smooth shape rather than five isolated dots.
+_FINGER_CHAINS = [
+    [0, 1, 2, 3, 4],     # thumb : wrist → CMC → MCP → IP → TIP
+    [0, 5, 6, 7, 8],     # index
+    [0, 9, 10, 11, 12],  # middle
+    [0, 13, 14, 15, 16], # ring
+    [0, 17, 18, 19, 20], # pinky
+]
+
+
+def _build_kpt_hand_region(
+    kpts_ref: np.ndarray,
+    w: int, h: int,
+    stamp_radius: int = 22,
+    smooth_sigma: float = 10.0,
+) -> np.ndarray:
+    """Build a deidentify-style filled hand silhouette from MP keypoints.
+
+    Mimics the algorithm in services/deidentify.py::_build_hand_mask_from_landmarks:
+
+    1. Stamp a filled circle of radius ``stamp_radius`` at every valid
+       MP keypoint (21 joints).
+    2. Add midpoints along each finger chain so the finger segments
+       between adjacent joints get covered as a continuous shape.  The
+       wrist→MCP segment of each finger gets three quarter-points
+       (palm fill); finger-internal segments get one midpoint each.
+    3. Add a midpoint between the thumb and index MCPs for palm
+       continuity.
+    4. Gaussian-blur the resulting binary stamp to soften the silhouette.
+
+    Returns a (h, w) float32 mask in [0, 1] approximating "anywhere
+    the hand is plausibly located".  Used as a geometric gate that
+    image-feature scores get multiplied through.
+    """
+    canvas = np.zeros((h, w), dtype=np.uint8)
+    valid = ~np.isnan(kpts_ref).any(axis=-1)   # (21,) bool
+    if not valid.any():
+        return canvas.astype(np.float32)
+
+    def _stamp(x: float, y: float) -> None:
+        xi, yi = int(round(float(x))), int(round(float(y)))
+        if 0 <= xi < w and 0 <= yi < h:
+            cv2.circle(canvas, (xi, yi), stamp_radius, 255, thickness=-1)
+
+    # 1. Stamp at each valid keypoint.
+    for x, y in kpts_ref[valid]:
+        _stamp(x, y)
+
+    # 2. Finger-chain midpoints.
+    by_joint: dict[int, np.ndarray] = {
+        int(j): kpts_ref[int(j)] for j in np.where(valid)[0]
+    }
+    for chain in _FINGER_CHAINS:
+        for ci in range(len(chain) - 1):
+            a_idx, b_idx = chain[ci], chain[ci + 1]
+            a = by_joint.get(a_idx); b = by_joint.get(b_idx)
+            if a is None or b is None:
+                continue
+            # Wrist→MCP (ci == 0) gets 1/4, 1/2, 3/4 to fill the palm;
+            # finger interior segments get one midpoint each.
+            fracs = (0.25, 0.5, 0.75) if ci == 0 else (0.5,)
+            for f in fracs:
+                _stamp(a[0] + f * (b[0] - a[0]),
+                       a[1] + f * (b[1] - a[1]))
+
+    # 3. Thumb-MCP ↔ Index-MCP midpoint (palm continuity).
+    if 2 in by_joint and 5 in by_joint:
+        a, b = by_joint[2], by_joint[5]
+        _stamp((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+
+    # 4. Smooth to a soft silhouette.
+    if smooth_sigma > 0:
+        smoothed = cv2.GaussianBlur(canvas.astype(np.float32), (0, 0), smooth_sigma)
+        return np.clip(smoothed / 255.0, 0.0, 1.0)
+    return canvas.astype(np.float32) / 255.0
+
+
+def _build_image_aware_hand_mask(
+    warped_frame: np.ndarray,
+    bg_full: np.ndarray,
+    kpts_ref: np.ndarray,
+    skin_model: dict | None,
+    *,
+    stamp_radius: int = 22,
+    region_sigma: float = 10.0,
+    motion_norm: float = 50.0,
+    image_thresh: float = 0.18,
+    feather_sigma: float = 2.5,
+) -> np.ndarray:
+    """Hand mask that follows the actual hand pixels inside a deidentify-style
+    keypoint-region gate.
+
+    Pipeline per frame:
+      1. ``kpt_region`` = filled silhouette from MP keypoints + finger
+         chains, smoothed (see :func:`_build_kpt_hand_region`).  This is
+         the GEOMETRIC bound -- "anywhere the hand might plausibly be".
+      2. ``image_score`` = per-pixel max of:
+           - motion: |warped - background| / motion_norm, clipped to [0,1]
+           - skin colour: exp(-Mahalanobis(CbCr) / scale) if a skin model
+             was fit.
+         Both are image-driven, so the score is high where the actual hand
+         pixels are and low on the background even inside ``kpt_region``.
+      3. Multiply ``kpt_region`` × ``image_score``, threshold, feather edges.
+
+    Result: a binary-ish uint8 mask, dark everywhere except where the
+    image actually looks like a hand inside the keypoint silhouette.
+    The boundary follows real pixel content, not just keypoint geometry.
+
+    Returns (h, w) uint8 in [0, 255].
+    """
+    H, W = warped_frame.shape[:2]
+
+    # 1. Geometric gate.
+    kpt_region = _build_kpt_hand_region(kpts_ref, W, H,
+                                          stamp_radius=stamp_radius,
+                                          smooth_sigma=region_sigma)
+    # Soft, but treat anything > a tiny threshold as "inside" so the
+    # multiply doesn't crater edge pixels.
+    kpt_gate = (kpt_region > 0.05).astype(np.float32)
+
+    # 2. Image-feature score (motion + colour).
+    motion = np.abs(warped_frame.astype(np.int16) - bg_full.astype(np.int16))
+    motion = motion.max(axis=-1).astype(np.float32) / float(motion_norm)
+    np.clip(motion, 0.0, 1.0, out=motion)
+
+    if skin_model is not None:
+        color = _color_similarity(warped_frame, skin_model)
+        image_score = np.maximum(motion, color)
+    else:
+        image_score = motion
+
+    # 3. Gate + threshold + feather.
+    gated = kpt_gate * image_score
+    binary = (gated > image_thresh).astype(np.uint8) * 255
+
+    if feather_sigma > 0:
+        # Small Gaussian blur turns the hard binary into a 1–2 pixel
+        # alpha-style feather so the canvas multiply transitions cleanly.
+        out = cv2.GaussianBlur(binary, (0, 0), float(feather_sigma))
+    else:
+        out = binary
+    return out
+
+
 def _build_kpt_proximity_mask(kpts_ref: np.ndarray, w: int, h: int,
                                 sigma: float = 30.0) -> np.ndarray:
     """Soft hand mask via Gaussian-blurred keypoint stamps.
@@ -697,14 +843,16 @@ def compute_background(
             # Replicate to 3 channels so ffmpeg's bgr24 pipe is happy.
             fg_L_bgr = np.stack([fg_L, fg_L, fg_L], axis=-1)
 
-            # Hand mask: strict kpt-gated when MP is usable, else fall
-            # back to the FG mask (motion + colour) so isolated view
-            # never goes completely black.
+            # Hand mask: image-aware silhouette gated by a deidentify-style
+            # keypoint region (filled circles + finger chain midpoints).
+            # The geometric gate bounds the search to the hand area; the
+            # actual mask values come from motion + skin-colour inside
+            # that gate, so the boundary follows real image content and
+            # not just the keypoint Gaussian blobs.  Falls back to the
+            # plain FG mask when MP keypoints aren't usable.
             if use_kpt_mask_L and kpts_L_now is not None:
-                hand_L_f = _build_kpt_proximity_mask(
-                    kpts_L_now, w_half, h_full, sigma=_HAND_KPT_SIGMA)
-                hand_L_u8 = (np.clip(hand_L_f * _HAND_BOOST, 0.0, 1.0)
-                              * 255).astype(np.uint8)
+                hand_L_u8 = _build_image_aware_hand_mask(
+                    warp_L, bg_L_full, kpts_L_now, skin_model_L)
             else:
                 hand_L_u8 = fg_L
             # Outline = thin contour at the 'hand vs not-hand' threshold.
@@ -729,10 +877,8 @@ def compute_background(
                 fg_R_bgr = np.stack([fg_R, fg_R, fg_R], axis=-1)
 
                 if use_kpt_mask_R and kpts_R_now is not None:
-                    hand_R_f = _build_kpt_proximity_mask(
-                        kpts_R_now, w_half, h_full, sigma=_HAND_KPT_SIGMA)
-                    hand_R_u8 = (np.clip(hand_R_f * _HAND_BOOST, 0.0, 1.0)
-                                  * 255).astype(np.uint8)
+                    hand_R_u8 = _build_image_aware_hand_mask(
+                        warp_R, bg_R_full, kpts_R_now, skin_model_R)
                 else:
                     hand_R_u8 = fg_R
                 binary_R = (hand_R_u8 > _OUTLINE_THRESH).astype(np.uint8) * 255
