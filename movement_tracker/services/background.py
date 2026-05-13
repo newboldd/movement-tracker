@@ -231,66 +231,74 @@ _FINGER_CHAINS = [
 def _build_kpt_hand_region(
     kpts_ref: np.ndarray,
     w: int, h: int,
-    stamp_radius: int = 22,
-    smooth_sigma: float = 10.0,
+    stamp_radius: int = 10,
+    smooth_sigma: float = 4.0,
 ) -> np.ndarray:
-    """Build a deidentify-style filled hand silhouette from MP keypoints.
+    """Tight hand-skeleton silhouette from MP keypoints.
 
-    Mimics the algorithm in services/deidentify.py::_build_hand_mask_from_landmarks:
+    Matches the shape of the deidentify hand mask (~1 cm dilation of
+    the MP skeleton).  Procedure:
 
     1. Stamp a filled circle of radius ``stamp_radius`` at every valid
-       MP keypoint (21 joints).
-    2. Add midpoints along each finger chain so the finger segments
-       between adjacent joints get covered as a continuous shape.  The
-       wrist→MCP segment of each finger gets three quarter-points
-       (palm fill); finger-internal segments get one midpoint each.
-    3. Add a midpoint between the thumb and index MCPs for palm
-       continuity.
-    4. Gaussian-blur the resulting binary stamp to soften the silhouette.
+       MP keypoint.
+    2. Draw a thick line (width = ``2 * stamp_radius``) between every
+       pair of adjacent joints along each finger chain.  This actually
+       traces the skeleton segments instead of scattering midpoint
+       stamps that leave bone-thin gaps.
+    3. Draw thick lines along the MCP arc (joints 1-5-9-13-17) to
+       close the palm.
+    4. Gaussian-blur with a small sigma to feather the edges without
+       expanding the silhouette much.
 
-    Returns a (h, w) float32 mask in [0, 1] approximating "anywhere
-    the hand is plausibly located".  Used as a geometric gate that
-    image-feature scores get multiplied through.
+    Returns a (h, w) float32 mask in [0, 1].  After the binary
+    threshold in the caller (``> 0.5``), the gate ends up roughly
+    ``stamp_radius + smooth_sigma`` pixels from each skeleton point --
+    so 14-15 px at the default settings, matching the deidentify
+    defaults of ``hand_mask_radius=10`` + ``hand_smooth=7``.
     """
     canvas = np.zeros((h, w), dtype=np.uint8)
     valid = ~np.isnan(kpts_ref).any(axis=-1)   # (21,) bool
     if not valid.any():
         return canvas.astype(np.float32)
 
-    def _stamp(x: float, y: float) -> None:
-        xi, yi = int(round(float(x))), int(round(float(y)))
-        if 0 <= xi < w and 0 <= yi < h:
-            cv2.circle(canvas, (xi, yi), stamp_radius, 255, thickness=-1)
+    def _to_int(p):
+        return (int(round(float(p[0]))), int(round(float(p[1]))))
 
-    # 1. Stamp at each valid keypoint.
-    for x, y in kpts_ref[valid]:
-        _stamp(x, y)
-
-    # 2. Finger-chain midpoints.
     by_joint: dict[int, np.ndarray] = {
         int(j): kpts_ref[int(j)] for j in np.where(valid)[0]
     }
+
+    # 1. Filled circle at every valid joint.
+    for j, p in by_joint.items():
+        xi, yi = _to_int(p)
+        if 0 <= xi < w and 0 <= yi < h:
+            cv2.circle(canvas, (xi, yi), stamp_radius, 255, thickness=-1)
+
+    # 2. Thick line along each adjacent pair in each finger chain.
+    line_thick = max(1, stamp_radius * 2)
     for chain in _FINGER_CHAINS:
         for ci in range(len(chain) - 1):
-            a_idx, b_idx = chain[ci], chain[ci + 1]
-            a = by_joint.get(a_idx); b = by_joint.get(b_idx)
+            a = by_joint.get(chain[ci]); b = by_joint.get(chain[ci + 1])
             if a is None or b is None:
                 continue
-            # Wrist→MCP (ci == 0) gets 1/4, 1/2, 3/4 to fill the palm;
-            # finger interior segments get one midpoint each.
-            fracs = (0.25, 0.5, 0.75) if ci == 0 else (0.5,)
-            for f in fracs:
-                _stamp(a[0] + f * (b[0] - a[0]),
-                       a[1] + f * (b[1] - a[1]))
+            cv2.line(canvas, _to_int(a), _to_int(b),
+                      color=255, thickness=line_thick, lineType=cv2.LINE_AA)
 
-    # 3. Thumb-MCP ↔ Index-MCP midpoint (palm continuity).
-    if 2 in by_joint and 5 in by_joint:
-        a, b = by_joint[2], by_joint[5]
-        _stamp((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+    # 3. Palm: thick lines along the MCP arc (thumb-CMC -> index-MCP ->
+    #    middle-MCP -> ring-MCP -> pinky-MCP).  Closes the palm fill
+    #    without needing per-frame triangle math.
+    palm_chain = [1, 5, 9, 13, 17]
+    for i in range(len(palm_chain) - 1):
+        a = by_joint.get(palm_chain[i]); b = by_joint.get(palm_chain[i + 1])
+        if a is None or b is None:
+            continue
+        cv2.line(canvas, _to_int(a), _to_int(b),
+                  color=255, thickness=line_thick, lineType=cv2.LINE_AA)
 
-    # 4. Smooth to a soft silhouette.
+    # 4. Light smoothing for edge feather.
     if smooth_sigma > 0:
-        smoothed = cv2.GaussianBlur(canvas.astype(np.float32), (0, 0), smooth_sigma)
+        smoothed = cv2.GaussianBlur(canvas.astype(np.float32), (0, 0),
+                                      float(smooth_sigma))
         return np.clip(smoothed / 255.0, 0.0, 1.0)
     return canvas.astype(np.float32) / 255.0
 
@@ -301,11 +309,12 @@ def _build_image_aware_hand_mask(
     kpts_ref: np.ndarray,
     skin_model: dict | None,
     *,
-    stamp_radius: int = 22,
-    region_sigma: float = 10.0,
+    stamp_radius: int = 10,           # matches deidentify hand_mask_radius default
+    region_sigma: float = 4.0,        # smaller than before -- keeps the gate tight
+    region_thresh: float = 0.5,       # binary cut at the silhouette boundary
     motion_norm: float = 50.0,
-    image_thresh: float = 0.18,
-    feather_sigma: float = 2.5,
+    image_thresh: float = 0.30,       # require stronger image signal inside the gate
+    feather_sigma: float = 1.5,
 ) -> np.ndarray:
     """Hand mask that follows the actual hand pixels inside a deidentify-style
     keypoint-region gate.
@@ -330,13 +339,15 @@ def _build_image_aware_hand_mask(
     """
     H, W = warped_frame.shape[:2]
 
-    # 1. Geometric gate.
+    # 1. Geometric gate -- tight binary silhouette ~1 cm out from the
+    #    MP skeleton (matching the deidentify hand mask in shape).  The
+    #    0.5 threshold cuts cleanly at the soft edge of the
+    #    stamp+blur, so the gate ends ~``stamp_radius + smooth_sigma``
+    #    pixels from each skeleton point -- not the long Gaussian tail.
     kpt_region = _build_kpt_hand_region(kpts_ref, W, H,
                                           stamp_radius=stamp_radius,
                                           smooth_sigma=region_sigma)
-    # Soft, but treat anything > a tiny threshold as "inside" so the
-    # multiply doesn't crater edge pixels.
-    kpt_gate = (kpt_region > 0.05).astype(np.float32)
+    kpt_gate = (kpt_region > region_thresh).astype(np.float32)
 
     # 2. Image-feature score (motion + colour).
     motion = np.abs(warped_frame.astype(np.int16) - bg_full.astype(np.int16))
