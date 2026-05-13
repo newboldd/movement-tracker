@@ -327,20 +327,41 @@ const SUBJECT_PAGES = [
         return Math.floor(sec / 3600) + 'h ago';
     }
 
+    // Cached pending-downloads payload, refreshed independently from the
+    // main poll.  ``/api/remote/pending-downloads`` does SSH probes
+    // against the remote and can take seconds on a cold cache; awaiting
+    // it inside the main poll froze the nav dropdown for that long.
+    // We now fetch it in the background and let the dropdown re-render
+    // with the latest known value -- the dot might be off by a poll
+    // tick but the dropdown stops feeling sluggish.
+    let _navCachedPending = [];
+    let _pendingInFlight = false;
+    function _refreshPendingDownloads() {
+        if (_pendingInFlight) return;
+        _pendingInFlight = true;
+        fetch('/api/remote/pending-downloads')
+            .then(r => r.json())
+            .then(p => { _navCachedPending = p?.pending || []; })
+            .catch(() => {})
+            .finally(() => { _pendingInFlight = false; });
+    }
+
     async function _pollJobs() {
         try {
-            const [data, localJobs, recentJobs, pendingDl, dlProg] = await Promise.all([
+            const [data, localJobs, recentJobs, dlProg] = await Promise.all([
                 fetch('/api/remote/queue').then(r => r.json()).catch(() => ({})),
                 fetch('/api/jobs?status=running,pending').then(r => r.json()).catch(() => []),
                 fetch('/api/jobs?status=completed,failed&limit=3').then(r => r.json()).catch(() => []),
-                fetch('/api/remote/pending-downloads').then(r => r.json()).catch(() => ({pending: []})),
                 fetch('/api/remote/download-progress').then(r => r.json()).catch(() => ({downloads: []})),
             ]);
+            // Kick off the slow SSH-probing pending-downloads fetch in
+            // the background; this poll renders with the previous value.
+            _refreshPendingDownloads();
             const activeDl = (dlProg?.downloads || []).filter(d => d.status === 'running');
             const running = data.running || [];
             const cpuQueue = data.cpu_queue || [];
             const gpuQueue = data.gpu_queue || [];
-            const pendingResults = pendingDl.pending || [];
+            const pendingResults = _navCachedPending;
 
             const remoteJobIds = new Set();
             [...running, ...cpuQueue, ...gpuQueue].forEach(item => {

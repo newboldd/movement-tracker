@@ -136,16 +136,23 @@ def list_pending_downloads(force: int = 0) -> dict:
     been downloaded locally (and aren't ignored).  Drives the Jobs-page
     banner and the nav-dropdown flag.
 
-    Cached for ~15 s so the nav-dropdown's 3 s poll doesn't pay the
+    Cached for ~60 s so the nav-dropdown's 3 s poll doesn't pay the
     remote SSH cost every tick.  Pass ``?force=1`` to bypass the cache
     (used after a download / ignore action).
+
+    The 15 s TTL we previously used was hitting the slow SSH path
+    roughly every 5 polls; combined with the dropdown awaiting this
+    response before painting, the nav dropdown felt sluggish.  60 s
+    is plenty of freshness for a download-ready indicator -- the user
+    is going to download once they see it, not poll for fast-changing
+    signal.
     """
     import time as _time
     from ..config import get_settings
     from ..services.remote_results import pending_for_job
 
     if not force and _pending_cache["data"] is not None and \
-            (_time.time() - _pending_cache["at"]) < 15.0:
+            (_time.time() - _pending_cache["at"]) < 60.0:
         return _pending_cache["data"]
 
     settings = get_settings()

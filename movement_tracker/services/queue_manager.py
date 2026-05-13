@@ -741,6 +741,9 @@ class QueueManager:
                         from ..services.jobs import registry as job_registry
                         from ..services.video import build_trial_map
                         from ..services.job_history import stage_timer, finalize_job_record
+                        import traceback as _tb
+                        import datetime as _dt
+
                         ep = extra_params or {}
                         cancel_event = threading.Event()
                         job_registry._cancel_events[job_id] = cancel_event
@@ -753,6 +756,28 @@ class QueueManager:
                                 "trial_name": ep.get("trial_name"),
                             }]
                         n_total = max(1, len(trials_batch))
+
+                        # ── Log file: open it up-front and write progress
+                        # / errors so the Jobs-page log viewer has
+                        # something to show.  Without this every local
+                        # preproc job looked silent in the UI even when
+                        # backend exceptions were being thrown.
+                        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                        log_fh = open(log_path, "w", buffering=1)   # line-buffered
+
+                        def _log(msg: str) -> None:
+                            stamp = _dt.datetime.now().strftime("%H:%M:%S")
+                            try:
+                                log_fh.write(f"[{stamp}] {msg}\n")
+                                log_fh.flush()
+                            except (OSError, ValueError):
+                                pass
+
+                        _log(f"=== Preproc job {job_id} ({n_total} trial(s)) ===")
+                        for t in trials_batch:
+                            _log(f"  - {t.get('subject_name', subject_names[0])} "
+                                 f"trial_idx={t.get('trial_idx')} "
+                                 f"trial_name={t.get('trial_name')}")
 
                         def _preproc_progress(trial_i, sub_pct, phase_weight):
                             # Map (trial_i + phase_local_pct) into the 0–100
@@ -768,59 +793,75 @@ class QueueManager:
 
                         had_failure = False
                         was_cancelled = False
-                        for i, t in enumerate(trials_batch):
-                            if cancel_event.is_set():
-                                was_cancelled = True
-                                break
-                            sub = t.get("subject_name") or subject_names[0]
-                            tidx = int(t.get("trial_idx", 0))
-                            tname = t.get("trial_name") or f"trial_{tidx}"
+                        try:
+                            for i, t in enumerate(trials_batch):
+                                if cancel_event.is_set():
+                                    was_cancelled = True
+                                    _log("  cancelled by user")
+                                    break
+                                sub = t.get("subject_name") or subject_names[0]
+                                tidx = int(t.get("trial_idx", 0))
+                                tname = t.get("trial_name") or f"trial_{tidx}"
+                                _log(f"[{i+1}/{n_total}] {sub} {tname} (idx {tidx})")
+                                try:
+                                    # Phase A: trajectory (~30% of the trial's work)
+                                    def _on_traj(pct, _i=i):
+                                        _preproc_progress(_i, pct * 0.30, 0.30)
+                                    _log("  compute_camera_trajectory...")
+                                    with stage_timer(job_id, "compute_trajectory",
+                                                      subject=sub, trial=tname,
+                                                      target="local"):
+                                        compute_camera_trajectory(
+                                            sub, tidx,
+                                            progress_callback=_on_traj,
+                                            cancel_event=cancel_event,
+                                        )
+                                    _log("  compute_camera_trajectory done")
+                                    # Phase B: background + masks (~70%)
+                                    def _on_bg(pct, _i=i):
+                                        _preproc_progress(_i, 30 + pct * 0.70, 0.70)
+                                    _log("  compute_background...")
+                                    with stage_timer(job_id, "compute_background",
+                                                      subject=sub, trial=tname,
+                                                      target="local"):
+                                        compute_background(
+                                            sub, tidx,
+                                            progress_callback=_on_bg,
+                                            cancel_event=cancel_event,
+                                        )
+                                    _log("  compute_background done")
+                                except InterruptedError:
+                                    was_cancelled = True
+                                    _log(f"  CANCELLED at {sub}/{tname}")
+                                    logger.info(f"preproc cancelled at trial {sub}/{tname}")
+                                    break
+                                except Exception as e:
+                                    had_failure = True
+                                    _log(f"  ERROR at {sub}/{tname}: {type(e).__name__}: {e}")
+                                    _log(_tb.format_exc())
+                                    logger.exception(f"preproc trial {sub}/{tname} failed: {e}")
+                                    with get_db_ctx() as _db:
+                                        _db.execute(
+                                            "UPDATE jobs SET error_msg = ? WHERE id = ?",
+                                            (f"{type(e).__name__}: {e}"[:500], job_id),
+                                        )
+                        finally:
+                            job_registry._cancel_events.pop(job_id, None)
+                            final_status = ("cancelled" if was_cancelled else
+                                             "failed"    if had_failure else
+                                             "completed")
+                            _log(f"=== finished: {final_status} ===")
                             try:
-                                # Phase A: trajectory (~30% of the trial's work)
-                                def _on_traj(pct, _i=i):
-                                    _preproc_progress(_i, pct * 0.30, 0.30)
-                                with stage_timer(job_id, "compute_trajectory",
-                                                  subject=sub, trial=tname,
-                                                  target="local"):
-                                    compute_camera_trajectory(
-                                        sub, tidx,
-                                        progress_callback=_on_traj,
-                                        cancel_event=cancel_event,
-                                    )
-                                # Phase B: background + masks (~70%)
-                                def _on_bg(pct, _i=i):
-                                    _preproc_progress(_i, 30 + pct * 0.70, 0.70)
-                                with stage_timer(job_id, "compute_background",
-                                                  subject=sub, trial=tname,
-                                                  target="local"):
-                                    compute_background(
-                                        sub, tidx,
-                                        progress_callback=_on_bg,
-                                        cancel_event=cancel_event,
-                                    )
-                            except InterruptedError:
-                                was_cancelled = True
-                                logger.info(f"preproc cancelled at trial {sub}/{tname}")
-                                break
-                            except Exception as e:
-                                had_failure = True
-                                logger.exception(f"preproc trial {sub}/{tname} failed: {e}")
-                                with get_db_ctx() as _db:
-                                    _db.execute(
-                                        "UPDATE jobs SET error_msg = ? WHERE id = ?",
-                                        (str(e)[:500], job_id),
-                                    )
-                        job_registry._cancel_events.pop(job_id, None)
-                        final_status = ("cancelled" if was_cancelled else
-                                         "failed"    if had_failure else
-                                         "completed")
-                        with get_db_ctx() as _db:
-                            _db.execute(
-                                f"UPDATE jobs SET status='{final_status}', progress_pct=100, "
-                                "finished_at=CURRENT_TIMESTAMP WHERE id=?",
-                                (job_id,),
-                            )
-                        finalize_job_record(job_id)
+                                log_fh.close()
+                            except (OSError, ValueError):
+                                pass
+                            with get_db_ctx() as _db:
+                                _db.execute(
+                                    f"UPDATE jobs SET status='{final_status}', progress_pct=100, "
+                                    "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                                    (job_id,),
+                                )
+                            finalize_job_record(job_id)
 
                 elif job_type == "train":
                     # GPU lane: training on local GPU
