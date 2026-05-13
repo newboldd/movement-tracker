@@ -804,9 +804,12 @@ class QueueManager:
                                 tname = t.get("trial_name") or f"trial_{tidx}"
                                 _log(f"[{i+1}/{n_total}] {sub} {tname} (idx {tidx})")
                                 try:
-                                    # Phase A: trajectory (~30% of the trial's work)
+                                    # Phase A: trajectory (~25% of the trial's
+                                    # wall-clock; the bake in Phase B does
+                                    # full-resolution warping + four mp4
+                                    # encodes and dominates real time).
                                     def _on_traj(pct, _i=i):
-                                        _preproc_progress(_i, pct * 0.30, 0.30)
+                                        _preproc_progress(_i, pct * 0.25, 0.25)
                                     _log("  compute_camera_trajectory...")
                                     with stage_timer(job_id, "compute_trajectory",
                                                       subject=sub, trial=tname,
@@ -817,9 +820,9 @@ class QueueManager:
                                             cancel_event=cancel_event,
                                         )
                                     _log("  compute_camera_trajectory done")
-                                    # Phase B: background + masks (~70%)
+                                    # Phase B: background + mask bake (~75%).
                                     def _on_bg(pct, _i=i):
-                                        _preproc_progress(_i, 30 + pct * 0.70, 0.70)
+                                        _preproc_progress(_i, 25 + pct * 0.75, 0.75)
                                     _log("  compute_background...")
                                     with stage_timer(job_id, "compute_background",
                                                       subject=sub, trial=tname,

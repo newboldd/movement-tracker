@@ -4981,8 +4981,11 @@ def main():
                           progress_pct=100.0 * i / max(1, n_total))
             print(f"=== [{i+1}/{n_total}] {tname}: trajectory ===", flush=True)
 
+            # Per-trial split: trajectory ~25 %, background+mask bake ~75 %
+            # (the bake does full-res warps + four mp4 encodes, which
+            # dominates real time on every trial we've measured).
             def _on_traj(pct, _i=i, _n=n_total):
-                local = 100.0 * (_i + (pct / 100.0) * 0.30) / _n
+                local = 100.0 * (_i + (pct / 100.0) * 0.25) / _n
                 _write_status(status_file, status="running", phase="trajectory",
                               current_trial=tname, progress_pct=local)
             compute_camera_trajectory(
@@ -4990,11 +4993,11 @@ def main():
 
             _write_status(status_file, status="running", phase="background",
                           current_trial=tname,
-                          progress_pct=100.0 * (i + 0.3) / max(1, n_total))
+                          progress_pct=100.0 * (i + 0.25) / max(1, n_total))
             print(f"=== [{i+1}/{n_total}] {tname}: background+mask ===", flush=True)
 
             def _on_bg(pct, _i=i, _n=n_total):
-                local = 100.0 * (_i + 0.30 + (pct / 100.0) * 0.70) / _n
+                local = 100.0 * (_i + 0.25 + (pct / 100.0) * 0.75) / _n
                 _write_status(status_file, status="running", phase="background",
                               current_trial=tname, progress_pct=local)
             compute_background(

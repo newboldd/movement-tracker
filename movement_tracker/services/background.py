@@ -639,17 +639,26 @@ def compute_background(
 
         if progress_callback is not None:
             try:
-                # 0 → 30 % during sampling pass; 30 → 35 during median;
-                # 35 → 100 during the second pass that bakes stable.mp4
-                # + fg.mp4 (the slow part — full video read + encode).
-                progress_callback(30.0 * (s_idx + 1) / max(1, n_samples))
+                # Re-allocated 2026-05-13 to match real wall-clock split:
+                #   sampling pass         : 0  → 10 %  (~n_samples frames,
+                #                                       downscaled, no encode)
+                #   median + MP setup     : 10 → 12 %  (numpy median + a few
+                #                                       small fits, milliseconds)
+                #   bake pass             : 12 → 97 %  (every frame, full-res
+                #                                       warp + 4 ffmpeg pipes —
+                #                                       this is the long phase)
+                #   save npz + PNGs       : 97 → 100 %
+                # The previous 0–30 sampling allocation reached 30 % in
+                # ~10 % of the total time, then crawled to 100 % across
+                # the rest, making the progress bar misleading.
+                progress_callback(10.0 * (s_idx + 1) / max(1, n_samples))
             except Exception:
                 pass
 
     cap.release()
 
     if progress_callback is not None:
-        try: progress_callback(32.0)
+        try: progress_callback(11.0)
         except Exception: pass
 
     # ── Per-pixel temporal median + MAD ─────────────────────────────────
@@ -750,7 +759,7 @@ def compute_background(
         skin_model_L = skin_model_R = None
 
     if progress_callback is not None:
-        try: progress_callback(35.0)
+        try: progress_callback(12.0)
         except Exception: pass
 
     # ── Pass 2: bake stable.mp4 + fg.mp4 ───────────────────────────────
@@ -906,7 +915,8 @@ def compute_background(
 
             if progress_callback is not None and (i % 5 == 0):
                 try:
-                    progress_callback(35.0 + 60.0 * (i + 1) / max(1, n_frames))
+                    # Bake covers 12 → 97 % of the bar (linear in frame index).
+                    progress_callback(12.0 + 85.0 * (i + 1) / max(1, n_frames))
                 except Exception:
                     pass
     finally:
@@ -925,7 +935,7 @@ def compute_background(
                 logger.warning(f"ffmpeg ({name}) finalise error: {e}")
 
     if progress_callback is not None:
-        try: progress_callback(96.0)
+        try: progress_callback(97.0)
         except Exception: pass
 
     out_path = _background_path(subject_name, stem)
