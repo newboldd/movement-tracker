@@ -1331,24 +1331,25 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
     if not landmarks:
         return mask > 0
 
-    # Replace MediaPipe fingertips with DLC labels (more accurate)
+    # Hand landmarks (MediaPipe).  DLC labels for thumb/index tips are
+    # added as ADDITIONAL mask centres, NOT as replacements for the MP
+    # joint -- the on-canvas overlay draws both, so the mask must too.
+    # If we replaced MP's joint 4 with DLC's coords, the user would see
+    # the MP fingertip dot uncovered whenever DLC and MP disagreed
+    # (which happens on Con02_R2 around frame 17 and others).  Treating
+    # DLC as an addition means whichever detector is right on a given
+    # frame, the fingertip lands inside the mask.
     dlc_lms = [lm for lm in landmarks if lm.get("type") == "dlc"]
     hand_lms = [lm for lm in landmarks if lm.get("type") not in ("pose", "dlc")]
     pose_lms = [lm for lm in landmarks if lm.get("type") == "pose"]
 
     if dlc_lms:
-        dlc_by_joint = {lm["joint"]: lm for lm in dlc_lms}
-        # Replace MP joints 4 (thumb tip) and 8 (index tip) with DLC coords
-        hand_lms = [
-            {**lm, "x": dlc_by_joint[lm["joint"]]["x"], "y": dlc_by_joint[lm["joint"]]["y"]}
-            if lm["joint"] in dlc_by_joint else lm
-            for lm in hand_lms
-        ]
-        # Add any DLC joints not already present
-        existing_joints = {lm["joint"] for lm in hand_lms}
-        for j, dlc in dlc_by_joint.items():
-            if j not in existing_joints:
-                hand_lms.append({**dlc, "type": "hand"})
+        # Tag a copy of each DLC entry as 'hand' so the rest of the
+        # function (which keys on type != 'pose' and on .joint) treats
+        # it like any other hand point.  Original MP entries stay
+        # untouched.
+        for dlc in dlc_lms:
+            hand_lms.append({**dlc, "type": "hand"})
 
     # Slider values are in image pixel units — the same coordinate space as the
     # stored landmarks.  The frontend draws circles at (radius * canvasScale)

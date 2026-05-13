@@ -921,25 +921,19 @@ const deid = (() => {
 
     // ── Build smoothed hand protection mask ──
     function _buildHandMask(landmarks, radiusPx, forearmPx, smoothPx, smooth2Px, w, h) {
-        // Replace MediaPipe fingertips with DLC labels when available
-        // DLC thumb=joint 4, index=joint 8 — same as MediaPipe convention
+        // DLC labels for thumb / index tips (joints 4 and 8) are added as
+        // ADDITIONAL mask centres, not as replacements for the MP joints.
+        // The on-canvas overlay draws both MP and DLC dots, so the mask
+        // must cover both -- otherwise the user sees an MP fingertip dot
+        // sitting outside the mask whenever DLC and MP disagree.  Both
+        // detectors can also fail on the same frame; with two
+        // independent samples, whichever one is right on a given frame
+        // gets the fingertip into the mask.
         const dlcLms = landmarks.filter(l => l.type === 'dlc');
         let mergedLandmarks = landmarks.filter(l => l.type !== 'dlc');
         if (dlcLms.length > 0) {
-            const dlcByJoint = {};
-            for (const lm of dlcLms) dlcByJoint[lm.joint] = lm;
-            // Replace MP joints 4 and 8 with DLC versions
-            mergedLandmarks = mergedLandmarks.map(lm => {
-                if (lm.type === 'hand' && dlcByJoint[lm.joint]) {
-                    return { ...lm, x: dlcByJoint[lm.joint].x, y: dlcByJoint[lm.joint].y };
-                }
-                return lm;
-            });
-            // Add DLC joints that don't have a MediaPipe equivalent
-            for (const [j, dlc] of Object.entries(dlcByJoint)) {
-                if (!mergedLandmarks.some(l => l.type === 'hand' && l.joint === parseInt(j))) {
-                    mergedLandmarks.push({ ...dlc, type: 'hand' });
-                }
+            for (const dlc of dlcLms) {
+                mergedLandmarks.push({ ...dlc, type: 'hand' });
             }
         }
 
