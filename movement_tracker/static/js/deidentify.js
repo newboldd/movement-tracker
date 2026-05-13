@@ -921,19 +921,31 @@ const deid = (() => {
 
     // ── Build smoothed hand protection mask ──
     function _buildHandMask(landmarks, radiusPx, forearmPx, smoothPx, smooth2Px, w, h) {
-        // DLC labels for thumb / index tips (joints 4 and 8) are added as
-        // ADDITIONAL mask centres, not as replacements for the MP joints.
-        // The on-canvas overlay draws both MP and DLC dots, so the mask
-        // must cover both -- otherwise the user sees an MP fingertip dot
-        // sitting outside the mask whenever DLC and MP disagree.  Both
-        // detectors can also fail on the same frame; with two
-        // independent samples, whichever one is right on a given frame
-        // gets the fingertip into the mask.
+        // Hand landmarks (MediaPipe) + DLC fallback ONLY for joints MP
+        // missed on this frame.  Two earlier strategies both regressed:
+        //   - "replace MP with DLC" (original): when DLC's tip
+        //     prediction was wrong, the mask drifted off the MP
+        //     fingertip the user could still see on screen.
+        //   - "add DLC alongside MP" (previous fix): when DLC was bad
+        //     on one camera, the mask grew an extra circle far from
+        //     the hand, making the slider feel frozen on that side.
+        // Treating DLC strictly as a fill-in keeps MP authoritative
+        // whenever it detected the joint and only draws a DLC-derived
+        // circle when MP genuinely lacked that joint.  Both
+        // regressions are avoided and the mask is symmetric across
+        // the two cameras.
         const dlcLms = landmarks.filter(l => l.type === 'dlc');
         let mergedLandmarks = landmarks.filter(l => l.type !== 'dlc');
         if (dlcLms.length > 0) {
+            const mpJoints = new Set(
+                mergedLandmarks
+                    .filter(l => l.type === 'hand' && l.joint != null)
+                    .map(l => l.joint)
+            );
             for (const dlc of dlcLms) {
-                mergedLandmarks.push({ ...dlc, type: 'hand' });
+                if (!mpJoints.has(dlc.joint)) {
+                    mergedLandmarks.push({ ...dlc, type: 'hand' });
+                }
             }
         }
 

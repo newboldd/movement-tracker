@@ -1331,25 +1331,28 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
     if not landmarks:
         return mask > 0
 
-    # Hand landmarks (MediaPipe).  DLC labels for thumb/index tips are
-    # added as ADDITIONAL mask centres, NOT as replacements for the MP
-    # joint -- the on-canvas overlay draws both, so the mask must too.
-    # If we replaced MP's joint 4 with DLC's coords, the user would see
-    # the MP fingertip dot uncovered whenever DLC and MP disagreed
-    # (which happens on Con02_R2 around frame 17 and others).  Treating
-    # DLC as an addition means whichever detector is right on a given
-    # frame, the fingertip lands inside the mask.
+    # Hand landmarks (MediaPipe) + DLC fallback ONLY for joints MP
+    # missed.  Two earlier strategies both regressed:
+    #   - "replace MP with DLC" (original): when DLC's thumb/index
+    #     prediction was wrong, the mask drifted off the MP fingertip
+    #     the user could still see on screen (Con02_R2 frame 17).
+    #   - "add DLC alongside MP" (previous fix): when DLC was bad on
+    #     one camera, the mask grew an extra circle far from the hand
+    #     -- visible as the OS-mask-too-large / slider-frozen feel.
+    # Treating DLC strictly as a fill-in keeps MP authoritative
+    # whenever it detected the joint, and only draws a DLC-derived
+    # circle when MP genuinely lacked that joint.  Both regressions
+    # are avoided and the mask is symmetric across the two cameras.
     dlc_lms = [lm for lm in landmarks if lm.get("type") == "dlc"]
     hand_lms = [lm for lm in landmarks if lm.get("type") not in ("pose", "dlc")]
     pose_lms = [lm for lm in landmarks if lm.get("type") == "pose"]
 
     if dlc_lms:
-        # Tag a copy of each DLC entry as 'hand' so the rest of the
-        # function (which keys on type != 'pose' and on .joint) treats
-        # it like any other hand point.  Original MP entries stay
-        # untouched.
+        mp_joints = {lm.get("joint") for lm in hand_lms
+                      if lm.get("type") == "hand" and lm.get("joint") is not None}
         for dlc in dlc_lms:
-            hand_lms.append({**dlc, "type": "hand"})
+            if dlc.get("joint") not in mp_joints:
+                hand_lms.append({**dlc, "type": "hand"})
 
     # Slider values are in image pixel units — the same coordinate space as the
     # stored landmarks.  The frontend draws circles at (radius * canvasScale)
