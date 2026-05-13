@@ -1402,11 +1402,69 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
             "type": "interp",
         })
 
-    # Draw circles at each hand landmark + interpolated midpoints
+    # Extrapolate any missing fingertip (joints 4, 8, 12, 16, 20) when
+    # the two joints below it (DIP + PIP / IP + MCP for the thumb) are
+    # present.  Without this, MP drops on the very tip leave the
+    # fingertip pad uncovered -- which is the most identifying piece of
+    # the hand and the part the user most needs blurred.
+    #
+    # Geometry: assume the finger is roughly straight at the tip, i.e.
+    # tip - PIP ≈ PIP - DIP, so tip ≈ 2*PIP - DIP.  Falls back to a
+    # half-segment extension when only one joint below the tip exists.
+    for chain in finger_chains:
+        tip = chain[-1]
+        if tip in by_joint:
+            continue
+        pip = by_joint.get(chain[-2])
+        dip = by_joint.get(chain[-3]) if len(chain) >= 3 else None
+        ext = None
+        if pip and dip:
+            ext = {
+                "x": 2 * pip["x"] - dip["x"],
+                "y": 2 * pip["y"] - dip["y"],
+                "type": "extrap", "joint": tip,
+            }
+        elif pip:
+            # Only one joint below — extend half a segment in the
+            # palm-to-PIP direction, using the wrist as the anchor.
+            wrist = by_joint.get(0)
+            if wrist:
+                ext = {
+                    "x": pip["x"] + 0.5 * (pip["x"] - wrist["x"]),
+                    "y": pip["y"] + 0.5 * (pip["y"] - wrist["y"]),
+                    "type": "extrap", "joint": tip,
+                }
+        if ext is not None:
+            by_joint[tip] = ext
+            hand_lms.append(ext)
+            all_points.append(ext)
+            # Also bridge the half-segment between PIP and the
+            # extrapolated tip so there isn't a coverage gap.
+            all_points.append({
+                "x": (pip["x"] + ext["x"]) / 2,
+                "y": (pip["y"] + ext["y"]) / 2,
+                "type": "interp",
+            })
+
+    # Draw circles at each hand landmark + interpolated / extrapolated
+    # points.  cv2.circle clips out-of-frame centres on its own, so we
+    # DON'T gate on a bounds check -- doing so silently dropped any
+    # landmark MP placed slightly off-frame (common at the edge of the
+    # FOV), leaving the fingertip uncovered.  NaN-safety: skip any
+    # landmark whose coords are None / NaN after interpolation, since
+    # ``int(nan)`` would raise ValueError.
+    import math
     for lm in all_points:
-        x, y = int(lm["x"]), int(lm["y"])
-        if 0 <= x < w and 0 <= y < h:
-            cv2.circle(mask, (x, y), radius, 255, -1)
+        xv, yv = lm.get("x"), lm.get("y")
+        if xv is None or yv is None:
+            continue
+        try:
+            xf, yf = float(xv), float(yv)
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(xf) or math.isnan(yf):
+            continue
+        cv2.circle(mask, (int(xf), int(yf)), radius, 255, -1)
 
     # Add forearm triangle BEFORE smoothing (unified smooth)
     # Forearm: pinky MCP (joint 17) → elbow → thumb CMC (joint 1)
