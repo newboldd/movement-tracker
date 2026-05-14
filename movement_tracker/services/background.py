@@ -1136,10 +1136,11 @@ def _encode_fg_png(motion: np.ndarray, gate: np.ndarray) -> dict | None:
     """Pack a small RGBA PNG of the foreground heatmap inside the gate.
 
     Returns ``{b64, bbox: [x0,y0,x1,y1]}`` or None if the gate is empty.
-    ``b64`` is a base64-encoded RGBA PNG cropped to the gate bbox; the
-    alpha channel is the motion intensity itself, so dark / static
-    pixels are transparent and bright / moving pixels are saturated.
-    Colour is the JET colormap of the motion intensity.
+    The image covers the WHOLE dilated MP gate -- alpha is flat 255
+    inside the gate and 0 outside, so the user sees the full region
+    coloured by motion intensity (low motion = dark blue JET, high
+    motion = red).  Overall fill opacity is left to the client so a
+    slider can dial visibility against the underlying frame.
 
     The crop keeps the payload small (typically 20-80 KB per side for
     a 200 px hand crop) and lets the UI position the image directly
@@ -1153,13 +1154,13 @@ def _encode_fg_png(motion: np.ndarray, gate: np.ndarray) -> dict | None:
     x0 = int(xs.min()); x1 = int(xs.max() + 1)
     motion_crop = motion[y0:y1, x0:x1].copy()
     gate_crop = gate[y0:y1, x0:x1]
-    # Zero out anything outside the gate so the alpha channel hides it.
     motion_crop[gate_crop == 0] = 0
     color = cv2.applyColorMap(motion_crop, cv2.COLORMAP_JET)
-    # Alpha channel: motion intensity, with a hard zero outside the
-    # gate.  Squared falloff so weak noise fades faster than the hand.
-    alpha = motion_crop.astype(np.float32) / 255.0
-    alpha = (alpha * alpha * 255.0).astype(np.uint8)
+    # Flat alpha: 255 inside the gate, 0 outside.  Decouples motion
+    # intensity (encoded by colour) from visibility (controlled by the
+    # client's opacity slider), so low-motion BG regions inside the
+    # gate still appear as dark-blue fill instead of vanishing.
+    alpha = (gate_crop > 0).astype(np.uint8) * 255
     rgba = np.concatenate([color, alpha[..., None]], axis=-1)
     ok, png = cv2.imencode('.png', rgba)
     if not ok:

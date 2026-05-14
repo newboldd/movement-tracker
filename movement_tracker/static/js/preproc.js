@@ -42,6 +42,7 @@
     let stableVideoEl = null;   // hidden <video> tied to stable.mp4
     let showOutline = true;     // checkbox: show live-fetched hand boundary
     let showFgFill = false;     // checkbox: also fetch + paint JET heatmap
+    let fgFillOpacity = 0.5;    // 0..1, controlled by slider next to checkbox
     // Live outline state -- replaces the old fg.mp4 / outline.mp4 bake.
     // Server returns a per-frame closed-polygon contour for the
     // current dilation; we fetch it whenever the frame or slider
@@ -726,7 +727,7 @@
             if (img && img.complete && img.naturalWidth > 0 && bbox) {
                 const [x0, y0, x1, y1] = bbox;
                 ctx.save();
-                ctx.globalAlpha = 0.65;
+                ctx.globalAlpha = Math.max(0, Math.min(1, fgFillOpacity));
                 ctx.drawImage(img, x0, y0, x1 - x0, y1 - y0);
                 ctx.restore();
             }
@@ -1253,6 +1254,17 @@
                 render();
             }
         });
+        // Opacity slider: no refetch, just a re-render with the new
+        // globalAlpha.  The image bytes don't change.
+        const _opacitySlider = $('fgOpacitySlider');
+        const _opacityVal    = $('fgOpacityVal');
+        if (_opacitySlider && _opacityVal) {
+            _opacitySlider.addEventListener('input', () => {
+                fgFillOpacity = parseInt(_opacitySlider.value, 10) / 100;
+                _opacityVal.textContent = fgFillOpacity.toFixed(2);
+                try { render(); } catch (_e) {}
+            });
+        }
         $('cbStabilizedView').addEventListener('change', e => {
             isStabilised = e.target.checked; render();
         });

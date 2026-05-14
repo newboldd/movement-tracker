@@ -236,6 +236,15 @@
                         <input type="checkbox" id="cbShowFgFill" disabled>
                         Show foreground fill (JET heatmap inside gate)
                     </label>
+                    <div id="fgOpacityWrap" style="margin-top:4px;margin-left:20px;font-size:11px;color:var(--text-muted);">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <label>Fill opacity</label>
+                            <span id="fgOpacityVal" style="color:var(--text);font-weight:bold;">0.50</span>
+                        </div>
+                        <input type="range" id="fgOpacitySlider" min="0" max="100" step="1" value="50"
+                               title="Opacity of the JET foreground fill (0 = invisible, 1 = solid)."
+                               style="width:100%;cursor:pointer;height:5px;">
+                    </div>
                     <div id="outlineStatus" class="pp-stat" style="margin-top:6px;"></div>
                 </div>
 
@@ -300,6 +309,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/preproc.js?v=26"></script>
+    <script src="/static/js/preproc.js?v=27"></script>
 </body>
 </html>
