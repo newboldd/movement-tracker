@@ -794,21 +794,19 @@ def compute_stable(
     trial_idx: int,
     progress_callback=None,
     cancel_event=None,
-    max_samples: int = _DEFAULT_MAX_SAMPLES,
-    downscale:   int = _DEFAULT_DOWNSCALE,
-    dilation_px: int = 14,
 ) -> str:
-    """Stage 1 of the preproc bake: produce stable.mp4 + background.npz.
+    """Stage 1 of the preproc bake: produce stable.mp4 only.
 
-    Requires a saved camera trajectory; raises ``RuntimeError`` otherwise.
-    The companion :func:`compute_foreground` reads from the artifacts
-    written here and produces fg.mp4 + outline.mp4 in a separate, much
-    cheaper pass.
+    Reads every source frame, warps it into the reference frame's
+    coordinate system using the saved camera trajectory, and pipes
+    the raw stream into ffmpeg -> H.264 mp4.  No background median,
+    no MP load, no skin-model fit -- those all live in the separate
+    :func:`compute_background` stage so the user can re-run the
+    (relatively cheap) BG computation without re-warping every
+    frame.
 
-    ``dilation_px`` here only sizes the BG hand-mask used during the
-    masked median -- it does NOT bake any hand-mask geometry into
-    stable.mp4 itself.  Foreground re-runs can choose a different
-    dilation without re-running this step.
+    Requires a saved camera trajectory; raises ``RuntimeError``
+    otherwise.
     """
     from .video import build_trial_map
     from .camera_motion import load_camera_trajectory
@@ -823,396 +821,55 @@ def compute_stable(
     traj = load_camera_trajectory(subject_name, stem)
     if traj is None:
         raise RuntimeError(
-            f"No camera trajectory for {subject_name}/{stem} — "
+            f"No camera trajectory for {subject_name}/{stem} -- "
             "run Compute Trajectory first."
         )
     H_L = traj["H_to_ref_L"]
     H_R = traj["H_to_ref_R"]
     is_stereo = bool(traj["is_stereo"])
     n_frames  = int(traj["n_frames"])
-    ref       = int(traj["reference_frame"])
-    start_frame = int(trial.get("start_frame", 0))
-
-    if downscale < 1:
-        downscale = 1
-    if max_samples < 4:
-        max_samples = 4
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {video_path}")
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
 
-    # Pick which frames to use.
-    frames_sampled = _pick_sample_frames(n_frames, traj["jerk_flag"], max_samples)
-    n_samples = int(frames_sampled.size)
-    sample_lookup = {int(f): i for i, f in enumerate(frames_sampled)}
-
-    # Probe the first frame to get dimensions.
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     ok, first = cap.read()
     if not ok:
         cap.release()
         raise RuntimeError("Failed to read first frame")
     h_full, w_full = first.shape[:2]
-    if is_stereo:
-        w_half = w_full // 2
-    else:
-        w_half = w_full
-    out_h = h_full // downscale
-    out_w = w_half // downscale
+    w_half = (w_full // 2) if is_stereo else w_full
+    full_w_total = w_half * 2 if is_stereo else w_half
 
-    # Sanity check on RAM: n_samples × out_h × out_w × 3 bytes × (1 or 2 sides).
-    n_sides = 2 if is_stereo else 1
-    bytes_needed = n_samples * out_h * out_w * 3 * n_sides
-    if bytes_needed > _MAX_RAM_BYTES:
-        # Re-scale max_samples down to fit.
-        new_max = int(_MAX_RAM_BYTES / (out_h * out_w * 3 * n_sides))
-        logger.warning(
-            f"background: requested {n_samples} samples × {out_h}×{out_w}×3 "
-            f"× {n_sides} sides = {bytes_needed/1e9:.2f} GB exceeds "
-            f"{_MAX_RAM_BYTES/1e9:.1f} GB cap; reducing to {new_max} samples"
-        )
-        frames_sampled = _pick_sample_frames(n_frames, traj["jerk_flag"], new_max)
-        n_samples = int(frames_sampled.size)
-        sample_lookup = {int(f): i for i, f in enumerate(frames_sampled)}
-
-    # ── Phase 0: load MP prelabels + warp to ref coords ──────────────
-    # We need the per-sample-frame hand region during the sampling pass
-    # so we can MASK OUT the hand from the temporal median.  Without
-    # this step, near-stationary subjects bake the palm right into the
-    # background -- exactly what produces the false shadow edges that
-    # bleed into fg.mp4 and the outline.  Skin-model fitting needs the
-    # warped stack and waits until Phase 1.5 below.
-    mp_kpts_ref_L: np.ndarray | None = None
-    mp_kpts_ref_R: np.ndarray | None = None
-    try:
-        from .mediapipe_prelabel import load_mediapipe_prelabels
-        mp = load_mediapipe_prelabels(subject_name)
-        if mp is not None:
-            os_lm_all = mp.get("OS_landmarks")
-            od_lm_all = mp.get("OD_landmarks") if is_stereo else None
-
-            def _prepare_kpts(all_lm, H_chain):
-                if all_lm is None or all_lm.size == 0:
-                    return None
-                end_lm = min(start_frame + n_frames, all_lm.shape[0])
-                if end_lm <= start_frame:
-                    return None
-                trial_lm = all_lm[start_frame:end_lm].astype(np.float64, copy=True)
-                trial_lm = _interpolate_keypoints(trial_lm)
-                n_lm = trial_lm.shape[0]
-                out = np.full((n_frames, 21, 2), np.nan, dtype=np.float64)
-                for fi in range(min(n_lm, H_chain.shape[0])):
-                    out[fi] = _warp_kpts_2d(trial_lm[fi], H_chain[fi])
-                return out
-
-            mp_kpts_ref_L = _prepare_kpts(os_lm_all, H_L)
-            if is_stereo and od_lm_all is not None:
-                mp_kpts_ref_R = _prepare_kpts(od_lm_all, H_R)
-    except Exception as e:
-        logger.warning(f"MP load for bg masking failed; bg will include hand: {e}")
-        mp_kpts_ref_L = mp_kpts_ref_R = None
-
-    # Allocate the warped-frame stacks.  uint8 keeps RAM minimal; the
-    # median is computed per-channel with a uint8 result anyway.
-    stack_L = np.empty((n_samples, out_h, out_w, 3), dtype=np.uint8)
-    stack_R = (np.empty((n_samples, out_h, out_w, 3), dtype=np.uint8)
-               if is_stereo else None)
-    # Per-sample-frame hand-region mask (True = drop from BG median).
-    # Built from the dilated MP skeleton, downscaled.  Size matches the
-    # downscaled stack so we can mask the median directly without a
-    # second resize.
-    hand_mask_L = np.zeros((n_samples, out_h, out_w), dtype=bool)
-    hand_mask_R = (np.zeros((n_samples, out_h, out_w), dtype=bool)
-                   if is_stereo else None)
-    # Skeleton stamp radius for BG masking, in downscaled pixels.  Use
-    # the same dilation as the hand-mask gate so the patch removed from
-    # BG matches the patch added back in by the fg mask -- otherwise the
-    # outline ends up tracing the seam between the two.
-    _BG_MASK_STAMP_DOWN = max(2, int(dilation_px) // max(1, downscale))
-    # Extend the BG-mask stamp down the forearm so the distal forearm
-    # also gets masked out of the median.  Outline-time gate doesn't
-    # use this -- the visible polygon still cuts off at the wrist.
-    # ~100 full-res px ~= a few cm of forearm in a typical 1080p clip.
-    _BG_MASK_FOREARM_DOWN = max(0, 100 // max(1, downscale))
-
-    # We have to re-seek because we already consumed frame 0.  Use a
-    # sequential read with skip — VideoCapture seeks are unreliable on
-    # variable-bitrate H.264 (the exact frame returned can be off-by-one
-    # near keyframes).  Sequential read is bulletproof but slower.
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-    frames_set = set(int(f) for f in frames_sampled)
-    max_frame = int(frames_sampled.max())
-
-    for i in range(max_frame + 1):
-        if cancel_event is not None and cancel_event.is_set():
-            cap.release()
-            raise InterruptedError("Job cancelled")
-        ok, frame = cap.read()
-        if not ok:
-            logger.warning(f"background: read failed at frame {i}; truncating")
-            break
-        if i not in frames_set:
-            continue
-        s_idx = sample_lookup[i]
-
-        if is_stereo:
-            os_img = frame[:, :w_half]
-            od_img = frame[:, w_half:]
-        else:
-            os_img = frame
-            od_img = None
-
-        # Warp into the reference frame coordinate system, then downscale.
-        # H_L[i] maps frame_i → ref (forward).  warpPerspective without
-        # WARP_INVERSE_MAP internally inverts M and uses inv(M) as the
-        # dst→src lookup — which is correctly inv(H_to_ref), i.e. it
-        # samples the source pixel that corresponds to each dst pixel's
-        # reference-frame location.
-        warp_L = cv2.warpPerspective(
-            os_img, H_L[i], (w_half, h_full),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0),
-        )
-        if downscale > 1:
-            warp_L = cv2.resize(warp_L, (out_w, out_h),
-                                 interpolation=cv2.INTER_AREA)
-        stack_L[s_idx] = warp_L
-        if mp_kpts_ref_L is not None and i < mp_kpts_ref_L.shape[0]:
-            kpts_L_down = mp_kpts_ref_L[i] / max(1, downscale)
-            region_L = _build_kpt_hand_region(
-                kpts_L_down, out_w, out_h,
-                stamp_radius=_BG_MASK_STAMP_DOWN, smooth_sigma=2.0,
-                extend_forearm_px=_BG_MASK_FOREARM_DOWN)
-            hand_mask_L[s_idx] = region_L > 0.5
-
-        if is_stereo and od_img is not None:
-            warp_R = cv2.warpPerspective(
-                od_img, H_R[i], (w_half, h_full),
-                flags=cv2.INTER_LINEAR,
-                borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0),
-            )
-            if downscale > 1:
-                warp_R = cv2.resize(warp_R, (out_w, out_h),
-                                     interpolation=cv2.INTER_AREA)
-            stack_R[s_idx] = warp_R
-            if (mp_kpts_ref_R is not None
-                    and i < mp_kpts_ref_R.shape[0]):
-                kpts_R_down = mp_kpts_ref_R[i] / max(1, downscale)
-                region_R = _build_kpt_hand_region(
-                    kpts_R_down, out_w, out_h,
-                    stamp_radius=_BG_MASK_STAMP_DOWN, smooth_sigma=2.0,
-                    extend_forearm_px=_BG_MASK_FOREARM_DOWN)
-                hand_mask_R[s_idx] = region_R > 0.5
-
-        if progress_callback is not None:
-            try:
-                # Re-allocated 2026-05-13 to match real wall-clock split:
-                #   sampling pass         : 0  → 10 %  (~n_samples frames,
-                #                                       downscaled, no encode)
-                #   median + MP setup     : 10 → 12 %  (numpy median + a few
-                #                                       small fits, milliseconds)
-                #   bake pass             : 12 → 97 %  (every frame, full-res
-                #                                       warp + 4 ffmpeg pipes —
-                #                                       this is the long phase)
-                #   save npz + PNGs       : 97 → 100 %
-                # The previous 0–30 sampling allocation reached 30 % in
-                # ~10 % of the total time, then crawled to 100 % across
-                # the rest, making the progress bar misleading.
-                progress_callback(10.0 * (s_idx + 1) / max(1, n_samples))
-            except Exception:
-                pass
-
-    cap.release()
-
-    if progress_callback is not None:
-        try: progress_callback(11.0)
-        except Exception: pass
-
-    # ── Per-pixel temporal median + MAD ─────────────────────────────────
-    # np.ma.median over (n_samples, H, W, 3) -> (H, W, 3).  When MP
-    # gave us a per-frame hand mask we exclude those pixels per-frame,
-    # which keeps the near-stationary palm out of the BG median.  Pixels
-    # that were masked in EVERY sample frame fall back to the plain
-    # median so the BG is never undefined.  MAD = median(|x - med|) is a
-    # robust spread measure used as a quality heat-map.
-    def _masked_median(stack: np.ndarray, hand_mask: np.ndarray) -> np.ndarray:
-        """Per-pixel temporal median ignoring hand-covered pixels.
-
-        Pixels that were masked in EVERY sample frame (deep palm
-        interior, wrist, thumb CMC on a near-stationary hand) are
-        filled with a bright-green sentinel ``[0, 255, 0]`` (BGR)
-        instead of a real BG colour.  Two benefits:
-
-          1. ``background_OS.png`` makes the always-hand region
-             unmistakable -- you can see at a glance which pixels
-             the BG could never observe.
-          2. ``|frame - green|`` is large for any skin / scene
-             colour, so those pixels always light up in the
-             foreground heatmap and in the Otsu binary, regardless
-             of this frame's hand pose.  No more flesh-colour
-             palm/wrist getting carved out by Otsu.
-        """
-        if not hand_mask.any():
-            return np.median(stack, axis=0).astype(np.uint8)
-        m4 = np.broadcast_to(hand_mask[..., None], stack.shape)
-        masked = np.ma.masked_array(stack, mask=m4)
-        med = np.ma.median(masked, axis=0)
-        # BGR bright green sentinel for always-masked pixels.
-        fill_color = np.array([0, 255, 0], dtype=np.uint8)
-        bg = np.where(np.ma.getmaskarray(med),
-                       fill_color.reshape(1, 1, 3),
-                       np.ma.getdata(med))
-        return bg.astype(np.uint8)
-
-    bg_L = _masked_median(stack_L, hand_mask_L)
-    dev_L = np.abs(stack_L.astype(np.int16) - bg_L.astype(np.int16))
-    mad_L = np.median(dev_L, axis=0).max(axis=-1).astype(np.uint8)
-    del dev_L   # stack_L kept alive for Phase 1.5 skin-model fit
-
-    if is_stereo:
-        bg_R = _masked_median(stack_R, hand_mask_R)
-        dev_R = np.abs(stack_R.astype(np.int16) - bg_R.astype(np.int16))
-        mad_R = np.median(dev_R, axis=0).max(axis=-1).astype(np.uint8)
-        del dev_R
-    else:
-        bg_R = np.zeros_like(bg_L)
-        mad_R = np.zeros_like(mad_L)
-
-    # ── Second BG pass: colour-based refinement, forearm-only ────────
-    # Walk only flesh-coloured pixels inside a forearm cylinder
-    # extending from the wrist along (wrist - MCP centroid).  Outside
-    # the cylinder we don't search for skin colours at all (catching
-    # arbitrary scene pixels was way too aggressive).  The cylinder's
-    # natural sleeve / non-skin boundary inside it determines how far
-    # the arm refinement actually reaches.
-    cyl_L = _build_forearm_cylinder(mp_kpts_ref_L, frames_sampled,
-                                       out_w, out_h, downscale)
-    bg_L, always_hand_color_L_down = _refine_bg_color_based(
-        bg_L, stack_L, region_mask=cyl_L)
-    if is_stereo:
-        cyl_R = _build_forearm_cylinder(mp_kpts_ref_R, frames_sampled,
-                                           out_w, out_h, downscale)
-        bg_R, always_hand_color_R_down = _refine_bg_color_based(
-            bg_R, stack_R, region_mask=cyl_R)
-    else:
-        always_hand_color_R_down = None
-
-    # Union the MP-based always-hand (pixels under the MP gate in
-    # every frame) with the colour-based always-hand (pixels whose
-    # entire sample history is skin colours).  Either one alone might
-    # miss cases the other catches:
-    #   - MP-based catches truly stationary hand parts even if their
-    #     colour doesn't quite match the universal skin range.
-    #   - Colour-based catches drifted-arm pixels the MP gate never
-    #     covered.
-    always_hand_L_down = hand_mask_L.all(axis=0) | always_hand_color_L_down
-    if hand_mask_R is not None:
-        always_hand_R_down = (hand_mask_R.all(axis=0)
-                              | always_hand_color_R_down)
-    else:
-        always_hand_R_down = None
-    del hand_mask_L
-    if hand_mask_R is not None:
-        del hand_mask_R
-
-    # For the diff-against-BG step we need a full-resolution BG.  Upscale
-    # the half-res median back up if a downscale was applied.
-    if downscale > 1:
-        bg_L_full = cv2.resize(bg_L, (w_half, h_full), interpolation=cv2.INTER_LINEAR)
-        bg_R_full = (cv2.resize(bg_R, (w_half, h_full), interpolation=cv2.INTER_LINEAR)
-                     if is_stereo else np.zeros((h_full, w_half, 3), dtype=np.uint8))
-    else:
-        bg_L_full = bg_L
-        bg_R_full = bg_R
-
-    # Background edge map -- subtracted from motion later so high-
-    # contrast BG seams don't leak through the hand mask.
-    bg_edge_L = _bg_edge_map(bg_L_full)
-    bg_edge_R = _bg_edge_map(bg_R_full) if is_stereo else None
-
-    # ── Phase 1.5: fit CbCr skin model from sampled stack ────────────
-    # MP keypoints (already warped to ref in Phase 0) tell us where
-    # skin pixels live in each sample frame.  We collect those pixels
-    # and fit a Gaussian in CbCr space so per-frame fg masks can use
-    # colour similarity alongside motion.  Best-effort: if any of this
-    # fails the bake just falls back to motion-only masks.
-    skin_model_L: dict | None = None
-    skin_model_R: dict | None = None
-    try:
-        def _kpts_at_downscale(kpts_ref_arr):
-            if kpts_ref_arr is None:
-                return []
-            return [kpts_ref_arr[fi] / max(1, downscale)
-                    for fi in frames_sampled]
-
-        if mp_kpts_ref_L is not None:
-            skin_model_L = _fit_skin_model_cbcr(
-                stack_L, _kpts_at_downscale(mp_kpts_ref_L))
-        if is_stereo and mp_kpts_ref_R is not None:
-            skin_model_R = _fit_skin_model_cbcr(
-                stack_R, _kpts_at_downscale(mp_kpts_ref_R))
-
-        n_lm_L = (int(np.sum(~np.isnan(mp_kpts_ref_L[:, 0, 0])))
-                  if mp_kpts_ref_L is not None else 0)
-        logger.info(
-            f"Enhanced fg mask: {n_lm_L}/{n_frames} frames with valid OS "
-            f"keypoints; skin model: "
-            f"L={'yes' if skin_model_L else 'no'}, "
-            f"R={'yes' if skin_model_R else 'no'}"
-        )
-    except Exception as e:
-        logger.warning(f"Skin-model fit failed; motion-only fg: {e}")
-        skin_model_L = skin_model_R = None
-
-    # Sampling stacks are large (n_samples × H × W × 3) — free them now
-    # that the skin model has been fit; the bake pass below reads frames
-    # one at a time from disk.
-    try: del stack_L
-    except NameError: pass
-    try: del stack_R
-    except NameError: pass
-
-    if progress_callback is not None:
-        try: progress_callback(12.0)
-        except Exception: pass
-
-    # ── Pass 2: bake stable.mp4 only ──────────────────────────────────
-    # Re-read every source frame, apply H_to_ref[i], pipe a raw stream
-    # into ffmpeg.  fg.mp4 + outline.mp4 are produced by the separate
-    # ``compute_foreground`` step, which reads from stable.mp4 instead
-    # of warping again.  Splitting the stages lets the user iterate on
-    # mask/outline parameters cheaply without re-running the heavy
-    # warp+median pass.
     out_dir = _preproc_dir(subject_name, stem)
     out_dir.mkdir(parents=True, exist_ok=True)
     stable_path = _stable_path(subject_name, stem)
-    # Wipe any orphan ffmpeg from a previous hard-killed bake before
-    # opening our own pipes to the same files.
     _kill_orphan_ffmpegs_for_dir(out_dir)
 
-    cap2 = cv2.VideoCapture(video_path)
-    if not cap2.isOpened():
-        raise RuntimeError(f"Cannot reopen video for bake pass: {video_path}")
-    fps = cap2.get(cv2.CAP_PROP_FPS) or 30.0
-    full_w_total = w_half * 2 if is_stereo else w_half
-
-    stable_proc = _open_ffmpeg_pipe(str(stable_path), full_w_total, h_full, fps, "bgr24")
-    # Stale fg/outline/hand from previous bakes are now out of sync
-    # with the freshly-stabilised frames -- unlink them so the UI
-    # shows "needs foreground" until that step is re-run.
-    for p in (_fg_path(subject_name, stem),
+    stable_proc = _open_ffmpeg_pipe(
+        str(stable_path), full_w_total, h_full, fps, "bgr24")
+    # background.npz produced by the OLD compute_stable is also stale
+    # the moment stable.mp4 changes -- the median / always-hand maps
+    # were computed against the previous warp.  Unlink anything that
+    # would let the UI keep showing the old overlay.
+    for p in (_background_path(subject_name, stem),
+              _fg_path(subject_name, stem),
               _outline_path(subject_name, stem),
               _hand_path(subject_name, stem)):
         try: p.unlink()
         except FileNotFoundError: pass
+
+    # Re-seek to frame 0 since we consumed it during the probe.
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
     frames_written = 0
     try:
         for i in range(n_frames):
             if cancel_event is not None and cancel_event.is_set():
                 raise InterruptedError("Job cancelled")
-            ok, frame = cap2.read()
+            ok, frame = cap.read()
             if not ok:
                 logger.warning(f"stable bake: read failed at frame {i}; truncating")
                 break
@@ -1245,11 +902,11 @@ def compute_stable(
 
             if progress_callback is not None and (i % 5 == 0):
                 try:
-                    progress_callback(12.0 + 85.0 * (i + 1) / max(1, n_frames))
+                    progress_callback(100.0 * (i + 1) / max(1, n_frames))
                 except Exception:
                     pass
     finally:
-        cap2.release()
+        cap.release()
         try: stable_proc.stdin.close()
         except Exception: pass
         try:
@@ -1264,9 +921,305 @@ def compute_stable(
             _retire_ffmpeg(stable_proc)
 
     if progress_callback is not None:
-        try: progress_callback(97.0)
+        try: progress_callback(100.0)
+        except Exception: pass
+    logger.info(
+        f"stable bake saved: {stable_path}  "
+        f"frames_written={frames_written}/{n_frames}  stereo={is_stereo}")
+    return str(stable_path)
+
+
+def compute_background(
+    subject_name: str,
+    trial_idx: int,
+    progress_callback=None,
+    cancel_event=None,
+    max_samples: int = _DEFAULT_MAX_SAMPLES,
+    downscale:   int = _DEFAULT_DOWNSCALE,
+    dilation_px: int = 14,
+) -> str:
+    """Stage 2 of the preproc bake: produce background.npz.
+
+    Reads sampled frames from stable.mp4 (already warped, so no
+    warpPerspective in the sample pass), stamps a downscaled MP-gate
+    region per sample frame so the hand can be excluded from the
+    temporal median, runs the colour-based forearm refinement, fits
+    a CbCr skin model, and saves the result.
+
+    Re-runnable cheaply (~30 s for a typical trial) so the user can
+    iterate on cylinder length / dilation / skin range without
+    re-running the heavy Stabilise step.
+
+    Requires :func:`compute_stable` to have produced stable.mp4
+    first; raises ``RuntimeError`` otherwise.
+    """
+    from .video import build_trial_map
+    from .camera_motion import load_camera_trajectory
+    from .mediapipe_prelabel import load_mediapipe_prelabels
+
+    tmap = build_trial_map(subject_name)
+    if trial_idx < 0 or trial_idx >= len(tmap):
+        raise ValueError(f"trial_idx {trial_idx} out of range ({len(tmap)} trials)")
+    trial = tmap[trial_idx]
+    stem = trial["trial_name"]
+
+    traj = load_camera_trajectory(subject_name, stem)
+    if traj is None:
+        raise RuntimeError(
+            f"No camera trajectory for {subject_name}/{stem} -- "
+            "run Compute Trajectory first.")
+    H_L = traj["H_to_ref_L"]
+    H_R = traj["H_to_ref_R"]
+    is_stereo = bool(traj["is_stereo"])
+    n_frames  = int(traj["n_frames"])
+    ref       = int(traj["reference_frame"])
+    start_frame = int(trial.get("start_frame", 0))
+
+    stable_path = _stable_path(subject_name, stem)
+    if not stable_path.exists():
+        raise RuntimeError(
+            f"No stable.mp4 for {subject_name}/{stem} -- "
+            "run Stabilise first.")
+
+    if downscale < 1:
+        downscale = 1
+    if max_samples < 4:
+        max_samples = 4
+
+    cap = cv2.VideoCapture(str(stable_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open stable.mp4: {stable_path}")
+
+    frames_sampled = _pick_sample_frames(n_frames, traj["jerk_flag"], max_samples)
+    n_samples = int(frames_sampled.size)
+    sample_lookup = {int(f): i for i, f in enumerate(frames_sampled)}
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    ok, first = cap.read()
+    if not ok:
+        cap.release()
+        raise RuntimeError("Failed to read first frame of stable.mp4")
+    h_full, w_full = first.shape[:2]
+    w_half = (w_full // 2) if is_stereo else w_full
+    out_h = h_full // downscale
+    out_w = w_half // downscale
+
+    # RAM ceiling for the sample stack.
+    n_sides = 2 if is_stereo else 1
+    bytes_needed = n_samples * out_h * out_w * 3 * n_sides
+    if bytes_needed > _MAX_RAM_BYTES:
+        new_max = int(_MAX_RAM_BYTES / (out_h * out_w * 3 * n_sides))
+        logger.warning(
+            f"background: requested {n_samples} samples x {out_h}x{out_w}x3 "
+            f"x {n_sides} sides = {bytes_needed/1e9:.2f} GB exceeds "
+            f"{_MAX_RAM_BYTES/1e9:.1f} GB cap; reducing to {new_max} samples")
+        frames_sampled = _pick_sample_frames(n_frames, traj["jerk_flag"], new_max)
+        n_samples = int(frames_sampled.size)
+        sample_lookup = {int(f): i for i, f in enumerate(frames_sampled)}
+
+    # ── Phase 0: MP keypoints -> reference-frame coords ──────────────
+    mp_kpts_ref_L: np.ndarray | None = None
+    mp_kpts_ref_R: np.ndarray | None = None
+    try:
+        mp = load_mediapipe_prelabels(subject_name)
+        if mp is not None:
+            os_lm_all = mp.get("OS_landmarks")
+            od_lm_all = mp.get("OD_landmarks") if is_stereo else None
+
+            def _prepare_kpts(all_lm, H_chain):
+                if all_lm is None or all_lm.size == 0:
+                    return None
+                end_lm = min(start_frame + n_frames, all_lm.shape[0])
+                if end_lm <= start_frame:
+                    return None
+                trial_lm = all_lm[start_frame:end_lm].astype(np.float64, copy=True)
+                trial_lm = _interpolate_keypoints(trial_lm)
+                n_lm = trial_lm.shape[0]
+                out = np.full((n_frames, 21, 2), np.nan, dtype=np.float64)
+                for fi in range(min(n_lm, H_chain.shape[0])):
+                    out[fi] = _warp_kpts_2d(trial_lm[fi], H_chain[fi])
+                return out
+
+            mp_kpts_ref_L = _prepare_kpts(os_lm_all, H_L)
+            if is_stereo and od_lm_all is not None:
+                mp_kpts_ref_R = _prepare_kpts(od_lm_all, H_R)
+    except Exception as e:
+        logger.warning(f"MP load for bg masking failed; bg will include hand: {e}")
+        mp_kpts_ref_L = mp_kpts_ref_R = None
+
+    # Allocate stacks + hand-region masks at downscaled resolution.
+    stack_L = np.empty((n_samples, out_h, out_w, 3), dtype=np.uint8)
+    stack_R = (np.empty((n_samples, out_h, out_w, 3), dtype=np.uint8)
+               if is_stereo else None)
+    hand_mask_L = np.zeros((n_samples, out_h, out_w), dtype=bool)
+    hand_mask_R = (np.zeros((n_samples, out_h, out_w), dtype=bool)
+                   if is_stereo else None)
+    _BG_MASK_STAMP_DOWN = max(2, int(dilation_px) // max(1, downscale))
+    _BG_MASK_FOREARM_DOWN = max(0, 100 // max(1, downscale))
+
+    # ── Sample pass: sequential read of stable.mp4 ─────────────────
+    # stable.mp4 is already warped, so we skip warpPerspective and
+    # just downscale + stamp the hand region.
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    frames_set = set(int(f) for f in frames_sampled)
+    max_frame = int(frames_sampled.max())
+
+    for i in range(max_frame + 1):
+        if cancel_event is not None and cancel_event.is_set():
+            cap.release()
+            raise InterruptedError("Job cancelled")
+        ok, frame = cap.read()
+        if not ok:
+            logger.warning(f"background sample: read failed at frame {i}; truncating")
+            break
+        if i not in frames_set:
+            continue
+        s_idx = sample_lookup[i]
+
+        if is_stereo:
+            warp_L = frame[:, :w_half]
+            warp_R = frame[:, w_half:]
+        else:
+            warp_L = frame
+            warp_R = None
+
+        if downscale > 1:
+            warp_L_d = cv2.resize(warp_L, (out_w, out_h),
+                                    interpolation=cv2.INTER_AREA)
+        else:
+            warp_L_d = warp_L
+        stack_L[s_idx] = warp_L_d
+        if mp_kpts_ref_L is not None and i < mp_kpts_ref_L.shape[0]:
+            kpts_L_down = mp_kpts_ref_L[i] / max(1, downscale)
+            region_L = _build_kpt_hand_region(
+                kpts_L_down, out_w, out_h,
+                stamp_radius=_BG_MASK_STAMP_DOWN, smooth_sigma=2.0,
+                extend_forearm_px=_BG_MASK_FOREARM_DOWN)
+            hand_mask_L[s_idx] = region_L > 0.5
+
+        if is_stereo and warp_R is not None:
+            if downscale > 1:
+                warp_R_d = cv2.resize(warp_R, (out_w, out_h),
+                                       interpolation=cv2.INTER_AREA)
+            else:
+                warp_R_d = warp_R
+            stack_R[s_idx] = warp_R_d
+            if (mp_kpts_ref_R is not None
+                    and i < mp_kpts_ref_R.shape[0]):
+                kpts_R_down = mp_kpts_ref_R[i] / max(1, downscale)
+                region_R = _build_kpt_hand_region(
+                    kpts_R_down, out_w, out_h,
+                    stamp_radius=_BG_MASK_STAMP_DOWN, smooth_sigma=2.0,
+                    extend_forearm_px=_BG_MASK_FOREARM_DOWN)
+                hand_mask_R[s_idx] = region_R > 0.5
+
+        if progress_callback is not None:
+            try:
+                progress_callback(15.0 * (s_idx + 1) / max(1, n_samples))
+            except Exception:
+                pass
+    cap.release()
+
+    if progress_callback is not None:
+        try: progress_callback(20.0)
         except Exception: pass
 
+    # ── Per-pixel temporal median + MAD ─────────────────────────────
+    def _masked_median(stack: np.ndarray, hand_mask: np.ndarray) -> np.ndarray:
+        """Median over non-MP-covered samples per pixel.  Pixels under
+        the MP gate in every sample fall back to a bright-green
+        sentinel ``[0, 255, 0]`` (BGR) -- unmistakable in the BG
+        image and guaranteed bright in the foreground heatmap."""
+        if not hand_mask.any():
+            return np.median(stack, axis=0).astype(np.uint8)
+        m4 = np.broadcast_to(hand_mask[..., None], stack.shape)
+        masked = np.ma.masked_array(stack, mask=m4)
+        med = np.ma.median(masked, axis=0)
+        fill_color = np.array([0, 255, 0], dtype=np.uint8)
+        bg = np.where(np.ma.getmaskarray(med),
+                       fill_color.reshape(1, 1, 3),
+                       np.ma.getdata(med))
+        return bg.astype(np.uint8)
+
+    bg_L = _masked_median(stack_L, hand_mask_L)
+    dev_L = np.abs(stack_L.astype(np.int16) - bg_L.astype(np.int16))
+    mad_L = np.median(dev_L, axis=0).max(axis=-1).astype(np.uint8)
+    del dev_L
+
+    if is_stereo:
+        bg_R = _masked_median(stack_R, hand_mask_R)
+        dev_R = np.abs(stack_R.astype(np.int16) - bg_R.astype(np.int16))
+        mad_R = np.median(dev_R, axis=0).max(axis=-1).astype(np.uint8)
+        del dev_R
+    else:
+        bg_R = np.zeros_like(bg_L)
+        mad_R = np.zeros_like(mad_L)
+
+    # Colour-based refinement inside a forearm cylinder.
+    cyl_L = _build_forearm_cylinder(mp_kpts_ref_L, frames_sampled,
+                                       out_w, out_h, downscale)
+    bg_L, always_hand_color_L_down = _refine_bg_color_based(
+        bg_L, stack_L, region_mask=cyl_L)
+    if is_stereo:
+        cyl_R = _build_forearm_cylinder(mp_kpts_ref_R, frames_sampled,
+                                           out_w, out_h, downscale)
+        bg_R, always_hand_color_R_down = _refine_bg_color_based(
+            bg_R, stack_R, region_mask=cyl_R)
+    else:
+        always_hand_color_R_down = None
+
+    always_hand_L_down = hand_mask_L.all(axis=0) | always_hand_color_L_down
+    if hand_mask_R is not None:
+        always_hand_R_down = (hand_mask_R.all(axis=0)
+                              | always_hand_color_R_down)
+    else:
+        always_hand_R_down = None
+    del hand_mask_L
+    if hand_mask_R is not None:
+        del hand_mask_R
+
+    if progress_callback is not None:
+        try: progress_callback(70.0)
+        except Exception: pass
+
+    # ── Skin-model fit from sample stack ─────────────────────────────
+    skin_model_L: dict | None = None
+    skin_model_R: dict | None = None
+    try:
+        def _kpts_at_downscale(kpts_ref_arr):
+            if kpts_ref_arr is None:
+                return []
+            return [kpts_ref_arr[fi] / max(1, downscale)
+                    for fi in frames_sampled]
+
+        if mp_kpts_ref_L is not None:
+            skin_model_L = _fit_skin_model_cbcr(
+                stack_L, _kpts_at_downscale(mp_kpts_ref_L))
+        if is_stereo and mp_kpts_ref_R is not None:
+            skin_model_R = _fit_skin_model_cbcr(
+                stack_R, _kpts_at_downscale(mp_kpts_ref_R))
+        n_lm_L = (int(np.sum(~np.isnan(mp_kpts_ref_L[:, 0, 0])))
+                  if mp_kpts_ref_L is not None else 0)
+        logger.info(
+            f"BG: {n_lm_L}/{n_frames} frames with valid OS keypoints; "
+            f"skin model: L={'yes' if skin_model_L else 'no'}, "
+            f"R={'yes' if skin_model_R else 'no'}")
+    except Exception as e:
+        logger.warning(f"Skin-model fit failed: {e}")
+        skin_model_L = skin_model_R = None
+
+    try: del stack_L
+    except NameError: pass
+    try: del stack_R
+    except NameError: pass
+
+    if progress_callback is not None:
+        try: progress_callback(85.0)
+        except Exception: pass
+
+    # ── Save background.npz + PNGs ───────────────────────────────────
+    out_dir = _preproc_dir(subject_name, stem)
+    out_dir.mkdir(parents=True, exist_ok=True)
     out_path = _background_path(subject_name, stem)
     save_kwargs = dict(
         background_L=bg_L,
@@ -1274,14 +1227,12 @@ def compute_stable(
         mad_L=mad_L,
         mad_R=mad_R,
         frames_sampled=frames_sampled,
-        frames_written=np.array(frames_written, dtype=np.int32),
+        frames_written=np.array(n_frames, dtype=np.int32),
         n_frames=np.array(n_frames, dtype=np.int32),
         reference_frame=np.array(ref, dtype=np.int32),
         is_stereo=np.array(is_stereo, dtype=bool),
         downscale=np.array(downscale, dtype=np.int32),
     )
-    # Save MP-ref keypoints and skin model so compute_foreground can run
-    # without re-loading MP / re-fitting the model.
     if mp_kpts_ref_L is not None:
         save_kwargs["mp_kpts_ref_L"] = mp_kpts_ref_L.astype(np.float32)
     if mp_kpts_ref_R is not None:
@@ -1292,8 +1243,6 @@ def compute_stable(
     if skin_model_R is not None:
         save_kwargs["skin_model_R_mean"]    = skin_model_R["mean"]
         save_kwargs["skin_model_R_cov_inv"] = skin_model_R["cov_inv"]
-    # Always-hand maps so the live outline can force these pixels
-    # inside the boundary regardless of per-frame motion.
     if always_hand_L_down is not None:
         save_kwargs["always_hand_L_down"] = always_hand_L_down
     if always_hand_R_down is not None:
@@ -1310,11 +1259,10 @@ def compute_stable(
         try: progress_callback(100.0)
         except Exception: pass
     logger.info(
-        f"stable bake saved: {out_path}  N_samples={n_samples}  "
-        f"frames_written={frames_written}/{n_frames}  "
-        f"stereo={is_stereo}  downscale={downscale}"
-    )
+        f"background.npz saved: {out_path}  N_samples={n_samples}  "
+        f"stereo={is_stereo}  downscale={downscale}")
     return str(out_path)
+
 
 
 
@@ -1594,11 +1542,6 @@ def compute_outline_frame(
         "fg_OS": os_out["fg"],
         "fg_OD": od_out["fg"] if od_out else None,
     }
-
-
-# Backward-compat alias: older callers may still reach for
-# ``compute_background``.  Points at the new Stage 1 (stable.mp4).
-compute_background = compute_stable
 
 
 def load_background(subject_name: str, trial_stem: str) -> dict | None:

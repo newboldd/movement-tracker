@@ -182,28 +182,39 @@
                 <div class="section">
                     <h3>Stabilise</h3>
                     <div class="small-note">
-                        Bakes <strong>stable.mp4</strong> (every frame
+                        Bakes <strong>stable.mp4</strong> -- every frame
                         warped into the reference camera so the scene is
-                        stationary) and <strong>background.png</strong>
-                        (temporal median over sampled frames, with the
-                        hand masked out).  Requires trajectory.
+                        stationary.  The heavy step; run once.  Requires
+                        trajectory.
                     </div>
                     <button class="btn btn-sm btn-success" id="runStableBtn" style="width:100%;margin-top:8px;" disabled>Compute Stable</button>
                     <div id="stableStatus" class="pp-stat" style="margin-top:6px;"></div>
+                    <label style="display:block;margin-top:8px;font-size:11px;color:var(--text-muted);">
+                        <input type="radio" name="bgOverlay" id="ovOff" checked> Off (live frame)
+                    </label>
+                    <label style="display:block;margin-top:2px;font-size:11px;color:var(--text-muted);">
+                        <input type="radio" name="bgOverlay" id="ovStable"> Stabilised (stable.mp4)
+                    </label>
+                </div>
+
+                <div class="section">
+                    <h3>Background</h3>
+                    <div class="small-note">
+                        Samples <strong>stable.mp4</strong>, takes the
+                        temporal median with the hand + forearm masked
+                        out, runs the colour-based forearm refinement,
+                        and saves <strong>background.npz</strong>.
+                        Cheap to re-run.  Requires stable.mp4.
+                    </div>
+                    <button class="btn btn-sm btn-success" id="runBackgroundBtn" style="width:100%;margin-top:8px;" disabled>Compute Background</button>
+                    <div id="backgroundStatus" class="pp-stat" style="margin-top:6px;"></div>
                     <div id="backgroundStats" class="pp-stat" style="margin-top:8px;"></div>
                     <div id="backgroundPreview" style="margin-top:8px;display:none;">
                         <div style="display:flex;gap:4px;align-items:flex-start;">
                             <img id="bgThumbOS" style="width:48%;border:1px solid var(--border);border-radius:4px;" title="OS background">
                             <img id="bgThumbOD" style="width:48%;border:1px solid var(--border);border-radius:4px;display:none;" title="OD background">
                         </div>
-                        <div style="margin-top:8px;font-size:11px;color:var(--text-muted);">Overlay on the viewport:</div>
-                        <label style="display:block;margin-top:2px;font-size:11px;color:var(--text-muted);">
-                            <input type="radio" name="bgOverlay" id="ovOff" checked> Off (live frame)
-                        </label>
-                        <label style="display:block;margin-top:2px;font-size:11px;color:var(--text-muted);">
-                            <input type="radio" name="bgOverlay" id="ovStable"> Stabilised (stable.mp4)
-                        </label>
-                        <label style="display:block;margin-top:2px;font-size:11px;color:var(--text-muted);">
+                        <label style="display:block;margin-top:8px;font-size:11px;color:var(--text-muted);">
                             <input type="radio" name="bgOverlay" id="ovBg"> Background (background.png)
                         </label>
                     </div>
@@ -309,6 +320,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/preproc.js?v=27"></script>
+    <script src="/static/js/preproc.js?v=28"></script>
 </body>
 </html>

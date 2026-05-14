@@ -152,17 +152,18 @@ def _spawn_preproc_job(
     name: str,
     trial_stem: str,
     trial_idx: int,
-    job_kind: str,                 # 'stable' (only kind now)
+    job_kind: str,                 # 'stable' | 'background'
     body: dict,
     job_type: str = "background",
 ) -> dict:
-    """Spawn the Stabilise bake worker thread.
+    """Spawn a Stabilise or Background worker thread.
 
-    Hand-boundary work used to be a separate ``foreground`` job kind;
-    that is now computed on demand per frame and no longer routes
-    through this helper.
+    Two endpoints share this helper: ``/compute_stable`` (just the
+    warp pass) and ``/compute_background`` (sample + median + colour
+    refinement + skin fit, reads stable.mp4).  Hand boundary is
+    computed on demand per frame and doesn't route through here.
     """
-    from ..services.background import compute_stable
+    from ..services.background import compute_stable, compute_background
 
     with get_db_ctx() as db:
         db.execute(
@@ -182,10 +183,14 @@ def _spawn_preproc_job(
     cancel_event = threading.Event()
     registry._cancel_events[job_id] = cancel_event
 
-    if job_kind != "stable":
+    if job_kind == "stable":
+        worker = compute_stable
+        allowed = ()           # no tunable params
+    elif job_kind == "background":
+        worker = compute_background
+        allowed = ("max_samples", "downscale", "dilation_px")
+    else:
         raise HTTPException(500, f"bad job_kind: {job_kind}")
-    worker = compute_stable
-    allowed = ("max_samples", "downscale", "dilation_px")
 
     kwargs = {}
     for k in allowed:
@@ -241,9 +246,9 @@ def _spawn_preproc_job(
 
 @router.post("/{subject_id}/compute_stable")
 def compute_stable_endpoint(subject_id: int, body: dict = Body(...)) -> dict:
-    """Stage 1: warp every frame to the reference and bake stable.mp4
-    plus background.npz (with skin model + MP-ref keypoints saved for
-    the foreground stage)."""
+    """Stage 1: warp every source frame to the reference and bake
+    stable.mp4.  No background extraction in this step; run
+    ``/compute_background`` afterwards."""
     name = _subject_name(subject_id)
     trial_idx = int(body.get("trial_idx", 0))
     trials = build_trial_map(name)
@@ -285,9 +290,12 @@ def get_outline_frame(subject_id: int, trial_idx: int,
 
 
 @router.post("/{subject_id}/compute_background")
-def compute_background_endpoint_compat(subject_id: int, body: dict = Body(...)) -> dict:
-    """Backward-compat: runs Stage 1 only.  Prefer /compute_stable +
-    /compute_foreground for new clients."""
+def compute_background_endpoint(subject_id: int, body: dict = Body(...)) -> dict:
+    """Stage 2: read stable.mp4 + camera trajectory + MP keypoints,
+    compute the masked-median background, run the colour-based
+    forearm refinement, fit the skin model, and save
+    background.npz.  Requires Stabilise to have produced
+    stable.mp4 first."""
     name = _subject_name(subject_id)
     trial_idx = int(body.get("trial_idx", 0))
     trials = build_trial_map(name)
@@ -295,26 +303,38 @@ def compute_background_endpoint_compat(subject_id: int, body: dict = Body(...)) 
         raise HTTPException(400, "trial_idx out of range")
     trial_stem = trials[trial_idx]["trial_name"]
     return _spawn_preproc_job(subject_id, name, trial_stem, trial_idx,
-                                "stable", body)
+                                "background", body)
 
 
 @router.get("/{subject_id}/trial/{trial_idx}/background")
 def get_background(subject_id: int, trial_idx: int) -> dict:
-    """Return a summary of the saved background+bake for a trial, or
-    ``{available: false}`` if not computed yet."""
-    from ..services.background import load_background, summarise_background
+    """Summary of the preproc artifacts for a trial.
+
+    ``available`` is True once background.npz exists (Stage 2 done).
+    ``stable_mp4_exists`` is reported independently so the UI can
+    tell "Stabilise done, Background not yet" apart from "nothing
+    done".
+    """
+    from ..services.background import (
+        load_background, summarise_background, stable_mp4_path)
 
     name = _subject_name(subject_id)
     trials = build_trial_map(name)
     if trial_idx < 0 or trial_idx >= len(trials):
         raise HTTPException(400, f"trial_idx out of range")
     trial_stem = trials[trial_idx]["trial_name"]
+    stable_exists = stable_mp4_path(name, trial_stem) is not None
     bg = load_background(name, trial_stem)
     if bg is None:
-        return {"available": False, "trial_stem": trial_stem}
+        return {
+            "available": False,
+            "trial_stem": trial_stem,
+            "stable_mp4_exists": stable_exists,
+        }
     summary = summarise_background(name, trial_stem, bg)
     summary["available"] = True
     summary["trial_stem"] = trial_stem
+    summary["stable_mp4_exists"] = stable_exists
     return summary
 
 

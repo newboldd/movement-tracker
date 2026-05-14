@@ -292,40 +292,60 @@
         $('bgThumbOS').src = '';
         $('bgThumbOD').src = '';
         $('bgThumbOD').style.display = 'none';
+        let b = null;
         try {
-            const b = await api(`/api/preproc/${subjectId}/trial/${trialMeta.trial_idx}/background`);
-            if (b.available) {
-                backgroundData = b;
-                $('dot-background').classList.add('done');
-                $('dot-background').classList.remove('running', 'failed');
-                showBackgroundStats();
-                _loadBackgroundArtifacts();
+            b = await api(`/api/preproc/${subjectId}/trial/${trialMeta.trial_idx}/background`);
+        } catch (e) {
+            $('stableStatus').textContent = `Load error: ${e.message}`;
+            return;
+        }
+        // Always store the response -- it carries stable_mp4_exists and
+        // available independently, so the UI can show three states:
+        // nothing / stabilised-only / background-done.
+        backgroundData = b;
+        const stableReady = !!b.stable_mp4_exists;
+        const bgReady = !!b.available;   // background.npz exists
+
+        if (bgReady) {
+            $('dot-background').classList.add('done');
+            $('dot-background').classList.remove('running', 'failed');
+            showBackgroundStats();
+            _loadBackgroundArtifacts();          // bg thumbs + stable video
+            $('backgroundStatus').textContent = 'Done.';
+        } else {
+            $('dot-background').classList.remove('done', 'running', 'failed');
+            $('backgroundStats').textContent = '';
+            $('backgroundPreview').style.display = 'none';
+            if (stableReady) {
+                // Stabilise done, Background not yet -- still load the
+                // stable video so the overlay works.
+                _loadStableVideo();
+                $('stableStatus').textContent = 'Done.';
+                $('backgroundStatus').textContent = 'Not computed yet.';
             } else {
-                backgroundData = null;
-                $('dot-background').classList.remove('done', 'running', 'failed');
                 $('stableStatus').textContent = trajectory
                     ? 'Not computed yet.'
                     : 'Waiting for trajectory (run step 1 first).';
-                $('outlineStatus').textContent = '';
-                $('backgroundStats').textContent = '';
-                $('backgroundPreview').style.display = 'none';
-                overlayMode = 'off';
-                if ($('ovOff'))    $('ovOff').checked = true;
-                if ($('ovStable'))     $('ovStable').disabled = true;
-                if ($('ovBg'))         $('ovBg').disabled = true;
-                if ($('cbShowOutline')) $('cbShowOutline').disabled = true;
+                $('backgroundStatus').textContent =
+                    'Waiting for stable.mp4 (run Stabilise first).';
             }
-        } catch (e) {
-            $('stableStatus').textContent = `Load error: ${e.message}`;
+            $('outlineStatus').textContent = '';
+            overlayMode = 'off';
+            if ($('ovOff'))  $('ovOff').checked = true;
         }
-        // Stable button: enabled when trajectory exists.
+        // Gating:
+        //   Stabilise  -> needs trajectory
+        //   Background -> needs stable.mp4
+        //   overlays   -> ovStable needs stable.mp4, ovBg needs background.npz
+        //   hand-boundary checkboxes -> need background.npz (compute_outline_frame
+        //     reads it)
         $('runStableBtn').disabled = !trajectory;
-        // Hand-boundary + foreground-fill checkboxes: enabled once
-        // stable.mp4 exists -- both rely on the warped frame.
-        const stableReady = !!(backgroundData && backgroundData.stable_mp4_exists);
-        $('cbShowOutline').disabled = !stableReady;
-        $('cbShowFgFill').disabled = !stableReady;
-        if (stableReady && (showOutline || showFgFill)) scheduleOutlineFetch();
+        $('runBackgroundBtn').disabled = !stableReady;
+        if ($('ovStable')) $('ovStable').disabled = !stableReady;
+        if ($('ovBg'))     $('ovBg').disabled = !bgReady;
+        $('cbShowOutline').disabled = !bgReady;
+        $('cbShowFgFill').disabled = !bgReady;
+        if (bgReady && (showOutline || showFgFill)) scheduleOutlineFetch();
     }
 
     function showBackgroundStats() {
@@ -347,13 +367,34 @@
         $('backgroundStats').innerHTML = lines.join('<br>');
     }
 
+    /** (Re)load the hidden stable.mp4 <video> element.  Safe to call
+     *  whenever stable.mp4 exists -- doesn't depend on background.npz. */
+    function _loadStableVideo() {
+        if (!backgroundData || !backgroundData.stable_mp4_exists) return;
+        const base = `/api/preproc/${subjectId}/trial/${trialMeta.trial_idx}`;
+        const t = Date.now();
+        const _makeVideo = () => {
+            const v = document.createElement('video');
+            v.muted = true; v.playsInline = true;
+            v.preload = 'auto'; v.crossOrigin = 'anonymous';
+            v.style.display = 'none';
+            document.body.appendChild(v);
+            return v;
+        };
+        if (!stableVideoEl) stableVideoEl = _makeVideo();
+        stableVideoEl.src = `${base}/stable_video?_=${t}`;
+        stableVideoEl.addEventListener('loadedmetadata', () => {
+            if ($('ovStable')) $('ovStable').disabled = false;
+        }, { once: true });
+    }
+
+    /** Load the background.npz-derived artifacts: BG thumbnails for the
+     *  sidebar preview + the stable video.  Only call when
+     *  ``backgroundData.available`` is true. */
     function _loadBackgroundArtifacts() {
-        if (!backgroundData) return;
+        if (!backgroundData || !backgroundData.available) return;
         const base = `/api/preproc/${subjectId}/trial/${trialMeta.trial_idx}`;
         const t = Date.now();   // bust HTTP cache after recompute
-        // BG/MAD thumbnails (sidebar preview).  Also used as the source
-        // for the 'bg' overlay's canvas render, so enable that radio
-        // once at least the OS thumbnail has loaded.
         $('ovBg').disabled = true;
         $('bgThumbOS').addEventListener('load', () => {
             $('ovBg').disabled = false;
@@ -366,33 +407,17 @@
             $('bgThumbOD').style.display = 'none';
         }
         $('backgroundPreview').style.display = '';
-
-        // Lazily create the hidden video elements that back the overlay
-        // modes.  We seek into them frame-by-frame in render().
-        const _makeVideo = () => {
-            const v = document.createElement('video');
-            v.muted = true; v.playsInline = true;
-            v.preload = 'auto'; v.crossOrigin = 'anonymous';
-            v.style.display = 'none';
-            document.body.appendChild(v);
-            return v;
-        };
-        if (!stableVideoEl)  stableVideoEl  = _makeVideo();
-        stableVideoEl.src  = `${base}/stable_video?_=${t}`;
-        stableVideoEl.addEventListener('loadedmetadata', () => {
-            $('ovStable').disabled = !backgroundData?.stable_mp4_exists;
-        }, { once: true });
+        _loadStableVideo();
     }
 
-    async function computeStable() {
-        if (subjectId == null || currentTrialIdx < 0) return;
-        if (!trajectory) {
-            $('stableStatus').textContent = 'Run Compute Trajectory first.';
-            return;
-        }
-        const statusEl = $('stableStatus');
+    /**
+     * Spawn a Stabilise or Background job and stream its progress into
+     * ``statusEl``.  Shared by computeStable + computeBackground.
+     */
+    async function _runPreprocJob(endpoint, statusElId) {
+        const statusEl = $(statusElId);
         try {
-            const res = await api(`/api/preproc/${subjectId}/compute_stable`, {
+            const res = await api(`/api/preproc/${subjectId}/${endpoint}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ trial_idx: trialMeta.trial_idx }),
@@ -426,6 +451,24 @@
         } catch (e) {
             statusEl.textContent = `Error: ${e.message}`;
         }
+    }
+
+    async function computeStable() {
+        if (subjectId == null || currentTrialIdx < 0) return;
+        if (!trajectory) {
+            $('stableStatus').textContent = 'Run Compute Trajectory first.';
+            return;
+        }
+        await _runPreprocJob('compute_stable', 'stableStatus');
+    }
+
+    async function computeBackground() {
+        if (subjectId == null || currentTrialIdx < 0) return;
+        if (!backgroundData || !backgroundData.stable_mp4_exists) {
+            $('backgroundStatus').textContent = 'Run Stabilise first.';
+            return;
+        }
+        await _runPreprocJob('compute_background', 'backgroundStatus');
     }
 
     /**
@@ -1173,10 +1216,10 @@
         $('prevSubjectBtn').addEventListener('click', prevSubject);
         $('nextSubjectBtn').addEventListener('click', nextSubject);
         $('runTrajectoryBtn').addEventListener('click', computeTrajectory);
-        // Stabilise is the only baked stage now.  Hand boundary is
-        // computed on demand per frame -- the slider triggers a
-        // debounced fetch instead of a job.
+        // Three baked-or-derived stages: Stabilise (stable.mp4),
+        // Background (background.npz), Hand Boundary (live, on demand).
         $('runStableBtn').addEventListener('click', computeStable);
+        $('runBackgroundBtn').addEventListener('click', computeBackground);
         const _fgDilateSlider = $('fgDilateSlider');
         const _fgDilateVal    = $('fgDilateVal');
         if (_fgDilateSlider && _fgDilateVal) {
