@@ -47,8 +47,33 @@
     let showOutline = true;     // checkbox: show live-fetched hand boundary
     let showFgFill = false;     // checkbox: also fetch + paint JET heatmap
     let fgFillOpacity = 0.5;    // 0..1, controlled by slider next to checkbox
-    let showBgZones = true;     // checkbox: preview palm zone + forearm cone
-    let showSkinMask = false;   // checkbox: live YCrCb skin-color overlay
+    // Transient previews: shown only while the relevant slider is
+    // being dragged, then auto-hidden a short moment after the last
+    // input.  showBgZones <- "MP dilate (mask)"; showSkinMask <-
+    // "Skin color leniency" / "MP dilate (color sample)".
+    let showBgZones = false;    // palm zone + forearm cone preview
+    let showSkinMask = false;   // live YCrCb skin-color mask + sample region
+    let _bgZonesTimer = null;
+    let _skinMaskTimer = null;
+    const _PREVIEW_HOLD_MS = 1100;
+    function _flashBgZones() {
+        showBgZones = true;
+        try { render(); } catch (_e) {}
+        if (_bgZonesTimer) clearTimeout(_bgZonesTimer);
+        _bgZonesTimer = setTimeout(() => {
+            showBgZones = false;
+            try { render(); } catch (_e) {}
+        }, _PREVIEW_HOLD_MS);
+    }
+    function _flashSkinMask() {
+        showSkinMask = true;
+        try { render(); } catch (_e) {}
+        if (_skinMaskTimer) clearTimeout(_skinMaskTimer);
+        _skinMaskTimer = setTimeout(() => {
+            showSkinMask = false;
+            try { render(); } catch (_e) {}
+        }, _PREVIEW_HOLD_MS);
+    }
     // Offscreen canvas + cache key for the live skin-color mask.  The
     // classification mirrors the server's _is_skin_ycc (BT.601 YCrCb,
     // leniency-scaled window) so the preview matches what Compute
@@ -1630,52 +1655,44 @@
         // Background (background.npz), Hand Boundary (live, on demand).
         $('runStableBtn').addEventListener('click', computeStable);
         $('runBackgroundBtn').addEventListener('click', computeBackground);
-        // Palm-zone grow slider: updates its label AND re-renders so
-        // the on-canvas zone preview tracks it.  The value is read
-        // when Compute Background is clicked (it's a bake param).
+        // "MP dilate (mask)" slider: a Background bake param (read when
+        // Compute Background is clicked).  While the user drags it, the
+        // palm-zone + forearm-cone preview flashes on so they can see
+        // the hard boundary they're setting; it auto-hides shortly
+        // after the last input.
         const _palmGrowSlider = $('palmGrowSlider');
         const _palmGrowVal    = $('palmGrowVal');
         if (_palmGrowSlider && _palmGrowVal) {
             _palmGrowSlider.addEventListener('input', () => {
                 _palmGrowVal.textContent = _palmGrowSlider.value;
-                try { render(); } catch (_e) {}
+                _flashBgZones();
             });
         }
-        // Skin-leniency slider: it's a Background bake param (read when
-        // Compute Background is clicked), but it also drives the live
-        // skin-color mask preview -- so re-render on every input so the
-        // magenta overlay tracks the slider with zero latency.
+        // "Skin color leniency" slider: a Background bake param.  While
+        // dragged, the live skin-color mask + sample-region preview
+        // flashes on so the user sees what the leniency classifies as
+        // hand-coloured; auto-hides shortly after the last input.
         const _skinLenSlider = $('skinLeniencySlider');
         const _skinLenVal    = $('skinLeniencyVal');
         if (_skinLenSlider && _skinLenVal) {
             _skinLenSlider.addEventListener('input', () => {
                 _skinLenVal.textContent =
                     parseFloat(_skinLenSlider.value).toFixed(2);
-                if (showSkinMask) try { render(); } catch (_e) {}
+                _flashSkinMask();
             });
         }
-        // MP dilate (color sample): a Background bake param, but it
-        // also widens/shrinks the patches the live skin-mask preview
-        // samples -- re-render so the magenta overlay tracks it.
+        // "MP dilate (color sample)" slider: a Background bake param.
+        // While dragged, the same skin-color mask + sample-region
+        // preview flashes on (the sample region tracks this slider);
+        // auto-hides shortly after the last input.
         const _colorDilateSlider = $('colorDilateSlider');
         const _colorDilateVal    = $('colorDilateVal');
         if (_colorDilateSlider && _colorDilateVal) {
             _colorDilateSlider.addEventListener('input', () => {
                 _colorDilateVal.textContent = _colorDilateSlider.value;
-                if (showSkinMask) try { render(); } catch (_e) {}
+                _flashSkinMask();
             });
         }
-        // Preview-zones checkbox: pure render toggle.
-        $('cbPreviewZones').addEventListener('change', e => {
-            showBgZones = e.target.checked;
-            try { render(); } catch (_e) {}
-        });
-        // Skin-mask checkbox: pure render toggle (classification is
-        // cached, so toggling on is instant after the first compute).
-        $('cbShowSkinMask').addEventListener('change', e => {
-            showSkinMask = e.target.checked;
-            try { render(); } catch (_e) {}
-        });
         const _fgDilateSlider = $('fgDilateSlider');
         const _fgDilateVal    = $('fgDilateVal');
         if (_fgDilateSlider && _fgDilateVal) {
