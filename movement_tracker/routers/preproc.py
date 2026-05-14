@@ -163,7 +163,8 @@ def _spawn_preproc_job(
     refinement + skin fit, reads stable.mp4).  Hand boundary is
     computed on demand per frame and doesn't route through here.
     """
-    from ..services.background import compute_stable, compute_background
+    from ..services.background import (
+        compute_stable, compute_background, refine_background)
 
     with get_db_ctx() as db:
         db.execute(
@@ -188,9 +189,15 @@ def _spawn_preproc_job(
         allowed = ()           # no tunable params
         float_params = ()
     elif job_kind == "background":
+        # Stage 2a: raw masked-median background only.
         worker = compute_background
-        allowed = ("max_samples", "downscale", "dilation_px",
-                    "palm_grow_px", "color_dilate_px", "skin_leniency")
+        allowed = ("max_samples", "downscale", "dilation_px")
+        float_params = ()
+    elif job_kind == "refine":
+        # Stage 2b: "Remove stump" -- colour-based refinement of the
+        # already-computed median.
+        worker = refine_background
+        allowed = ("palm_grow_px", "color_dilate_px", "skin_leniency")
         float_params = ("skin_leniency",)
     else:
         raise HTTPException(500, f"bad job_kind: {job_kind}")
@@ -298,11 +305,10 @@ def get_outline_frame(subject_id: int, trial_idx: int,
 
 @router.post("/{subject_id}/compute_background")
 def compute_background_endpoint(subject_id: int, body: dict = Body(...)) -> dict:
-    """Stage 2: read stable.mp4 + camera trajectory + MP keypoints,
-    compute the masked-median background, run the color-based
-    forearm refinement, fit the skin model, and save
-    background.npz.  Requires Stabilize to have produced
-    stable.mp4 first."""
+    """Stage 2a: read stable.mp4 + camera trajectory + MP keypoints,
+    compute the raw masked-median background, and save
+    background.npz + the bg_samples.npz sidecar.  Requires Stabilize
+    to have produced stable.mp4 first."""
     name = _subject_name(subject_id)
     trial_idx = int(body.get("trial_idx", 0))
     trials = build_trial_map(name)
@@ -311,6 +317,23 @@ def compute_background_endpoint(subject_id: int, body: dict = Body(...)) -> dict
     trial_stem = trials[trial_idx]["trial_name"]
     return _spawn_preproc_job(subject_id, name, trial_stem, trial_idx,
                                 "background", body)
+
+
+@router.post("/{subject_id}/refine_background")
+def refine_background_endpoint(subject_id: int, body: dict = Body(...)) -> dict:
+    """Stage 2b ("Remove stump"): apply the colour-based refinement to
+    the already-computed median background, swapping flesh-coloured BG
+    pixels for a non-skin sample colour where available (green only
+    where every sample is skin), and save background_refined.npz.
+    Requires Compute Background to have produced the sidecar first."""
+    name = _subject_name(subject_id)
+    trial_idx = int(body.get("trial_idx", 0))
+    trials = build_trial_map(name)
+    if trial_idx < 0 or trial_idx >= len(trials):
+        raise HTTPException(400, "trial_idx out of range")
+    trial_stem = trials[trial_idx]["trial_name"]
+    return _spawn_preproc_job(subject_id, name, trial_stem, trial_idx,
+                                "refine", body)
 
 
 @router.get("/{subject_id}/trial/{trial_idx}/background")
@@ -357,10 +380,11 @@ def get_background_image(subject_id: int, trial_idx: int,
                           side: str = Query("OS"),
                           kind: str = Query("bg"),
                           ):
-    """Serve the background or MAD PNG for one trial.
+    """Serve a background / MAD / refined-background PNG for one trial.
 
-    ``side`` ∈ {OS, OD}, ``kind`` ∈ {bg, mad}.  The files are saved next
-    to ``background.npz`` by ``compute_background``.
+    ``side`` ∈ {OS, OD}, ``kind`` ∈ {bg, mad, refined}.  The files are
+    saved next to ``background.npz`` by ``compute_background`` (bg, mad)
+    and ``refine_background`` (refined).
     """
     from ..services.background import _preproc_dir, background_exists
 
@@ -372,11 +396,13 @@ def get_background_image(subject_id: int, trial_idx: int,
     side = side.upper()
     if side not in ("OS", "OD"):
         raise HTTPException(400, "side must be OS or OD")
-    if kind not in ("bg", "mad"):
-        raise HTTPException(400, "kind must be bg or mad")
+    if kind not in ("bg", "mad", "refined"):
+        raise HTTPException(400, "kind must be bg, mad or refined")
     if not background_exists(name, trial_stem):
         raise HTTPException(404, "no background — run Compute Background")
-    fname = ("background_" if kind == "bg" else "mad_") + side + ".png"
+    prefix = {"bg": "background_", "mad": "mad_",
+              "refined": "background_refined_"}[kind]
+    fname = prefix + side + ".png"
     fpath = _preproc_dir(name, trial_stem) / fname
     if not fpath.exists():
         raise HTTPException(404, f"image not found: {fname}")

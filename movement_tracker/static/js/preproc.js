@@ -42,21 +42,34 @@
     let backgroundData = null;
     let bgJobId = null;
     let bgEvtSource = null;
-    let overlayMode = 'off';    // 'off' | 'stable' | 'bg'
+    let overlayMode = 'off';    // 'off' | 'stable' | 'bg' | 'refined'
     let stableVideoEl = null;   // hidden <video> tied to stable.mp4
+    let refinedImgOS = null;    // <img> for the stump-removed background
+    let refinedImgOD = null;
     let showOutline = true;     // checkbox: show live-fetched hand boundary
     let showFgFill = false;     // checkbox: also fetch + paint JET heatmap
     let fgFillOpacity = 0.5;    // 0..1, controlled by slider next to checkbox
-    // Transient previews: shown only while the relevant slider is
-    // being dragged, then auto-hidden a short moment after the last
-    // input.  showBgZones <- "MP dilate (mask)"; showSkinMask <-
-    // "Skin color leniency" / "MP dilate (color sample)".
-    let showBgZones = false;    // palm zone + forearm cone preview
+    // Transient previews: shown only while the relevant slider is being
+    // dragged, then auto-hidden a short moment after the last input.
+    // Each flash also switches the viewport to the view that preview
+    // belongs on: "MP dilate (color sample)" -> Stabilized; "Skin
+    // color leniency" + "MP dilate (mask)" -> Background (raw median).
+    let showBgZones = false;    // palm zone preview
     let showSkinMask = false;   // live YCrCb skin-color mask + sample region
     let _bgZonesTimer = null;
     let _skinMaskTimer = null;
     const _PREVIEW_HOLD_MS = 1100;
+    // Switch the viewport overlay by clicking the radio (so the change
+    // handler / video-seek logic runs).  No-op if already there or the
+    // target view isn't available yet.
+    function _switchOverlay(mode) {
+        const id = { stable: 'ovStable', bg: 'ovBg',
+                     refined: 'ovRefined', off: 'ovOff' }[mode];
+        const el = id && document.getElementById(id);
+        if (el && !el.disabled && !el.checked) el.click();
+    }
     function _flashBgZones() {
+        _switchOverlay('bg');
         showBgZones = true;
         try { render(); } catch (_e) {}
         if (_bgZonesTimer) clearTimeout(_bgZonesTimer);
@@ -65,7 +78,8 @@
             try { render(); } catch (_e) {}
         }, _PREVIEW_HOLD_MS);
     }
-    function _flashSkinMask() {
+    function _flashSkinMask(mode) {
+        if (mode) _switchOverlay(mode);
         showSkinMask = true;
         try { render(); } catch (_e) {}
         if (_skinMaskTimer) clearTimeout(_skinMaskTimer);
@@ -363,14 +377,23 @@
         // nothing / stabilized-only / background-done.
         backgroundData = b;
         const stableReady = !!b.stable_mp4_exists;
-        const bgReady = !!b.available;   // background.npz exists
+        const bgReady = !!b.available;            // background.npz exists
+        const refinedReady = !!b.refined_available;  // background_refined.npz
 
         if (bgReady) {
             $('dot-background').classList.add('done');
             $('dot-background').classList.remove('running', 'failed');
             showBackgroundStats();
             _loadBackgroundArtifacts();          // bg thumbs + stable video
-            $('backgroundStatus').textContent = 'Done.';
+            $('medianStatus').textContent = 'Done.';
+            $('backgroundStatus').textContent = refinedReady
+                ? 'Done.' : 'Not computed yet.';
+            // The refined overlay may have just been invalidated (a
+            // fresh median drops the stale refined artifacts).
+            if (overlayMode === 'refined' && !refinedReady) {
+                overlayMode = 'bg';
+                if ($('ovBg')) $('ovBg').checked = true;
+            }
         } else {
             $('dot-background').classList.remove('done', 'running', 'failed');
             $('backgroundStats').textContent = '';
@@ -380,28 +403,33 @@
                 // stable video so the overlay works.
                 _loadStableVideo();
                 $('stableStatus').textContent = 'Done.';
-                $('backgroundStatus').textContent = 'Not computed yet.';
+                $('medianStatus').textContent = 'Not computed yet.';
+                $('backgroundStatus').textContent = 'Run Compute Background first.';
             } else {
                 $('stableStatus').textContent = trajectory
                     ? 'Not computed yet.'
                     : 'Waiting for trajectory (run step 1 first).';
-                $('backgroundStatus').textContent =
+                $('medianStatus').textContent =
                     'Waiting for stable.mp4 (run Stabilize first).';
+                $('backgroundStatus').textContent = '';
             }
             $('outlineStatus').textContent = '';
             overlayMode = 'off';
             if ($('ovOff'))  $('ovOff').checked = true;
         }
         // Gating:
-        //   Stabilize  -> needs trajectory
-        //   Background -> needs stable.mp4
-        //   overlays   -> ovStable needs stable.mp4, ovBg needs background.npz
-        //   hand-boundary checkboxes -> need background.npz (compute_outline_frame
-        //     reads it)
+        //   Stabilize          -> needs trajectory
+        //   Compute Background -> needs stable.mp4
+        //   Remove stump       -> needs background.npz (the median)
+        //   overlays           -> ovStable needs stable.mp4, ovBg needs
+        //     background.npz, ovRefined needs background_refined.npz
+        //   hand-boundary checkboxes -> need background.npz
         $('runStableBtn').disabled = !trajectory;
-        $('runBackgroundBtn').disabled = !stableReady;
-        if ($('ovStable')) $('ovStable').disabled = !stableReady;
-        if ($('ovBg'))     $('ovBg').disabled = !bgReady;
+        $('runMedianBtn').disabled = !stableReady;
+        $('runRefineBtn').disabled = !bgReady;
+        if ($('ovStable'))  $('ovStable').disabled = !stableReady;
+        if ($('ovBg'))      $('ovBg').disabled = !bgReady;
+        if ($('ovRefined')) $('ovRefined').disabled = !refinedReady;
         $('cbShowOutline').disabled = !bgReady;
         $('cbShowFgFill').disabled = !bgReady;
         if (bgReady && (showOutline || showFgFill)) scheduleOutlineFetch();
@@ -466,13 +494,30 @@
             $('bgThumbOD').style.display = 'none';
         }
         $('backgroundPreview').style.display = '';
+        // Refined (stump-removed) background -- off-DOM <img>s used by
+        // render() for the "Refined background" overlay.
+        if (backgroundData.refined_available) {
+            if (!refinedImgOS) refinedImgOS = new Image();
+            if (!refinedImgOD) refinedImgOD = new Image();
+            refinedImgOS.onload = () => {
+                if ($('ovRefined')) $('ovRefined').disabled = false;
+                render();
+            };
+            refinedImgOS.src = `${base}/background_image?side=OS&kind=refined&_=${t}`;
+            if (backgroundData.is_stereo) {
+                refinedImgOD.src = `${base}/background_image?side=OD&kind=refined&_=${t}`;
+            }
+        } else {
+            refinedImgOS = refinedImgOD = null;
+        }
         _loadStableVideo();
     }
 
     /**
-     * Spawn a Stabilize or Background job and stream its progress into
-     * ``statusEl``.  Shared by computeStable + computeBackground.
-     * ``extraBody`` merges into the POST body (e.g. palm_grow_px).
+     * Spawn a preproc job (Stabilize / Compute Background / Remove
+     * stump) and stream its progress into ``statusEl``.  Shared by
+     * computeStable + computeMedian + computeRefine.  ``extraBody``
+     * merges into the POST body (e.g. palm_grow_px).
      */
     async function _runPreprocJob(endpoint, statusElId, extraBody = {}) {
         const statusEl = $(statusElId);
@@ -522,10 +567,21 @@
         await _runPreprocJob('compute_stable', 'stableStatus');
     }
 
-    async function computeBackground() {
+    /** Stage 2a -- "Compute Background": the raw masked-median only. */
+    async function computeMedian() {
         if (subjectId == null || currentTrialIdx < 0) return;
         if (!backgroundData || !backgroundData.stable_mp4_exists) {
-            $('backgroundStatus').textContent = 'Run Stabilize first.';
+            $('medianStatus').textContent = 'Run Stabilize first.';
+            return;
+        }
+        await _runPreprocJob('compute_background', 'medianStatus');
+    }
+
+    /** Stage 2b -- "Remove stump": apply the sliders to the median. */
+    async function computeRefine() {
+        if (subjectId == null || currentTrialIdx < 0) return;
+        if (!backgroundData || !backgroundData.available) {
+            $('backgroundStatus').textContent = 'Run Compute Background first.';
             return;
         }
         const palmSlider = $('palmGrowSlider');
@@ -535,7 +591,7 @@
             ? parseInt(colorDilateSlider.value, 10) : 0;
         const lenSlider = $('skinLeniencySlider');
         const skinLeniency = lenSlider ? parseFloat(lenSlider.value) : 1.0;
-        await _runPreprocJob('compute_background', 'backgroundStatus',
+        await _runPreprocJob('refine_background', 'backgroundStatus',
                               { palm_grow_px: palmGrowPx,
                                 color_dilate_px: colorDilatePx,
                                 skin_leniency: skinLeniency });
@@ -946,20 +1002,29 @@
         // stereo pair is cropped from the source via a sub-rect draw.
         let srcImage = null, srcW = 0, srcH = 0, applyWarpH = false, labelText = null;
         let drawSx = 0, drawSy = 0, drawSw = 0, drawSh = 0;   // sub-rect of srcImage
-        if (overlayMode === 'bg' && backgroundData) {
-            // Static background PNG — the existing sidebar thumbnail
-            // <img> is the same per-side PNG served by the API, already
-            // loaded at full natural resolution.  drawImage on it uses
+        if ((overlayMode === 'bg' || overlayMode === 'refined')
+                && backgroundData) {
+            // Static background PNG.  'bg' = the raw masked-median
+            // thumbnail <img> already in the sidebar; 'refined' = the
+            // stump-removed background, loaded off-DOM.  drawImage uses
             // the natural dimensions regardless of CSS display size.
             const isOD = (currentSide === 'OD');
-            const img = (isOD && backgroundData.is_stereo)
-                ? $('bgThumbOD') : $('bgThumbOS');
+            let img;
+            if (overlayMode === 'refined') {
+                img = (isOD && backgroundData.is_stereo)
+                    ? refinedImgOD : refinedImgOS;
+            } else {
+                img = (isOD && backgroundData.is_stereo)
+                    ? $('bgThumbOD') : $('bgThumbOS');
+            }
             if (img && img.complete && img.naturalWidth > 0) {
                 srcImage = img;
                 drawSx = 0; drawSy = 0;
                 drawSw = img.naturalWidth; drawSh = img.naturalHeight;
                 srcW = drawSw; srcH = drawSh;
-                labelText = 'Background  (temporal median)';
+                labelText = overlayMode === 'refined'
+                    ? 'Refined background  (stump removed)'
+                    : 'Background  (raw temporal median)';
             }
         } else if (overlayMode !== 'off' && backgroundData) {
             // Stabilized overlay only -- fg.mp4 is gone (hand boundary
@@ -1651,15 +1716,15 @@
         $('prevSubjectBtn').addEventListener('click', prevSubject);
         $('nextSubjectBtn').addEventListener('click', nextSubject);
         $('runTrajectoryBtn').addEventListener('click', computeTrajectory);
-        // Three baked-or-derived stages: Stabilize (stable.mp4),
-        // Background (background.npz), Hand Boundary (live, on demand).
+        // Stages: Stabilize (stable.mp4), Compute Background (raw
+        // median), Remove stump (refined), Hand Boundary (live).
         $('runStableBtn').addEventListener('click', computeStable);
-        $('runBackgroundBtn').addEventListener('click', computeBackground);
-        // "MP dilate (mask)" slider: a Background bake param (read when
-        // Compute Background is clicked).  While the user drags it, the
-        // palm-zone + forearm-cone preview flashes on so they can see
-        // the hard boundary they're setting; it auto-hides shortly
-        // after the last input.
+        $('runMedianBtn').addEventListener('click', computeMedian);
+        $('runRefineBtn').addEventListener('click', computeRefine);
+        // "MP dilate (mask)" slider: a Remove-stump param.  While the
+        // user drags it, the palm-zone preview flashes on over the
+        // Background (raw median) view so they can see the hard
+        // boundary they're setting; it auto-hides after the last input.
         const _palmGrowSlider = $('palmGrowSlider');
         const _palmGrowVal    = $('palmGrowVal');
         if (_palmGrowSlider && _palmGrowVal) {
@@ -1668,10 +1733,10 @@
                 _flashBgZones();
             });
         }
-        // "Skin color leniency" slider: a Background bake param.  While
+        // "Skin color leniency" slider: a Remove-stump param.  While
         // dragged, the live skin-color mask + sample-region preview
-        // flashes on so the user sees what the leniency classifies as
-        // hand-coloured; auto-hides shortly after the last input.
+        // flashes on over the Background (raw median) view so the user
+        // sees what the leniency classifies as hand-coloured.
         // Leniency 0 skips the color-based refinement entirely, so both
         // MP-dilate knobs ("MP dilate (color sample)" and "MP dilate
         // (mask)") -- which feed only that refinement -- are dimmed +
@@ -1696,17 +1761,17 @@
                 _skinLenVal.textContent =
                     parseFloat(_skinLenSlider.value).toFixed(2);
                 _syncMpDilateEnabled();
-                _flashSkinMask();
+                _flashSkinMask('bg');
             });
         }
-        // "MP dilate (color sample)" slider: a Background bake param.
+        // "MP dilate (color sample)" slider: a Remove-stump param.
         // While dragged, the same skin-color mask + sample-region
-        // preview flashes on (the sample region tracks this slider);
-        // auto-hides shortly after the last input.
+        // preview flashes on over the Stabilized view (the sample
+        // region tracks this slider); auto-hides after the last input.
         if (_colorDilateSlider && _colorDilateVal) {
             _colorDilateSlider.addEventListener('input', () => {
                 _colorDilateVal.textContent = _colorDilateSlider.value;
-                _flashSkinMask();
+                _flashSkinMask('stable');
             });
         }
         _syncMpDilateEnabled();
@@ -1771,6 +1836,8 @@
         $('ovOff').addEventListener('change',      e => e.target.checked && _setOverlay('off'));
         $('ovStable').addEventListener('change',   e => e.target.checked && _setOverlay('stable'));
         $('ovBg').addEventListener('change',       e => e.target.checked && _setOverlay('bg'));
+        if ($('ovRefined'))
+            $('ovRefined').addEventListener('change', e => e.target.checked && _setOverlay('refined'));
         // Hand-boundary checkbox: trigger a fresh fetch when turned on
         // so the user sees the contour for the current frame
         // immediately; clear the cached data when turned off.

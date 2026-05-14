@@ -737,7 +737,7 @@ class QueueManager:
                         # Hand boundary is computed on demand per
                         # frame from the UI, no fourth stage.
                         from ..services.camera_motion import compute_camera_trajectory
-                        from ..services.background import compute_stable, compute_background
+                        from ..services.background import compute_stable, compute_background, refine_background
                         from ..services.jobs import registry as job_registry
                         from ..services.video import build_trial_map
                         from ..services.job_history import stage_timer, finalize_job_record
@@ -831,10 +831,10 @@ class QueueManager:
                                             cancel_event=cancel_event,
                                         )
                                     _log("  compute_stable done")
-                                    # Phase C: background (~20% -- sample
-                                    # stable.mp4, masked median, refine).
+                                    # Phase C: background median (~15%)
+                                    # then stump removal (~5%).
                                     def _on_bg(pct, _i=i):
-                                        _preproc_progress(_i, 80 + pct * 0.20, 0.20)
+                                        _preproc_progress(_i, 80 + pct * 0.15, 0.15)
                                     _log("  compute_background...")
                                     with stage_timer(job_id, "compute_background",
                                                       subject=sub, trial=tname,
@@ -845,6 +845,18 @@ class QueueManager:
                                             cancel_event=cancel_event,
                                         )
                                     _log("  compute_background done")
+                                    def _on_refine(pct, _i=i):
+                                        _preproc_progress(_i, 95 + pct * 0.05, 0.05)
+                                    _log("  refine_background...")
+                                    with stage_timer(job_id, "refine_background",
+                                                      subject=sub, trial=tname,
+                                                      target="local"):
+                                        refine_background(
+                                            sub, tidx,
+                                            progress_callback=_on_refine,
+                                            cancel_event=cancel_event,
+                                        )
+                                    _log("  refine_background done")
                                 except InterruptedError:
                                     was_cancelled = True
                                     _log(f"  CANCELLED at {sub}/{tname}")

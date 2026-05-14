@@ -207,12 +207,17 @@
                     <div class="section">
                         <h3>Background</h3>
                         <div class="small-note">
-                            Samples <strong>stable.mp4</strong>, takes the
-                            temporal median with the hand + forearm masked
-                            out, runs the color-based forearm refinement,
-                            and saves <strong>background.npz</strong>.
-                            Cheap to re-run.  Requires stable.mp4.
+                            <strong>Compute Background</strong> samples
+                            <strong>stable.mp4</strong> and takes the temporal
+                            median with the hand masked out — the raw median
+                            background.  <strong>Remove stump</strong> then
+                            applies the sliders below to swap flesh-colored
+                            background pixels for a non-skin sample color
+                            (green only where a pixel never has one).  Both
+                            are cheap to re-run.  Requires stable.mp4.
                         </div>
+                        <button class="btn btn-sm btn-success" id="runMedianBtn" style="width:100%;margin-top:8px;" disabled>Compute Background</button>
+                        <div id="medianStatus" class="pp-stat" style="margin-top:6px;"></div>
                         <div style="margin-top:8px;font-size:11px;">
                             <div style="display:flex;justify-content:space-between;align-items:center;">
                                 <label style="color:var(--text-muted);">Skin color leniency</label>
@@ -240,7 +245,7 @@
                                    title="Grows the MP hand region outward to set the hard hand boundary.  Flesh-colored pixels inside the grown zone are forced to always-hand (green), instead of having a background color recovered.  Raise this to capture chunks like the ulnar palm that the raw MP gate clips.  Disabled when Skin color leniency is 0."
                                    style="width:100%;cursor:pointer;height:5px;">
                         </div>
-                        <button class="btn btn-sm btn-success" id="runBackgroundBtn" style="width:100%;margin-top:8px;" disabled>Compute Background</button>
+                        <button class="btn btn-sm btn-success" id="runRefineBtn" style="width:100%;margin-top:8px;" disabled>Remove stump</button>
                         <div id="backgroundStatus" class="pp-stat" style="margin-top:6px;"></div>
                         <div id="backgroundStats" class="pp-stat" style="margin-top:8px;"></div>
                         <div id="backgroundPreview" style="margin-top:8px;display:none;">
@@ -304,7 +309,10 @@
                         <input type="radio" name="bgOverlay" id="ovStable"> Stabilized (stable.mp4)
                     </label>
                     <label class="pp-viz-row" style="display:block;">
-                        <input type="radio" name="bgOverlay" id="ovBg"> Background (background.png)
+                        <input type="radio" name="bgOverlay" id="ovBg"> Background (raw median)
+                    </label>
+                    <label class="pp-viz-row" style="display:block;">
+                        <input type="radio" name="bgOverlay" id="ovRefined"> Refined background (stump removed)
                     </label>
                     <label class="pp-viz-row" style="display:flex;align-items:center;gap:6px;margin-top:8px;">
                         <input type="checkbox" id="cbShowOutline" disabled checked> Show hand boundary
@@ -375,6 +383,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/preproc.js?v=46"></script>
+    <script src="/static/js/preproc.js?v=47"></script>
 </body>
 </html>
