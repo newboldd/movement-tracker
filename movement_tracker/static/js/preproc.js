@@ -15,8 +15,12 @@
     let trajectory = null;
     let currentFrame = 0;
     let nFrames = 0;
-    let isStabilized = false;
-    let showJerks = true;
+    // The "Stabilized view" and "Mark jerks" toggles were removed from
+    // the View panel -- use the Stabilized overlay radio for the
+    // warped view.  These stay as fixed-false flags so the render /
+    // plot code that still reads them is a no-op.
+    const isStabilized = false;
+    const showJerks = false;
     let playing = false;
     let playTimer = null;
     // Hidden <video> element with the trial's source video.  All
@@ -1574,12 +1578,6 @@
                 try { render(); } catch (_e) {}
             });
         }
-        $('cbStabilizedView').addEventListener('change', e => {
-            isStabilized = e.target.checked; render();
-        });
-        $('cbShowJerks').addEventListener('change', e => {
-            showJerks = e.target.checked; render(); drawPlot();
-        });
         // Plot click + drag scrubs frames.  Pointer-x is mapped from
         // the canvas's pixel-padding to a frame index using the same
         // ``pad.l`` margin the plot uses.

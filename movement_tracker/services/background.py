@@ -922,15 +922,18 @@ def compute_stable(
     is_stereo = bool(traj["is_stereo"])
     n_frames  = int(traj["n_frames"])
 
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
+    # Probe dimensions + fps with a throwaway capture, then open a
+    # FRESH one for the bake loop.  cv2.VideoCapture.set(POS_FRAMES, 0)
+    # is unreliable on VBR H.264 -- a botched rewind truncated
+    # stable.mp4 to a fraction of its frames -- so we never seek; the
+    # bake capture reads strictly sequentially from a clean open.
+    probe = cv2.VideoCapture(video_path)
+    if not probe.isOpened():
         raise RuntimeError(f"Cannot open video: {video_path}")
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-    ok, first = cap.read()
+    fps = probe.get(cv2.CAP_PROP_FPS) or 30.0
+    ok, first = probe.read()
+    probe.release()
     if not ok:
-        cap.release()
         raise RuntimeError("Failed to read first frame")
     h_full, w_full = first.shape[:2]
     w_half = (w_full // 2) if is_stereo else w_full
@@ -954,8 +957,10 @@ def compute_stable(
         try: p.unlink()
         except FileNotFoundError: pass
 
-    # Re-seek to frame 0 since we consumed it during the probe.
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    # Fresh capture for the sequential bake read -- no seeking.
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot reopen video for bake pass: {video_path}")
 
     frames_written = 0
     try:
@@ -1081,23 +1086,42 @@ def compute_background(
     if max_samples < 4:
         max_samples = 4
 
-    cap = cv2.VideoCapture(str(stable_path))
-    if not cap.isOpened():
+    # Probe stable.mp4 with a throwaway capture: dimensions + frame
+    # count.  Never seek the bake capture (VBR H.264 seeks are
+    # unreliable); read sequentially from a fresh open below.
+    probe = cv2.VideoCapture(str(stable_path))
+    if not probe.isOpened():
         raise RuntimeError(f"Cannot open stable.mp4: {stable_path}")
-
-    frames_sampled = _pick_sample_frames(n_frames, traj["jerk_flag"], max_samples)
-    n_samples = int(frames_sampled.size)
-    sample_lookup = {int(f): i for i, f in enumerate(frames_sampled)}
-
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-    ok, first = cap.read()
+    stable_n = int(probe.get(cv2.CAP_PROP_FRAME_COUNT))
+    ok, first = probe.read()
+    probe.release()
     if not ok:
-        cap.release()
         raise RuntimeError("Failed to read first frame of stable.mp4")
     h_full, w_full = first.shape[:2]
     w_half = (w_full // 2) if is_stereo else w_full
     out_h = h_full // downscale
     out_w = w_half // downscale
+
+    # Truncation guard.  stable.mp4 should have ~n_frames frames.  A
+    # short one means Stabilize was interrupted -- building the BG
+    # median from it silently produces a near-black image (most of the
+    # sample stack stays at its zero-initialised value).  Fail loudly
+    # instead so the user re-runs Stabilize.
+    if stable_n < int(n_frames * 0.95):
+        raise RuntimeError(
+            f"stable.mp4 has only {stable_n} frames but the trajectory "
+            f"expects {n_frames} -- Stabilize looks interrupted.  "
+            f"Re-run Stabilize before Background.")
+    effective_n = min(n_frames, stable_n)
+
+    frames_sampled = _pick_sample_frames(
+        effective_n, traj["jerk_flag"][:effective_n], max_samples)
+    n_samples = int(frames_sampled.size)
+    sample_lookup = {int(f): i for i, f in enumerate(frames_sampled)}
+
+    cap = cv2.VideoCapture(str(stable_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open stable.mp4: {stable_path}")
 
     # RAM ceiling for the sample stack.
     n_sides = 2 if is_stereo else 1
@@ -1108,7 +1132,8 @@ def compute_background(
             f"background: requested {n_samples} samples x {out_h}x{out_w}x3 "
             f"x {n_sides} sides = {bytes_needed/1e9:.2f} GB exceeds "
             f"{_MAX_RAM_BYTES/1e9:.1f} GB cap; reducing to {new_max} samples")
-        frames_sampled = _pick_sample_frames(n_frames, traj["jerk_flag"], new_max)
+        frames_sampled = _pick_sample_frames(
+            effective_n, traj["jerk_flag"][:effective_n], new_max)
         n_samples = int(frames_sampled.size)
         sample_lookup = {int(f): i for i, f in enumerate(frames_sampled)}
 
@@ -1154,8 +1179,8 @@ def compute_background(
 
     # ── Sample pass: sequential read of stable.mp4 ─────────────────
     # stable.mp4 is already warped, so we skip warpPerspective and
-    # just downscale + stamp the hand region.
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    # just downscale + stamp the hand region.  The capture is fresh
+    # (opened above) and read strictly sequentially -- no seeking.
     frames_set = set(int(f) for f in frames_sampled)
     max_frame = int(frames_sampled.max())
 
