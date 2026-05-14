@@ -55,13 +55,37 @@ _DEFAULT_DOWNSCALE   = 2       # downsample factor inside the median stack
 _MAX_RAM_BYTES       = 1_500_000_000   # ~1.5 GB ceiling per side
 
 
+_LIVE_FFMPEG_PROCS: "list[subprocess.Popen]" = []
+"""Module-level registry of currently-active ffmpeg encoder subprocesses.
+Used by an ``atexit`` handler below so that if the parent Python process
+is shut down via SIGTERM (or finishes abruptly) the ffmpeg children get
+killed immediately instead of being left as orphans writing to
+half-finished mp4 files."""
+
+
+def _kill_live_ffmpegs() -> None:
+    for p in list(_LIVE_FFMPEG_PROCS):
+        try:
+            if p.poll() is None:
+                p.kill()
+        except Exception:
+            pass
+
+
+import atexit as _atexit
+_atexit.register(_kill_live_ffmpegs)
+
+
 def _open_ffmpeg_pipe(output_path: str, width: int, height: int,
                       fps: float, pix_fmt_in: str = "bgr24") -> subprocess.Popen:
     """Open an ffmpeg subprocess that consumes raw frames on stdin and
     writes a yuv420p / H.264 mp4 to ``output_path``.
 
-    Mirrors the pattern in ``deidentify.py`` so the produced mp4 plays
-    in every browser and can be read by OpenCV / MediaPipe consumers.
+    The Popen is registered in ``_LIVE_FFMPEG_PROCS`` so the atexit
+    handler can SIGKILL it if Python exits before the bake finishes a
+    clean ``stdin.close() / wait()`` -- prevents the "orphan ffmpegs
+    writing to the same mp4" failure mode that corrupted bakes earlier
+    in development.
     """
     from .ffmpeg import get_ffmpeg_path
     ffmpeg = get_ffmpeg_path()
@@ -77,7 +101,7 @@ def _open_ffmpeg_pipe(output_path: str, width: int, height: int,
             getattr(subprocess, "DETACHED_PROCESS", 0) |
             getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         )
-    return subprocess.Popen([
+    proc = subprocess.Popen([
         ffmpeg, "-y",
         "-f", "rawvideo", "-vcodec", "rawvideo",
         "-s", f"{width}x{height}", "-pix_fmt", pix_fmt_in,
@@ -90,6 +114,18 @@ def _open_ffmpeg_pipe(output_path: str, width: int, height: int,
         "-movflags", "+faststart",
         output_path,
     ], **kwargs)
+    _LIVE_FFMPEG_PROCS.append(proc)
+    return proc
+
+
+def _retire_ffmpeg(proc: subprocess.Popen) -> None:
+    """Drop ``proc`` from the live-ffmpeg registry once the bake's
+    ``finally:`` block has finished closing its stdin and waiting for
+    the encoder to flush."""
+    try:
+        _LIVE_FFMPEG_PROCS.remove(proc)
+    except ValueError:
+        pass
 
 
 def _stable_path(subject_name: str, trial_stem: str) -> Path:
@@ -949,6 +985,8 @@ def compute_stable(
                                 f"{stderr_bytes.decode('utf-8', errors='replace')[:600]}")
         except Exception as e:
             logger.warning(f"ffmpeg (stable) finalise error: {e}")
+        finally:
+            _retire_ffmpeg(stable_proc)
 
     if progress_callback is not None:
         try: progress_callback(97.0)
@@ -1190,6 +1228,8 @@ def compute_foreground(
                                     f"{stderr_bytes.decode('utf-8', errors='replace')[:600]}")
             except Exception as e:
                 logger.warning(f"ffmpeg ({name}) finalise error: {e}")
+            finally:
+                _retire_ffmpeg(proc)
 
     if progress_callback is not None:
         try: progress_callback(100.0)
