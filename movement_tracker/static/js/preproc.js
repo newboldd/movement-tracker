@@ -139,6 +139,11 @@
     let _bgEdgeKey = null;
     let _bgEdgeBin = null;
     let _bgEdgeBinW = 0, _bgEdgeBinH = 0, _bgEdgeBinScale = 0.5;
+    // Per-pixel Sobel gradient of the background (edge-normal
+    // direction) + a "meaningful gradient" magnitude-squared cutoff.
+    // Used to mark an outline side red only when it runs ALONG a BG
+    // edge (parallel), not when it crosses one.
+    let _bgEdgeGradX = null, _bgEdgeGradY = null, _bgEdgeGradT2 = 0;
     // Live outline state -- replaces the old fg.mp4 / outline.mp4 bake.
     // Server returns a per-frame closed-polygon contour for the
     // current dilation; we fetch it whenever the frame or slider
@@ -531,6 +536,7 @@
         bgFullOS = bgFullOD = refinedFullOS = refinedFullOD = null;
         // background changed -> drop cached edge band
         _bgEdgeKey = null; _bgEdgeBin = null;
+        _bgEdgeGradX = _bgEdgeGradY = null;
         // On load: upscale the (downscaled) PNG to full-res for the
         // overlay coord space, then re-render -- the canvas 'bg'
         // overlay draws from the full-res canvas, so if the user (or a
@@ -1017,8 +1023,10 @@
         for (let i = 0, p = 0; p < gray.length; i += 4, p++) {
             gray[p] = 0.114 * d[i] + 0.587 * d[i + 1] + 0.299 * d[i + 2];
         }
-        // Sobel magnitude.
+        // Sobel magnitude + gradient (edge-normal direction).
         const mag = new Float32Array(cw * ch);
+        const gradX = new Float32Array(cw * ch);
+        const gradY = new Float32Array(cw * ch);
         for (let y = 1; y < ch - 1; y++) {
             for (let x = 1; x < cw - 1; x++) {
                 const o = y * cw + x;
@@ -1027,6 +1035,7 @@
                 const bl = gray[o + cw - 1], bc = gray[o + cw], br = gray[o + cw + 1];
                 const sx = (tr + 2 * mr + br) - (tl + 2 * ml + bl);
                 const sy = (bl + 2 * bc + br) - (tl + 2 * tc + tr);
+                gradX[o] = sx; gradY[o] = sy;
                 mag[o] = Math.sqrt(sx * sx + sy * sy);
             }
         }
@@ -1051,32 +1060,53 @@
         tctx.putImageData(img, 0, 0);
         _bgEdgeCanvas = tmp;
         _bgEdgeKey = key;
-        // Keep the binary band for the outline edge-overlap test.
+        // Keep the binary band + gradient for the outline edge test.
         _bgEdgeBin = bin;
         _bgEdgeBinW = cw; _bgEdgeBinH = ch;
         _bgEdgeBinScale = cw / bcv.width;
+        _bgEdgeGradX = gradX; _bgEdgeGradY = gradY;
+        _bgEdgeGradT2 = (0.35 * thr * p99) * (0.35 * thr * p99);
         return _bgEdgeCanvas;
     }
 
-    /** True if a polygon side (full-res reference coords) mostly sits
-     *  on the background-edge band.  Samples ~every 2 px along it. */
+    /** True if a polygon side (full-res reference coords) runs ALONG a
+     *  background edge -- mostly on the BG-edge band AND, where the
+     *  band has a clear gradient, mostly parallel to that edge (not
+     *  crossing it).  Samples ~every 2 px along the side. */
     function _segOnBgEdge(x0, y0, x1, y1) {
         if (!_bgEdgeBin) return false;
         const s = _bgEdgeBinScale;
         const dx = x1 - x0, dy = y1 - y0;
         const len = Math.hypot(dx, dy);
+        if (len < 1e-3) return false;
+        const sdx = dx / len, sdy = dy / len;        // unit side direction
         const n = Math.max(1, Math.round(len / 2));
-        let hit = 0, tot = 0;
+        let inBounds = 0, onBand = 0, dirN = 0, par = 0;
         for (let i = 0; i <= n; i++) {
             const t = i / n;
             const bx = Math.round((x0 + dx * t) * s);
             const by = Math.round((y0 + dy * t) * s);
             if (bx < 0 || by < 0 || bx >= _bgEdgeBinW || by >= _bgEdgeBinH)
                 continue;
-            tot++;
-            if (_bgEdgeBin[by * _bgEdgeBinW + bx]) hit++;
+            inBounds++;
+            const idx = by * _bgEdgeBinW + bx;
+            if (!_bgEdgeBin[idx]) continue;
+            onBand++;
+            // Where the band has a clear gradient, the side runs ALONG
+            // the edge when its direction is ~perpendicular to the
+            // gradient (the edge-normal): |sideDir . gradUnit| small.
+            const gx = _bgEdgeGradX[idx], gy = _bgEdgeGradY[idx];
+            const g2 = gx * gx + gy * gy;
+            if (g2 < _bgEdgeGradT2) continue;
+            dirN++;
+            const dot = Math.abs((sdx * gx + sdy * gy) / Math.sqrt(g2));
+            if (dot < 0.5) par++;                    // within ~30 deg of parallel
         }
-        return tot > 0 && hit / tot >= 0.5;
+        if (inBounds === 0 || onBand < 0.5 * inBounds) return false;
+        // On the band: red only if it mostly runs along the edge (not
+        // crossing it).  If the band stretch had no clear gradient at
+        // all, stay conservative and don't mark it red.
+        return dirN > 0 && par >= 0.5 * dirN;
     }
 
     function showTrajectoryStats() {
