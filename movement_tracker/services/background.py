@@ -409,6 +409,86 @@ def _build_kpt_hand_region(
     return canvas.astype(np.float32) / 255.0
 
 
+# Universal YCrCb skin range -- conservative enough to catch all
+# common ethnicities, tight enough to reject typical table / desk /
+# clothing colours.  Used by _refine_bg_color_based to identify
+# flesh-coloured pixels in the BG median and per-sample.
+_SKIN_CR_LO, _SKIN_CR_HI = 130, 175
+_SKIN_CB_LO, _SKIN_CB_HI = 80, 130
+
+
+def _is_skin_ycc(ycc: np.ndarray) -> np.ndarray:
+    """Boolean mask of skin-coloured pixels.  Input is a YCrCb image
+    (any shape ending in 3), output is the same shape minus the last
+    axis."""
+    cr = ycc[..., 1]
+    cb = ycc[..., 2]
+    return ((cr >= _SKIN_CR_LO) & (cr <= _SKIN_CR_HI)
+            & (cb >= _SKIN_CB_LO) & (cb <= _SKIN_CB_HI))
+
+
+def _refine_bg_color_based(
+    bg_initial: np.ndarray,
+    stack: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Second BG-median pass that fixes pixels which came out
+    flesh-coloured in the first pass.
+
+    For each flesh-in-BG pixel:
+      - Classify each of the ``N`` sample colours at that pixel as
+        skin / not-skin (universal YCrCb range).
+      - If at least one sample is not skin, replace the BG pixel
+        with the median of the non-skin samples.  This is the
+        "next most common colour in the BG / overlap grouping"
+        the user asked for: per-pixel, we recover the BG that
+        was peeking through whenever the hand wasn't there.
+      - If every sample is skin, paint the pixel bright green
+        ``[0, 255, 0]`` (BGR) and record it in ``always_hand_color``.
+
+    Returns ``(refined_bg, always_hand_color_mask)`` where the mask
+    is True at pixels that were entirely skin across the trial --
+    those need the green sentinel and force-include in the outline.
+    """
+    bg_ycc = cv2.cvtColor(bg_initial, cv2.COLOR_BGR2YCrCb)
+    flesh_in_bg = _is_skin_ycc(bg_ycc)
+    if not flesh_in_bg.any():
+        return bg_initial.copy(), np.zeros(bg_initial.shape[:2], dtype=bool)
+
+    flesh_ys, flesh_xs = np.where(flesh_in_bg)
+    n = int(flesh_ys.size)
+    N = stack.shape[0]
+
+    # (N, n, 3) per-pixel time series, only over flesh-in-BG pixels.
+    flesh_samples = stack[:, flesh_ys, flesh_xs, :]
+    # cvtColor wants a 2-D-image-shaped input; collapse to (N*n, 1, 3).
+    flesh_ycc = cv2.cvtColor(
+        flesh_samples.reshape(N * n, 1, 3),
+        cv2.COLOR_BGR2YCrCb,
+    ).reshape(N, n, 3)
+    is_skin = _is_skin_ycc(flesh_ycc)   # (N, n)
+
+    # Median over the non-skin samples per pixel.
+    m = np.broadcast_to(is_skin[..., None], flesh_samples.shape)
+    masked = np.ma.masked_array(flesh_samples, mask=m)
+    med = np.ma.median(masked, axis=0)               # (n, 3)
+    all_skin_per_pixel = np.ma.getmaskarray(med).any(axis=-1)   # (n,)
+
+    refined = bg_initial.copy()
+    # 1. Non-skin median fills wherever it's defined.
+    nonskin_meds = np.ma.getdata(med).astype(np.uint8)
+    refined[flesh_ys, flesh_xs] = nonskin_meds
+    # 2. All-skin pixels overwritten with green sentinel.
+    green = np.array([0, 255, 0], dtype=np.uint8)
+    if all_skin_per_pixel.any():
+        gys = flesh_ys[all_skin_per_pixel]
+        gxs = flesh_xs[all_skin_per_pixel]
+        refined[gys, gxs] = green
+    always_hand_color = np.zeros(bg_initial.shape[:2], dtype=bool)
+    always_hand_color[flesh_ys[all_skin_per_pixel],
+                       flesh_xs[all_skin_per_pixel]] = True
+    return refined, always_hand_color
+
+
 def _bg_edge_map(bg_full: np.ndarray) -> np.ndarray:
     """Normalised Sobel-magnitude of the background image.
 
@@ -917,15 +997,34 @@ def compute_stable(
     else:
         bg_R = np.zeros_like(bg_L)
         mad_R = np.zeros_like(mad_L)
-    # Pixels that were under the dilated MP gate in EVERY sample frame.
-    # These are guaranteed-hand: the BG median had to fall back to the
-    # global non-skin colour for them.  Save the map (downscaled, bool)
-    # so compute_outline_frame can force them inside every boundary --
-    # otherwise per-frame Otsu can carve them out when the hand pose
-    # makes them blend with the synthetic BG fill.
-    always_hand_L_down = hand_mask_L.all(axis=0)
-    always_hand_R_down = (hand_mask_R.all(axis=0)
-                           if hand_mask_R is not None else None)
+
+    # ── Second BG pass: colour-based refinement of flesh pixels ──────
+    # Any pixel that came out skin-coloured in the first median (palm
+    # interior, wrist, thumb CMC, and -- crucially -- forearm pixels
+    # that drift outside the MP gate) gets re-evaluated.  Per pixel:
+    # if there's a non-skin colour anywhere in its sample history, we
+    # use the median of those non-skin samples; otherwise the pixel
+    # becomes a green sentinel that the outline path force-includes.
+    bg_L, always_hand_color_L_down = _refine_bg_color_based(bg_L, stack_L)
+    if is_stereo:
+        bg_R, always_hand_color_R_down = _refine_bg_color_based(bg_R, stack_R)
+    else:
+        always_hand_color_R_down = None
+
+    # Union the MP-based always-hand (pixels under the MP gate in
+    # every frame) with the colour-based always-hand (pixels whose
+    # entire sample history is skin colours).  Either one alone might
+    # miss cases the other catches:
+    #   - MP-based catches truly stationary hand parts even if their
+    #     colour doesn't quite match the universal skin range.
+    #   - Colour-based catches drifted-arm pixels the MP gate never
+    #     covered.
+    always_hand_L_down = hand_mask_L.all(axis=0) | always_hand_color_L_down
+    if hand_mask_R is not None:
+        always_hand_R_down = (hand_mask_R.all(axis=0)
+                              | always_hand_color_R_down)
+    else:
+        always_hand_R_down = None
     del hand_mask_L
     if hand_mask_R is not None:
         del hand_mask_R
@@ -1315,9 +1414,27 @@ def compute_outline_frame(
         if bg_edge is not None:
             motion_f = motion_f - _BG_EDGE_PENALTY * bg_edge
         motion = np.clip(motion_f, 0.0, 255.0).astype(np.uint8)
+        # Detect bright-green sentinel pixels in the BG.  |frame - green|
+        # is huge for any skin-coloured hand pixel and would saturate
+        # the JET heatmap, making nearby moderately-bright hand pixels
+        # look dim by comparison.  Replace their motion with the median
+        # motion of nearby non-green gate pixels so they read as
+        # "normal hand region" in the heatmap instead of a max-bright
+        # spike.  The always-hand OR step in #4 still force-includes
+        # them in the outline.
+        green_mask = ((bg_full[..., 0] < 50)
+                       & (bg_full[..., 1] > 200)
+                       & (bg_full[..., 2] < 50)
+                       & (gate > 0))
+        if green_mask.any():
+            non_green_gate = (gate > 0) & ~green_mask
+            if non_green_gate.any():
+                local_median = int(np.median(motion[non_green_gate]))
+                motion[green_mask] = local_median
         # Optional: foreground heatmap PNG cropped to the gate bbox.
         # Sent back so the UI can paint a JET-coloured fill over the
-        # gate region, alpha == motion intensity (dark = transparent).
+        # gate region.  Now uniformly visible thanks to the green
+        # normalisation above.
         fg_pack = None
         if include_fg:
             fg_pack = _encode_fg_png(motion, gate)
