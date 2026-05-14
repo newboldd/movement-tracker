@@ -1367,29 +1367,40 @@ def compute_background(
         except Exception: pass
 
     # ── Per-pixel temporal median + MAD ─────────────────────────────
-    def _masked_median(stack: np.ndarray, hand_mask: np.ndarray) -> np.ndarray:
-        """Median over non-MP-covered samples per pixel.  Pixels under
-        the MP gate in every sample fall back to a bright-green
-        sentinel ``[0, 255, 0]`` (BGR) -- unmistakable in the BG
-        image and guaranteed bright in the foreground heatmap."""
+    def _masked_median(stack: np.ndarray, hand_mask: np.ndarray,
+                       green_always_hand: bool = True) -> np.ndarray:
+        """Median over non-MP-covered samples per pixel.
+
+        Pixels under the MP gate in *every* sample have no clean
+        sample to median.  With ``green_always_hand`` (the default)
+        they fall back to a bright-green sentinel ``[0, 255, 0]``
+        (BGR) -- unmistakable in the BG image and guaranteed bright
+        in the foreground heatmap.  With it False (the
+        ``skin_leniency == 0`` path) they fall back to the plain
+        temporal median over *all* samples instead, so the BG image
+        is just a median color at every pixel -- no green."""
         if not hand_mask.any():
             return np.median(stack, axis=0).astype(np.uint8)
         m4 = np.broadcast_to(hand_mask[..., None], stack.shape)
         masked = np.ma.masked_array(stack, mask=m4)
         med = np.ma.median(masked, axis=0)
-        fill_color = np.array([0, 255, 0], dtype=np.uint8)
-        bg = np.where(np.ma.getmaskarray(med),
-                       fill_color.reshape(1, 1, 3),
-                       np.ma.getdata(med))
+        if green_always_hand:
+            fill = np.broadcast_to(
+                np.array([0, 255, 0], dtype=np.uint8).reshape(1, 1, 3),
+                med.shape)
+        else:
+            fill = np.median(stack, axis=0)
+        bg = np.where(np.ma.getmaskarray(med), fill, np.ma.getdata(med))
         return bg.astype(np.uint8)
 
-    bg_L = _masked_median(stack_L, hand_mask_L)
+    _green_ah = skin_leniency > 0
+    bg_L = _masked_median(stack_L, hand_mask_L, green_always_hand=_green_ah)
     dev_L = np.abs(stack_L.astype(np.int16) - bg_L.astype(np.int16))
     mad_L = np.median(dev_L, axis=0).max(axis=-1).astype(np.uint8)
     del dev_L
 
     if is_stereo:
-        bg_R = _masked_median(stack_R, hand_mask_R)
+        bg_R = _masked_median(stack_R, hand_mask_R, green_always_hand=_green_ah)
         dev_R = np.abs(stack_R.astype(np.int16) - bg_R.astype(np.int16))
         mad_R = np.median(dev_R, axis=0).max(axis=-1).astype(np.uint8)
         del dev_R
