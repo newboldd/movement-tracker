@@ -46,6 +46,27 @@
     let stableVideoEl = null;   // hidden <video> tied to stable.mp4
     let refinedImgOS = null;    // <img> for the stump-removed background
     let refinedImgOD = null;
+    // Background PNGs are saved at the downscaled bake resolution.  The
+    // canvas overlay coords (MP keypoints etc.) live in full per-camera
+    // pixel space, so each background image is upscaled into a
+    // full-resolution offscreen <canvas> for the overlay to draw on --
+    // otherwise the picture and the overlays would be misaligned by the
+    // downscale factor.  Built on image load, keyed OS/OD x raw/refined.
+    let bgFullOS = null, bgFullOD = null;
+    let refinedFullOS = null, refinedFullOD = null;
+    // Upscale a loaded background <img> to full per-camera resolution
+    // (naturalSize x downscale) into a reusable offscreen canvas.
+    function _toFullRes(img) {
+        if (!img || !img.complete || !img.naturalWidth) return null;
+        const ds = (backgroundData && backgroundData.downscale) || 1;
+        const w = img.naturalWidth * ds, h = img.naturalHeight * ds;
+        const cv = document.createElement('canvas');
+        cv.width = w; cv.height = h;
+        const cx = cv.getContext('2d');
+        cx.imageSmoothingEnabled = true;
+        cx.drawImage(img, 0, 0, w, h);
+        return cv;
+    }
     let showOutline = true;     // checkbox: show live-fetched hand boundary
     let showFgFill = false;     // checkbox: also fetch + paint JET heatmap
     let fgFillOpacity = 0.5;    // 0..1, controlled by slider next to checkbox
@@ -483,17 +504,21 @@
         const base = `/api/preproc/${subjectId}/trial/${trialMeta.trial_idx}`;
         const t = Date.now();   // bust HTTP cache after recompute
         $('ovBg').disabled = true;
-        // Re-render once the thumbnail finishes loading -- the canvas
-        // 'bg' overlay draws straight from this <img>, so if the user
-        // (or a slider flash) switches to the Background view before it
-        // decodes, the canvas would otherwise stay blank.
+        bgFullOS = bgFullOD = refinedFullOS = refinedFullOD = null;
+        // On load: upscale the (downscaled) PNG to full-res for the
+        // overlay coord space, then re-render -- the canvas 'bg'
+        // overlay draws from the full-res canvas, so if the user (or a
+        // slider flash) switches to the Background view before it
+        // decodes, the canvas would otherwise stay blank / misaligned.
         $('bgThumbOS').addEventListener('load', () => {
             $('ovBg').disabled = false;
+            bgFullOS = _toFullRes($('bgThumbOS'));
             try { render(); } catch (_e) {}
         }, { once: true });
         $('bgThumbOS').src = `${base}/background_image?side=OS&kind=bg&_=${t}`;
         if (backgroundData.is_stereo) {
             $('bgThumbOD').addEventListener('load', () => {
+                bgFullOD = _toFullRes($('bgThumbOD'));
                 try { render(); } catch (_e) {}
             }, { once: true });
             $('bgThumbOD').src = `${base}/background_image?side=OD&kind=bg&_=${t}`;
@@ -502,17 +527,22 @@
             $('bgThumbOD').style.display = 'none';
         }
         $('backgroundPreview').style.display = '';
-        // Refined (stump-removed) background -- off-DOM <img>s used by
-        // render() for the "Refined background" overlay.
+        // Refined (stump-removed) background -- off-DOM <img>s, upscaled
+        // to full-res canvases the same way.
         if (backgroundData.refined_available) {
-            if (!refinedImgOS) refinedImgOS = new Image();
-            if (!refinedImgOD) refinedImgOD = new Image();
+            refinedImgOS = new Image();
+            refinedImgOD = new Image();
             refinedImgOS.onload = () => {
                 if ($('ovRefined')) $('ovRefined').disabled = false;
+                refinedFullOS = _toFullRes(refinedImgOS);
                 render();
             };
             refinedImgOS.src = `${base}/background_image?side=OS&kind=refined&_=${t}`;
             if (backgroundData.is_stereo) {
+                refinedImgOD.onload = () => {
+                    refinedFullOD = _toFullRes(refinedImgOD);
+                    render();
+                };
                 refinedImgOD.src = `${base}/background_image?side=OD&kind=refined&_=${t}`;
             }
         } else {
@@ -1027,23 +1057,23 @@
         let drawSx = 0, drawSy = 0, drawSw = 0, drawSh = 0;   // sub-rect of srcImage
         if ((overlayMode === 'bg' || overlayMode === 'refined')
                 && backgroundData) {
-            // Static background PNG.  'bg' = the raw masked-median
-            // thumbnail <img> already in the sidebar; 'refined' = the
-            // stump-removed background, loaded off-DOM.  drawImage uses
-            // the natural dimensions regardless of CSS display size.
+            // Static background, upscaled to full per-camera resolution
+            // so the overlay coords (MP keypoints etc.) line up with the
+            // picture.  'bg' = raw masked-median; 'refined' = stump
+            // removed.  Each is a full-res offscreen <canvas>.
             const isOD = (currentSide === 'OD');
-            let img;
+            let cv;
             if (overlayMode === 'refined') {
-                img = (isOD && backgroundData.is_stereo)
-                    ? refinedImgOD : refinedImgOS;
+                cv = (isOD && backgroundData.is_stereo)
+                    ? refinedFullOD : refinedFullOS;
             } else {
-                img = (isOD && backgroundData.is_stereo)
-                    ? $('bgThumbOD') : $('bgThumbOS');
+                cv = (isOD && backgroundData.is_stereo)
+                    ? bgFullOD : bgFullOS;
             }
-            if (img && img.complete && img.naturalWidth > 0) {
-                srcImage = img;
+            if (cv && cv.width > 0) {
+                srcImage = cv;
                 drawSx = 0; drawSy = 0;
-                drawSw = img.naturalWidth; drawSh = img.naturalHeight;
+                drawSw = cv.width; drawSh = cv.height;
                 srcW = drawSw; srcH = drawSh;
                 labelText = overlayMode === 'refined'
                     ? 'Refined background  (stump removed)'
