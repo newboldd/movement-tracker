@@ -692,6 +692,8 @@
         const beBand = beBandSlider ? parseInt(beBandSlider.value, 10) : 3;
         const beClipSlider = $('bgEdgeClipSlider');
         const beClip = beClipSlider ? parseInt(beClipSlider.value, 10) : 5;
+        const threshSlider = $('outlineThreshSlider');
+        const threshScale = threshSlider ? parseFloat(threshSlider.value) : 1.0;
         const frame = currentFrame;
         const seq = ++outlineFetchSeq;
         const includeFg = showFgFill ? 1 : 0;
@@ -700,7 +702,8 @@
                   + `&open_radius_px=${openRadiusPx}&include_fg=${includeFg}`
                   + `&bg_edge_band_thresh=${beThresh}`
                   + `&bg_edge_band_dilate=${beBand}`
-                  + `&bg_edge_open_radius=${beClip}`;
+                  + `&bg_edge_open_radius=${beClip}`
+                  + `&threshold_scale=${threshScale}`;
         $('outlineStatus').textContent = 'Updating…';
         try {
             const resp = await fetch(url);
@@ -2082,6 +2085,8 @@
         // three "BG-edge ..." sliders also flash the background-edge
         // band preview on the canvas while dragged.
         const _outlineSliders = [
+            ['outlineThreshSlider', 'outlineThreshVal',
+             v => parseFloat(v).toFixed(2), false],
             ['bgEdgeThreshSlider', 'bgEdgeThreshVal',
              v => parseFloat(v).toFixed(2), true],
             ['bgEdgeBandSlider',   'bgEdgeBandVal',   v => v, true],

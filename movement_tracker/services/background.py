@@ -1769,6 +1769,7 @@ def compute_outline_frame(
     bg_edge_band_thresh: float = 0.35,
     bg_edge_band_dilate: int = 3,
     bg_edge_open_radius: int = 5,
+    threshold_scale: float = 1.0,
 ) -> dict:
     """On-demand hand boundary for one frame.
 
@@ -1968,6 +1969,11 @@ def compute_outline_frame(
         thresh, _ = cv2.threshold(
             gated_vals, 0, 255,
             cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # ``threshold_scale`` shifts the automatic Otsu cut: < 1 lets
+        # more (lower-motion) pixels count as hand -> a slightly larger
+        # outline; > 1 is stricter.  Still image-informed -- it only
+        # moves the cut point on the real |frame-BG| score.
+        thresh = float(thresh) * float(threshold_scale)
         binary = ((motion > thresh) & (gate > 0))
         # 4. OR with the always-hand map.  Pixels whose BG fell back to
         # the global non-skin fill were structurally inside the hand
