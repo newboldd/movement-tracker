@@ -503,12 +503,17 @@ def _build_forearm_cone(
     color-based BG refinement to a localised arm region.
 
     A constant-width capsule missed the forearm because the arm widens
-    toward the elbow.  This draws a filled trapezoid instead:
+    toward the elbow.  This draws a filled trapezoid:
 
-      - Anchor: median wrist position (joint 0) over the sampled frames.
+      - Base edge: the palm-heel line -- thumb CMC (joint 1) to the
+        reflected ulnar-heel point.  Anchoring the cone top to that
+        segment makes the palm zone and forearm cone meet cleanly
+        along it instead of leaving a gap or overlapping at the
+        wrist.  (Falls back to a perpendicular segment at the wrist,
+        |MCP_5 - MCP_17| x 1.2 wide, when joint 1 / the reflection
+        aren't available.)
       - Direction: wrist - median(MCP_5/9/13/17) -- the forearm axis.
-      - Base width (at the wrist): |MCP_5 - MCP_17| x 1.2.
-      - Tip  width (at the far end): base x ``cone_factor``.
+      - Tip width (at the far end): base x ``cone_factor``.
       - Length: ``max_length_px`` (downscaled).  Flesh coverage still
         stops naturally at the sleeve / non-skin boundary inside the
         cone.
@@ -519,6 +524,7 @@ def _build_forearm_cone(
     if kpts_per_frame is None or frames_sampled.size == 0:
         return np.zeros((out_h, out_w), dtype=np.uint8)
     wrists, mcp5s, mcp17s, centroids = [], [], [], []
+    cmc_pts, refl_pts = [], []
     for fi in frames_sampled:
         if fi >= kpts_per_frame.shape[0]:
             continue
@@ -529,6 +535,11 @@ def _build_forearm_cone(
             mcp5s.append(k[5])
         if not np.isnan(k[17]).any():
             mcp17s.append(k[17])
+        if not np.isnan(k[1]).any():
+            cmc_pts.append(k[1])
+        refl = _reflect_thumb_cmc(k)
+        if refl is not None:
+            refl_pts.append(refl)
         mcps = [k[j] for j in (5, 9, 13, 17) if not np.isnan(k[j]).any()]
         if mcps:
             centroids.append(np.mean(mcps, axis=0))
@@ -543,27 +554,40 @@ def _build_forearm_cone(
     if norm < 1e-6:
         return np.zeros((out_h, out_w), dtype=np.uint8)
     forearm_dir /= norm
-    # Perpendicular direction for the trapezoid half-widths.
     perp = np.array([-forearm_dir[1], forearm_dir[0]], dtype=np.float64)
 
-    if mcp5s and mcp17s:
-        m5 = np.median(mcp5s, axis=0) / ds
-        m17 = np.median(mcp17s, axis=0) / ds
-        base_w = max(float(np.linalg.norm(m5 - m17) * 1.2),
-                      float(fallback_width_px // ds))
+    # Base edge -- the palm-heel line if we have the thumb CMC and its
+    # reflection, otherwise a perpendicular segment at the wrist.
+    if cmc_pts and refl_pts:
+        base_a = np.median(cmc_pts, axis=0) / ds      # radial heel
+        base_b = np.median(refl_pts, axis=0) / ds     # ulnar heel
     else:
-        base_w = float(max(8, fallback_width_px // ds))
+        if mcp5s and mcp17s:
+            m5 = np.median(mcp5s, axis=0) / ds
+            m17 = np.median(mcp17s, axis=0) / ds
+            base_w = max(float(np.linalg.norm(m5 - m17) * 1.2),
+                          float(fallback_width_px // ds))
+        else:
+            base_w = float(max(8, fallback_width_px // ds))
+        base_a = wrist_med + perp * (base_w / 2.0)
+        base_b = wrist_med - perp * (base_w / 2.0)
+
+    base_mid = (base_a + base_b) * 0.5
+    base_w = float(np.linalg.norm(base_a - base_b))
     tip_w = base_w * float(cone_factor)
 
     length_down = max(2, max_length_px // ds)
-    end = wrist_med + forearm_dir * length_down
+    end = base_mid + forearm_dir * length_down
 
-    # Trapezoid corners: narrow at the wrist, wide at the far end.
-    p1 = wrist_med + perp * (base_w / 2.0)
-    p2 = wrist_med - perp * (base_w / 2.0)
-    p3 = end       - perp * (tip_w / 2.0)
-    p4 = end       + perp * (tip_w / 2.0)
-    poly = np.array([p1, p2, p3, p4], dtype=np.int32)
+    # Tip corners: extend each base corner's offset (from base_mid)
+    # out to tip_w at the far end.  base_a->base_b->tip_b->tip_a is a
+    # proper non-crossing trapezoid regardless of which side is which.
+    def _unit(v):
+        n = float(np.linalg.norm(v))
+        return v / n if n > 1e-6 else perp
+    tip_a = end + _unit(base_a - base_mid) * (tip_w / 2.0)
+    tip_b = end + _unit(base_b - base_mid) * (tip_w / 2.0)
+    poly = np.array([base_a, base_b, tip_b, tip_a], dtype=np.int32)
 
     cone = np.zeros((out_h, out_w), dtype=np.uint8)
     cv2.fillPoly(cone, [poly], color=255)
