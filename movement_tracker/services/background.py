@@ -1409,6 +1409,8 @@ def compute_background(
     # entirely: nothing is force-greened, the background is just the
     # plain masked temporal median.  Both MP-dilate knobs feed only
     # this refinement, so they're dimmed in the UI in that mode.
+    skin_range_L = None
+    skin_range_R = None
     if skin_leniency > 0:
         palm_grow_down = max(0, int(palm_grow_px) // max(1, downscale))
         # Trial-specific skin range from the tight-MP-mask pixels --
