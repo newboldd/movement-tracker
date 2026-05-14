@@ -43,6 +43,7 @@
     let showOutline = true;     // checkbox: show live-fetched hand boundary
     let showFgFill = false;     // checkbox: also fetch + paint JET heatmap
     let fgFillOpacity = 0.5;    // 0..1, controlled by slider next to checkbox
+    let showBgZones = true;     // checkbox: preview palm zone + forearm cone
     // Live outline state -- replaces the old fg.mp4 / outline.mp4 bake.
     // Server returns a per-frame closed-polygon contour for the
     // current dilation; we fetch it whenever the frame or slider
@@ -471,8 +472,11 @@
         }
         const palmSlider = $('palmGrowSlider');
         const palmGrowPx = palmSlider ? parseInt(palmSlider.value, 10) : 15;
+        const lenSlider = $('skinLeniencySlider');
+        const skinLeniency = lenSlider ? parseFloat(lenSlider.value) : 1.0;
         await _runPreprocJob('compute_background', 'backgroundStatus',
-                              { palm_grow_px: palmGrowPx });
+                              { palm_grow_px: palmGrowPx,
+                                skin_leniency: skinLeniency });
     }
 
     /**
@@ -488,11 +492,14 @@
         if (!showOutline && !showFgFill) return;
         const dilSlider = $('fgDilateSlider');
         const dilationPx = dilSlider ? parseInt(dilSlider.value, 10) : 14;
+        const openSlider = $('fgOpenSlider');
+        const openRadiusPx = openSlider ? parseInt(openSlider.value, 10) : 0;
         const frame = currentFrame;
         const seq = ++outlineFetchSeq;
         const includeFg = showFgFill ? 1 : 0;
         const url = `/api/preproc/${subjectId}/trial/${trialMeta.trial_idx}/outline_frame`
-                  + `?frame=${frame}&dilation_px=${dilationPx}&include_fg=${includeFg}`;
+                  + `?frame=${frame}&dilation_px=${dilationPx}`
+                  + `&open_radius_px=${openRadiusPx}&include_fg=${includeFg}`;
         $('outlineStatus').textContent = 'Updating…';
         try {
             const resp = await fetch(url);
@@ -862,6 +869,88 @@
                 ctx.restore();
             }
         }
+
+        // Background-zone preview: palm zone (grown MP region) +
+        // forearm cone, drawn from the current frame's MP keypoints so
+        // the user can see what region Compute Background will operate
+        // on BEFORE running it.  Approximate -- the bake unions over
+        // all sample frames -- but good enough to dial the sliders.
+        if (showBgZones && mpKeypoints) {
+            const useRef = overlayMode !== 'off';
+            const isOD = (currentSide === 'OD');
+            const arr = useRef
+                ? (isOD ? mpKeypoints.ref_OD : mpKeypoints.ref_OS)
+                : (isOD ? mpKeypoints.raw_OD : mpKeypoints.raw_OS);
+            const f = arr && currentFrame < arr.length ? arr[currentFrame] : null;
+            if (f) {
+                const _hasPt = j => f[j] && f[j][0] != null && f[j][1] != null;
+                const palmSlider = $('palmGrowSlider');
+                const palmGrow = palmSlider ? parseInt(palmSlider.value, 10) : 15;
+                // Server builds the palm zone from the BG-mask gate
+                // (~dilation 14 full-res) then dilates by palm_grow_px.
+                const palmThick = Math.max(2, (14 + palmGrow) * 2);
+
+                ctx.save();
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                // 1. Palm zone -- translucent green strokes along the
+                //    MP skeleton + palm arc.
+                ctx.strokeStyle = 'rgba(0, 230, 0, 0.28)';
+                ctx.lineWidth = palmThick;
+                const _seg = (a, b) => {
+                    if (!_hasPt(a) || !_hasPt(b)) return;
+                    ctx.beginPath();
+                    ctx.moveTo(f[a][0], f[a][1]);
+                    ctx.lineTo(f[b][0], f[b][1]);
+                    ctx.stroke();
+                };
+                for (const chain of _MP_FINGER_CHAINS)
+                    for (let ci = 0; ci < chain.length - 1; ci++)
+                        _seg(chain[ci], chain[ci + 1]);
+                for (let i = 0; i < _MP_PALM_CHAIN.length - 1; i++)
+                    _seg(_MP_PALM_CHAIN[i], _MP_PALM_CHAIN[i + 1]);
+
+                // 2. Forearm cone -- trapezoid from wrist (0) along
+                //    (wrist - MCP centroid).  Mirrors _build_forearm_cone.
+                const mcpIdx = [5, 9, 13, 17].filter(_hasPt);
+                if (_hasPt(0) && mcpIdx.length) {
+                    const wrist = f[0];
+                    let cx = 0, cy = 0;
+                    for (const j of mcpIdx) { cx += f[j][0]; cy += f[j][1]; }
+                    cx /= mcpIdx.length; cy /= mcpIdx.length;
+                    let dx = wrist[0] - cx, dy = wrist[1] - cy;
+                    const dn = Math.hypot(dx, dy);
+                    if (dn > 1e-3) {
+                        dx /= dn; dy /= dn;
+                        const px = -dy, py = dx;        // perpendicular
+                        let baseW = 30;
+                        if (_hasPt(5) && _hasPt(17)) {
+                            baseW = Math.hypot(f[5][0] - f[17][0],
+                                                f[5][1] - f[17][1]) * 1.2;
+                        }
+                        const tipW = baseW * 1.8;
+                        const len = 220;               // full-res px
+                        const ex = wrist[0] + dx * len, ey = wrist[1] + dy * len;
+                        const c1 = [wrist[0] + px * baseW / 2, wrist[1] + py * baseW / 2];
+                        const c2 = [wrist[0] - px * baseW / 2, wrist[1] - py * baseW / 2];
+                        const c3 = [ex - px * tipW / 2, ey - py * tipW / 2];
+                        const c4 = [ex + px * tipW / 2, ey + py * tipW / 2];
+                        ctx.fillStyle = 'rgba(0, 200, 255, 0.18)';
+                        ctx.strokeStyle = 'rgba(0, 200, 255, 0.7)';
+                        ctx.lineWidth = 2 / Math.max(0.01, scale * bps);
+                        ctx.beginPath();
+                        ctx.moveTo(c1[0], c1[1]);
+                        ctx.lineTo(c2[0], c2[1]);
+                        ctx.lineTo(c3[0], c3[1]);
+                        ctx.lineTo(c4[0], c4[1]);
+                        ctx.closePath();
+                        ctx.fill();
+                        ctx.stroke();
+                    }
+                }
+                ctx.restore();
+            }
+        }
         ctx.restore();
 
         if (labelText) {
@@ -1224,15 +1313,32 @@
         // Background (background.npz), Hand Boundary (live, on demand).
         $('runStableBtn').addEventListener('click', computeStable);
         $('runBackgroundBtn').addEventListener('click', computeBackground);
-        // Palm-zone grow slider: just updates its label; the value is
-        // read when Compute Background is clicked (it's a bake param).
+        // Palm-zone grow slider: updates its label AND re-renders so
+        // the on-canvas zone preview tracks it.  The value is read
+        // when Compute Background is clicked (it's a bake param).
         const _palmGrowSlider = $('palmGrowSlider');
         const _palmGrowVal    = $('palmGrowVal');
         if (_palmGrowSlider && _palmGrowVal) {
             _palmGrowSlider.addEventListener('input', () => {
                 _palmGrowVal.textContent = _palmGrowSlider.value;
+                try { render(); } catch (_e) {}
             });
         }
+        // Skin-leniency slider: label only -- it's a Background bake
+        // param, read when Compute Background is clicked.
+        const _skinLenSlider = $('skinLeniencySlider');
+        const _skinLenVal    = $('skinLeniencyVal');
+        if (_skinLenSlider && _skinLenVal) {
+            _skinLenSlider.addEventListener('input', () => {
+                _skinLenVal.textContent =
+                    parseFloat(_skinLenSlider.value).toFixed(2);
+            });
+        }
+        // Preview-zones checkbox: pure render toggle.
+        $('cbPreviewZones').addEventListener('change', e => {
+            showBgZones = e.target.checked;
+            try { render(); } catch (_e) {}
+        });
         const _fgDilateSlider = $('fgDilateSlider');
         const _fgDilateVal    = $('fgDilateVal');
         if (_fgDilateSlider && _fgDilateVal) {
@@ -1242,6 +1348,16 @@
                 // dilated-skeleton preview tracks the slider.
                 try { render(); } catch (_e) {}
                 // Debounced backend fetch for the new outline / heatmap.
+                if (showOutline || showFgFill) scheduleOutlineFetch();
+            });
+        }
+        // Strand-clip slider: live -- refetch the outline so the
+        // morphological-open radius takes effect immediately.
+        const _fgOpenSlider = $('fgOpenSlider');
+        const _fgOpenVal    = $('fgOpenVal');
+        if (_fgOpenSlider && _fgOpenVal) {
+            _fgOpenSlider.addEventListener('input', () => {
+                _fgOpenVal.textContent = _fgOpenSlider.value;
                 if (showOutline || showFgFill) scheduleOutlineFetch();
             });
         }

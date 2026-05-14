@@ -417,14 +417,23 @@ _SKIN_CR_LO, _SKIN_CR_HI = 130, 175
 _SKIN_CB_LO, _SKIN_CB_HI = 80, 130
 
 
-def _is_skin_ycc(ycc: np.ndarray) -> np.ndarray:
+def _is_skin_ycc(ycc: np.ndarray, leniency: float = 1.0) -> np.ndarray:
     """Boolean mask of skin-coloured pixels.  Input is a YCrCb image
     (any shape ending in 3), output is the same shape minus the last
-    axis."""
+    axis.
+
+    ``leniency`` scales the Cr/Cb acceptance window around its centre:
+    1.0 = the universal range above, >1 widens it (more pixels count
+    as skin -- more lenient), <1 narrows it (stricter).
+    """
     cr = ycc[..., 1]
     cb = ycc[..., 2]
-    return ((cr >= _SKIN_CR_LO) & (cr <= _SKIN_CR_HI)
-            & (cb >= _SKIN_CB_LO) & (cb <= _SKIN_CB_HI))
+    cr_c = (_SKIN_CR_LO + _SKIN_CR_HI) * 0.5
+    cr_h = (_SKIN_CR_HI - _SKIN_CR_LO) * 0.5 * float(leniency)
+    cb_c = (_SKIN_CB_LO + _SKIN_CB_HI) * 0.5
+    cb_h = (_SKIN_CB_HI - _SKIN_CB_LO) * 0.5 * float(leniency)
+    return ((cr >= cr_c - cr_h) & (cr <= cr_c + cr_h)
+            & (cb >= cb_c - cb_h) & (cb <= cb_c + cb_h))
 
 
 def _build_forearm_cone(
@@ -538,6 +547,7 @@ def _refine_bg_color_based(
     stack: np.ndarray,
     recover_mask: np.ndarray | None = None,
     force_green_mask: np.ndarray | None = None,
+    skin_leniency: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Second BG-median pass that fixes flesh-coloured BG pixels.
 
@@ -559,7 +569,7 @@ def _refine_bg_color_based(
     Returns ``(refined_bg, always_hand_color_mask)``.
     """
     bg_ycc = cv2.cvtColor(bg_initial, cv2.COLOR_BGR2YCrCb)
-    flesh_in_bg = _is_skin_ycc(bg_ycc)
+    flesh_in_bg = _is_skin_ycc(bg_ycc, leniency=skin_leniency)
     refined = bg_initial.copy()
     always_hand = np.zeros(bg_initial.shape[:2], dtype=bool)
     green = np.array([0, 255, 0], dtype=np.uint8)
@@ -585,7 +595,7 @@ def _refine_bg_color_based(
                 samples.reshape(N * n, 1, 3),
                 cv2.COLOR_BGR2YCrCb,
             ).reshape(N, n, 3)
-            is_skin = _is_skin_ycc(samples_ycc)   # (N, n)
+            is_skin = _is_skin_ycc(samples_ycc, leniency=skin_leniency)  # (N, n)
             m = np.broadcast_to(is_skin[..., None], samples.shape)
             masked = np.ma.masked_array(samples, mask=m)
             med = np.ma.median(masked, axis=0)               # (n, 3)
@@ -968,6 +978,7 @@ def compute_background(
     downscale:   int = _DEFAULT_DOWNSCALE,
     dilation_px: int = 14,
     palm_grow_px: int = 15,
+    skin_leniency: float = 1.0,
 ) -> str:
     """Stage 2 of the preproc bake: produce background.npz.
 
@@ -1198,13 +1209,15 @@ def compute_background(
     cone_L = _build_forearm_cone(mp_kpts_ref_L, frames_sampled,
                                     out_w, out_h, downscale)
     bg_L, always_hand_color_L_down = _refine_bg_color_based(
-        bg_L, stack_L, recover_mask=cone_L, force_green_mask=palm_zone_L)
+        bg_L, stack_L, recover_mask=cone_L, force_green_mask=palm_zone_L,
+        skin_leniency=skin_leniency)
     if is_stereo:
         palm_zone_R = _build_palm_zone(hand_mask_R, palm_grow_down)
         cone_R = _build_forearm_cone(mp_kpts_ref_R, frames_sampled,
                                         out_w, out_h, downscale)
         bg_R, always_hand_color_R_down = _refine_bg_color_based(
-            bg_R, stack_R, recover_mask=cone_R, force_green_mask=palm_zone_R)
+            bg_R, stack_R, recover_mask=cone_R, force_green_mask=palm_zone_R,
+            skin_leniency=skin_leniency)
     else:
         always_hand_color_R_down = None
 
@@ -1351,6 +1364,7 @@ def compute_outline_frame(
     frame: int,
     dilation_px: int = 14,
     close_radius_px: int = 5,
+    open_radius_px: int = 0,
     simplify_eps_px: float = 0.5,
     include_fg: bool = False,
 ) -> dict:
@@ -1371,8 +1385,12 @@ def compute_outline_frame(
          a synthetic colour, so we force them to count as hand always).
       5. Morphological close (disk radius ``close_radius_px``) to fill
          palm-interior holes where skin happens to match BG.
-      6. Keep only the largest connected component (drop speckles).
-      7. Extract the outermost contour and simplify via Douglas-Peucker
+      6. Morphological open (disk radius ``open_radius_px``) to clip
+         thin strands / webs jutting off the boundary.  0 = no
+         clipping; bump it to trim noise without shaving fingertips
+         (they're far wider than the kernel at sane values).
+      7. Keep only the largest connected component (drop speckles).
+      8. Extract the outermost contour and simplify via Douglas-Peucker
          (``simplify_eps_px`` -- 0.5 keeps ~10x more points than 3.0,
          giving a smooth boundary while still removing 1 px jitter).
 
@@ -1535,12 +1553,21 @@ def compute_outline_frame(
         r = max(1, int(close_radius_px))
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-        # 6. Largest connected component.
+        # 6. Morphological open -- clips thin strands / webs.  Erode
+        # then dilate by the same disk: anything narrower than
+        # 2 * open_radius_px disappears, fingertips (much wider)
+        # survive.  0 = off.
+        if open_radius_px > 0:
+            ro = int(open_radius_px)
+            ok_kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * ro + 1, 2 * ro + 1))
+            binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, ok_kernel)
+        # 7. Largest connected component.
         n_lbl, lbl, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
         if n_lbl <= 1:
             return {"contour": [], "fg": fg_pack}
         largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-        # 7. Outermost contour + Douglas-Peucker smoothing.
+        # 8. Outermost contour + Douglas-Peucker smoothing.
         binary = (lbl == largest).astype(np.uint8) * 255
         contours, _hier = cv2.findContours(
             binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)

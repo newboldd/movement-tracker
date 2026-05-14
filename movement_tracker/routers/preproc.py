@@ -186,9 +186,12 @@ def _spawn_preproc_job(
     if job_kind == "stable":
         worker = compute_stable
         allowed = ()           # no tunable params
+        float_params = ()
     elif job_kind == "background":
         worker = compute_background
-        allowed = ("max_samples", "downscale", "dilation_px", "palm_grow_px")
+        allowed = ("max_samples", "downscale", "dilation_px",
+                    "palm_grow_px", "skin_leniency")
+        float_params = ("skin_leniency",)
     else:
         raise HTTPException(500, f"bad job_kind: {job_kind}")
 
@@ -197,7 +200,7 @@ def _spawn_preproc_job(
         v = body.get(k)
         if v is None:
             continue
-        kwargs[k] = int(v)
+        kwargs[k] = float(v) if k in float_params else int(v)
 
     def _run():
         try:
@@ -262,24 +265,28 @@ def compute_stable_endpoint(subject_id: int, body: dict = Body(...)) -> dict:
 @router.get("/{subject_id}/trial/{trial_idx}/outline_frame")
 def get_outline_frame(subject_id: int, trial_idx: int,
                        frame: int, dilation_px: int = 14,
+                       open_radius_px: int = 0,
                        include_fg: int = 0) -> dict:
     """On-demand hand boundary for a single frame.
 
     Replaces the old ``compute_foreground`` bake: the UI calls this as
-    the user scrubs frames or moves the dilation slider, and gets back
-    a closed contour polygon (per camera in stereo).  Cheap enough to
-    re-fetch interactively -- skips the warp pass entirely by reading
-    from stable.mp4.
+    the user scrubs frames or moves a slider, and gets back a closed
+    contour polygon (per camera in stereo).  Cheap enough to re-fetch
+    interactively -- skips the warp pass entirely by reading from
+    stable.mp4.
 
-    ``include_fg=1`` also returns a JET-coloured foreground heatmap
-    PNG cropped to the gate bbox (``fg_OS``, ``fg_OD``).  Off by
-    default since the encoding adds ~100 ms per side.
+    ``open_radius_px`` clips thin strands off the boundary via a
+    morphological open (0 = off).  ``include_fg=1`` also returns a
+    JET-coloured foreground heatmap PNG cropped to the gate bbox
+    (``fg_OS``, ``fg_OD``); off by default since the encoding adds
+    ~100 ms per side.
     """
     from ..services.background import compute_outline_frame
     name = _subject_name(subject_id)
     try:
         return compute_outline_frame(name, trial_idx, int(frame),
                                        dilation_px=int(dilation_px),
+                                       open_radius_px=int(open_radius_px),
                                        include_fg=bool(int(include_fg)))
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))

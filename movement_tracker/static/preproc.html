@@ -215,6 +215,19 @@
                                title="Grows the MP hand region outward.  Flesh-coloured pixels inside the grown zone are forced to always-hand (green), instead of having a background colour recovered.  Raise this to capture chunks like the ulnar palm that the raw MP gate clips."
                                style="width:100%;cursor:pointer;height:5px;">
                     </div>
+                    <div style="margin-top:8px;font-size:11px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <label style="color:var(--text-muted);">Skin colour leniency</label>
+                            <span id="skinLeniencyVal" style="color:var(--text);font-weight:bold;">1.00</span>
+                        </div>
+                        <input type="range" id="skinLeniencySlider" min="0.5" max="2" step="0.05" value="1"
+                               title="Scales the YCrCb skin-colour acceptance window.  >1 = more lenient (more pixels count as hand-coloured), <1 = stricter.  Affects the colour-based forearm refinement."
+                               style="width:100%;cursor:pointer;height:5px;">
+                    </div>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);margin-top:8px;">
+                        <input type="checkbox" id="cbPreviewZones" checked>
+                        Preview palm zone + forearm cone
+                    </label>
                     <button class="btn btn-sm btn-success" id="runBackgroundBtn" style="width:100%;margin-top:8px;" disabled>Compute Background</button>
                     <div id="backgroundStatus" class="pp-stat" style="margin-top:6px;"></div>
                     <div id="backgroundStats" class="pp-stat" style="margin-top:8px;"></div>
@@ -246,6 +259,15 @@
                         </div>
                         <input type="range" id="fgDilateSlider" min="4" max="60" step="1" value="14"
                                title="Total dilation of the MP skeleton in image pixels.  Sets the outer bound of the hand region; the actual boundary follows image content inside this gate."
+                               style="width:100%;cursor:pointer;height:5px;">
+                    </div>
+                    <div style="margin-top:8px;font-size:11px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <label style="color:var(--text-muted);">Strand clip (px)</label>
+                            <span id="fgOpenVal" style="color:var(--text);font-weight:bold;">0</span>
+                        </div>
+                        <input type="range" id="fgOpenSlider" min="0" max="12" step="1" value="0"
+                               title="Morphological-open radius.  Clips thin strands / webs jutting off the boundary.  0 = off; fingertips (much wider than the kernel) survive at sane values."
                                style="width:100%;cursor:pointer;height:5px;">
                     </div>
                     <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);margin-top:8px;">
@@ -329,6 +351,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/preproc.js?v=29"></script>
+    <script src="/static/js/preproc.js?v=30"></script>
 </body>
 </html>
