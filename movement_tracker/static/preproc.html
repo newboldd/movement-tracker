@@ -286,6 +286,33 @@
                         </div>
                         <div style="margin-top:8px;font-size:11px;">
                             <div style="display:flex;justify-content:space-between;align-items:center;">
+                                <label style="color:var(--text-muted);">BG-edge threshold</label>
+                                <span id="bgEdgeThreshVal" style="color:var(--text);font-weight:bold;">0.35</span>
+                            </div>
+                            <input type="range" id="bgEdgeThreshSlider" min="0.05" max="1" step="0.05" value="0.35"
+                                   title="How strong a static background edge must be (normalized 0-1) to trigger edge retraction.  Lower = more edges count = more aggressive retraction; higher = only the strongest edges."
+                                   style="width:100%;cursor:pointer;height:5px;">
+                        </div>
+                        <div style="margin-top:8px;font-size:11px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;">
+                                <label style="color:var(--text-muted);">BG-edge band width (px)</label>
+                                <span id="bgEdgeBandVal" style="color:var(--text);font-weight:bold;">3</span>
+                            </div>
+                            <input type="range" id="bgEdgeBandSlider" min="0" max="15" step="1" value="3"
+                                   title="Dilates the background-edge band to cover the misregistration spread around each edge.  Wider band = retraction reaches further from the edge ridge."
+                                   style="width:100%;cursor:pointer;height:5px;">
+                        </div>
+                        <div style="margin-top:8px;font-size:11px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;">
+                                <label style="color:var(--text-muted);">BG-edge clip (px)</label>
+                                <span id="bgEdgeClipVal" style="color:var(--text);font-weight:bold;">5</span>
+                            </div>
+                            <input type="range" id="bgEdgeClipSlider" min="0" max="15" step="1" value="5"
+                                   title="Morphological-open radius applied to the mask inside the background-edge band.  A bleed band narrower than twice this is wiped; solid hand crossing the edge survives.  0 = edge retraction off."
+                                   style="width:100%;cursor:pointer;height:5px;">
+                        </div>
+                        <div style="margin-top:8px;font-size:11px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;">
                                 <label style="color:var(--text-muted);">Strand clip (px)</label>
                                 <span id="fgOpenVal" style="color:var(--text);font-weight:bold;">0</span>
                             </div>
@@ -383,6 +410,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/preproc.js?v=51"></script>
+    <script src="/static/js/preproc.js?v=52"></script>
 </body>
 </html>

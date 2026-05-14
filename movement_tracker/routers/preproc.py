@@ -274,7 +274,10 @@ def compute_stable_endpoint(subject_id: int, body: dict = Body(...)) -> dict:
 def get_outline_frame(subject_id: int, trial_idx: int,
                        frame: int, dilation_px: int = 14,
                        open_radius_px: int = 0,
-                       include_fg: int = 0) -> dict:
+                       include_fg: int = 0,
+                       bg_edge_band_thresh: float = 0.35,
+                       bg_edge_band_dilate: int = 3,
+                       bg_edge_open_radius: int = 5) -> dict:
     """On-demand hand boundary for a single frame.
 
     Replaces the old ``compute_foreground`` bake: the UI calls this as
@@ -284,10 +287,12 @@ def get_outline_frame(subject_id: int, trial_idx: int,
     stable.mp4.
 
     ``open_radius_px`` clips thin strands off the boundary via a
-    morphological open (0 = off).  ``include_fg=1`` also returns a
-    JET-colored foreground heatmap PNG cropped to the gate bbox
-    (``fg_OS``, ``fg_OD``); off by default since the encoding adds
-    ~100 ms per side.
+    morphological open (0 = off).  ``bg_edge_band_thresh`` /
+    ``bg_edge_band_dilate`` / ``bg_edge_open_radius`` tune the
+    background-edge retraction step (``bg_edge_open_radius=0`` = off).
+    ``include_fg=1`` also returns a JET-colored foreground heatmap PNG
+    cropped to the gate bbox (``fg_OS``, ``fg_OD``); off by default
+    since the encoding adds ~100 ms per side.
     """
     from ..services.background import compute_outline_frame
     name = _subject_name(subject_id)
@@ -295,7 +300,10 @@ def get_outline_frame(subject_id: int, trial_idx: int,
         return compute_outline_frame(name, trial_idx, int(frame),
                                        dilation_px=int(dilation_px),
                                        open_radius_px=int(open_radius_px),
-                                       include_fg=bool(int(include_fg)))
+                                       include_fg=bool(int(include_fg)),
+                                       bg_edge_band_thresh=float(bg_edge_band_thresh),
+                                       bg_edge_band_dilate=int(bg_edge_band_dilate),
+                                       bg_edge_open_radius=int(bg_edge_open_radius))
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
     except RuntimeError as e:

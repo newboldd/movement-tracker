@@ -1766,6 +1766,9 @@ def compute_outline_frame(
     open_radius_px: int = 0,
     simplify_eps_px: float = 0.5,
     include_fg: bool = False,
+    bg_edge_band_thresh: float = 0.35,
+    bg_edge_band_dilate: int = 3,
+    bg_edge_open_radius: int = 5,
 ) -> dict:
     """On-demand hand boundary for one frame.
 
@@ -1890,13 +1893,15 @@ def compute_outline_frame(
     # killing true overlap.  60 motion units at peak edge ~= 1/4 of
     # the dynamic range, leaves room for the hand to dominate.
     _BG_EDGE_PENALTY = 60.0
-    # Background-edge retraction: bg_edge values above this count as a
-    # "strong static edge"; the band around them is opened off the mask
-    # (thin |frame-BG| bleed that hugs the edge is removed, solid hand
-    # crossing it survives).  Radius in full-res px.
-    _BG_EDGE_BAND_THRESH = 0.35
-    _BG_EDGE_BAND_DILATE = 3
-    _BG_EDGE_OPEN_RADIUS = 5
+    # Background-edge retraction (caller-tunable): bg_edge values above
+    # ``bg_edge_band_thresh`` count as a "strong static edge"; the band
+    # around them (dilated by ``bg_edge_band_dilate``) is opened off the
+    # mask with radius ``bg_edge_open_radius`` -- thin |frame-BG| bleed
+    # hugging the edge is removed, solid hand crossing it survives.
+    # ``bg_edge_open_radius == 0`` disables the retraction.
+    _BG_EDGE_BAND_THRESH = float(bg_edge_band_thresh)
+    _BG_EDGE_BAND_DILATE = max(0, int(bg_edge_band_dilate))
+    _BG_EDGE_OPEN_RADIUS = max(0, int(bg_edge_open_radius))
 
     def _side_outline(stable_side: np.ndarray, bg_full: np.ndarray,
                        kpts: np.ndarray | None,
@@ -1979,7 +1984,7 @@ def compute_outline_frame(
         # band (narrower than 2 * _BG_EDGE_OPEN_RADIUS) is wiped, while
         # a solid hand region crossing the edge -- and any always-hand
         # pixel -- survives.  Outside the band the mask is untouched.
-        if bg_edge is not None:
+        if bg_edge is not None and _BG_EDGE_OPEN_RADIUS > 0:
             edge_band = (bg_edge > _BG_EDGE_BAND_THRESH).astype(np.uint8)
             if edge_band.any():
                 edge_band = cv2.dilate(

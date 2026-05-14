@@ -654,12 +654,21 @@
         const dilationPx = dilSlider ? parseInt(dilSlider.value, 10) : 14;
         const openSlider = $('fgOpenSlider');
         const openRadiusPx = openSlider ? parseInt(openSlider.value, 10) : 0;
+        const beThreshSlider = $('bgEdgeThreshSlider');
+        const beThresh = beThreshSlider ? parseFloat(beThreshSlider.value) : 0.35;
+        const beBandSlider = $('bgEdgeBandSlider');
+        const beBand = beBandSlider ? parseInt(beBandSlider.value, 10) : 3;
+        const beClipSlider = $('bgEdgeClipSlider');
+        const beClip = beClipSlider ? parseInt(beClipSlider.value, 10) : 5;
         const frame = currentFrame;
         const seq = ++outlineFetchSeq;
         const includeFg = showFgFill ? 1 : 0;
         const url = `/api/preproc/${subjectId}/trial/${trialMeta.trial_idx}/outline_frame`
                   + `?frame=${frame}&dilation_px=${dilationPx}`
-                  + `&open_radius_px=${openRadiusPx}&include_fg=${includeFg}`;
+                  + `&open_radius_px=${openRadiusPx}&include_fg=${includeFg}`
+                  + `&bg_edge_band_thresh=${beThresh}`
+                  + `&bg_edge_band_dilate=${beBand}`
+                  + `&bg_edge_open_radius=${beClip}`;
         $('outlineStatus').textContent = 'Updating…';
         try {
             const resp = await fetch(url);
@@ -1853,13 +1862,21 @@
                 if (showOutline || showFgFill) scheduleOutlineFetch();
             });
         }
-        // Strand-clip slider: live -- refetch the outline so the
-        // morphological-open radius takes effect immediately.
-        const _fgOpenSlider = $('fgOpenSlider');
-        const _fgOpenVal    = $('fgOpenVal');
-        if (_fgOpenSlider && _fgOpenVal) {
-            _fgOpenSlider.addEventListener('input', () => {
-                _fgOpenVal.textContent = _fgOpenSlider.value;
+        // Background-edge retraction sliders + strand-clip slider: all
+        // live -- refetch the outline so the change takes effect
+        // immediately.  Each just updates its label and reschedules.
+        const _outlineSliders = [
+            ['bgEdgeThreshSlider', 'bgEdgeThreshVal',
+             v => parseFloat(v).toFixed(2)],
+            ['bgEdgeBandSlider',   'bgEdgeBandVal',   v => v],
+            ['bgEdgeClipSlider',   'bgEdgeClipVal',   v => v],
+            ['fgOpenSlider',       'fgOpenVal',       v => v],
+        ];
+        for (const [sId, vId, fmt] of _outlineSliders) {
+            const sl = $(sId), vl = $(vId);
+            if (!sl || !vl) continue;
+            sl.addEventListener('input', () => {
+                vl.textContent = fmt(sl.value);
                 if (showOutline || showFgFill) scheduleOutlineFetch();
             });
         }
