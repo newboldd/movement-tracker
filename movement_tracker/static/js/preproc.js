@@ -77,8 +77,10 @@
     // color leniency" + "MP dilate (mask)" -> Background (raw median).
     let showBgZones = false;    // palm zone preview
     let showSkinMask = false;   // live YCrCb skin-color mask + sample region
+    let showBgEdge = false;     // background-edge band preview (Hand Boundary)
     let _bgZonesTimer = null;
     let _skinMaskTimer = null;
+    let _bgEdgeTimer = null;
     const _PREVIEW_HOLD_MS = 1100;
     // Switch the viewport overlay by clicking the radio (so the change
     // handler / video-seek logic runs).  No-op if already there or the
@@ -109,12 +111,29 @@
             try { render(); } catch (_e) {}
         }, _PREVIEW_HOLD_MS);
     }
+    // Background-edge band preview -- flashed while the Hand Boundary
+    // "BG-edge ..." sliders are dragged.  Drawn over whatever overlay
+    // is active (the band is in reference coords like the background).
+    function _flashBgEdge() {
+        showBgEdge = true;
+        try { render(); } catch (_e) {}
+        if (_bgEdgeTimer) clearTimeout(_bgEdgeTimer);
+        _bgEdgeTimer = setTimeout(() => {
+            showBgEdge = false;
+            try { render(); } catch (_e) {}
+        }, _PREVIEW_HOLD_MS);
+    }
     // Offscreen canvas + cache key for the live skin-color mask.  The
     // classification mirrors the server's _is_skin_ycc (BT.601 YCrCb,
     // leniency-scaled window) so the preview matches what Compute
     // Background will actually do.
     let _skinMaskCanvas = null;
     let _skinMaskKey = null;
+    // Offscreen canvas + cache key for the background-edge band preview
+    // (client-side echo of _bg_edge_map + threshold + dilate on the
+    // server).  Invalidated whenever the background images reload.
+    let _bgEdgeCanvas = null;
+    let _bgEdgeKey = null;
     // Live outline state -- replaces the old fg.mp4 / outline.mp4 bake.
     // Server returns a per-frame closed-polygon contour for the
     // current dilation; we fetch it whenever the frame or slider
@@ -505,6 +524,7 @@
         const t = Date.now();   // bust HTTP cache after recompute
         $('ovBg').disabled = true;
         bgFullOS = bgFullOD = refinedFullOS = refinedFullOD = null;
+        _bgEdgeKey = null;   // background changed -> drop cached edge band
         // On load: upscale the (downscaled) PNG to full-res for the
         // overlay coord space, then re-render -- the canvas 'bg'
         // overlay draws from the full-res canvas, so if the user (or a
@@ -925,6 +945,109 @@
         return _skinMaskCanvas;
     }
 
+    /** Binary dilation by radius ``r`` via two separable max passes. */
+    function _dilateBinary(src, w, h, r) {
+        if (r <= 0) return src;
+        const tmp = new Uint8Array(w * h);
+        for (let y = 0; y < h; y++) {
+            const row = y * w;
+            for (let x = 0; x < w; x++) {
+                let m = 0;
+                const x0 = Math.max(0, x - r), x1 = Math.min(w - 1, x + r);
+                for (let xx = x0; xx <= x1; xx++) {
+                    if (src[row + xx]) { m = 1; break; }
+                }
+                tmp[row + x] = m;
+            }
+        }
+        const out = new Uint8Array(w * h);
+        for (let x = 0; x < w; x++) {
+            for (let y = 0; y < h; y++) {
+                let m = 0;
+                const y0 = Math.max(0, y - r), y1 = Math.min(h - 1, y + r);
+                for (let yy = y0; yy <= y1; yy++) {
+                    if (tmp[yy * w + x]) { m = 1; break; }
+                }
+                out[y * w + x] = m;
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Background-edge band for the current side -- the client-side echo
+     * of the server's _bg_edge_map + threshold + dilate (the
+     * ``edge_band`` of the outline's step-5b retraction).  Sobel
+     * magnitude of the background image, 99th-percentile normalized,
+     * thresholded by "BG-edge threshold" and dilated by "BG-edge band
+     * width".  Returns an RGBA <canvas> (orange where the band is,
+     * transparent elsewhere), or null if no background is loaded yet.
+     * Cached by side + slider values; invalidated on background reload.
+     */
+    function _bgEdgeBand() {
+        const isOD = (currentSide === 'OD');
+        const bcv = (isOD && backgroundData && backgroundData.is_stereo)
+            ? (refinedFullOD || bgFullOD)
+            : (refinedFullOS || bgFullOS);
+        if (!bcv || !bcv.width) return null;
+        const thr = parseFloat(($('bgEdgeThreshSlider') || {}).value || 0.35);
+        const band = parseInt(($('bgEdgeBandSlider') || {}).value || 3, 10);
+        const key = `${currentSide}|${bcv.width}x${bcv.height}|${thr}|${band}`;
+        if (key === _bgEdgeKey && _bgEdgeCanvas) return _bgEdgeCanvas;
+        // Work at half-res -- plenty for a preview.
+        const cw = Math.max(3, Math.round(bcv.width / 2));
+        const ch = Math.max(3, Math.round(bcv.height / 2));
+        const tmp = document.createElement('canvas');
+        tmp.width = cw; tmp.height = ch;
+        const tctx = tmp.getContext('2d', { willReadFrequently: true });
+        let img;
+        try {
+            tctx.drawImage(bcv, 0, 0, cw, ch);
+            img = tctx.getImageData(0, 0, cw, ch);
+        } catch (e) { return null; }
+        const d = img.data;
+        // Grayscale.
+        const gray = new Float32Array(cw * ch);
+        for (let i = 0, p = 0; p < gray.length; i += 4, p++) {
+            gray[p] = 0.114 * d[i] + 0.587 * d[i + 1] + 0.299 * d[i + 2];
+        }
+        // Sobel magnitude.
+        const mag = new Float32Array(cw * ch);
+        for (let y = 1; y < ch - 1; y++) {
+            for (let x = 1; x < cw - 1; x++) {
+                const o = y * cw + x;
+                const tl = gray[o - cw - 1], tc = gray[o - cw], tr = gray[o - cw + 1];
+                const ml = gray[o - 1],                         mr = gray[o + 1];
+                const bl = gray[o + cw - 1], bc = gray[o + cw], br = gray[o + cw + 1];
+                const sx = (tr + 2 * mr + br) - (tl + 2 * ml + bl);
+                const sy = (bl + 2 * bc + br) - (tl + 2 * tc + tr);
+                mag[o] = Math.sqrt(sx * sx + sy * sy);
+            }
+        }
+        // 99th-percentile normalization.
+        const sorted = Float32Array.from(mag).sort();
+        const p99 = sorted[Math.min(sorted.length - 1,
+                                    Math.floor(0.99 * sorted.length))] || 1;
+        // Threshold -> binary, then dilate (half-res radius).
+        let bin = new Uint8Array(cw * ch);
+        for (let p = 0; p < bin.length; p++) {
+            bin[p] = (mag[p] / p99) > thr ? 1 : 0;
+        }
+        bin = _dilateBinary(bin, cw, ch, Math.max(0, Math.round(band / 2)));
+        // Paint orange band into an RGBA canvas.
+        for (let p = 0, i = 0; p < bin.length; p++, i += 4) {
+            if (bin[p]) {
+                d[i] = 255; d[i + 1] = 140; d[i + 2] = 0; d[i + 3] = 120;
+            } else {
+                d[i + 3] = 0;
+            }
+        }
+        tctx.putImageData(img, 0, 0);
+        _bgEdgeCanvas = tmp;
+        _bgEdgeKey = key;
+        return _bgEdgeCanvas;
+    }
+
     function showTrajectoryStats() {
         if (!trajectory) return;
         const njerk = trajectory.jerk_flag.filter(Boolean).length;
@@ -1188,6 +1311,19 @@
                     ctx.lineTo(s[2], s[3]);
                 }
                 ctx.stroke();
+                ctx.restore();
+            }
+        }
+
+        // Background-edge band -- orange tint over the static
+        // background edges the outline's step-5b retraction acts on.
+        // Flashed while the Hand Boundary "BG-edge ..." sliders move.
+        if (showBgEdge && srcImage) {
+            const band = _bgEdgeBand();
+            if (band) {
+                ctx.save();
+                ctx.imageSmoothingEnabled = false;
+                ctx.drawImage(band, 0, 0, drawSw, drawSh);
                 ctx.restore();
             }
         }
@@ -1864,19 +2000,22 @@
         }
         // Background-edge retraction sliders + strand-clip slider: all
         // live -- refetch the outline so the change takes effect
-        // immediately.  Each just updates its label and reschedules.
+        // immediately.  Each updates its label and reschedules; the
+        // three "BG-edge ..." sliders also flash the background-edge
+        // band preview on the canvas while dragged.
         const _outlineSliders = [
             ['bgEdgeThreshSlider', 'bgEdgeThreshVal',
-             v => parseFloat(v).toFixed(2)],
-            ['bgEdgeBandSlider',   'bgEdgeBandVal',   v => v],
-            ['bgEdgeClipSlider',   'bgEdgeClipVal',   v => v],
-            ['fgOpenSlider',       'fgOpenVal',       v => v],
+             v => parseFloat(v).toFixed(2), true],
+            ['bgEdgeBandSlider',   'bgEdgeBandVal',   v => v, true],
+            ['bgEdgeClipSlider',   'bgEdgeClipVal',   v => v, true],
+            ['fgOpenSlider',       'fgOpenVal',       v => v, false],
         ];
-        for (const [sId, vId, fmt] of _outlineSliders) {
+        for (const [sId, vId, fmt, flashEdge] of _outlineSliders) {
             const sl = $(sId), vl = $(vId);
             if (!sl || !vl) continue;
             sl.addEventListener('input', () => {
                 vl.textContent = fmt(sl.value);
+                if (flashEdge) _flashBgEdge();
                 if (showOutline || showFgFill) scheduleOutlineFetch();
             });
         }
