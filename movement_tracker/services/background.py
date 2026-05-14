@@ -549,22 +549,39 @@ def _build_forearm_cone(
     ds = max(1, int(downscale))
     wrist_med = np.median(wrists, axis=0) / ds
     centroid_med = np.median(centroids, axis=0) / ds
-    forearm_dir = wrist_med - centroid_med
-    norm = float(np.linalg.norm(forearm_dir))
-    if norm < 1e-6:
+    rough_forearm = wrist_med - centroid_med    # palm -> elbow, roughly
+    if float(np.linalg.norm(rough_forearm)) < 1e-6:
         return np.zeros((out_h, out_w), dtype=np.uint8)
-    forearm_dir /= norm
-    perp = np.array([-forearm_dir[1], forearm_dir[0]], dtype=np.float64)
 
-    # Base POSITION -- the midpoint of the palm-heel line (thumb CMC
-    # <-> reflected ulnar heel), which lies on the forearm axis right
-    # at the heel.  This anchors the cone top to the heel line.  When
-    # the CMC / reflection aren't available, fall back to the wrist.
+    # The palm-heel line (thumb CMC <-> reflected ulnar heel) anchors
+    # the trapezoid in BOTH position and orientation:
+    #   - base edge runs ALONG the heel line  (perp = heel_dir)
+    #   - cone axis runs PERPENDICULAR to it  (forearm_dir)
+    # so the trapezoid top is parallel to the heel line by
+    # construction.  Falls back to the wrist + wrist->centroid axis
+    # when the CMC / reflection aren't available.
+    heel_dir = None
     if cmc_pts and refl_pts:
         cmc_med  = np.median(cmc_pts, axis=0) / ds
         refl_med = np.median(refl_pts, axis=0) / ds
         base_mid = (cmc_med + refl_med) * 0.5
+        hd = refl_med - cmc_med
+        hn = float(np.linalg.norm(hd))
+        if hn > 1e-6:
+            heel_dir = hd / hn
+
+    if heel_dir is not None:
+        perp = heel_dir
+        # Cone axis = perpendicular to the heel line, pointing toward
+        # the elbow (positive dot with the rough palm->elbow vector).
+        axis = np.array([-heel_dir[1], heel_dir[0]], dtype=np.float64)
+        if float(np.dot(axis, rough_forearm)) < 0:
+            axis = -axis
+        forearm_dir = axis
     else:
+        # Fallback: orientation from the wrist -> MCP-centroid axis.
+        forearm_dir = rough_forearm / float(np.linalg.norm(rough_forearm))
+        perp = np.array([-forearm_dir[1], forearm_dir[0]], dtype=np.float64)
         base_mid = wrist_med
 
     # Base WIDTH -- independent of the heel-line length: keep it wide,

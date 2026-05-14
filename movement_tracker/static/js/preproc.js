@@ -1045,11 +1045,13 @@
                     }
                 }
 
-                // 2. Forearm cone -- trapezoid positioned ON the
-                //    palm-heel line (midpoint of thumb CMC <->
-                //    reflected ulnar heel) but kept WIDE: base width
-                //    = MCP knuckle spread x 1.2, widening toward the
-                //    elbow.  Mirrors _build_forearm_cone.
+                // 2. Forearm cone -- trapezoid anchored to the
+                //    palm-heel line (thumb CMC <-> reflected ulnar
+                //    heel) in BOTH position and orientation: base edge
+                //    runs ALONG the heel line, cone axis runs
+                //    PERPENDICULAR to it, so the top is parallel to
+                //    the heel line.  Width = MCP spread x 1.2 (wide).
+                //    Mirrors _build_forearm_cone.
                 const mcpIdx = [5, 9, 13, 17].filter(_hasPt);
                 const _crefl = _reflectThumbCmc(f);
                 if (_hasPt(0) && mcpIdx.length && _hasPt(1) && _crefl) {
@@ -1057,15 +1059,21 @@
                     let cx = 0, cy = 0;
                     for (const j of mcpIdx) { cx += f[j][0]; cy += f[j][1]; }
                     cx /= mcpIdx.length; cy /= mcpIdx.length;
-                    let dx = wrist[0] - cx, dy = wrist[1] - cy;
-                    const dn = Math.hypot(dx, dy);
-                    if (dn > 1e-3) {
-                        dx /= dn; dy /= dn;
-                        const px = -dy, py = dx;          // perpendicular
-                        // Base sits at the heel-line midpoint.
+                    // Heel line: thumb CMC -> reflected ulnar heel.
+                    let hx = _crefl[0] - f[1][0], hy = _crefl[1] - f[1][1];
+                    const hn = Math.hypot(hx, hy);
+                    if (hn > 1e-3) {
+                        hx /= hn; hy /= hn;                 // heel-line dir
+                        const px = hx, py = hy;             // base edge runs along it
+                        // Cone axis = perpendicular to the heel line,
+                        // pointing toward the elbow (positive dot with
+                        // the rough wrist - centroid vector).
+                        let ax = -hy, ay = hx;
+                        if (ax * (wrist[0] - cx) + ay * (wrist[1] - cy) < 0) {
+                            ax = -ax; ay = -ay;
+                        }
                         const baseMid = [(f[1][0] + _crefl[0]) / 2,
                                           (f[1][1] + _crefl[1]) / 2];
-                        // Width = MCP spread x 1.2 (wide, like before).
                         let baseW = 30;
                         if (_hasPt(5) && _hasPt(17)) {
                             baseW = Math.hypot(f[5][0] - f[17][0],
@@ -1073,8 +1081,8 @@
                         }
                         const tipW = baseW * 1.8;
                         const len = 220;                  // full-res px
-                        const ex = baseMid[0] + dx * len;
-                        const ey = baseMid[1] + dy * len;
+                        const ex = baseMid[0] + ax * len;
+                        const ey = baseMid[1] + ay * len;
                         const baseA = [baseMid[0] + px * baseW / 2, baseMid[1] + py * baseW / 2];
                         const baseB = [baseMid[0] - px * baseW / 2, baseMid[1] - py * baseW / 2];
                         const tipA  = [ex + px * tipW / 2, ey + py * tipW / 2];
