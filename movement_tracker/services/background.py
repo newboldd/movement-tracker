@@ -427,31 +427,32 @@ def _is_skin_ycc(ycc: np.ndarray) -> np.ndarray:
             & (cb >= _SKIN_CB_LO) & (cb <= _SKIN_CB_HI))
 
 
-def _build_forearm_cylinder(
+def _build_forearm_cone(
     kpts_per_frame: np.ndarray | None,
     frames_sampled: np.ndarray,
     out_w: int,
     out_h: int,
     downscale: int,
-    max_length_px: int = 200,
+    max_length_px: int = 220,
+    cone_factor: float = 1.8,
     fallback_width_px: int = 30,
 ) -> np.ndarray:
-    """Capsule mask along the forearm, used to restrict color-based
-    BG refinement to a localised arm region instead of the whole frame.
+    """Cone (trapezoid) mask along the forearm, used to restrict the
+    color-based BG refinement to a localised arm region.
 
-    Geometry, computed from the sampled MP keypoints:
+    A constant-width capsule missed the forearm because the arm widens
+    toward the elbow.  This draws a filled trapezoid instead:
+
       - Anchor: median wrist position (joint 0) over the sampled frames.
-      - Direction: wrist - median(MCP_5/9/13/17) -- the forearm axis
-        pointing away from the palm.
-      - Width: |MCP_5 - MCP_17| x 1.2 (index-MCP to pinky-MCP, a decent
-        proxy for wrist/forearm width).  Falls back to
-        ``fallback_width_px`` when those joints are missing.
-      - Length: ``max_length_px`` (downscaled).  The actual flesh
-        coverage stops naturally at the sleeve / non-skin boundary
-        when the color-based pass walks pixels inside this capsule.
+      - Direction: wrist - median(MCP_5/9/13/17) -- the forearm axis.
+      - Base width (at the wrist): |MCP_5 - MCP_17| x 1.2.
+      - Tip  width (at the far end): base x ``cone_factor``.
+      - Length: ``max_length_px`` (downscaled).  Flesh coverage still
+        stops naturally at the sleeve / non-skin boundary inside the
+        cone.
 
     Returns an ``(out_h, out_w)`` uint8 mask (0 or 255) at downscaled
-    BG resolution.  All coordinates are first divided by ``downscale``.
+    BG resolution.
     """
     if kpts_per_frame is None or frames_sampled.size == 0:
         return np.zeros((out_h, out_w), dtype=np.uint8)
@@ -480,94 +481,123 @@ def _build_forearm_cylinder(
     if norm < 1e-6:
         return np.zeros((out_h, out_w), dtype=np.uint8)
     forearm_dir /= norm
+    # Perpendicular direction for the trapezoid half-widths.
+    perp = np.array([-forearm_dir[1], forearm_dir[0]], dtype=np.float64)
 
     if mcp5s and mcp17s:
         m5 = np.median(mcp5s, axis=0) / ds
         m17 = np.median(mcp17s, axis=0) / ds
-        width = max(int(round(np.linalg.norm(m5 - m17) * 1.2)),
-                     fallback_width_px // ds)
+        base_w = max(float(np.linalg.norm(m5 - m17) * 1.2),
+                      float(fallback_width_px // ds))
     else:
-        width = max(8, fallback_width_px // ds)
+        base_w = float(max(8, fallback_width_px // ds))
+    tip_w = base_w * float(cone_factor)
 
     length_down = max(2, max_length_px // ds)
     end = wrist_med + forearm_dir * length_down
 
-    cylinder = np.zeros((out_h, out_w), dtype=np.uint8)
-    cv2.line(
-        cylinder,
-        (int(round(float(wrist_med[0]))), int(round(float(wrist_med[1])))),
-        (int(round(float(end[0]))),         int(round(float(end[1])))),
-        color=255, thickness=int(max(2, width)), lineType=cv2.LINE_AA,
-    )
-    return cylinder
+    # Trapezoid corners: narrow at the wrist, wide at the far end.
+    p1 = wrist_med + perp * (base_w / 2.0)
+    p2 = wrist_med - perp * (base_w / 2.0)
+    p3 = end       - perp * (tip_w / 2.0)
+    p4 = end       + perp * (tip_w / 2.0)
+    poly = np.array([p1, p2, p3, p4], dtype=np.int32)
+
+    cone = np.zeros((out_h, out_w), dtype=np.uint8)
+    cv2.fillPoly(cone, [poly], color=255)
+    return cone
+
+
+def _build_palm_zone(
+    hand_mask_stack: np.ndarray,
+    grow_px: int,
+) -> np.ndarray:
+    """"Definitely-hand" palm zone: union of the per-sample-frame MP
+    hand gates, dilated outward by ``grow_px``.
+
+    Flesh-coloured pixels inside this zone are forced to the green
+    sentinel (always-hand) -- no color recovery is attempted, because
+    the hand was demonstrably here and any "background colour" the
+    recovery would find is really just the hand at a different angle /
+    lighting.  The ``grow_px`` slider lets the user reach chunks like
+    the ulnar palm that the raw MP gate clips.
+
+    ``hand_mask_stack`` is the ``(n_samples, h, w)`` bool array built
+    during the sample pass.  Returns an ``(h, w)`` uint8 mask.
+    """
+    base = hand_mask_stack.any(axis=0).astype(np.uint8) * 255
+    if grow_px > 0:
+        r = int(grow_px)
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+        base = cv2.dilate(base, k)
+    return base
 
 
 def _refine_bg_color_based(
     bg_initial: np.ndarray,
     stack: np.ndarray,
-    region_mask: np.ndarray | None = None,
+    recover_mask: np.ndarray | None = None,
+    force_green_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Second BG-median pass that fixes pixels which came out
-    flesh-coloured in the first pass.
+    """Second BG-median pass that fixes flesh-coloured BG pixels.
 
-    For each flesh-in-BG pixel:
-      - Classify each of the ``N`` sample colours at that pixel as
-        skin / not-skin (universal YCrCb range).
-      - If at least one sample is not skin, replace the BG pixel
-        with the median of the non-skin samples.  This is the
-        "next most common colour in the BG / overlap grouping"
-        the user asked for: per-pixel, we recover the BG that
-        was peeking through whenever the hand wasn't there.
-      - If every sample is skin, paint the pixel bright green
-        ``[0, 255, 0]`` (BGR) and record it in ``always_hand_color``.
+    Two regions, two behaviours:
 
-    Returns ``(refined_bg, always_hand_color_mask)`` where the mask
-    is True at pixels that were entirely skin across the trial --
-    those need the green sentinel and force-include in the outline.
+    * ``force_green_mask`` (the palm zone -- grown MP gate).  Every
+      flesh-coloured pixel here is painted the green sentinel and
+      recorded as always-hand.  No color recovery: the hand was
+      demonstrably here, so any "background colour" recovery would
+      find is just the hand at a different angle / lighting.
+
+    * ``recover_mask`` (the forearm cone, minus the palm zone).  For
+      each flesh-coloured pixel, classify its ``N`` sample colours
+      skin / not-skin.  If at least one sample isn't skin, fill with
+      the median of the non-skin samples (recovering the BG that
+      peeked through between movements).  If every sample is skin,
+      paint green + record always-hand.
+
+    Returns ``(refined_bg, always_hand_color_mask)``.
     """
     bg_ycc = cv2.cvtColor(bg_initial, cv2.COLOR_BGR2YCrCb)
     flesh_in_bg = _is_skin_ycc(bg_ycc)
-    if region_mask is not None:
-        # Restrict refinement to the supplied region (e.g. a forearm
-        # cylinder).  Without this, distant skin-toned objects in the
-        # scene get rewritten too -- way too aggressive.
-        flesh_in_bg = flesh_in_bg & (region_mask > 0)
-    if not flesh_in_bg.any():
-        return bg_initial.copy(), np.zeros(bg_initial.shape[:2], dtype=bool)
-
-    flesh_ys, flesh_xs = np.where(flesh_in_bg)
-    n = int(flesh_ys.size)
-    N = stack.shape[0]
-
-    # (N, n, 3) per-pixel time series, only over flesh-in-BG pixels.
-    flesh_samples = stack[:, flesh_ys, flesh_xs, :]
-    # cvtColor wants a 2-D-image-shaped input; collapse to (N*n, 1, 3).
-    flesh_ycc = cv2.cvtColor(
-        flesh_samples.reshape(N * n, 1, 3),
-        cv2.COLOR_BGR2YCrCb,
-    ).reshape(N, n, 3)
-    is_skin = _is_skin_ycc(flesh_ycc)   # (N, n)
-
-    # Median over the non-skin samples per pixel.
-    m = np.broadcast_to(is_skin[..., None], flesh_samples.shape)
-    masked = np.ma.masked_array(flesh_samples, mask=m)
-    med = np.ma.median(masked, axis=0)               # (n, 3)
-    all_skin_per_pixel = np.ma.getmaskarray(med).any(axis=-1)   # (n,)
-
     refined = bg_initial.copy()
-    # 1. Non-skin median fills wherever it's defined.
-    nonskin_meds = np.ma.getdata(med).astype(np.uint8)
-    refined[flesh_ys, flesh_xs] = nonskin_meds
-    # 2. All-skin pixels overwritten with green sentinel.
+    always_hand = np.zeros(bg_initial.shape[:2], dtype=bool)
     green = np.array([0, 255, 0], dtype=np.uint8)
-    if all_skin_per_pixel.any():
-        gys = flesh_ys[all_skin_per_pixel]
-        gxs = flesh_xs[all_skin_per_pixel]
-        refined[gys, gxs] = green
-    always_hand_color = np.zeros(bg_initial.shape[:2], dtype=bool)
-    always_hand_color[flesh_ys[all_skin_per_pixel],
-                       flesh_xs[all_skin_per_pixel]] = True
-    return refined, always_hand_color
+
+    # ── 1. Force-green zone: flesh here is definitely hand ───────────
+    if force_green_mask is not None:
+        fg = flesh_in_bg & (force_green_mask > 0)
+        if fg.any():
+            refined[fg] = green
+            always_hand |= fg
+    else:
+        fg = np.zeros(bg_initial.shape[:2], dtype=bool)
+
+    # ── 2. Recover zone: per-pixel non-skin median ───────────────────
+    if recover_mask is not None:
+        rec = flesh_in_bg & (recover_mask > 0) & ~fg
+        if rec.any():
+            rec_ys, rec_xs = np.where(rec)
+            n = int(rec_ys.size)
+            N = stack.shape[0]
+            samples = stack[:, rec_ys, rec_xs, :]
+            samples_ycc = cv2.cvtColor(
+                samples.reshape(N * n, 1, 3),
+                cv2.COLOR_BGR2YCrCb,
+            ).reshape(N, n, 3)
+            is_skin = _is_skin_ycc(samples_ycc)   # (N, n)
+            m = np.broadcast_to(is_skin[..., None], samples.shape)
+            masked = np.ma.masked_array(samples, mask=m)
+            med = np.ma.median(masked, axis=0)               # (n, 3)
+            all_skin = np.ma.getmaskarray(med).any(axis=-1)   # (n,)
+            refined[rec_ys, rec_xs] = np.ma.getdata(med).astype(np.uint8)
+            if all_skin.any():
+                gys = rec_ys[all_skin]
+                gxs = rec_xs[all_skin]
+                refined[gys, gxs] = green
+                always_hand[gys, gxs] = True
+
+    return refined, always_hand
 
 
 def _bg_edge_map(bg_full: np.ndarray) -> np.ndarray:
@@ -937,6 +967,7 @@ def compute_background(
     max_samples: int = _DEFAULT_MAX_SAMPLES,
     downscale:   int = _DEFAULT_DOWNSCALE,
     dilation_px: int = 14,
+    palm_grow_px: int = 15,
 ) -> str:
     """Stage 2 of the preproc bake: produce background.npz.
 
@@ -1155,16 +1186,25 @@ def compute_background(
         bg_R = np.zeros_like(bg_L)
         mad_R = np.zeros_like(mad_L)
 
-    # Colour-based refinement inside a forearm cylinder.
-    cyl_L = _build_forearm_cylinder(mp_kpts_ref_L, frames_sampled,
-                                       out_w, out_h, downscale)
+    # ── Colour-based refinement: palm zone + forearm cone ───────────
+    # Palm zone (grown MP gate): flesh here is force-greened -- the
+    # hand was demonstrably present, so don't try to recover a "BG"
+    # colour.  ``palm_grow_px`` lets the user reach chunks like the
+    # ulnar palm that the raw gate clips.
+    # Forearm cone: flesh here gets per-pixel non-skin recovery, green
+    # only where every sample is skin.
+    palm_grow_down = max(0, int(palm_grow_px) // max(1, downscale))
+    palm_zone_L = _build_palm_zone(hand_mask_L, palm_grow_down)
+    cone_L = _build_forearm_cone(mp_kpts_ref_L, frames_sampled,
+                                    out_w, out_h, downscale)
     bg_L, always_hand_color_L_down = _refine_bg_color_based(
-        bg_L, stack_L, region_mask=cyl_L)
+        bg_L, stack_L, recover_mask=cone_L, force_green_mask=palm_zone_L)
     if is_stereo:
-        cyl_R = _build_forearm_cylinder(mp_kpts_ref_R, frames_sampled,
-                                           out_w, out_h, downscale)
+        palm_zone_R = _build_palm_zone(hand_mask_R, palm_grow_down)
+        cone_R = _build_forearm_cone(mp_kpts_ref_R, frames_sampled,
+                                        out_w, out_h, downscale)
         bg_R, always_hand_color_R_down = _refine_bg_color_based(
-            bg_R, stack_R, region_mask=cyl_R)
+            bg_R, stack_R, recover_mask=cone_R, force_green_mask=palm_zone_R)
     else:
         always_hand_color_R_down = None
 

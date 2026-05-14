@@ -413,14 +413,15 @@
     /**
      * Spawn a Stabilise or Background job and stream its progress into
      * ``statusEl``.  Shared by computeStable + computeBackground.
+     * ``extraBody`` merges into the POST body (e.g. palm_grow_px).
      */
-    async function _runPreprocJob(endpoint, statusElId) {
+    async function _runPreprocJob(endpoint, statusElId, extraBody = {}) {
         const statusEl = $(statusElId);
         try {
             const res = await api(`/api/preproc/${subjectId}/${endpoint}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ trial_idx: trialMeta.trial_idx }),
+                body: JSON.stringify({ trial_idx: trialMeta.trial_idx, ...extraBody }),
             });
             bgJobId = res.job_id;
             $('dot-background').classList.add('running');
@@ -468,7 +469,10 @@
             $('backgroundStatus').textContent = 'Run Stabilise first.';
             return;
         }
-        await _runPreprocJob('compute_background', 'backgroundStatus');
+        const palmSlider = $('palmGrowSlider');
+        const palmGrowPx = palmSlider ? parseInt(palmSlider.value, 10) : 15;
+        await _runPreprocJob('compute_background', 'backgroundStatus',
+                              { palm_grow_px: palmGrowPx });
     }
 
     /**
@@ -1220,6 +1224,15 @@
         // Background (background.npz), Hand Boundary (live, on demand).
         $('runStableBtn').addEventListener('click', computeStable);
         $('runBackgroundBtn').addEventListener('click', computeBackground);
+        // Palm-zone grow slider: just updates its label; the value is
+        // read when Compute Background is clicked (it's a bake param).
+        const _palmGrowSlider = $('palmGrowSlider');
+        const _palmGrowVal    = $('palmGrowVal');
+        if (_palmGrowSlider && _palmGrowVal) {
+            _palmGrowSlider.addEventListener('input', () => {
+                _palmGrowVal.textContent = _palmGrowSlider.value;
+            });
+        }
         const _fgDilateSlider = $('fgDilateSlider');
         const _fgDilateVal    = $('fgDilateVal');
         if (_fgDilateSlider && _fgDilateVal) {

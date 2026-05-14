@@ -188,7 +188,7 @@ def _spawn_preproc_job(
         allowed = ()           # no tunable params
     elif job_kind == "background":
         worker = compute_background
-        allowed = ("max_samples", "downscale", "dilation_px")
+        allowed = ("max_samples", "downscale", "dilation_px", "palm_grow_px")
     else:
         raise HTTPException(500, f"bad job_kind: {job_kind}")
 

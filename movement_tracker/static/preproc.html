@@ -206,6 +206,15 @@
                         and saves <strong>background.npz</strong>.
                         Cheap to re-run.  Requires stable.mp4.
                     </div>
+                    <div style="margin-top:8px;font-size:11px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <label style="color:var(--text-muted);">Palm zone grow (px)</label>
+                            <span id="palmGrowVal" style="color:var(--text);font-weight:bold;">15</span>
+                        </div>
+                        <input type="range" id="palmGrowSlider" min="0" max="80" step="1" value="15"
+                               title="Grows the MP hand region outward.  Flesh-coloured pixels inside the grown zone are forced to always-hand (green), instead of having a background colour recovered.  Raise this to capture chunks like the ulnar palm that the raw MP gate clips."
+                               style="width:100%;cursor:pointer;height:5px;">
+                    </div>
                     <button class="btn btn-sm btn-success" id="runBackgroundBtn" style="width:100%;margin-top:8px;" disabled>Compute Background</button>
                     <div id="backgroundStatus" class="pp-stat" style="margin-top:6px;"></div>
                     <div id="backgroundStats" class="pp-stat" style="margin-top:8px;"></div>
@@ -320,6 +329,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/preproc.js?v=28"></script>
+    <script src="/static/js/preproc.js?v=29"></script>
 </body>
 </html>
