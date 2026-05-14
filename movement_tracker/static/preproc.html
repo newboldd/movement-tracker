@@ -228,7 +228,7 @@
                                 <span id="skinLeniencyVal" style="color:var(--text);font-weight:bold;">1.00</span>
                             </div>
                             <input type="range" id="skinLeniencySlider" min="0.5" max="2" step="0.05" value="1"
-                                   title="Scales the YCrCb skin-color acceptance window.  >1 = more lenient (more pixels count as hand-colored), <1 = stricter.  Affects the color-based forearm refinement."
+                                   title="Scales the trial-specific skin Cr/Cb window (fit from a tight MP mask of this subject's hand).  >1 = more lenient (more pixels count as hand-colored), <1 = stricter.  Affects the color-based forearm refinement."
                                    style="width:100%;cursor:pointer;height:5px;">
                         </div>
                         <button class="btn btn-sm btn-success" id="runBackgroundBtn" style="width:100%;margin-top:8px;" disabled>Compute Background</button>
@@ -373,6 +373,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/preproc.js?v=38"></script>
+    <script src="/static/js/preproc.js?v=39"></script>
 </body>
 </html>

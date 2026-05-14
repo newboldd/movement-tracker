@@ -588,11 +588,73 @@
         outlineFetchTimer = setTimeout(fetchOutline, delay);
     }
 
+    /** Universal YCrCb skin box (mirrors _SKIN_* in background.py) --
+     *  the fallback when no trial-specific range can be fit. */
+    const _SKIN_UNIVERSAL = { crLo: 130, crHi: 175, cbLo: 80, cbHi: 130 };
+
+    /** BT.601 RGB -> (Cr, Cb).  Matches cv2.cvtColor(BGR2YCrCb). */
+    function _rgbToCrCb(r, g, b) {
+        const y = 0.299 * r + 0.587 * g + 0.114 * b;
+        return [(r - y) * 0.713 + 128, (b - y) * 0.564 + 128];
+    }
+
+    /**
+     * Trial-specific skin window from the current frame's MP keypoints
+     * -- the client-side echo of _fit_skin_range_cbcr.  Samples small
+     * patches at each keypoint in the half-res offscreen image,
+     * collects Cr/Cb, returns {crLo,crHi,cbLo,cbHi} from the [2,98]
+     * percentiles.  Null if too few samples (caller falls back to the
+     * universal box).
+     */
+    function _skinRangeFromKpts(imgData, cw, ch, drawSw, drawSh) {
+        if (!mpKeypoints) return null;
+        const isOD = (currentSide === 'OD');
+        const useRef = overlayMode !== 'off';
+        const arr = useRef
+            ? (isOD ? mpKeypoints.ref_OD : mpKeypoints.ref_OS)
+            : (isOD ? mpKeypoints.raw_OD : mpKeypoints.raw_OS);
+        const f = arr && currentFrame < arr.length ? arr[currentFrame] : null;
+        if (!f) return null;
+        const sx = cw / drawSw, sy = ch / drawSh;
+        const d = imgData.data;
+        const crs = [], cbs = [];
+        const R = 2;                               // patch half-size, px
+        for (let j = 0; j < 21; j++) {
+            if (!f[j] || f[j][0] == null || f[j][1] == null) continue;
+            const ox = Math.round(f[j][0] * sx);
+            const oy = Math.round(f[j][1] * sy);
+            for (let dy = -R; dy <= R; dy++) {
+                const yy = oy + dy;
+                if (yy < 0 || yy >= ch) continue;
+                for (let dx = -R; dx <= R; dx++) {
+                    const xx = ox + dx;
+                    if (xx < 0 || xx >= cw) continue;
+                    const i = (yy * cw + xx) * 4;
+                    const [cr, cb] = _rgbToCrCb(d[i], d[i + 1], d[i + 2]);
+                    crs.push(cr); cbs.push(cb);
+                }
+            }
+        }
+        if (crs.length < 50) return null;
+        const pct = (a, p) => {
+            const s = a.slice().sort((x, y) => x - y);
+            return s[Math.min(s.length - 1,
+                              Math.max(0, Math.round(p / 100 * (s.length - 1))))];
+        };
+        let crLo = pct(crs, 2), crHi = pct(crs, 98);
+        let cbLo = pct(cbs, 2), cbHi = pct(cbs, 98);
+        if (crHi - crLo < 2) { crLo -= 1; crHi += 1; }
+        if (cbHi - cbLo < 2) { cbLo -= 1; cbHi += 1; }
+        return { crLo, crHi, cbLo, cbHi };
+    }
+
     /**
      * Build (and cache) the live skin-color mask for the current
-     * frame at the current Skin-colour-leniency setting.  Classifies
-     * the displayed sub-rect with the same BT.601 YCrCb test the
-     * server's _is_skin_ycc uses, scaled by ``leniency``.
+     * frame at the current Skin-colour-leniency setting.  Uses a
+     * trial-specific Cr/Cb window fit from this frame's MP keypoints
+     * (echoing the server's _fit_skin_range_cbcr); falls back to the
+     * universal box when MP isn't available.  ``leniency`` scales the
+     * window's half-width around its center.
      *
      * Returns an offscreen <canvas> with magenta where skin, fully
      * transparent elsewhere -- or null if the source can't be read
@@ -622,16 +684,16 @@
             return null;          // video not ready / tainted -- skip
         }
         const d = img.data;
-        // Universal YCrCb skin window (mirrors _SKIN_* in background.py),
-        // half-width scaled by leniency around the centre.
-        const CR_LO = 130, CR_HI = 175, CB_LO = 80, CB_HI = 130;
-        const crC = (CR_LO + CR_HI) / 2, crH = (CR_HI - CR_LO) / 2 * leniency;
-        const cbC = (CB_LO + CB_HI) / 2, cbH = (CB_HI - CB_LO) / 2 * leniency;
+        // Trial-specific window from this frame's keypoints; universal
+        // box if MP unavailable.  Scale half-width by leniency.
+        const rng = _skinRangeFromKpts(img, cw, ch, drawSw, drawSh)
+                 || _SKIN_UNIVERSAL;
+        const crC = (rng.crLo + rng.crHi) / 2;
+        const crH = (rng.crHi - rng.crLo) / 2 * leniency;
+        const cbC = (rng.cbLo + rng.cbHi) / 2;
+        const cbH = (rng.cbHi - rng.cbLo) / 2 * leniency;
         for (let i = 0; i < d.length; i += 4) {
-            const r = d[i], g = d[i + 1], b = d[i + 2];
-            const y  = 0.299 * r + 0.587 * g + 0.114 * b;
-            const cr = (r - y) * 0.713 + 128;
-            const cb = (b - y) * 0.564 + 128;
+            const [cr, cb] = _rgbToCrCb(d[i], d[i + 1], d[i + 2]);
             if (cr >= crC - crH && cr <= crC + crH &&
                 cb >= cbC - cbH && cb <= cbC + cbH) {
                 d[i] = 255; d[i + 1] = 0; d[i + 2] = 255; d[i + 3] = 130;

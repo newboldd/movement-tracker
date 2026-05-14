@@ -462,29 +462,41 @@ def _build_kpt_hand_region(
     return canvas.astype(np.float32) / 255.0
 
 
-# Universal YCrCb skin range -- conservative enough to catch all
-# common ethnicities, tight enough to reject typical table / desk /
-# clothing colors.  Used by _refine_bg_color_based to identify
-# flesh-colored pixels in the BG median and per-sample.
+# Universal YCrCb skin range -- the FALLBACK used when no
+# trial-specific range could be fit (MP missing / too few skin
+# pixels).  Conservative enough to catch common skin tones, tight
+# enough to reject typical table / desk / clothing colors.  The
+# preferred path is _fit_skin_range_cbcr, which derives a window
+# from this trial's own hand pixels.
 _SKIN_CR_LO, _SKIN_CR_HI = 130, 175
 _SKIN_CB_LO, _SKIN_CB_HI = 80, 130
 
 
-def _is_skin_ycc(ycc: np.ndarray, leniency: float = 1.0) -> np.ndarray:
+def _is_skin_ycc(ycc: np.ndarray, leniency: float = 1.0,
+                 skin_range: tuple | None = None) -> np.ndarray:
     """Boolean mask of skin-colored pixels.  Input is a YCrCb image
     (any shape ending in 3), output is the same shape minus the last
     axis.
 
-    ``leniency`` scales the Cr/Cb acceptance window around its center:
-    1.0 = the universal range above, >1 widens it (more pixels count
-    as skin -- more lenient), <1 narrows it (stricter).
+    ``skin_range`` -- optional ``(cr_lo, cr_hi, cb_lo, cb_hi)`` window
+    fit from this trial's own hand pixels (see _fit_skin_range_cbcr).
+    When None, the universal ``_SKIN_*`` box is used.
+
+    ``leniency`` scales whichever window is in play around its
+    center: 1.0 = the window as-is, >1 widens it (more pixels count
+    as skin), <1 narrows it.
     """
     cr = ycc[..., 1]
     cb = ycc[..., 2]
-    cr_c = (_SKIN_CR_LO + _SKIN_CR_HI) * 0.5
-    cr_h = (_SKIN_CR_HI - _SKIN_CR_LO) * 0.5 * float(leniency)
-    cb_c = (_SKIN_CB_LO + _SKIN_CB_HI) * 0.5
-    cb_h = (_SKIN_CB_HI - _SKIN_CB_LO) * 0.5 * float(leniency)
+    if skin_range is not None:
+        cr_lo, cr_hi, cb_lo, cb_hi = skin_range
+    else:
+        cr_lo, cr_hi = _SKIN_CR_LO, _SKIN_CR_HI
+        cb_lo, cb_hi = _SKIN_CB_LO, _SKIN_CB_HI
+    cr_c = (cr_lo + cr_hi) * 0.5
+    cr_h = (cr_hi - cr_lo) * 0.5 * float(leniency)
+    cb_c = (cb_lo + cb_hi) * 0.5
+    cb_h = (cb_hi - cb_lo) * 0.5 * float(leniency)
     return ((cr >= cr_c - cr_h) & (cr <= cr_c + cr_h)
             & (cb >= cb_c - cb_h) & (cb <= cb_c + cb_h))
 
@@ -641,6 +653,7 @@ def _refine_bg_color_based(
     recover_mask: np.ndarray | None = None,
     force_green_mask: np.ndarray | None = None,
     skin_leniency: float = 1.0,
+    skin_range: tuple | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Second BG-median pass that fixes flesh-colored BG pixels.
 
@@ -662,7 +675,8 @@ def _refine_bg_color_based(
     Returns ``(refined_bg, always_hand_color_mask)``.
     """
     bg_ycc = cv2.cvtColor(bg_initial, cv2.COLOR_BGR2YCrCb)
-    flesh_in_bg = _is_skin_ycc(bg_ycc, leniency=skin_leniency)
+    flesh_in_bg = _is_skin_ycc(bg_ycc, leniency=skin_leniency,
+                                skin_range=skin_range)
     refined = bg_initial.copy()
     always_hand = np.zeros(bg_initial.shape[:2], dtype=bool)
     green = np.array([0, 255, 0], dtype=np.uint8)
@@ -688,7 +702,8 @@ def _refine_bg_color_based(
                 samples.reshape(N * n, 1, 3),
                 cv2.COLOR_BGR2YCrCb,
             ).reshape(N, n, 3)
-            is_skin = _is_skin_ycc(samples_ycc, leniency=skin_leniency)  # (N, n)
+            is_skin = _is_skin_ycc(samples_ycc, leniency=skin_leniency,
+                                    skin_range=skin_range)              # (N, n)
             m = np.broadcast_to(is_skin[..., None], samples.shape)
             masked = np.ma.masked_array(samples, mask=m)
             med = np.ma.median(masked, axis=0)               # (n, 3)
@@ -833,46 +848,37 @@ def _build_image_aware_hand_mask(
     return out
 
 
-def _fit_skin_model_cbcr(sampled_frames: np.ndarray,
-                          sampled_kpts: list[np.ndarray],
-                          patch_radius: int = 2) -> dict | None:
-    """Fit a 2-D Gaussian (Cb, Cr) skin-tone model from pixels near hand keypoints.
+def _fit_skin_range_cbcr(bgr_pixels: np.ndarray | None,
+                          pct_lo: float = 2.0, pct_hi: float = 98.0,
+                          min_count: int = 200) -> tuple | None:
+    """Trial-specific skin Cr/Cb window from high-confidence hand pixels.
 
-    Y (luminance) is dropped — skin chrominance is much more lighting-
-    invariant than its brightness, which lets the same model survive
-    cross-trial lighting changes.
+    ``bgr_pixels`` is an (M, 3) array of BGR pixels harvested from a
+    TIGHT (eroded) MP hand mask across the sampled frames -- pixels
+    we're confident are this subject's skin under this trial's
+    lighting.  Converts to YCrCb and returns
+    ``(cr_lo, cr_hi, cb_lo, cb_hi)`` from the [pct_lo, pct_hi]
+    percentiles -- robust to the odd non-skin pixel that crept into
+    the tight mask.  Returns None if fewer than ``min_count`` pixels
+    were collected (caller then falls back to the universal box).
 
-    Returns ``{'mean': (2,), 'cov_inv': (2,2)}`` or ``None`` if fewer
-    than 50 samples could be collected.
+    Y (luminance) is dropped: skin chrominance is far more
+    lighting-invariant than its brightness.
     """
-    cbcr_samples = []
-    n_frames = len(sampled_frames)
-    for i in range(n_frames):
-        kpts = sampled_kpts[i]
-        valid = ~np.isnan(kpts).any(axis=-1)
-        if not valid.any():
-            continue
-        ycc = cv2.cvtColor(sampled_frames[i], cv2.COLOR_BGR2YCrCb)
-        fh, fw = ycc.shape[:2]
-        for x, y in kpts[valid]:
-            xi, yi = int(round(float(x))), int(round(float(y)))
-            y0, y1 = max(0, yi - patch_radius), min(fh, yi + patch_radius + 1)
-            x0, x1 = max(0, xi - patch_radius), min(fw, xi + patch_radius + 1)
-            if y1 > y0 and x1 > x0:
-                cbcr_samples.append(ycc[y0:y1, x0:x1, 1:3].reshape(-1, 2))
-    if not cbcr_samples:
+    if bgr_pixels is None or len(bgr_pixels) < min_count:
         return None
-    samples = np.vstack(cbcr_samples).astype(np.float32)
-    if len(samples) < 50:
-        return None
-    mean = samples.mean(axis=0)
-    cov = np.cov(samples.T)
-    try:
-        cov_inv = np.linalg.inv(cov + np.eye(2, dtype=np.float64) * 1.0)
-    except np.linalg.LinAlgError:
-        return None
-    return {"mean": mean.astype(np.float32),
-            "cov_inv": cov_inv.astype(np.float32)}
+    px = np.asarray(bgr_pixels, dtype=np.uint8).reshape(-1, 1, 3)
+    ycc = cv2.cvtColor(px, cv2.COLOR_BGR2YCrCb).reshape(-1, 3)
+    cr = ycc[:, 1].astype(np.float32)
+    cb = ycc[:, 2].astype(np.float32)
+    cr_lo, cr_hi = np.percentile(cr, [pct_lo, pct_hi])
+    cb_lo, cb_hi = np.percentile(cb, [pct_lo, pct_hi])
+    # Never let the window collapse to zero width.
+    if cr_hi - cr_lo < 2.0:
+        cr_lo, cr_hi = cr_lo - 1.0, cr_hi + 1.0
+    if cb_hi - cb_lo < 2.0:
+        cb_lo, cb_hi = cb_lo - 1.0, cb_hi + 1.0
+    return (float(cr_lo), float(cr_hi), float(cb_lo), float(cb_hi))
 
 
 def _color_similarity(frame_bgr: np.ndarray, skin_model: dict,
@@ -1241,6 +1247,24 @@ def compute_background(
                    if is_stereo else None)
     _BG_MASK_STAMP_DOWN = max(2, int(dilation_px) // max(1, downscale))
     _BG_MASK_FOREARM_DOWN = max(0, 100 // max(1, downscale))
+    # Tight MP mask for the trial-specific skin-range fit: half the
+    # dilation stamp, no forearm extension, no feather, then eroded
+    # 1 px -- a conservative "definitely hand" core.  Its pixels feed
+    # _fit_skin_range_cbcr; harvested per frame into these lists.
+    _TIGHT_STAMP_DOWN = max(2, _BG_MASK_STAMP_DOWN // 2)
+    _TIGHT_ERODE = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    skin_px_L: list[np.ndarray] = []
+    skin_px_R: list[np.ndarray] = []
+
+    def _harvest_skin(warp_d, kpts_down, sink):
+        """Collect BGR pixels under a tight, eroded MP mask."""
+        tight = _build_kpt_hand_region(
+            kpts_down, out_w, out_h,
+            stamp_radius=_TIGHT_STAMP_DOWN, smooth_sigma=0.0,
+            extend_forearm_px=0)
+        tb = cv2.erode((tight > 0.5).astype(np.uint8), _TIGHT_ERODE)
+        if tb.any():
+            sink.append(warp_d[tb > 0])
 
     # ── Sample pass: sequential read of stable.mp4 ─────────────────
     # stable.mp4 is already warped, so we skip warpPerspective and
@@ -1281,6 +1305,7 @@ def compute_background(
                 stamp_radius=_BG_MASK_STAMP_DOWN, smooth_sigma=2.0,
                 extend_forearm_px=_BG_MASK_FOREARM_DOWN)
             hand_mask_L[s_idx] = region_L > 0.5
+            _harvest_skin(warp_L_d, kpts_L_down, skin_px_L)
 
         if is_stereo and warp_R is not None:
             if downscale > 1:
@@ -1297,6 +1322,7 @@ def compute_background(
                     stamp_radius=_BG_MASK_STAMP_DOWN, smooth_sigma=2.0,
                     extend_forearm_px=_BG_MASK_FOREARM_DOWN)
                 hand_mask_R[s_idx] = region_R > 0.5
+                _harvest_skin(warp_R_d, kpts_R_down, skin_px_R)
 
         if progress_callback is not None:
             try:
@@ -1340,6 +1366,19 @@ def compute_background(
         bg_R = np.zeros_like(bg_L)
         mad_R = np.zeros_like(mad_L)
 
+    # ── Trial-specific skin range from the tight-MP-mask pixels ─────
+    # Derived from this subject's own hand under this trial's
+    # lighting; falls back to the universal box when too few pixels
+    # were harvested (MP missing etc.).
+    skin_px_L_all = np.vstack(skin_px_L) if skin_px_L else None
+    skin_px_R_all = np.vstack(skin_px_R) if skin_px_R else None
+    skin_range_L = _fit_skin_range_cbcr(skin_px_L_all)
+    skin_range_R = (_fit_skin_range_cbcr(skin_px_R_all)
+                    if is_stereo else None)
+    logger.info(
+        f"BG skin range: L={skin_range_L} (n={0 if skin_px_L_all is None else len(skin_px_L_all)})"
+        + (f", R={skin_range_R}" if is_stereo else ""))
+
     # ── Color-based refinement: palm zone + forearm cone ───────────
     # Palm zone (grown MP gate): flesh here is force-greened -- the
     # hand was demonstrably present, so don't try to recover a "BG"
@@ -1353,14 +1392,14 @@ def compute_background(
                                     out_w, out_h, downscale)
     bg_L, always_hand_color_L_down = _refine_bg_color_based(
         bg_L, stack_L, recover_mask=cone_L, force_green_mask=palm_zone_L,
-        skin_leniency=skin_leniency)
+        skin_leniency=skin_leniency, skin_range=skin_range_L)
     if is_stereo:
         palm_zone_R = _build_palm_zone(hand_mask_R, palm_grow_down)
         cone_R = _build_forearm_cone(mp_kpts_ref_R, frames_sampled,
                                         out_w, out_h, downscale)
         bg_R, always_hand_color_R_down = _refine_bg_color_based(
             bg_R, stack_R, recover_mask=cone_R, force_green_mask=palm_zone_R,
-            skin_leniency=skin_leniency)
+            skin_leniency=skin_leniency, skin_range=skin_range_R)
     else:
         always_hand_color_R_down = None
 
@@ -1375,34 +1414,8 @@ def compute_background(
         del hand_mask_R
 
     if progress_callback is not None:
-        try: progress_callback(70.0)
+        try: progress_callback(75.0)
         except Exception: pass
-
-    # ── Skin-model fit from sample stack ─────────────────────────────
-    skin_model_L: dict | None = None
-    skin_model_R: dict | None = None
-    try:
-        def _kpts_at_downscale(kpts_ref_arr):
-            if kpts_ref_arr is None:
-                return []
-            return [kpts_ref_arr[fi] / max(1, downscale)
-                    for fi in frames_sampled]
-
-        if mp_kpts_ref_L is not None:
-            skin_model_L = _fit_skin_model_cbcr(
-                stack_L, _kpts_at_downscale(mp_kpts_ref_L))
-        if is_stereo and mp_kpts_ref_R is not None:
-            skin_model_R = _fit_skin_model_cbcr(
-                stack_R, _kpts_at_downscale(mp_kpts_ref_R))
-        n_lm_L = (int(np.sum(~np.isnan(mp_kpts_ref_L[:, 0, 0])))
-                  if mp_kpts_ref_L is not None else 0)
-        logger.info(
-            f"BG: {n_lm_L}/{n_frames} frames with valid OS keypoints; "
-            f"skin model: L={'yes' if skin_model_L else 'no'}, "
-            f"R={'yes' if skin_model_R else 'no'}")
-    except Exception as e:
-        logger.warning(f"Skin-model fit failed: {e}")
-        skin_model_L = skin_model_R = None
 
     try: del stack_L
     except NameError: pass
@@ -1433,12 +1446,12 @@ def compute_background(
         save_kwargs["mp_kpts_ref_L"] = mp_kpts_ref_L.astype(np.float32)
     if mp_kpts_ref_R is not None:
         save_kwargs["mp_kpts_ref_R"] = mp_kpts_ref_R.astype(np.float32)
-    if skin_model_L is not None:
-        save_kwargs["skin_model_L_mean"]    = skin_model_L["mean"]
-        save_kwargs["skin_model_L_cov_inv"] = skin_model_L["cov_inv"]
-    if skin_model_R is not None:
-        save_kwargs["skin_model_R_mean"]    = skin_model_R["mean"]
-        save_kwargs["skin_model_R_cov_inv"] = skin_model_R["cov_inv"]
+    # Trial-specific skin Cr/Cb windows -- (cr_lo, cr_hi, cb_lo,
+    # cb_hi), or absent when the universal box was used as fallback.
+    if skin_range_L is not None:
+        save_kwargs["skin_range_L"] = np.asarray(skin_range_L, dtype=np.float32)
+    if skin_range_R is not None:
+        save_kwargs["skin_range_R"] = np.asarray(skin_range_R, dtype=np.float32)
     if always_hand_L_down is not None:
         save_kwargs["always_hand_L_down"] = always_hand_L_down
     if always_hand_R_down is not None:
