@@ -237,7 +237,7 @@
                                 <span id="palmGrowVal" style="color:var(--text);font-weight:bold;">15</span>
                             </div>
                             <input type="range" id="palmGrowSlider" min="0" max="80" step="1" value="15"
-                                   title="Grows the MP hand region outward to set the hard hand boundary.  Flesh-colored pixels inside the grown zone are forced to always-hand (green), instead of having a background color recovered.  Raise this to capture chunks like the ulnar palm that the raw MP gate clips."
+                                   title="Grows the MP hand region outward to set the hard hand boundary.  Flesh-colored pixels inside the grown zone are forced to always-hand (green), instead of having a background color recovered.  Raise this to capture chunks like the ulnar palm that the raw MP gate clips.  Disabled when Skin color leniency is 0."
                                    style="width:100%;cursor:pointer;height:5px;">
                         </div>
                         <button class="btn btn-sm btn-success" id="runBackgroundBtn" style="width:100%;margin-top:8px;" disabled>Compute Background</button>
@@ -375,6 +375,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/preproc.js?v=45"></script>
+    <script src="/static/js/preproc.js?v=46"></script>
 </body>
 </html>

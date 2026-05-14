@@ -1125,12 +1125,14 @@ def compute_background(
         (negative) or dilates (positive) the MP region that skin
         pixels are SAMPLED from for the trial skin-range fit.
         Negative lets the sampling region pull in tighter than the
-        raw skeleton.  No effect when ``skin_leniency == 0``.
+        raw skeleton.
 
     ``skin_leniency`` scales the trial skin Cr/Cb window for the
     color refinement; ``skin_leniency == 0`` skips that refinement
-    ("stump removal") entirely -- the forearm cone is left as the
-    plain masked median and only the palm zone is force-greened.
+    entirely -- nothing is force-greened and the background is just
+    the plain masked temporal median.  Both ``palm_grow_px`` and
+    ``color_dilate_px`` feed only the refinement, so they have no
+    effect (and are dimmed in the UI) when ``skin_leniency == 0``.
 
     Re-runnable cheaply (~30 s for a typical trial) so the user can
     iterate without re-running the heavy Stabilize step.
@@ -1403,16 +1405,12 @@ def compute_background(
     # Forearm cone: flesh here gets per-pixel non-skin recovery, green
     # only where every sample is skin.
     #
-    # ``skin_leniency == 0`` skips the color-based forearm refinement
-    # ("stump removal") entirely.  The palm zone is still honored, but
-    # unconditionally -- every pixel in the grown MP gate is painted
-    # the green sentinel (without skin classification we can't tell
-    # flesh from background there, and the hand was demonstrably in
-    # that zone).  "MP dilate (color sample)" has no effect in this
-    # mode and is dimmed in the UI.
-    palm_grow_down = max(0, int(palm_grow_px) // max(1, downscale))
-    _GREEN = np.array([0, 255, 0], dtype=np.uint8)
+    # ``skin_leniency == 0`` skips the color-based refinement
+    # entirely: nothing is force-greened, the background is just the
+    # plain masked temporal median.  Both MP-dilate knobs feed only
+    # this refinement, so they're dimmed in the UI in that mode.
     if skin_leniency > 0:
+        palm_grow_down = max(0, int(palm_grow_px) // max(1, downscale))
         # Trial-specific skin range from the tight-MP-mask pixels --
         # this subject's own hand under this trial's lighting; falls
         # back to the universal box when too few pixels were harvested.
@@ -1441,17 +1439,11 @@ def compute_background(
         else:
             always_hand_color_R_down = None
     else:
-        logger.info("BG skin_leniency=0: skipping color-based forearm "
-                    "refinement; palm zone force-greened unconditionally")
-        palm_zone_L = _build_palm_zone(hand_mask_L, palm_grow_down)
-        always_hand_color_L_down = palm_zone_L > 0
-        bg_L[always_hand_color_L_down] = _GREEN
-        if is_stereo:
-            palm_zone_R = _build_palm_zone(hand_mask_R, palm_grow_down)
-            always_hand_color_R_down = palm_zone_R > 0
-            bg_R[always_hand_color_R_down] = _GREEN
-        else:
-            always_hand_color_R_down = None
+        logger.info("BG skin_leniency=0: skipping color-based refinement "
+                    "entirely; nothing force-greened")
+        always_hand_color_L_down = np.zeros((out_h, out_w), dtype=bool)
+        always_hand_color_R_down = (np.zeros((out_h, out_w), dtype=bool)
+                                    if is_stereo else None)
 
     always_hand_L_down = hand_mask_L.all(axis=0) | always_hand_color_L_down
     if hand_mask_R is not None:
