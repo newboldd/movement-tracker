@@ -69,7 +69,7 @@
     }
     let showOutline = true;     // checkbox: show live-fetched hand boundary
     let showFgFill = false;     // checkbox: also fetch + paint JET heatmap
-    let fgFillOpacity = 0.5;    // 0..1, controlled by slider next to checkbox
+    const fgFillOpacity = 1.0;  // JET foreground fill always fully opaque
     // Transient previews: shown only while the relevant slider is being
     // dragged, then auto-hidden a short moment after the last input.
     // Each flash also switches the viewport to the view that preview
@@ -1930,17 +1930,6 @@
                 render();
             }
         });
-        // Opacity slider: no refetch, just a re-render with the new
-        // globalAlpha.  The image bytes don't change.
-        const _opacitySlider = $('fgOpacitySlider');
-        const _opacityVal    = $('fgOpacityVal');
-        if (_opacitySlider && _opacityVal) {
-            _opacitySlider.addEventListener('input', () => {
-                fgFillOpacity = parseInt(_opacitySlider.value, 10) / 100;
-                _opacityVal.textContent = fgFillOpacity.toFixed(2);
-                try { render(); } catch (_e) {}
-            });
-        }
         // Plot click + drag scrubs frames.  Pointer-x is mapped from
         // the canvas's pixel-padding to a frame index using the same
         // ``pad.l`` margin the plot uses.
