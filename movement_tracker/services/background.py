@@ -1926,7 +1926,13 @@ def compute_outline_frame(
         # show as motion when the hand crosses them.  Float for the
         # subtraction, clipped back to uint8 [0, 255] afterwards.
         motion_raw = np.abs(stable_side.astype(np.int16) - bg_full.astype(np.int16))
-        motion_f = motion_raw.max(axis=-1).astype(np.float32)
+        # ``motion_unpen`` is the raw |frame-BG| score; ``motion`` has
+        # the bg-edge penalty subtracted.  Both are kept: the penalty
+        # avoids edge-bleed false-positives, but it also suppresses real
+        # hand (e.g. a fingertip) crossing an edge -- step 5b uses the
+        # un-penalized score to recover those.
+        motion_unpen = motion_raw.max(axis=-1).astype(np.float32)
+        motion_f = motion_unpen.copy()
         if bg_edge is not None:
             motion_f = motion_f - _BG_EDGE_PENALTY * bg_edge
         motion = np.clip(motion_f, 0.0, 255.0).astype(np.uint8)
@@ -1976,14 +1982,21 @@ def compute_outline_frame(
         r = max(1, int(close_radius_px))
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-        # 5b. Background-edge retraction.  Even with the per-pixel
-        # bg-edge penalty, the mask can still grow a thin |frame-BG|
-        # bleed band that hugs a strong static edge -- and then the
-        # outline locks onto that edge.  Inside the dilated bg-edge
-        # band, replace the mask with its morphological opening: a thin
-        # band (narrower than 2 * _BG_EDGE_OPEN_RADIUS) is wiped, while
-        # a solid hand region crossing the edge -- and any always-hand
-        # pixel -- survives.  Outside the band the mask is untouched.
+        # 5b. Background-edge correction.  A strong static edge cuts
+        # both ways: the per-pixel bg-edge penalty can leave a thin
+        # |frame-BG| bleed band hugging the edge (false growth), and it
+        # can also suppress a real fingertip crossing the edge (false
+        # clipping).  This step does both:
+        #   - RETRACT: inside the dilated bg-edge band, drop mask pixels
+        #     that don't survive a morphological open -- thin bleed
+        #     bands (narrower than 2 * _BG_EDGE_OPEN_RADIUS) go away.
+        #   - GROW: take the UN-penalized detection's solid blobs
+        #     outside the band (real hand the penalty didn't suppress,
+        #     incl. a fingertip past the edge) and bridge them to the
+        #     hand across the band with a close -- so a clipped
+        #     fingertip is filled back in.
+        # always-hand pixels are kept throughout; outside the band the
+        # mask is untouched.
         if bg_edge is not None and _BG_EDGE_OPEN_RADIUS > 0:
             edge_band = (bg_edge > _BG_EDGE_BAND_THRESH).astype(np.uint8)
             if edge_band.any():
@@ -1992,14 +2005,40 @@ def compute_outline_frame(
                     cv2.getStructuringElement(
                         cv2.MORPH_ELLIPSE,
                         (2 * _BG_EDGE_BAND_DILATE + 1,) * 2))
+                in_band = edge_band > 0
                 eo = _BG_EDGE_OPEN_RADIUS
                 eo_kernel = cv2.getStructuringElement(
                     cv2.MORPH_ELLIPSE, (2 * eo + 1, 2 * eo + 1))
+
+                # RETRACT: drop thin bleed inside the band.
                 opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, eo_kernel)
-                keep = (edge_band == 0) | (opened > 0)
+                retracted = binary.copy()
+                retracted[in_band & (opened == 0)] = 0
+
+                # GROW: solid un-penalized detections outside the band
+                # (the part of a clipped fingertip past the edge, plus
+                # the hand body) -- thin bleed is excluded by ``& ~band``
+                # and by the open.
+                unpen = (((motion_unpen > thresh) & (gate > 0))
+                         .astype(np.uint8) * 255)
+                unpen[in_band] = 0
+                detect_solid = cv2.morphologyEx(unpen, cv2.MORPH_OPEN, eo_kernel)
+                seed = cv2.bitwise_or(retracted, detect_solid)
+                # Bridge hand <-> fingertip blob across the band with a
+                # close whose kernel spans the band; only the new pixels
+                # that land inside the band are added back.
+                br = _BG_EDGE_BAND_DILATE + eo
+                bridge_k = cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE, (2 * br + 1, 2 * br + 1))
+                bridged = cv2.morphologyEx(seed, cv2.MORPH_CLOSE, bridge_k)
+                grow = cv2.bitwise_and(
+                    bridged, edge_band.astype(np.uint8) * 255)
+                binary = cv2.bitwise_or(seed, grow)
+
                 if always_hand is not None:
-                    keep = keep | (always_hand & (gate > 0))
-                binary = np.where(keep, binary, 0).astype(np.uint8)
+                    binary[always_hand & (gate > 0)] = 255
+                # Never spill outside the dilated MP gate.
+                binary[gate == 0] = 0
         # 6. Morphological open -- clips thin strands / webs.  Erode
         # then dilate by the same disk: anything narrower than
         # 2 * open_radius_px disappears, fingertips (much wider)
