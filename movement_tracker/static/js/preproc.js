@@ -483,11 +483,19 @@
         const base = `/api/preproc/${subjectId}/trial/${trialMeta.trial_idx}`;
         const t = Date.now();   // bust HTTP cache after recompute
         $('ovBg').disabled = true;
+        // Re-render once the thumbnail finishes loading -- the canvas
+        // 'bg' overlay draws straight from this <img>, so if the user
+        // (or a slider flash) switches to the Background view before it
+        // decodes, the canvas would otherwise stay blank.
         $('bgThumbOS').addEventListener('load', () => {
             $('ovBg').disabled = false;
+            try { render(); } catch (_e) {}
         }, { once: true });
         $('bgThumbOS').src = `${base}/background_image?side=OS&kind=bg&_=${t}`;
         if (backgroundData.is_stereo) {
+            $('bgThumbOD').addEventListener('load', () => {
+                try { render(); } catch (_e) {}
+            }, { once: true });
             $('bgThumbOD').src = `${base}/background_image?side=OD&kind=bg&_=${t}`;
             $('bgThumbOD').style.display = '';
         } else {
