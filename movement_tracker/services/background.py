@@ -76,6 +76,56 @@ import atexit as _atexit
 _atexit.register(_kill_live_ffmpegs)
 
 
+def _kill_orphan_ffmpegs_for_dir(preproc_dir: Path) -> int:
+    """Kill any ffmpeg process whose command line writes into
+    ``preproc_dir``.
+
+    Called at the start of every Stabilise / Foreground run so that
+    even when a previous bake was hard-killed (SIGKILL, OOM, panic)
+    and atexit didn't fire, the new bake doesn't race against a
+    surviving encoder writing to the same mp4.  Returns the number of
+    processes killed; logs a warning if any were found.
+    """
+    if os.name == "nt":
+        return 0    # ps/SIGKILL path is POSIX-only; fine for our use case
+    target = str(preproc_dir.resolve())
+    try:
+        out = subprocess.run(
+            ["ps", "-axo", "pid=,command="],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except Exception:
+        return 0
+    killed = 0
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if "ffmpeg" not in line:
+            continue
+        if target not in line:
+            continue
+        try:
+            pid_str, _ = line.split(None, 1)
+            pid = int(pid_str)
+        except (ValueError, IndexError):
+            continue
+        # Don't kill ourselves -- we just registered new ffmpegs in
+        # _LIVE_FFMPEG_PROCS, so leave those alone.
+        if any(p.pid == pid for p in _LIVE_FFMPEG_PROCS):
+            continue
+        try:
+            os.kill(pid, 9)
+            killed += 1
+        except Exception:
+            pass
+    if killed:
+        logger.warning(
+            f"killed {killed} orphan ffmpeg(s) writing to {target} "
+            "before starting new bake")
+    return killed
+
+
 def _open_ffmpeg_pipe(output_path: str, width: int, height: int,
                       fps: float, pix_fmt_in: str = "bgr24") -> subprocess.Popen:
     """Open an ffmpeg subprocess that consumes raw frames on stdin and
@@ -915,6 +965,9 @@ def compute_stable(
     out_dir = _preproc_dir(subject_name, stem)
     out_dir.mkdir(parents=True, exist_ok=True)
     stable_path = _stable_path(subject_name, stem)
+    # Wipe any orphan ffmpeg from a previous hard-killed bake before
+    # opening our own pipes to the same files.
+    _kill_orphan_ffmpegs_for_dir(out_dir)
 
     cap2 = cv2.VideoCapture(video_path)
     if not cap2.isOpened():
@@ -1132,6 +1185,9 @@ def compute_foreground(
 
     fg_path = _fg_path(subject_name, stem)
     outline_path = _outline_path(subject_name, stem)
+    # Wipe any orphan ffmpeg from a previous hard-killed bake before
+    # opening our own pipes to the same files.
+    _kill_orphan_ffmpegs_for_dir(_preproc_dir(subject_name, stem))
     fg_proc      = _open_ffmpeg_pipe(str(fg_path),      full_w_total, h_full, fps, "bgr24")
     outline_proc = _open_ffmpeg_pipe(str(outline_path), full_w_total, h_full, fps, "bgr24")
 
