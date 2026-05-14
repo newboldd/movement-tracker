@@ -805,7 +805,10 @@
             // 'seeked'/'loadedmetadata' will re-render shortly.
             const vid = stableVideoEl;
             if (vid && vid.readyState >= 1 && vid.videoWidth > 0) {
-                const isStereo = backgroundData.is_stereo;
+                // Use the module-level isStereo (set from the live
+                // video's aspect ratio).  backgroundData.is_stereo is
+                // absent until Background runs, so relying on it left
+                // stable.mp4 drawn full-width with no OS/OD crop.
                 const fullW = vid.videoWidth, fullH = vid.videoHeight;
                 const half = isStereo ? Math.floor(fullW / 2) : fullW;
                 const isOD = (currentSide === 'OD');

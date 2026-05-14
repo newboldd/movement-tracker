@@ -324,6 +324,7 @@ def get_background(subject_id: int, trial_idx: int) -> dict:
     """
     from ..services.background import (
         load_background, summarise_background, stable_mp4_path)
+    from ..services.camera_motion import load_camera_trajectory
 
     name = _subject_name(subject_id)
     trials = build_trial_map(name)
@@ -333,10 +334,16 @@ def get_background(subject_id: int, trial_idx: int) -> dict:
     stable_exists = stable_mp4_path(name, trial_stem) is not None
     bg = load_background(name, trial_stem)
     if bg is None:
+        # background.npz not built yet -- still report is_stereo (from
+        # the trajectory) so the UI can crop a stabilized-only overlay
+        # to the correct OS/OD half.
+        traj = load_camera_trajectory(name, trial_stem)
+        is_stereo = bool(traj["is_stereo"]) if traj is not None else None
         return {
             "available": False,
             "trial_stem": trial_stem,
             "stable_mp4_exists": stable_exists,
+            "is_stereo": is_stereo,
         }
     summary = summarise_background(name, trial_stem, bg)
     summary["available"] = True
