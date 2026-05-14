@@ -808,14 +808,14 @@ def compute_background(
 
     stable_proc = _open_ffmpeg_pipe(str(stable_path), full_w_total, h_full, fps, "bgr24")
     fg_proc     = _open_ffmpeg_pipe(str(fg_path),     full_w_total, h_full, fps, "bgr24")
-    # Keypoint-only hand mask + contour outline.  When MP data is
-    # genuinely usable we bake a tight kpt-gated mask; otherwise we
-    # fall back to writing the foreground mask into hand.mp4 so the
-    # 'Hand isolated' view shows SOMETHING useful rather than going
-    # totally black.
+    # Hand mask is computed per-frame to drive the outline but never
+    # written to disk -- the outline carries all the useful information
+    # and is much cheaper.  Any stale hand.mp4 from a previous bake is
+    # deleted so it doesn't get served by accident.
     hand_path = _hand_path(subject_name, stem)
+    try: hand_path.unlink()
+    except FileNotFoundError: pass
     outline_path = _outline_path(subject_name, stem)
-    hand_proc    = _open_ffmpeg_pipe(str(hand_path),    full_w_total, h_full, fps, "bgr24")
     outline_proc = _open_ffmpeg_pipe(str(outline_path), full_w_total, h_full, fps, "bgr24")
     # Sigma for the keypoint Gaussian on hand.mp4 — wider than the
     # one inside _build_enhanced_fg_mask so the smooth blob reliably
@@ -897,7 +897,6 @@ def compute_background(
             # 1-pixel dilation so the line is visible on a 1080p canvas.
             outline_L = cv2.dilate(outline_L, np.ones((2, 2), np.uint8),
                                     iterations=1)
-            hand_L_bgr    = np.stack([hand_L_u8, hand_L_u8, hand_L_u8], axis=-1)
             outline_L_bgr = np.stack([outline_L, outline_L, outline_L], axis=-1)
 
             if is_stereo and od_img is not None:
@@ -922,22 +921,18 @@ def compute_background(
                 outline_R = cv2.Canny(binary_R, 50, 150)
                 outline_R = cv2.dilate(outline_R, np.ones((2, 2), np.uint8),
                                         iterations=1)
-                hand_R_bgr    = np.stack([hand_R_u8, hand_R_u8, hand_R_u8], axis=-1)
                 outline_R_bgr = np.stack([outline_R, outline_R, outline_R], axis=-1)
 
                 stable_frame  = np.concatenate([warp_L,        warp_R],        axis=1)
                 fg_frame      = np.concatenate([fg_L_bgr,      fg_R_bgr],      axis=1)
-                hand_frame    = np.concatenate([hand_L_bgr,    hand_R_bgr],    axis=1)
                 outline_frame = np.concatenate([outline_L_bgr, outline_R_bgr], axis=1)
             else:
                 stable_frame  = warp_L
                 fg_frame      = fg_L_bgr
-                hand_frame    = hand_L_bgr
                 outline_frame = outline_L_bgr
 
             stable_proc.stdin.write(np.ascontiguousarray(stable_frame,  dtype=np.uint8).tobytes())
             fg_proc.stdin.write(    np.ascontiguousarray(fg_frame,      dtype=np.uint8).tobytes())
-            hand_proc.stdin.write(  np.ascontiguousarray(hand_frame,    dtype=np.uint8).tobytes())
             outline_proc.stdin.write(np.ascontiguousarray(outline_frame, dtype=np.uint8).tobytes())
             frames_written += 1
 
@@ -950,7 +945,7 @@ def compute_background(
     finally:
         cap2.release()
         for proc, name in ((stable_proc, "stable"), (fg_proc, "fg"),
-                            (hand_proc, "hand"), (outline_proc, "outline")):
+                            (outline_proc, "outline")):
             try: proc.stdin.close()
             except Exception: pass
             try:
@@ -1033,7 +1028,6 @@ def summarise_background(subject_name: str, trial_stem: str, bg: dict) -> dict:
     h, w = bg_L.shape[:2]
     sp = _stable_path(subject_name, trial_stem)
     fp = _fg_path(subject_name, trial_stem)
-    hp = _hand_path(subject_name, trial_stem)
     op = _outline_path(subject_name, trial_stem)
     return {
         "n_samples_used": int(bg["frames_sampled"].size),
@@ -1053,12 +1047,7 @@ def summarise_background(subject_name: str, trial_stem: str, bg: dict) -> dict:
         "stable_mp4_size_mb": (sp.stat().st_size / 1e6) if sp.exists() else 0.0,
         "fg_mp4_exists":      fp.exists(),
         "fg_mp4_size_mb":     (fp.stat().st_size / 1e6) if fp.exists() else 0.0,
-        "hand_mp4_exists":    hp.exists(),
         "outline_mp4_exists": op.exists(),
-        # Roughly indicates whether hand.mp4 is kpt-gated or motion-fallback,
-        # inferred from the variance of the mask — a near-uniform fg-fallback
-        # has higher variance across the trial than a sparse kpt blob.
-        # (Cheap inference; precise info lives in the job log.)
     }
 
 
@@ -1071,11 +1060,6 @@ def stable_mp4_path(subject_name: str, trial_stem: str) -> Path | None:
 
 def fg_mp4_path(subject_name: str, trial_stem: str) -> Path | None:
     p = _fg_path(subject_name, trial_stem)
-    return p if p.exists() else None
-
-
-def hand_mp4_path(subject_name: str, trial_stem: str) -> Path | None:
-    p = _hand_path(subject_name, trial_stem)
     return p if p.exists() else None
 
 

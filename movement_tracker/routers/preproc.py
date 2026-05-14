@@ -316,23 +316,6 @@ def get_fg_video(subject_id: int, trial_idx: int):
     return FileResponse(str(p), media_type="video/mp4")
 
 
-@router.get("/{subject_id}/trial/{trial_idx}/hand_video")
-def get_hand_video(subject_id: int, trial_idx: int):
-    """Serve the strictly-MP-keypoint-gated hand mask mp4.  Bright =
-    near a MediaPipe hand landmark.  Used by the 'Hand isolated'
-    canvas composite so distant motion can never light up."""
-    from ..services.background import hand_mp4_path
-    name = _subject_name(subject_id)
-    trials = build_trial_map(name)
-    if trial_idx < 0 or trial_idx >= len(trials):
-        raise HTTPException(400, f"trial_idx out of range")
-    trial_stem = trials[trial_idx]["trial_name"]
-    p = hand_mp4_path(name, trial_stem)
-    if p is None:
-        raise HTTPException(404, "no hand.mp4 — run Compute Stable + Mask")
-    return FileResponse(str(p), media_type="video/mp4")
-
-
 @router.get("/{subject_id}/trial/{trial_idx}/outline_video")
 def get_outline_video(subject_id: int, trial_idx: int):
     """Serve the per-frame contour of the hand mask (Canny edges,

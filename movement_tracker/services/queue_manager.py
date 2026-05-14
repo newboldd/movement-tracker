@@ -733,9 +733,9 @@ class QueueManager:
 
                     elif job_type == "preproc":
                         # Per-trial preproc: camera trajectory followed by
-                        # background + stable.mp4 + fg.mp4 + hand.mp4 +
-                        # outline.mp4 bake.  Same one-job-many-trials
-                        # batching pattern as the hrnet branch above.
+                        # background + stable.mp4 + fg.mp4 + outline.mp4
+                        # bake.  Same one-job-many-trials batching pattern
+                        # as the hrnet branch above.
                         from ..services.camera_motion import compute_camera_trajectory
                         from ..services.background import compute_background
                         from ..services.jobs import registry as job_registry

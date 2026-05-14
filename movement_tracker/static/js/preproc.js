@@ -38,10 +38,9 @@
     let backgroundData = null;
     let bgJobId = null;
     let bgEvtSource = null;
-    let overlayMode = 'off';    // 'off' | 'stable' | 'bg' | 'fg' | 'isolated'
+    let overlayMode = 'off';    // 'off' | 'stable' | 'bg' | 'fg'
     let stableVideoEl = null;   // hidden <video> tied to stable.mp4
     let fgVideoEl = null;       // hidden <video> tied to fg.mp4
-    let handVideoEl = null;     // hidden <video> tied to hand.mp4 (kpt-only mask)
     let outlineVideoEl = null;  // hidden <video> tied to outline.mp4 (contour)
     let showOutline = false;    // checkbox: overlay segmentation outline on canvas
     // MP keypoints for the current trial — used to draw the dilated-
@@ -51,7 +50,7 @@
     //                     Used when the canvas shows the live video.
     //   ref_OS / ref_OD : same keypoints warped into stable.mp4 ref
     //                     coords via the saved trajectory.  Used for
-    //                     stable / fg / bg / isolated overlays.
+    //                     stable / fg / bg overlays.
     let mpKeypoints = null;     // { raw_OS, raw_OD, ref_OS, ref_OD, n_frames }
     // MediaPipe finger chain joint indices (same convention as the
     // service module).
@@ -277,7 +276,6 @@
         // Reset cached overlay videos so any pending overlay redraw won't use stale data.
         if (stableVideoEl)  { stableVideoEl.removeAttribute('src');  stableVideoEl.load(); }
         if (fgVideoEl)      { fgVideoEl.removeAttribute('src');      fgVideoEl.load(); }
-        if (handVideoEl)    { handVideoEl.removeAttribute('src');    handVideoEl.load(); }
         if (outlineVideoEl) { outlineVideoEl.removeAttribute('src'); outlineVideoEl.load(); }
         $('bgThumbOS').src = '';
         $('bgThumbOD').src = '';
@@ -304,7 +302,6 @@
                 if ($('ovStable'))     $('ovStable').disabled = true;
                 if ($('ovBg'))         $('ovBg').disabled = true;
                 if ($('ovFg'))         $('ovFg').disabled = true;
-                if ($('ovIsolated'))   $('ovIsolated').disabled = true;
                 if ($('cbShowOutline')) $('cbShowOutline').disabled = true;
             }
         } catch (e) {
@@ -370,28 +367,15 @@
         };
         if (!stableVideoEl)  stableVideoEl  = _makeVideo();
         if (!fgVideoEl)      fgVideoEl      = _makeVideo();
-        if (!handVideoEl)    handVideoEl    = _makeVideo();
         if (!outlineVideoEl) outlineVideoEl = _makeVideo();
         stableVideoEl.src  = `${base}/stable_video?_=${t}`;
         fgVideoEl.src      = `${base}/fg_video?_=${t}`;
-        handVideoEl.src    = `${base}/hand_video?_=${t}`;
         outlineVideoEl.src = `${base}/outline_video?_=${t}`;
-        // The 'isolated' composite needs hand.mp4 (strict keypoint mask)
-        // — disable the radio until it's actually loaded.  Outline
-        // checkbox needs outline.mp4 likewise.
-        const _updateIsolatedAvailability = () => {
-            $('ovIsolated').disabled = !(backgroundData?.stable_mp4_exists
-                                          && backgroundData?.hand_mp4_exists);
-        };
         stableVideoEl.addEventListener('loadedmetadata', () => {
             $('ovStable').disabled = !backgroundData?.stable_mp4_exists;
-            _updateIsolatedAvailability();
         }, { once: true });
         fgVideoEl.addEventListener('loadedmetadata', () => {
             $('ovFg').disabled = !backgroundData?.fg_mp4_exists;
-        }, { once: true });
-        handVideoEl.addEventListener('loadedmetadata', () => {
-            _updateIsolatedAvailability();
         }, { once: true });
         outlineVideoEl.addEventListener('loadedmetadata', () => {
             $('cbShowOutline').disabled = !backgroundData?.outline_mp4_exists;
@@ -534,10 +518,10 @@
         const fps = trialMeta?.fps || 30;
         const t = Math.max(0, Math.min((frameNum + 0.5) / fps,
                                         (videoEl.duration || 1) - 1e-3));
-        // Keep all companion tracks (hand in isolated mode, outline
-        // when its checkbox is on) seeked alongside.  No need to await
-        // their 'seeked' events — render() reads from them lazily and
-        // any catch-up paint happens within a frame or two.
+        // Keep companion tracks (outline when its checkbox is on) seeked
+        // alongside.  No need to await their 'seeked' events — render()
+        // reads from them lazily and any catch-up paint happens within
+        // a frame or two.
         for (const c of companions) c.currentTime = t;
         return new Promise(resolve => {
             videoEl.currentTime = t;
@@ -586,7 +570,6 @@
         // stereo pair is cropped from the source via a sub-rect draw.
         let srcImage = null, srcW = 0, srcH = 0, applyWarpH = false, labelText = null;
         let drawSx = 0, drawSy = 0, drawSw = 0, drawSh = 0;   // sub-rect of srcImage
-        let compositeFg = false;   // 'isolated' mode → multiply by fg afterwards
         if (overlayMode === 'bg' && backgroundData) {
             // Static background PNG — the existing sidebar thumbnail
             // <img> is the same per-side PNG served by the API, already
@@ -604,12 +587,8 @@
             }
         } else if (overlayMode !== 'off' && backgroundData) {
             // Use readyState >= 1 (HAVE_METADATA) — drawImage will paint
-            // whatever frame is currently decoded.  Stricter checks here
-            // caused the canvas to silently fall through to the live
-            // video during mid-seek (e.g., when the user stepped
-            // frame-by-frame in isolated mode), even though the overlay
-            // radio was still selected.  If the video isn't even at
-            // metadata yet (cold load), we simply skip rendering this
+            // whatever frame is currently decoded.  If the video isn't even
+            // at metadata yet (cold load), we simply skip rendering this
             // tick — the next 'seeked'/'loadedmetadata' will trigger
             // another render with valid state.
             const vid = (overlayMode === 'fg') ? fgVideoEl : stableVideoEl;
@@ -624,19 +603,9 @@
                 drawSh = fullH;
                 srcImage = vid;
                 srcW = drawSw; srcH = drawSh;
-                if (overlayMode === 'fg') {
-                    labelText = 'Foreground mask  (|frame − BG|)';
-                } else if (overlayMode === 'isolated') {
-                    labelText = 'Hand isolated  (stable × hand-mask)';
-                    // Multiply by hand.mp4 (strict keypoint-only mask).
-                    // Distant motion / skin-toned background never
-                    // lights up because hand.mp4 is dark everywhere
-                    // except within ~σ of an MP landmark.
-                    compositeFg = (handVideoEl?.readyState >= 1
-                                    && handVideoEl.videoWidth > 0);
-                } else {
-                    labelText = 'Stabilised  (warped to reference frame)';
-                }
+                labelText = (overlayMode === 'fg')
+                    ? 'Foreground mask  (|frame − BG|)'
+                    : 'Stabilised  (warped to reference frame)';
             } else {
                 // Overlay video not ready yet — skip this paint instead of
                 // falling through to the live frame.  The seek's 'seeked'
@@ -682,19 +651,6 @@
         ctx.drawImage(srcImage, drawSx, drawSy, drawSw, drawSh,
                                 0,      0,      drawSw, drawSh);
 
-        // Isolated-hand composite: multiply by hand.mp4 (the strict
-        // keypoint-only mask).  Hand mask is already amplified at bake
-        // time so a 1.3× brightness here saturates the hand interior
-        // while leaving background pixels (mask ≈ 0) at black.
-        if (compositeFg && handVideoEl) {
-            ctx.globalCompositeOperation = 'multiply';
-            ctx.filter = 'brightness(1.3)';
-            ctx.drawImage(handVideoEl, drawSx, drawSy, drawSw, drawSh,
-                                       0,      0,      drawSw, drawSh);
-            ctx.filter = 'none';
-            ctx.globalCompositeOperation = 'source-over';
-        }
-
         // Segmentation outline overlay — draws on top of whatever the
         // current overlay produced.  outline.mp4 is white-on-black, so
         // 'screen' blend mode adds the white pixels without dimming
@@ -721,7 +677,7 @@
             const dilSlider = document.getElementById('bgDilateSlider');
             const dilation = dilSlider ? parseInt(dilSlider.value, 10) : 14;
             // Choose coord system: live frame uses raw MP, every other
-            // overlay (stable / fg / bg / isolated) draws on ref-space
+            // overlay (stable / fg / bg) draws on ref-space
             // pixels so we need the warped keypoints.
             const useRef = overlayMode !== 'off';
             const isOD = (currentSide === 'OD');
@@ -997,24 +953,16 @@
         const prev = videoEl;
         if (overlayMode === 'stable' && stableVideoEl?.readyState >= 1) videoEl = stableVideoEl;
         else if (overlayMode === 'fg' && fgVideoEl?.readyState >= 1)    videoEl = fgVideoEl;
-        // 'isolated' = composite stable × fg client-side; use stable as
-        // the primary (drives play loop / frame display), fg follows via
-        // _companionVideo() — both must be kept in sync during play/seek.
-        else if (overlayMode === 'isolated' && stableVideoEl?.readyState >= 1) videoEl = stableVideoEl;
         else                                                             videoEl = liveVideoEl;
         return prev !== videoEl;
     }
 
     /** Videos that must be seeked / played in lockstep with ``videoEl``.
-     *  - 'isolated' composite needs the hand-mask track (hand.mp4).
      *  - 'show outline' checkbox needs the outline track (outline.mp4)
      *    regardless of which overlay is active.
      *  Returns the list (possibly empty). */
     function _companionVideos() {
         const out = [];
-        if (overlayMode === 'isolated' && handVideoEl?.readyState >= 1) {
-            out.push(handVideoEl);
-        }
         if (showOutline && outlineVideoEl?.readyState >= 1
             && outlineVideoEl !== videoEl) {
             out.push(outlineVideoEl);
@@ -1210,7 +1158,6 @@
         $('ovStable').addEventListener('change',   e => e.target.checked && _setOverlay('stable'));
         $('ovBg').addEventListener('change',       e => e.target.checked && _setOverlay('bg'));
         $('ovFg').addEventListener('change',       e => e.target.checked && _setOverlay('fg'));
-        $('ovIsolated').addEventListener('change', e => e.target.checked && _setOverlay('isolated'));
         // Segmentation outline checkbox — independent of overlay mode.
         // When toggled on, seek the outline track to the current frame
         // so the first paint isn't from a stale time, then render.

@@ -4373,7 +4373,7 @@ def remote_preproc(
 
     Outputs the worker writes (each trial):
       <subject>/preproc/<trial_stem>/{camera_trajectory.npz, background.npz,
-        stable.mp4, fg.mp4, hand.mp4, outline.mp4, background_*.png, mad_*.png}
+        stable.mp4, fg.mp4, outline.mp4, background_*.png, mad_*.png}
 
     Each output dir is downloaded back to the local
     ``<dlc>/<subject>/preproc/<trial_stem>/``.
