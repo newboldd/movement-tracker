@@ -650,27 +650,20 @@ def _build_palm_zone(
 def _refine_bg_color_based(
     bg_initial: np.ndarray,
     stack: np.ndarray,
-    recover_mask: np.ndarray | None = None,
-    force_green_mask: np.ndarray | None = None,
+    refine_mask: np.ndarray | None = None,
     skin_leniency: float = 1.0,
     skin_range: tuple | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Second BG-median pass that fixes flesh-colored BG pixels.
 
-    Two regions, two behaviors:
-
-    * ``force_green_mask`` (the palm zone -- grown MP gate).  Every
-      flesh-colored pixel here is painted the green sentinel and
-      recorded as always-hand.  No color recovery: the hand was
-      demonstrably here, so any "background color" recovery would
-      find is just the hand at a different angle / lighting.
-
-    * ``recover_mask`` (the forearm cone, minus the palm zone).  For
-      each flesh-colored pixel, classify its ``N`` sample colors
-      skin / not-skin.  If at least one sample isn't skin, fill with
-      the median of the non-skin samples (recovering the BG that
-      peeked through between movements).  If every sample is skin,
-      paint green + record always-hand.
+    Over ``refine_mask`` (the palm zone + forearm cone), every
+    flesh-colored BG pixel is re-derived per-pixel: classify its
+    ``N`` sample colors skin / not-skin, and if at least one sample
+    isn't skin, fill with the median of the non-skin samples --
+    recovering the background that peeked through between movements.
+    Only when *every* sample is skin (no non-skin color is available
+    anywhere for that pixel) is it painted the green sentinel and
+    recorded as always-hand.
 
     Returns ``(refined_bg, always_hand_color_mask)``.
     """
@@ -681,18 +674,11 @@ def _refine_bg_color_based(
     always_hand = np.zeros(bg_initial.shape[:2], dtype=bool)
     green = np.array([0, 255, 0], dtype=np.uint8)
 
-    # ── 1. Force-green zone: flesh here is definitely hand ───────────
-    if force_green_mask is not None:
-        fg = flesh_in_bg & (force_green_mask > 0)
-        if fg.any():
-            refined[fg] = green
-            always_hand |= fg
-    else:
-        fg = np.zeros(bg_initial.shape[:2], dtype=bool)
-
-    # ── 2. Recover zone: per-pixel non-skin median ───────────────────
-    if recover_mask is not None:
-        rec = flesh_in_bg & (recover_mask > 0) & ~fg
+    # Per-pixel non-skin median over the whole refine region.  A pixel
+    # is greened ONLY if every sample is skin -- if any sample shows a
+    # non-skin colour, that colour is used instead.
+    if refine_mask is not None:
+        rec = flesh_in_bg & (refine_mask > 0)
         if rec.any():
             rec_ys, rec_xs = np.where(rec)
             n = int(rec_ys.size)
@@ -1409,12 +1395,12 @@ def compute_background(
         mad_R = np.zeros_like(mad_L)
 
     # ── Color-based refinement: palm zone + forearm cone ───────────
-    # Palm zone (grown MP gate): the hand was demonstrably present, so
-    # it's force-greened -- no "background color" recovery.
-    # ``palm_grow_px`` ("MP dilate (mask)") lets the user reach chunks
-    # like the ulnar palm that the raw gate clips.
-    # Forearm cone: flesh here gets per-pixel non-skin recovery, green
-    # only where every sample is skin.
+    # Over the palm zone (grown MP gate) + forearm cone, every
+    # flesh-colored BG pixel is re-derived per-pixel: if any sample
+    # shows a non-skin colour, that colour is used; a pixel is only
+    # greened when EVERY sample is skin.  ``palm_grow_px`` ("MP dilate
+    # (mask)") grows the palm zone to reach chunks like the ulnar palm
+    # that the raw MP gate clips.
     #
     # ``skin_leniency == 0`` skips the color-based refinement
     # entirely: nothing is force-greened, the background is just the
@@ -1439,15 +1425,17 @@ def compute_background(
         palm_zone_L = _build_palm_zone(hand_mask_L, palm_grow_down)
         cone_L = _build_forearm_cone(mp_kpts_ref_L, frames_sampled,
                                         out_w, out_h, downscale)
+        refine_L = (palm_zone_L > 0) | (cone_L > 0)
         bg_L, always_hand_color_L_down = _refine_bg_color_based(
-            bg_L, stack_L, recover_mask=cone_L, force_green_mask=palm_zone_L,
+            bg_L, stack_L, refine_mask=refine_L,
             skin_leniency=skin_leniency, skin_range=skin_range_L)
         if is_stereo:
             palm_zone_R = _build_palm_zone(hand_mask_R, palm_grow_down)
             cone_R = _build_forearm_cone(mp_kpts_ref_R, frames_sampled,
                                             out_w, out_h, downscale)
+            refine_R = (palm_zone_R > 0) | (cone_R > 0)
             bg_R, always_hand_color_R_down = _refine_bg_color_based(
-                bg_R, stack_R, recover_mask=cone_R, force_green_mask=palm_zone_R,
+                bg_R, stack_R, refine_mask=refine_R,
                 skin_leniency=skin_leniency, skin_range=skin_range_R)
         else:
             always_hand_color_R_down = None
