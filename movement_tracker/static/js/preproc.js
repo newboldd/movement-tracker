@@ -1672,12 +1672,25 @@
         // dragged, the live skin-color mask + sample-region preview
         // flashes on so the user sees what the leniency classifies as
         // hand-coloured; auto-hides shortly after the last input.
+        // Leniency 0 skips the color-based forearm refinement entirely,
+        // so "MP dilate (color sample)" (which only shapes the skin
+        // sample region) is dimmed + disabled in that case.
         const _skinLenSlider = $('skinLeniencySlider');
         const _skinLenVal    = $('skinLeniencyVal');
+        const _colorDilateSlider = $('colorDilateSlider');
+        const _colorDilateVal    = $('colorDilateVal');
+        function _syncColorDilateEnabled() {
+            if (!_skinLenSlider || !_colorDilateSlider) return;
+            const off = parseFloat(_skinLenSlider.value) <= 0;
+            _colorDilateSlider.disabled = off;
+            const wrap = _colorDilateSlider.parentElement;
+            if (wrap) wrap.style.opacity = off ? '0.4' : '1';
+        }
         if (_skinLenSlider && _skinLenVal) {
             _skinLenSlider.addEventListener('input', () => {
                 _skinLenVal.textContent =
                     parseFloat(_skinLenSlider.value).toFixed(2);
+                _syncColorDilateEnabled();
                 _flashSkinMask();
             });
         }
@@ -1685,14 +1698,13 @@
         // While dragged, the same skin-color mask + sample-region
         // preview flashes on (the sample region tracks this slider);
         // auto-hides shortly after the last input.
-        const _colorDilateSlider = $('colorDilateSlider');
-        const _colorDilateVal    = $('colorDilateVal');
         if (_colorDilateSlider && _colorDilateVal) {
             _colorDilateSlider.addEventListener('input', () => {
                 _colorDilateVal.textContent = _colorDilateSlider.value;
                 _flashSkinMask();
             });
         }
+        _syncColorDilateEnabled();
         const _fgDilateSlider = $('fgDilateSlider');
         const _fgDilateVal    = $('fgDilateVal');
         if (_fgDilateSlider && _fgDilateVal) {

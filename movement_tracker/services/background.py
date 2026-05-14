@@ -1125,7 +1125,12 @@ def compute_background(
         (negative) or dilates (positive) the MP region that skin
         pixels are SAMPLED from for the trial skin-range fit.
         Negative lets the sampling region pull in tighter than the
-        raw skeleton.
+        raw skeleton.  No effect when ``skin_leniency == 0``.
+
+    ``skin_leniency`` scales the trial skin Cr/Cb window for the
+    color refinement; ``skin_leniency == 0`` skips that refinement
+    ("stump removal") entirely -- the forearm cone is left as the
+    plain masked median and only the palm zone is force-greened.
 
     Re-runnable cheaply (~30 s for a typical trial) so the user can
     iterate without re-running the heavy Stabilize step.
@@ -1390,42 +1395,63 @@ def compute_background(
         bg_R = np.zeros_like(bg_L)
         mad_R = np.zeros_like(mad_L)
 
-    # ── Trial-specific skin range from the tight-MP-mask pixels ─────
-    # Derived from this subject's own hand under this trial's
-    # lighting; falls back to the universal box when too few pixels
-    # were harvested (MP missing etc.).
-    skin_px_L_all = np.vstack(skin_px_L) if skin_px_L else None
-    skin_px_R_all = np.vstack(skin_px_R) if skin_px_R else None
-    skin_range_L = _fit_skin_range_cbcr(skin_px_L_all)
-    skin_range_R = (_fit_skin_range_cbcr(skin_px_R_all)
-                    if is_stereo else None)
-    logger.info(
-        f"BG skin range: L={skin_range_L} (n={0 if skin_px_L_all is None else len(skin_px_L_all)})"
-        + (f", R={skin_range_R}" if is_stereo else ""))
-
     # ── Color-based refinement: palm zone + forearm cone ───────────
-    # Palm zone (grown MP gate): flesh here is force-greened -- the
-    # hand was demonstrably present, so don't try to recover a "BG"
-    # color.  ``palm_grow_px`` lets the user reach chunks like the
-    # ulnar palm that the raw gate clips.
+    # Palm zone (grown MP gate): the hand was demonstrably present, so
+    # it's force-greened -- no "background color" recovery.
+    # ``palm_grow_px`` ("MP dilate (mask)") lets the user reach chunks
+    # like the ulnar palm that the raw gate clips.
     # Forearm cone: flesh here gets per-pixel non-skin recovery, green
     # only where every sample is skin.
+    #
+    # ``skin_leniency == 0`` skips the color-based forearm refinement
+    # ("stump removal") entirely.  The palm zone is still honored, but
+    # unconditionally -- every pixel in the grown MP gate is painted
+    # the green sentinel (without skin classification we can't tell
+    # flesh from background there, and the hand was demonstrably in
+    # that zone).  "MP dilate (color sample)" has no effect in this
+    # mode and is dimmed in the UI.
     palm_grow_down = max(0, int(palm_grow_px) // max(1, downscale))
-    palm_zone_L = _build_palm_zone(hand_mask_L, palm_grow_down)
-    cone_L = _build_forearm_cone(mp_kpts_ref_L, frames_sampled,
-                                    out_w, out_h, downscale)
-    bg_L, always_hand_color_L_down = _refine_bg_color_based(
-        bg_L, stack_L, recover_mask=cone_L, force_green_mask=palm_zone_L,
-        skin_leniency=skin_leniency, skin_range=skin_range_L)
-    if is_stereo:
-        palm_zone_R = _build_palm_zone(hand_mask_R, palm_grow_down)
-        cone_R = _build_forearm_cone(mp_kpts_ref_R, frames_sampled,
+    _GREEN = np.array([0, 255, 0], dtype=np.uint8)
+    if skin_leniency > 0:
+        # Trial-specific skin range from the tight-MP-mask pixels --
+        # this subject's own hand under this trial's lighting; falls
+        # back to the universal box when too few pixels were harvested.
+        skin_px_L_all = np.vstack(skin_px_L) if skin_px_L else None
+        skin_px_R_all = np.vstack(skin_px_R) if skin_px_R else None
+        skin_range_L = _fit_skin_range_cbcr(skin_px_L_all)
+        skin_range_R = (_fit_skin_range_cbcr(skin_px_R_all)
+                        if is_stereo else None)
+        logger.info(
+            f"BG skin range: L={skin_range_L} (n={0 if skin_px_L_all is None else len(skin_px_L_all)})"
+            + (f", R={skin_range_R}" if is_stereo else ""))
+
+        palm_zone_L = _build_palm_zone(hand_mask_L, palm_grow_down)
+        cone_L = _build_forearm_cone(mp_kpts_ref_L, frames_sampled,
                                         out_w, out_h, downscale)
-        bg_R, always_hand_color_R_down = _refine_bg_color_based(
-            bg_R, stack_R, recover_mask=cone_R, force_green_mask=palm_zone_R,
-            skin_leniency=skin_leniency, skin_range=skin_range_R)
+        bg_L, always_hand_color_L_down = _refine_bg_color_based(
+            bg_L, stack_L, recover_mask=cone_L, force_green_mask=palm_zone_L,
+            skin_leniency=skin_leniency, skin_range=skin_range_L)
+        if is_stereo:
+            palm_zone_R = _build_palm_zone(hand_mask_R, palm_grow_down)
+            cone_R = _build_forearm_cone(mp_kpts_ref_R, frames_sampled,
+                                            out_w, out_h, downscale)
+            bg_R, always_hand_color_R_down = _refine_bg_color_based(
+                bg_R, stack_R, recover_mask=cone_R, force_green_mask=palm_zone_R,
+                skin_leniency=skin_leniency, skin_range=skin_range_R)
+        else:
+            always_hand_color_R_down = None
     else:
-        always_hand_color_R_down = None
+        logger.info("BG skin_leniency=0: skipping color-based forearm "
+                    "refinement; palm zone force-greened unconditionally")
+        palm_zone_L = _build_palm_zone(hand_mask_L, palm_grow_down)
+        always_hand_color_L_down = palm_zone_L > 0
+        bg_L[always_hand_color_L_down] = _GREEN
+        if is_stereo:
+            palm_zone_R = _build_palm_zone(hand_mask_R, palm_grow_down)
+            always_hand_color_R_down = palm_zone_R > 0
+            bg_R[always_hand_color_R_down] = _GREEN
+        else:
+            always_hand_color_R_down = None
 
     always_hand_L_down = hand_mask_L.all(axis=0) | always_hand_color_L_down
     if hand_mask_R is not None:
