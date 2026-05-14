@@ -732,7 +732,7 @@ class QueueManager:
                         local_executor.execute_blur(subject_names, job_id, log_path)
 
                     elif job_type == "preproc":
-                        # Per-trial preproc: trajectory -> Stabilise
+                        # Per-trial preproc: trajectory -> Stabilize
                         # (stable.mp4) -> Background (background.npz).
                         # Hand boundary is computed on demand per
                         # frame from the UI, no fourth stage.
@@ -817,7 +817,7 @@ class QueueManager:
                                             cancel_event=cancel_event,
                                         )
                                     _log("  compute_camera_trajectory done")
-                                    # Phase B: stabilise (~60% -- the
+                                    # Phase B: stabilize (~60% -- the
                                     # full-res warp + encode pass).
                                     def _on_stable(pct, _i=i):
                                         _preproc_progress(_i, 20 + pct * 0.60, 0.60)
@@ -1088,12 +1088,12 @@ class QueueManager:
                     #     completion + downloads.  Survives local app
                     #     restarts (the new "Submit Batch" button uses this).
                     #   * default → legacy per-trial dispatch (current
-                    #     "Submit Processing Job" behaviour).
+                    #     "Submit Processing Job" behavior).
                     from .remote import remote_hrnet_job
                     ep = extra_params or {}
                     if ep.get("_use_batch_runner"):
                         from .remote import dispatch_remote_batch, poll_remote_batch
-                        # Normalise the trials list (the dispatcher needs
+                        # Normalize the trials list (the dispatcher needs
                         # subject_name + trial_idx for each).
                         _tb = ep.get("trials") or [{
                             "subject_name": subject_names[0],
@@ -1187,7 +1187,7 @@ class QueueManager:
                                 pass
                             _res = {"remote_done": False, "downloaded": False, "error": str(_e)}
                         # Translate to the on-disk outcome tag used by the
-                        # frontend trial-chip colour and parent status badge.
+                        # frontend trial-chip color and parent status badge.
                         if _res.get("remote_done") and _res.get("downloaded"):
                             t["outcome"] = "ok"
                         elif _res.get("remote_done"):
@@ -1197,7 +1197,7 @@ class QueueManager:
                         if _res.get("error"):
                             t["outcome_error"] = str(_res["error"])[:300]
                         # Persist mid-batch so the active-job modal can show
-                        # per-trial colours live while the loop is still
+                        # per-trial colors live while the loop is still
                         # iterating (otherwise outcomes only land at end).
                         try:
                             import json as _json2
@@ -1210,7 +1210,7 @@ class QueueManager:
                         except Exception:
                             pass
                     # Persist per-trial outcomes back to params_json so the
-                    # Jobs page can colour chips and pick a correct status.
+                    # Jobs page can color chips and pick a correct status.
                     import json as _json
                     _new_params = dict(ep); _new_params["trials"] = trials_batch
                     n_ok = sum(1 for _t in trials_batch if _t.get("outcome") == "ok")

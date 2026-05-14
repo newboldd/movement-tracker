@@ -1088,7 +1088,7 @@ def remote_preprocess_batch(
     from ..config import get_settings
     settings = get_settings()
 
-    # Normalise the work_dir to forward slashes — Windows OpenSSH's SCP
+    # Normalize the work_dir to forward slashes — Windows OpenSSH's SCP
     # rejects mixed-slash paths like ``C:\Users\dilla\...\foo/bar/baz``
     # with "No such file or directory" even when the file exists, because
     # the shell escapes the literal backslashes (``C:\\Users\\dilla...``)
@@ -2074,7 +2074,7 @@ def remote_hrnet_redownload(
     The parent's ``params_json`` and overall status badge are updated to
     reflect the new outcome distribution.
 
-    When ``parent_job_id`` is None, the legacy "scan remote dirs" behaviour
+    When ``parent_job_id`` is None, the legacy "scan remote dirs" behavior
     is used (mirrors every ``hrnet_jobs/{subject}_*`` directory locally).
     """
     from .mano_data import _mano_dir
@@ -2128,7 +2128,7 @@ def remote_hrnet_redownload(
                     if t.get("outcome") != "ok":
                         continue
             # Frontend stores the short trial code ("L1"); build_trial_map
-            # produces the full stem ("Con04_L1").  Normalise to full_stem.
+            # produces the full stem ("Con04_L1").  Normalize to full_stem.
             full_stem = tn if "_" in tn else f"{sub}_{tn}"
             work.append(dict(
                 sub=sub,
@@ -3042,7 +3042,7 @@ def remote_preprocess_download(
     from ..config import get_settings
     settings = get_settings()
 
-    # Normalise work_dir to forward slashes — see comment in
+    # Normalize work_dir to forward slashes — see comment in
     # remote_preprocess_batch.  Windows OpenSSH SCP rejects mixed-slash
     # paths.
     _work_dir = cfg.work_dir.replace("\\", "/")
@@ -3225,7 +3225,7 @@ def resume_preprocess_monitor(
     from ..config import get_settings
     settings = get_settings()
 
-    # Forward-slash normalisation for SCP (see remote_preprocess_batch).
+    # Forward-slash normalization for SCP (see remote_preprocess_batch).
     _work_dir = cfg.work_dir.replace("\\", "/")
     remote_output_dir = f"{_work_dir}/preprocess_output"
     remote_log_file = f"{_work_dir}/preprocess_{job_id}.log"
@@ -4109,7 +4109,7 @@ def _write_status(path, **kwargs):
     a stale status.json one tick old is far better than the worker
     crash-halting an entire trial.
 
-    Also normalise the destination path so mixed forward/back slashes
+    Also normalize the destination path so mixed forward/back slashes
     (which leak in when callers concatenate ``work_dir`` with a
     forward-slash literal) don't confuse Windows handle tracking.
     """

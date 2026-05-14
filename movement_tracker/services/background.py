@@ -1,4 +1,4 @@
-"""Stabilisation + on-demand hand-boundary extraction.
+"""Stabilization + on-demand hand-boundary extraction.
 
 One bake per trial produces ``stable.mp4`` and ``background.npz``.
 The hand boundary is computed on demand per frame by
@@ -11,7 +11,7 @@ coordinate system using the camera trajectory.  The static scene stays
 put; only the hand (and any other moving parts) appears to move.  Same
 resolution and layout as the source video.
 
-``background.npz`` -- temporal median of stabilised samples (with the
+``background.npz`` -- temporal median of stabilized samples (with the
 hand masked out via the dilated MP skeleton), plus the fitted CbCr
 skin model and the MP-ref keypoints, so downstream callers can
 reconstruct everything needed for per-frame mask work without
@@ -22,7 +22,7 @@ Inputs:
     compute it via the *Compute Trajectory* button first.
 
 Outputs in ``<dlc>/<subject>/preproc/<stem>/``:
-    stable.mp4              stabilised source video
+    stable.mp4              stabilized source video
     background.npz          BG image + MAD + skin model + MP-ref kpts
     background_OS.png       BG image, OS half (full-res preview)
     background_OD.png       BG image, OD half (stereo only)
@@ -78,7 +78,7 @@ def _kill_orphan_ffmpegs_for_dir(preproc_dir: Path) -> int:
     """Kill any ffmpeg process whose command line writes into
     ``preproc_dir``.
 
-    Called at the start of every Stabilise / Foreground run so that
+    Called at the start of every Stabilize / Foreground run so that
     even when a previous bake was hard-killed (SIGKILL, OOM, panic)
     and atexit didn't fire, the new bake doesn't race against a
     surviving encoder writing to the same mp4.  Returns the number of
@@ -185,10 +185,10 @@ def _fg_path(subject_name: str, trial_stem: str) -> Path:
 
 
 def _hand_path(subject_name: str, trial_stem: str) -> Path:
-    """Strictly keypoint-gated hand mask (no motion / colour contribution).
+    """Strictly keypoint-gated hand mask (no motion / color contribution).
     Used for the 'isolated' canvas composite — pixels far from any
     MediaPipe landmark are guaranteed-dark even if they moved or are
-    skin-coloured."""
+    skin-colored."""
     return _preproc_dir(subject_name, trial_stem) / "hand.mp4"
 
 
@@ -237,10 +237,10 @@ def _pick_sample_frames(n_frames: int, jerk_flag: np.ndarray,
     return good[idx].astype(np.int32)
 
 
-# ─── Enhanced FG-mask helpers (MediaPipe + colour) ──────────────────────
+# ─── Enhanced FG-mask helpers (MediaPipe + color) ──────────────────────
 #
 # The plain "|frame − BG|" mask has two predictable failure modes:
-#   1. Hand pixels whose colour happens to match the background → dim
+#   1. Hand pixels whose color happens to match the background → dim
 #   2. Anything else that moved (head, other hand, scene clutter) → bright
 #
 # When MediaPipe prelabels are available we can refine the mask with two
@@ -248,11 +248,11 @@ def _pick_sample_frames(n_frames: int, jerk_flag: np.ndarray,
 #   • Keypoint proximity — a Gaussian-blurred stamp around each of the 21
 #     hand landmarks, warped into the reference frame.  This says "the
 #     hand is roughly here, even if motion is weak".
-#   • Skin-colour similarity — a CbCr Mahalanobis-distance model fit
+#   • Skin-color similarity — a CbCr Mahalanobis-distance model fit
 #     from pixels at MP keypoints in sampled frames.  This says "this
-#     pixel's colour matches the trial's hand", regardless of motion.
+#     pixel's color matches the trial's hand", regardless of motion.
 #
-# Combined: motion·w_m + keypoint·w_k + colour·w_c, clipped to 0..255.
+# Combined: motion·w_m + keypoint·w_k + color·w_c, clipped to 0..255.
 # Falls back to motion-only when MediaPipe data is absent.
 
 
@@ -380,7 +380,7 @@ def _build_kpt_hand_region(
         cv2.line(canvas, _to_int(a), _to_int(b),
                   color=255, thickness=line_thick, lineType=cv2.LINE_AA)
 
-    # 3a. Optional forearm extension.  Used at Stabilise-time so the BG
+    # 3a. Optional forearm extension.  Used at Stabilize-time so the BG
     #     median masks the distal forearm out alongside the hand;
     #     compute_outline_frame leaves this off (extend_forearm_px=0)
     #     so the visible polygon still ends at the wrist.
@@ -411,18 +411,18 @@ def _build_kpt_hand_region(
 
 # Universal YCrCb skin range -- conservative enough to catch all
 # common ethnicities, tight enough to reject typical table / desk /
-# clothing colours.  Used by _refine_bg_color_based to identify
-# flesh-coloured pixels in the BG median and per-sample.
+# clothing colors.  Used by _refine_bg_color_based to identify
+# flesh-colored pixels in the BG median and per-sample.
 _SKIN_CR_LO, _SKIN_CR_HI = 130, 175
 _SKIN_CB_LO, _SKIN_CB_HI = 80, 130
 
 
 def _is_skin_ycc(ycc: np.ndarray, leniency: float = 1.0) -> np.ndarray:
-    """Boolean mask of skin-coloured pixels.  Input is a YCrCb image
+    """Boolean mask of skin-colored pixels.  Input is a YCrCb image
     (any shape ending in 3), output is the same shape minus the last
     axis.
 
-    ``leniency`` scales the Cr/Cb acceptance window around its centre:
+    ``leniency`` scales the Cr/Cb acceptance window around its center:
     1.0 = the universal range above, >1 widens it (more pixels count
     as skin -- more lenient), <1 narrows it (stricter).
     """
@@ -524,9 +524,9 @@ def _build_palm_zone(
     """"Definitely-hand" palm zone: union of the per-sample-frame MP
     hand gates, dilated outward by ``grow_px``.
 
-    Flesh-coloured pixels inside this zone are forced to the green
+    Flesh-colored pixels inside this zone are forced to the green
     sentinel (always-hand) -- no color recovery is attempted, because
-    the hand was demonstrably here and any "background colour" the
+    the hand was demonstrably here and any "background color" the
     recovery would find is really just the hand at a different angle /
     lighting.  The ``grow_px`` slider lets the user reach chunks like
     the ulnar palm that the raw MP gate clips.
@@ -549,18 +549,18 @@ def _refine_bg_color_based(
     force_green_mask: np.ndarray | None = None,
     skin_leniency: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Second BG-median pass that fixes flesh-coloured BG pixels.
+    """Second BG-median pass that fixes flesh-colored BG pixels.
 
-    Two regions, two behaviours:
+    Two regions, two behaviors:
 
     * ``force_green_mask`` (the palm zone -- grown MP gate).  Every
-      flesh-coloured pixel here is painted the green sentinel and
+      flesh-colored pixel here is painted the green sentinel and
       recorded as always-hand.  No color recovery: the hand was
-      demonstrably here, so any "background colour" recovery would
+      demonstrably here, so any "background color" recovery would
       find is just the hand at a different angle / lighting.
 
     * ``recover_mask`` (the forearm cone, minus the palm zone).  For
-      each flesh-coloured pixel, classify its ``N`` sample colours
+      each flesh-colored pixel, classify its ``N`` sample colors
       skin / not-skin.  If at least one sample isn't skin, fill with
       the median of the non-skin samples (recovering the BG that
       peeked through between movements).  If every sample is skin,
@@ -611,7 +611,7 @@ def _refine_bg_color_based(
 
 
 def _bg_edge_map(bg_full: np.ndarray) -> np.ndarray:
-    """Normalised Sobel-magnitude of the background image.
+    """Normalized Sobel-magnitude of the background image.
 
     Strong edges in the BG (table seams, monitor bezels, high-contrast
     decor) produce huge |frame - BG| activations the instant the hand
@@ -624,7 +624,7 @@ def _bg_edge_map(bg_full: np.ndarray) -> np.ndarray:
     sx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
     sy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
     mag = np.sqrt(sx * sx + sy * sy)
-    # 99th percentile normalisation -- a few extreme pixels don't blow
+    # 99th percentile normalization -- a few extreme pixels don't blow
     # out the rest of the map.
     p = float(np.percentile(mag, 99.0))
     if p <= 1e-6:
@@ -691,7 +691,7 @@ def _build_image_aware_hand_mask(
            - motion: |warped - background| / motion_norm, clipped to [0,1],
              with the background edge map subtracted off so BG seams
              don't leak through.
-           - skin colour: exp(-Mahalanobis(CbCr) / scale) if a skin model
+           - skin color: exp(-Mahalanobis(CbCr) / scale) if a skin model
              was fit.
       3. Multiply ``kpt_region`` x ``image_score``, threshold, feather edges,
          then a width-aware prune to drop thin webs / speckles.
@@ -720,7 +720,7 @@ def _build_image_aware_hand_mask(
         motion = motion - float(edge_subtract_strength) * bg_edge_norm
     np.clip(motion, 0.0, 1.0, out=motion)
 
-    # 2b. Colour similarity (when a skin model was fit).
+    # 2b. Color similarity (when a skin model was fit).
     if skin_model is not None:
         color = _color_similarity(warped_frame, skin_model)
         image_score = np.maximum(motion, color)
@@ -810,14 +810,14 @@ def _build_fg_mask(
 
     motion_norm: the |frame-BG| value that maps to 1.0.
 
-    bg_edge_norm: optional Sobel-magnitude map of the BG, normalised to
+    bg_edge_norm: optional Sobel-magnitude map of the BG, normalized to
     [0,1].  When present, motion is reduced by
     ``edge_subtract_strength * bg_edge_norm`` so BG seams don't
     dominate when the hand crosses them.  This is a correction (removes
     a known false signal), not an enhancement.
 
     Previously this function also added an MP keypoint Gaussian and a
-    CbCr skin-colour boost.  Both have been removed: the downstream
+    CbCr skin-color boost.  Both have been removed: the downstream
     pipeline already gates by MP, so adding non-motion signals here
     distorts what fg.mp4 represents.
     """
@@ -985,12 +985,12 @@ def compute_background(
     Reads sampled frames from stable.mp4 (already warped, so no
     warpPerspective in the sample pass), stamps a downscaled MP-gate
     region per sample frame so the hand can be excluded from the
-    temporal median, runs the colour-based forearm refinement, fits
+    temporal median, runs the color-based forearm refinement, fits
     a CbCr skin model, and saves the result.
 
     Re-runnable cheaply (~30 s for a typical trial) so the user can
     iterate on cylinder length / dilation / skin range without
-    re-running the heavy Stabilise step.
+    re-running the heavy Stabilize step.
 
     Requires :func:`compute_stable` to have produced stable.mp4
     first; raises ``RuntimeError`` otherwise.
@@ -1021,7 +1021,7 @@ def compute_background(
     if not stable_path.exists():
         raise RuntimeError(
             f"No stable.mp4 for {subject_name}/{stem} -- "
-            "run Stabilise first.")
+            "run Stabilize first.")
 
     if downscale < 1:
         downscale = 1
@@ -1197,10 +1197,10 @@ def compute_background(
         bg_R = np.zeros_like(bg_L)
         mad_R = np.zeros_like(mad_L)
 
-    # ── Colour-based refinement: palm zone + forearm cone ───────────
+    # ── Color-based refinement: palm zone + forearm cone ───────────
     # Palm zone (grown MP gate): flesh here is force-greened -- the
     # hand was demonstrably present, so don't try to recover a "BG"
-    # colour.  ``palm_grow_px`` lets the user reach chunks like the
+    # color.  ``palm_grow_px`` lets the user reach chunks like the
     # ulnar palm that the raw gate clips.
     # Forearm cone: flesh here gets per-pixel non-skin recovery, green
     # only where every sample is skin.
@@ -1325,7 +1325,7 @@ def _encode_fg_png(motion: np.ndarray, gate: np.ndarray) -> dict | None:
     Returns ``{b64, bbox: [x0,y0,x1,y1]}`` or None if the gate is empty.
     The image covers the WHOLE dilated MP gate -- alpha is flat 255
     inside the gate and 0 outside, so the user sees the full region
-    coloured by motion intensity (low motion = dark blue JET, high
+    colored by motion intensity (low motion = dark blue JET, high
     motion = red).  Overall fill opacity is left to the client so a
     slider can dial visibility against the underlying frame.
 
@@ -1344,7 +1344,7 @@ def _encode_fg_png(motion: np.ndarray, gate: np.ndarray) -> dict | None:
     motion_crop[gate_crop == 0] = 0
     color = cv2.applyColorMap(motion_crop, cv2.COLORMAP_JET)
     # Flat alpha: 255 inside the gate, 0 outside.  Decouples motion
-    # intensity (encoded by colour) from visibility (controlled by the
+    # intensity (encoded by color) from visibility (controlled by the
     # client's opacity slider), so low-motion BG regions inside the
     # gate still appear as dark-blue fill instead of vanishing.
     alpha = (gate_crop > 0).astype(np.uint8) * 255
@@ -1381,8 +1381,8 @@ def compute_outline_frame(
       2. Compute |stable_frame - BG| inside the gate.
       3. Otsu-threshold the gate-restricted motion (bimodal: BG vs hand).
       4. OR with the always-hand map (pixels covered by the MP gate in
-         every sample frame during Stabilise -- their BG fell back to
-         a synthetic colour, so we force them to count as hand always).
+         every sample frame during Stabilize -- their BG fell back to
+         a synthetic color, so we force them to count as hand always).
       5. Morphological close (disk radius ``close_radius_px``) to fill
          palm-interior holes where skin happens to match BG.
       6. Morphological open (disk radius ``open_radius_px``) to clip
@@ -1411,7 +1411,7 @@ def compute_outline_frame(
     if not bg_path.exists():
         raise RuntimeError(
             f"No background.npz for {subject_name}/{stem} -- "
-            "run Stabilise first.")
+            "run Stabilize first.")
     d = np.load(str(bg_path))
     bg_L = d["background_L"]
     is_stereo = bool(d["is_stereo"])
@@ -1431,7 +1431,7 @@ def compute_outline_frame(
     stable_path = _stable_path(subject_name, stem)
     if not stable_path.exists():
         raise RuntimeError(
-            f"No stable.mp4 for {subject_name}/{stem} -- run Stabilise first.")
+            f"No stable.mp4 for {subject_name}/{stem} -- run Stabilize first.")
 
     cap = cv2.VideoCapture(str(stable_path))
     if not cap.isOpened():
@@ -1454,7 +1454,7 @@ def compute_outline_frame(
         bg_L_full = bg_L
         bg_R_full = bg_R
 
-    # Upscale always-hand masks to full-res (nearest-neighbour preserves
+    # Upscale always-hand masks to full-res (nearest-neighbor preserves
     # the binary nature -- never interpolate a "maybe" pixel into being).
     def _upscale_bool(m, w, h):
         if m is None:
@@ -1466,7 +1466,7 @@ def compute_outline_frame(
     always_hand_R = _upscale_bool(always_hand_R_down, w_half, h_full) \
                      if is_stereo else None
 
-    # Background edge map -- Sobel magnitude normalised to [0, 1].
+    # Background edge map -- Sobel magnitude normalized to [0, 1].
     # Subtracted from motion before Otsu so static high-contrast
     # seams in the BG (table edges, monitor bezels) don't produce
     # false outline boundaries when the hand crosses them.  True
@@ -1508,7 +1508,7 @@ def compute_outline_frame(
             motion_f = motion_f - _BG_EDGE_PENALTY * bg_edge
         motion = np.clip(motion_f, 0.0, 255.0).astype(np.uint8)
         # Detect bright-green sentinel pixels in the BG.  |frame - green|
-        # is huge for any skin-coloured hand pixel and would saturate
+        # is huge for any skin-colored hand pixel and would saturate
         # the JET heatmap, making nearby moderately-bright hand pixels
         # look dim by comparison.  Replace their motion with the 80th
         # percentile of nearby non-green gate motion so they read as
@@ -1524,9 +1524,9 @@ def compute_outline_frame(
                 local_p80 = int(np.percentile(motion[non_green_gate], 80))
                 motion[green_mask] = local_p80
         # Optional: foreground heatmap PNG cropped to the gate bbox.
-        # Sent back so the UI can paint a JET-coloured fill over the
+        # Sent back so the UI can paint a JET-colored fill over the
         # gate region.  Now uniformly visible thanks to the green
-        # normalisation above.
+        # normalization above.
         fg_pack = None
         if include_fg:
             fg_pack = _encode_fg_png(motion, gate)
@@ -1544,7 +1544,7 @@ def compute_outline_frame(
         # the global non-skin fill were structurally inside the hand
         # every sample frame, so they belong inside the boundary even
         # when this frame's pose makes them blend with the synthetic
-        # BG colour.  Also clip to the gate so we never extend outside
+        # BG color.  Also clip to the gate so we never extend outside
         # the dilated MP silhouette.
         if always_hand is not None:
             binary = binary | (always_hand & (gate > 0))
@@ -1664,7 +1664,7 @@ def summarise_background(subject_name: str, trial_stem: str, bg: dict) -> dict:
 
 def stable_mp4_path(subject_name: str, trial_stem: str) -> Path | None:
     """Public helper for downstream consumers (MP/HRnet/DLC).  Returns
-    the path to the stabilised mp4 if it exists, else ``None``."""
+    the path to the stabilized mp4 if it exists, else ``None``."""
     p = _stable_path(subject_name, trial_stem)
     return p if p.exists() else None
 

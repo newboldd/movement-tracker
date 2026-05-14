@@ -28,7 +28,7 @@
             display: flex; flex-direction: column;
             overflow: hidden;
         }
-        /* The pipeline sections (Status / Camera Motion / Stabilise /
+        /* The pipeline sections (Status / Camera Motion / Stabilize /
            Background / Hand Boundary / Exclude) scroll; the View panel
            stays pinned at the bottom. */
         .pp-sidebar-scroll {
@@ -193,7 +193,7 @@
                     </div>
 
                     <div class="section">
-                        <h3>Stabilise</h3>
+                        <h3>Stabilize</h3>
                         <div class="small-note">
                             Bakes <strong>stable.mp4</strong> -- every frame
                             warped into the reference camera so the scene is
@@ -209,7 +209,7 @@
                         <div class="small-note">
                             Samples <strong>stable.mp4</strong>, takes the
                             temporal median with the hand + forearm masked
-                            out, runs the colour-based forearm refinement,
+                            out, runs the color-based forearm refinement,
                             and saves <strong>background.npz</strong>.
                             Cheap to re-run.  Requires stable.mp4.
                         </div>
@@ -219,16 +219,16 @@
                                 <span id="palmGrowVal" style="color:var(--text);font-weight:bold;">15</span>
                             </div>
                             <input type="range" id="palmGrowSlider" min="0" max="80" step="1" value="15"
-                                   title="Grows the MP hand region outward.  Flesh-coloured pixels inside the grown zone are forced to always-hand (green), instead of having a background colour recovered.  Raise this to capture chunks like the ulnar palm that the raw MP gate clips."
+                                   title="Grows the MP hand region outward.  Flesh-colored pixels inside the grown zone are forced to always-hand (green), instead of having a background color recovered.  Raise this to capture chunks like the ulnar palm that the raw MP gate clips."
                                    style="width:100%;cursor:pointer;height:5px;">
                         </div>
                         <div style="margin-top:8px;font-size:11px;">
                             <div style="display:flex;justify-content:space-between;align-items:center;">
-                                <label style="color:var(--text-muted);">Skin colour leniency</label>
+                                <label style="color:var(--text-muted);">Skin color leniency</label>
                                 <span id="skinLeniencyVal" style="color:var(--text);font-weight:bold;">1.00</span>
                             </div>
                             <input type="range" id="skinLeniencySlider" min="0.5" max="2" step="0.05" value="1"
-                                   title="Scales the YCrCb skin-colour acceptance window.  >1 = more lenient (more pixels count as hand-coloured), <1 = stricter.  Affects the colour-based forearm refinement."
+                                   title="Scales the YCrCb skin-color acceptance window.  >1 = more lenient (more pixels count as hand-colored), <1 = stricter.  Affects the color-based forearm refinement."
                                    style="width:100%;cursor:pointer;height:5px;">
                         </div>
                         <button class="btn btn-sm btn-success" id="runBackgroundBtn" style="width:100%;margin-top:8px;" disabled>Compute Background</button>
@@ -288,7 +288,7 @@
                 <div class="pp-viz-panel">
                     <h3>View / Overlays</h3>
                     <label class="pp-viz-row first" style="display:flex;align-items:center;gap:6px;">
-                        <input type="checkbox" id="cbStabilizedView"> Stabilised view
+                        <input type="checkbox" id="cbStabilizedView"> Stabilized view
                     </label>
                     <label class="pp-viz-row" style="display:flex;align-items:center;gap:6px;">
                         <input type="checkbox" id="cbShowJerks" checked> Mark jerks
@@ -298,13 +298,17 @@
                         <input type="radio" name="bgOverlay" id="ovOff" checked> Off (live frame)
                     </label>
                     <label class="pp-viz-row" style="display:block;">
-                        <input type="radio" name="bgOverlay" id="ovStable"> Stabilised (stable.mp4)
+                        <input type="radio" name="bgOverlay" id="ovStable"> Stabilized (stable.mp4)
                     </label>
                     <label class="pp-viz-row" style="display:block;">
                         <input type="radio" name="bgOverlay" id="ovBg"> Background (background.png)
                     </label>
                     <label class="pp-viz-row" style="display:flex;align-items:center;gap:6px;margin-top:8px;">
                         <input type="checkbox" id="cbPreviewZones" checked> Preview palm zone + forearm cone
+                    </label>
+                    <label class="pp-viz-row" style="display:flex;align-items:center;gap:6px;"
+                           title="Live: tints every pixel the current Skin colour leniency would classify as hand-coloured.  Updates as you drag that slider.">
+                        <input type="checkbox" id="cbShowSkinMask"> Show skin-color mask (live)
                     </label>
                     <label class="pp-viz-row" style="display:flex;align-items:center;gap:6px;">
                         <input type="checkbox" id="cbShowOutline" disabled checked> Show hand boundary
@@ -375,6 +379,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/preproc.js?v=31"></script>
+    <script src="/static/js/preproc.js?v=32"></script>
 </body>
 </html>

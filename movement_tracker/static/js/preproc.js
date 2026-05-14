@@ -15,7 +15,7 @@
     let trajectory = null;
     let currentFrame = 0;
     let nFrames = 0;
-    let isStabilised = false;
+    let isStabilized = false;
     let showJerks = true;
     let playing = false;
     let playTimer = null;
@@ -44,6 +44,13 @@
     let showFgFill = false;     // checkbox: also fetch + paint JET heatmap
     let fgFillOpacity = 0.5;    // 0..1, controlled by slider next to checkbox
     let showBgZones = true;     // checkbox: preview palm zone + forearm cone
+    let showSkinMask = false;   // checkbox: live YCrCb skin-color overlay
+    // Offscreen canvas + cache key for the live skin-color mask.  The
+    // classification mirrors the server's _is_skin_ycc (BT.601 YCrCb,
+    // leniency-scaled window) so the preview matches what Compute
+    // Background will actually do.
+    let _skinMaskCanvas = null;
+    let _skinMaskKey = null;
     // Live outline state -- replaces the old fg.mp4 / outline.mp4 bake.
     // Server returns a per-frame closed-polygon contour for the
     // current dilation; we fetch it whenever the frame or slider
@@ -240,7 +247,7 @@
         if (!wrap) return;
         if (isStereo) {
             wrap.style.display = 'inline-flex';
-            // Re-normalise away from any legacy 'full' state.
+            // Re-normalize away from any legacy 'full' state.
             if (currentSide !== 'OS' && currentSide !== 'OD') currentSide = 'OS';
             $('cameraLabel').textContent = currentSide;
         } else {
@@ -277,7 +284,7 @@
             $('trajectoryStatus').textContent = `Load error: ${e.message}`;
         }
         updateCameraControls();
-        // Trajectory readiness gates Stabilise.  Foreground is gated
+        // Trajectory readiness gates Stabilize.  Foreground is gated
         // separately on stable.mp4 existing -- see refreshBackgroundFromServer.
         const stableBtn = $('runStableBtn');
         if (stableBtn) stableBtn.disabled = !trajectory;
@@ -302,7 +309,7 @@
         }
         // Always store the response -- it carries stable_mp4_exists and
         // available independently, so the UI can show three states:
-        // nothing / stabilised-only / background-done.
+        // nothing / stabilized-only / background-done.
         backgroundData = b;
         const stableReady = !!b.stable_mp4_exists;
         const bgReady = !!b.available;   // background.npz exists
@@ -318,7 +325,7 @@
             $('backgroundStats').textContent = '';
             $('backgroundPreview').style.display = 'none';
             if (stableReady) {
-                // Stabilise done, Background not yet -- still load the
+                // Stabilize done, Background not yet -- still load the
                 // stable video so the overlay works.
                 _loadStableVideo();
                 $('stableStatus').textContent = 'Done.';
@@ -328,14 +335,14 @@
                     ? 'Not computed yet.'
                     : 'Waiting for trajectory (run step 1 first).';
                 $('backgroundStatus').textContent =
-                    'Waiting for stable.mp4 (run Stabilise first).';
+                    'Waiting for stable.mp4 (run Stabilize first).';
             }
             $('outlineStatus').textContent = '';
             overlayMode = 'off';
             if ($('ovOff'))  $('ovOff').checked = true;
         }
         // Gating:
-        //   Stabilise  -> needs trajectory
+        //   Stabilize  -> needs trajectory
         //   Background -> needs stable.mp4
         //   overlays   -> ovStable needs stable.mp4, ovBg needs background.npz
         //   hand-boundary checkboxes -> need background.npz (compute_outline_frame
@@ -412,7 +419,7 @@
     }
 
     /**
-     * Spawn a Stabilise or Background job and stream its progress into
+     * Spawn a Stabilize or Background job and stream its progress into
      * ``statusEl``.  Shared by computeStable + computeBackground.
      * ``extraBody`` merges into the POST body (e.g. palm_grow_px).
      */
@@ -467,7 +474,7 @@
     async function computeBackground() {
         if (subjectId == null || currentTrialIdx < 0) return;
         if (!backgroundData || !backgroundData.stable_mp4_exists) {
-            $('backgroundStatus').textContent = 'Run Stabilise first.';
+            $('backgroundStatus').textContent = 'Run Stabilize first.';
             return;
         }
         const palmSlider = $('palmGrowSlider');
@@ -553,6 +560,62 @@
     function scheduleOutlineFetch(delay = 150) {
         clearTimeout(outlineFetchTimer);
         outlineFetchTimer = setTimeout(fetchOutline, delay);
+    }
+
+    /**
+     * Build (and cache) the live skin-color mask for the current
+     * frame at the current Skin-colour-leniency setting.  Classifies
+     * the displayed sub-rect with the same BT.601 YCrCb test the
+     * server's _is_skin_ycc uses, scaled by ``leniency``.
+     *
+     * Returns an offscreen <canvas> with magenta where skin, fully
+     * transparent elsewhere -- or null if the source can't be read
+     * yet (cold video, tainted canvas).  Cached by frame + leniency +
+     * source so playback / re-renders don't reclassify needlessly.
+     */
+    function _updateSkinMask(srcImage, drawSx, drawSy, drawSw, drawSh) {
+        const lenSlider = $('skinLeniencySlider');
+        const leniency = lenSlider ? parseFloat(lenSlider.value) : 1.0;
+        const key = `${currentFrame}|${leniency}|${overlayMode}|`
+                  + `${currentSide}|${drawSw}x${drawSh}`;
+        if (key === _skinMaskKey && _skinMaskCanvas) return _skinMaskCanvas;
+        // Classify at half-res -- plenty for a preview, ~4x faster.
+        const cw = Math.max(1, Math.round(drawSw / 2));
+        const ch = Math.max(1, Math.round(drawSh / 2));
+        if (!_skinMaskCanvas) _skinMaskCanvas = document.createElement('canvas');
+        _skinMaskCanvas.width = cw;
+        _skinMaskCanvas.height = ch;
+        const sctx = _skinMaskCanvas.getContext('2d', { willReadFrequently: true });
+        let img;
+        try {
+            sctx.clearRect(0, 0, cw, ch);
+            sctx.drawImage(srcImage, drawSx, drawSy, drawSw, drawSh, 0, 0, cw, ch);
+            img = sctx.getImageData(0, 0, cw, ch);
+        } catch (e) {
+            _skinMaskKey = null;
+            return null;          // video not ready / tainted -- skip
+        }
+        const d = img.data;
+        // Universal YCrCb skin window (mirrors _SKIN_* in background.py),
+        // half-width scaled by leniency around the centre.
+        const CR_LO = 130, CR_HI = 175, CB_LO = 80, CB_HI = 130;
+        const crC = (CR_LO + CR_HI) / 2, crH = (CR_HI - CR_LO) / 2 * leniency;
+        const cbC = (CB_LO + CB_HI) / 2, cbH = (CB_HI - CB_LO) / 2 * leniency;
+        for (let i = 0; i < d.length; i += 4) {
+            const r = d[i], g = d[i + 1], b = d[i + 2];
+            const y  = 0.299 * r + 0.587 * g + 0.114 * b;
+            const cr = (r - y) * 0.713 + 128;
+            const cb = (b - y) * 0.564 + 128;
+            if (cr >= crC - crH && cr <= crC + crH &&
+                cb >= cbC - cbH && cb <= cbC + cbH) {
+                d[i] = 255; d[i + 1] = 0; d[i + 2] = 255; d[i + 3] = 130;
+            } else {
+                d[i + 3] = 0;
+            }
+        }
+        sctx.putImageData(img, 0, 0);
+        _skinMaskKey = key;
+        return _skinMaskCanvas;
     }
 
     function showTrajectoryStats() {
@@ -689,7 +752,7 @@
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
         // Pick the source image + dimensions based on overlay mode.
-        // The stabilised + fg videos are already in reference coords so
+        // The stabilized + fg videos are already in reference coords so
         // no warp matrix is applied at draw time.  Either side of the
         // stereo pair is cropped from the source via a sub-rect draw.
         let srcImage = null, srcW = 0, srcH = 0, applyWarpH = false, labelText = null;
@@ -710,7 +773,7 @@
                 labelText = 'Background  (temporal median)';
             }
         } else if (overlayMode !== 'off' && backgroundData) {
-            // Stabilised overlay only -- fg.mp4 is gone (hand boundary
+            // Stabilized overlay only -- fg.mp4 is gone (hand boundary
             // is computed on demand and drawn as a contour, not a
             // raster).  Skip the paint if the video isn't ready;
             // 'seeked'/'loadedmetadata' will re-render shortly.
@@ -726,7 +789,7 @@
                 drawSh = fullH;
                 srcImage = vid;
                 srcW = drawSw; srcH = drawSh;
-                labelText = 'Stabilised  (warped to reference frame)';
+                labelText = 'Stabilized  (warped to reference frame)';
             } else {
                 return;
             }
@@ -744,7 +807,7 @@
             drawSh = fullH;
             srcImage = liveVideoEl;
             srcW = drawSw; srcH = drawSh;
-            applyWarpH = isStabilised && !!trajectory;
+            applyWarpH = isStabilized && !!trajectory;
         }
         if (!srcImage) return;
 
@@ -768,6 +831,20 @@
         // cropped out; live-frame source draws the whole image.
         ctx.drawImage(srcImage, drawSx, drawSy, drawSw, drawSh,
                                 0,      0,      drawSw, drawSh);
+
+        // Live skin-color mask -- magenta tint over every pixel the
+        // current Skin colour leniency would classify as hand-coloured.
+        // Client-side YCrCb classification (mirrors _is_skin_ycc), so
+        // it tracks the leniency slider with zero latency.
+        if (showSkinMask && srcImage) {
+            const mask = _updateSkinMask(srcImage, drawSx, drawSy, drawSw, drawSh);
+            if (mask) {
+                ctx.save();
+                ctx.imageSmoothingEnabled = false;
+                ctx.drawImage(mask, 0, 0, drawSw, drawSh);
+                ctx.restore();
+            }
+        }
 
         // Live foreground heatmap fill -- JET colormap of |frame - BG|
         // inside the gate, painted UNDER the outline polygon.  Image
@@ -1309,7 +1386,7 @@
         $('prevSubjectBtn').addEventListener('click', prevSubject);
         $('nextSubjectBtn').addEventListener('click', nextSubject);
         $('runTrajectoryBtn').addEventListener('click', computeTrajectory);
-        // Three baked-or-derived stages: Stabilise (stable.mp4),
+        // Three baked-or-derived stages: Stabilize (stable.mp4),
         // Background (background.npz), Hand Boundary (live, on demand).
         $('runStableBtn').addEventListener('click', computeStable);
         $('runBackgroundBtn').addEventListener('click', computeBackground);
@@ -1324,19 +1401,28 @@
                 try { render(); } catch (_e) {}
             });
         }
-        // Skin-leniency slider: label only -- it's a Background bake
-        // param, read when Compute Background is clicked.
+        // Skin-leniency slider: it's a Background bake param (read when
+        // Compute Background is clicked), but it also drives the live
+        // skin-color mask preview -- so re-render on every input so the
+        // magenta overlay tracks the slider with zero latency.
         const _skinLenSlider = $('skinLeniencySlider');
         const _skinLenVal    = $('skinLeniencyVal');
         if (_skinLenSlider && _skinLenVal) {
             _skinLenSlider.addEventListener('input', () => {
                 _skinLenVal.textContent =
                     parseFloat(_skinLenSlider.value).toFixed(2);
+                if (showSkinMask) try { render(); } catch (_e) {}
             });
         }
         // Preview-zones checkbox: pure render toggle.
         $('cbPreviewZones').addEventListener('change', e => {
             showBgZones = e.target.checked;
+            try { render(); } catch (_e) {}
+        });
+        // Skin-mask checkbox: pure render toggle (classification is
+        // cached, so toggling on is instant after the first compute).
+        $('cbShowSkinMask').addEventListener('change', e => {
+            showSkinMask = e.target.checked;
             try { render(); } catch (_e) {}
         });
         const _fgDilateSlider = $('fgDilateSlider');
@@ -1438,7 +1524,7 @@
             });
         }
         $('cbStabilizedView').addEventListener('change', e => {
-            isStabilised = e.target.checked; render();
+            isStabilized = e.target.checked; render();
         });
         $('cbShowJerks').addEventListener('change', e => {
             showJerks = e.target.checked; render(); drawPlot();

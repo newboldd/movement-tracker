@@ -156,10 +156,10 @@ def _spawn_preproc_job(
     body: dict,
     job_type: str = "background",
 ) -> dict:
-    """Spawn a Stabilise or Background worker thread.
+    """Spawn a Stabilize or Background worker thread.
 
     Two endpoints share this helper: ``/compute_stable`` (just the
-    warp pass) and ``/compute_background`` (sample + median + colour
+    warp pass) and ``/compute_background`` (sample + median + color
     refinement + skin fit, reads stable.mp4).  Hand boundary is
     computed on demand per frame and doesn't route through here.
     """
@@ -277,7 +277,7 @@ def get_outline_frame(subject_id: int, trial_idx: int,
 
     ``open_radius_px`` clips thin strands off the boundary via a
     morphological open (0 = off).  ``include_fg=1`` also returns a
-    JET-coloured foreground heatmap PNG cropped to the gate bbox
+    JET-colored foreground heatmap PNG cropped to the gate bbox
     (``fg_OS``, ``fg_OD``); off by default since the encoding adds
     ~100 ms per side.
     """
@@ -299,9 +299,9 @@ def get_outline_frame(subject_id: int, trial_idx: int,
 @router.post("/{subject_id}/compute_background")
 def compute_background_endpoint(subject_id: int, body: dict = Body(...)) -> dict:
     """Stage 2: read stable.mp4 + camera trajectory + MP keypoints,
-    compute the masked-median background, run the colour-based
+    compute the masked-median background, run the color-based
     forearm refinement, fit the skin model, and save
-    background.npz.  Requires Stabilise to have produced
+    background.npz.  Requires Stabilize to have produced
     stable.mp4 first."""
     name = _subject_name(subject_id)
     trial_idx = int(body.get("trial_idx", 0))
@@ -319,7 +319,7 @@ def get_background(subject_id: int, trial_idx: int) -> dict:
 
     ``available`` is True once background.npz exists (Stage 2 done).
     ``stable_mp4_exists`` is reported independently so the UI can
-    tell "Stabilise done, Background not yet" apart from "nothing
+    tell "Stabilize done, Background not yet" apart from "nothing
     done".
     """
     from ..services.background import (
@@ -378,7 +378,7 @@ def get_background_image(subject_id: int, trial_idx: int,
 
 @router.get("/{subject_id}/trial/{trial_idx}/stable_video")
 def get_stable_video(subject_id: int, trial_idx: int):
-    """Serve the stabilised mp4 — every frame warped into reference
+    """Serve the stabilized mp4 — every frame warped into reference
     coords using the camera trajectory.  Same resolution + fps as the
     source so MP/HRnet/DLC can consume it transparently."""
     from ..services.background import stable_mp4_path
@@ -431,7 +431,7 @@ def get_mp_keypoints(subject_id: int, trial_idx: int) -> dict:
 
     # Apply the saved trajectory (if any) to land the keypoints in ref
     # coords -- so the client can overlay the dilated skeleton on the
-    # stabilised view without re-doing the warp math.
+    # stabilized view without re-doing the warp math.
     traj = load_camera_trajectory(name, trial_stem)
     ref_os = None; ref_od = None
     if traj is not None:
@@ -487,7 +487,7 @@ def get_warp_at_frame(subject_id: int, trial_idx: int,
     """Return the 3×3 homography that warps the given frame's pixels
     into the reference frame.
 
-    Used by the canvas overlay to render a "stabilised view" — multiply
+    Used by the canvas overlay to render a "stabilized view" — multiply
     the canvas transform by this matrix and the frame snaps into the
     reference's coordinate system.
     """
