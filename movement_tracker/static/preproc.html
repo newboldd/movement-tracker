@@ -210,14 +210,14 @@
                 </div>
 
                 <div class="section">
-                    <h3>Foreground / Mask</h3>
+                    <h3>Hand Boundary</h3>
                     <div class="small-note">
-                        Reads <strong>stable.mp4</strong> and the
-                        background to produce <strong>fg.mp4</strong>
-                        (motion against BG) and
-                        <strong>outline.mp4</strong> (hand boundary).
-                        Cheap to re-run with different parameters --
-                        no re-warping.
+                        Live overlay: for the current frame, the server
+                        runs Otsu + morphology + contour extraction
+                        inside the dilated MP gate and returns a closed
+                        polygon.  Adjust the slider to widen / tighten
+                        the gate -- the boundary updates in place.
+                        Requires <strong>stable.mp4</strong>.
                     </div>
                     <div style="margin-top:8px;font-size:11px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;">
@@ -225,19 +225,14 @@
                             <span id="fgDilateVal" style="color:var(--text);font-weight:bold;">14</span>
                         </div>
                         <input type="range" id="fgDilateSlider" min="4" max="60" step="1" value="14"
-                               title="Total dilation of the MP skeleton in image pixels.  Sets the outer bound of the hand mask gate; the actual outline still follows image content inside this region."
+                               title="Total dilation of the MP skeleton in image pixels.  Sets the outer bound of the hand region; the actual boundary follows image content inside this gate."
                                style="width:100%;cursor:pointer;height:5px;">
                     </div>
-                    <button class="btn btn-sm btn-success" id="runForegroundBtn" style="width:100%;margin-top:8px;" disabled>Compute Foreground</button>
-                    <div id="foregroundStatus" class="pp-stat" style="margin-top:6px;"></div>
-                    <div style="margin-top:8px;">
-                        <label style="display:block;margin-top:2px;font-size:11px;color:var(--text-muted);">
-                            <input type="radio" name="bgOverlay" id="ovFg"> Foreground mask (fg.mp4)
-                        </label>
-                        <label style="display:block;margin-top:6px;font-size:11px;color:var(--text-muted);">
-                            <input type="checkbox" id="cbShowOutline" disabled> Show segmentation outline
-                        </label>
-                    </div>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);margin-top:8px;">
+                        <input type="checkbox" id="cbShowOutline" disabled checked>
+                        Show hand boundary
+                    </label>
+                    <div id="outlineStatus" class="pp-stat" style="margin-top:6px;"></div>
                 </div>
 
                 <div class="section">
@@ -301,6 +296,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/preproc.js?v=24"></script>
+    <script src="/static/js/preproc.js?v=25"></script>
 </body>
 </html>

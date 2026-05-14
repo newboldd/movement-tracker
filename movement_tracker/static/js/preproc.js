@@ -38,11 +38,16 @@
     let backgroundData = null;
     let bgJobId = null;
     let bgEvtSource = null;
-    let overlayMode = 'off';    // 'off' | 'stable' | 'bg' | 'fg'
+    let overlayMode = 'off';    // 'off' | 'stable' | 'bg'
     let stableVideoEl = null;   // hidden <video> tied to stable.mp4
-    let fgVideoEl = null;       // hidden <video> tied to fg.mp4
-    let outlineVideoEl = null;  // hidden <video> tied to outline.mp4 (contour)
-    let showOutline = false;    // checkbox: overlay segmentation outline on canvas
+    let showOutline = true;     // checkbox: show live-fetched hand boundary
+    // Live outline state -- replaces the old fg.mp4 / outline.mp4 bake.
+    // Server returns a per-frame closed-polygon contour for the
+    // current dilation; we fetch it whenever the frame or slider
+    // changes (debounced ~150 ms) and draw it on top of the canvas.
+    let outlineData = null;          // {frame, dilation_px, is_stereo, OS, OD}
+    let outlineFetchTimer = null;    // debounce handle
+    let outlineFetchSeq = 0;         // request-id so late responses don't clobber newer state
     // MP keypoints for the current trial — used to draw the dilated-
     // skeleton preview on the canvas while the Compute Stable + Mask
     // panel is open.  Two coordinate spaces:
@@ -276,8 +281,7 @@
         if (subjectId == null || currentTrialIdx < 0) return;
         // Reset cached overlay videos so any pending overlay redraw won't use stale data.
         if (stableVideoEl)  { stableVideoEl.removeAttribute('src');  stableVideoEl.load(); }
-        if (fgVideoEl)      { fgVideoEl.removeAttribute('src');      fgVideoEl.load(); }
-        if (outlineVideoEl) { outlineVideoEl.removeAttribute('src'); outlineVideoEl.load(); }
+        outlineData = null;
         $('bgThumbOS').src = '';
         $('bgThumbOD').src = '';
         $('bgThumbOD').style.display = 'none';
@@ -295,24 +299,25 @@
                 $('stableStatus').textContent = trajectory
                     ? 'Not computed yet.'
                     : 'Waiting for trajectory (run step 1 first).';
-                $('foregroundStatus').textContent = '';
+                $('outlineStatus').textContent = '';
                 $('backgroundStats').textContent = '';
                 $('backgroundPreview').style.display = 'none';
                 overlayMode = 'off';
                 if ($('ovOff'))    $('ovOff').checked = true;
                 if ($('ovStable'))     $('ovStable').disabled = true;
                 if ($('ovBg'))         $('ovBg').disabled = true;
-                if ($('ovFg'))         $('ovFg').disabled = true;
                 if ($('cbShowOutline')) $('cbShowOutline').disabled = true;
             }
         } catch (e) {
             $('stableStatus').textContent = `Load error: ${e.message}`;
         }
         // Stable button: enabled when trajectory exists.
-        // Foreground button: enabled when stable.mp4 exists.
         $('runStableBtn').disabled = !trajectory;
-        $('runForegroundBtn').disabled =
-            !(backgroundData && backgroundData.stable_mp4_exists);
+        // Hand-boundary checkbox: enabled once stable.mp4 exists --
+        // we need the warped frame to compute the outline live.
+        const stableReady = !!(backgroundData && backgroundData.stable_mp4_exists);
+        $('cbShowOutline').disabled = !stableReady;
+        if (stableReady && showOutline) scheduleOutlineFetch();
     }
 
     function showBackgroundStats() {
@@ -326,11 +331,6 @@
             lines.push(`stable.mp4: <strong>${b.stable_mp4_size_mb.toFixed(1)} MB</strong>`);
         } else {
             lines.push(`<span style="color:var(--red);">stable.mp4 missing</span>`);
-        }
-        if (b.fg_mp4_exists) {
-            lines.push(`fg.mp4: <strong>${b.fg_mp4_size_mb.toFixed(1)} MB</strong>`);
-        } else {
-            lines.push(`<span style="color:var(--red);">fg.mp4 missing</span>`);
         }
         lines.push(`OS MAD: p95=<strong>${b.mad_OS_p95.toFixed(1)}</strong>  mean=${b.mad_OS_mean.toFixed(1)}`);
         if (b.is_stereo) {
@@ -370,34 +370,24 @@
             return v;
         };
         if (!stableVideoEl)  stableVideoEl  = _makeVideo();
-        if (!fgVideoEl)      fgVideoEl      = _makeVideo();
-        if (!outlineVideoEl) outlineVideoEl = _makeVideo();
         stableVideoEl.src  = `${base}/stable_video?_=${t}`;
-        fgVideoEl.src      = `${base}/fg_video?_=${t}`;
-        outlineVideoEl.src = `${base}/outline_video?_=${t}`;
         stableVideoEl.addEventListener('loadedmetadata', () => {
             $('ovStable').disabled = !backgroundData?.stable_mp4_exists;
         }, { once: true });
-        fgVideoEl.addEventListener('loadedmetadata', () => {
-            $('ovFg').disabled = !backgroundData?.fg_mp4_exists;
-        }, { once: true });
-        outlineVideoEl.addEventListener('loadedmetadata', () => {
-            $('cbShowOutline').disabled = !backgroundData?.outline_mp4_exists;
-        }, { once: true });
     }
 
-    /**
-     * Spawn a preproc job (stable or foreground) and stream its status
-     * into ``statusEl``.  Stable + Foreground are now separate endpoints
-     * + separate buttons; this helper handles the common SSE wiring.
-     */
-    async function _runPreprocJob(endpoint, body, statusElId) {
-        const statusEl = $(statusElId);
+    async function computeStable() {
+        if (subjectId == null || currentTrialIdx < 0) return;
+        if (!trajectory) {
+            $('stableStatus').textContent = 'Run Compute Trajectory first.';
+            return;
+        }
+        const statusEl = $('stableStatus');
         try {
-            const res = await api(`/api/preproc/${subjectId}/${endpoint}`, {
+            const res = await api(`/api/preproc/${subjectId}/compute_stable`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
+                body: JSON.stringify({ trial_idx: trialMeta.trial_idx }),
             });
             bgJobId = res.job_id;
             $('dot-background').classList.add('running');
@@ -430,29 +420,52 @@
         }
     }
 
-    async function computeStable() {
+    /**
+     * Fetch the hand-boundary contour for the current frame at the
+     * current dilation.  Live -- called whenever the frame or the
+     * dilation slider changes (debounced via scheduleOutlineFetch).
+     * Uses a monotonic sequence number so a stale late response
+     * doesn't overwrite newer state.
+     */
+    async function fetchOutline() {
         if (subjectId == null || currentTrialIdx < 0) return;
-        if (!trajectory) {
-            $('stableStatus').textContent = 'Run Compute Trajectory first.';
-            return;
-        }
-        await _runPreprocJob('compute_stable', {
-            trial_idx: trialMeta.trial_idx,
-        }, 'stableStatus');
-    }
-
-    async function computeForeground() {
-        if (subjectId == null || currentTrialIdx < 0) return;
-        if (!backgroundData || !backgroundData.stable_mp4_exists) {
-            $('foregroundStatus').textContent = 'Run Compute Stable first.';
-            return;
-        }
+        if (!backgroundData || !backgroundData.stable_mp4_exists) return;
+        if (!showOutline) return;
         const dilSlider = $('fgDilateSlider');
         const dilationPx = dilSlider ? parseInt(dilSlider.value, 10) : 14;
-        await _runPreprocJob('compute_foreground', {
-            trial_idx: trialMeta.trial_idx,
-            dilation_px: dilationPx,
-        }, 'foregroundStatus');
+        const frame = currentFrame;
+        const seq = ++outlineFetchSeq;
+        const url = `/api/preproc/${subjectId}/trial/${trialMeta.trial_idx}/outline_frame`
+                  + `?frame=${frame}&dilation_px=${dilationPx}`;
+        $('outlineStatus').textContent = 'Updating…';
+        try {
+            const resp = await fetch(url);
+            if (seq !== outlineFetchSeq) return;   // newer request superseded
+            if (!resp.ok) {
+                outlineData = null;
+                $('outlineStatus').textContent = `HTTP ${resp.status}`;
+            } else {
+                outlineData = await resp.json();
+                const nOS = outlineData.OS ? outlineData.OS.length : 0;
+                const nOD = outlineData.OD ? outlineData.OD.length : 0;
+                $('outlineStatus').textContent =
+                    `f${frame} d${dilationPx}px · OS ${nOS}pt` +
+                    (outlineData.is_stereo ? ` · OD ${nOD}pt` : '');
+            }
+        } catch (e) {
+            if (seq === outlineFetchSeq) {
+                outlineData = null;
+                $('outlineStatus').textContent = `Error: ${e.message}`;
+            }
+        } finally {
+            if (seq === outlineFetchSeq) render();
+        }
+    }
+
+    /** Debounced fetch: coalesce slider drags + frame steps. */
+    function scheduleOutlineFetch(delay = 150) {
+        clearTimeout(outlineFetchTimer);
+        outlineFetchTimer = setTimeout(fetchOutline, delay);
     }
 
     function showTrajectoryStats() {
@@ -534,6 +547,8 @@
         currentFrame = frameNum;
         if (!trialMeta) return Promise.resolve();
         $('frameDisplay').textContent = `Frame: ${frameNum} / ${nFrames}`;
+        // Hand-boundary refetch -- debounced so scrubbing isn't laggy.
+        if (showOutline) scheduleOutlineFetch();
         _refreshActiveVideo();
         const companions = _companionVideos();
         if (!videoEl || videoEl.readyState < 1) return Promise.resolve();
@@ -608,12 +623,11 @@
                 labelText = 'Background  (temporal median)';
             }
         } else if (overlayMode !== 'off' && backgroundData) {
-            // Use readyState >= 1 (HAVE_METADATA) — drawImage will paint
-            // whatever frame is currently decoded.  If the video isn't even
-            // at metadata yet (cold load), we simply skip rendering this
-            // tick — the next 'seeked'/'loadedmetadata' will trigger
-            // another render with valid state.
-            const vid = (overlayMode === 'fg') ? fgVideoEl : stableVideoEl;
+            // Stabilised overlay only -- fg.mp4 is gone (hand boundary
+            // is computed on demand and drawn as a contour, not a
+            // raster).  Skip the paint if the video isn't ready;
+            // 'seeked'/'loadedmetadata' will re-render shortly.
+            const vid = stableVideoEl;
             if (vid && vid.readyState >= 1 && vid.videoWidth > 0) {
                 const isStereo = backgroundData.is_stereo;
                 const fullW = vid.videoWidth, fullH = vid.videoHeight;
@@ -625,13 +639,8 @@
                 drawSh = fullH;
                 srcImage = vid;
                 srcW = drawSw; srcH = drawSh;
-                labelText = (overlayMode === 'fg')
-                    ? 'Foreground mask  (|frame − BG|)'
-                    : 'Stabilised  (warped to reference frame)';
+                labelText = 'Stabilised  (warped to reference frame)';
             } else {
-                // Overlay video not ready yet — skip this paint instead of
-                // falling through to the live frame.  The seek's 'seeked'
-                // listener (or canplay) will re-render shortly.
                 return;
             }
         } else if (overlayMode === 'off'
@@ -673,20 +682,33 @@
         ctx.drawImage(srcImage, drawSx, drawSy, drawSw, drawSh,
                                 0,      0,      drawSw, drawSh);
 
-        // Segmentation outline overlay — draws on top of whatever the
-        // current overlay produced.  outline.mp4 is white-on-black, so
-        // 'screen' blend mode adds the white pixels without dimming
-        // the underlying frame.  Tinted yellow via a CSS filter.
-        if (showOutline && outlineVideoEl?.readyState >= 1
-            && outlineVideoEl.videoWidth > 0
-            && backgroundData?.outline_mp4_exists) {
-            ctx.globalCompositeOperation = 'screen';
-            // Brightness + hue-rotate tints white edges to yellow-green.
-            ctx.filter = 'brightness(1.0) sepia(1) hue-rotate(0deg) saturate(5)';
-            ctx.drawImage(outlineVideoEl, drawSx, drawSy, drawSw, drawSh,
-                                          0,      0,      drawSw, drawSh);
-            ctx.filter = 'none';
-            ctx.globalCompositeOperation = 'source-over';
+        // Live hand-boundary overlay -- draws the server-computed
+        // closed polygon as a yellow stroked path, tracking the
+        // current side's contour from outlineData.  No mp4 reads,
+        // no compositing -- just a vector path that scales cleanly
+        // with the zoom transform.
+        if (showOutline && outlineData
+            && outlineData.frame === currentFrame) {
+            const pts = (currentSide === 'OD' && outlineData.is_stereo)
+                ? outlineData.OD
+                : outlineData.OS;
+            if (pts && pts.length >= 3) {
+                ctx.save();
+                ctx.strokeStyle = 'rgba(255, 235, 59, 0.95)';   // MP-yellow
+                ctx.lineJoin = 'round';
+                ctx.lineCap = 'round';
+                // Stay 2px wide on screen regardless of zoom.  We're
+                // inside the (scale * bps) transform, so divide.
+                ctx.lineWidth = 2 / Math.max(0.01, scale * bps);
+                ctx.beginPath();
+                ctx.moveTo(pts[0][0], pts[0][1]);
+                for (let i = 1; i < pts.length; i++) {
+                    ctx.lineTo(pts[i][0], pts[i][1]);
+                }
+                ctx.closePath();
+                ctx.stroke();
+                ctx.restore();
+            }
         }
 
         // Dilated MP-skeleton preview, shown while the Foreground
@@ -975,23 +997,14 @@
     function _refreshActiveVideo() {
         const prev = videoEl;
         if (overlayMode === 'stable' && stableVideoEl?.readyState >= 1) videoEl = stableVideoEl;
-        else if (overlayMode === 'fg' && fgVideoEl?.readyState >= 1)    videoEl = fgVideoEl;
         else                                                             videoEl = liveVideoEl;
         return prev !== videoEl;
     }
 
     /** Videos that must be seeked / played in lockstep with ``videoEl``.
-     *  - 'show outline' checkbox needs the outline track (outline.mp4)
-     *    regardless of which overlay is active.
-     *  Returns the list (possibly empty). */
-    function _companionVideos() {
-        const out = [];
-        if (showOutline && outlineVideoEl?.readyState >= 1
-            && outlineVideoEl !== videoEl) {
-            out.push(outlineVideoEl);
-        }
-        return out;
-    }
+     *  Hand boundary is now a vector overlay -- no companion video.
+     */
+    function _companionVideos() { return []; }
 
     // Mirrors mano.js exactly — one videoEl, rVFC when available,
     // playbackRate clamped to 16 (browsers get unreliable above that).
@@ -1109,21 +1122,23 @@
         $('prevSubjectBtn').addEventListener('click', prevSubject);
         $('nextSubjectBtn').addEventListener('click', nextSubject);
         $('runTrajectoryBtn').addEventListener('click', computeTrajectory);
-        // Two preproc stages, two buttons.  Stabilise is the heavy
-        // warp+median pass; Foreground iterates cheaply on top of it.
+        // Stabilise is the only baked stage now.  Hand boundary is
+        // computed on demand per frame -- the slider triggers a
+        // debounced fetch instead of a job.
         $('runStableBtn').addEventListener('click', computeStable);
-        $('runForegroundBtn').addEventListener('click', computeForeground);
         const _fgDilateSlider = $('fgDilateSlider');
         const _fgDilateVal    = $('fgDilateVal');
         if (_fgDilateSlider && _fgDilateVal) {
             _fgDilateSlider.addEventListener('input', () => {
                 _fgDilateVal.textContent = _fgDilateSlider.value;
-                // Re-render so the on-canvas dilated-skeleton preview
-                // tracks the slider.
+                // Instant feedback: re-render so the on-canvas
+                // dilated-skeleton preview tracks the slider.
                 try { render(); } catch (_e) {}
+                // Debounced backend fetch for the new outline.
+                if (showOutline) scheduleOutlineFetch();
             });
         }
-        // Overlay radio group → mutually exclusive: live, stable.mp4, fg.mp4.
+        // Overlay radio group → mutually exclusive: live, stable.mp4.
         // Switching swaps which video element is the active source.  If
         // playback was running, transfer it to the new source seamlessly.
         const _setOverlay = (mode) => {
@@ -1162,18 +1177,15 @@
         $('ovOff').addEventListener('change',      e => e.target.checked && _setOverlay('off'));
         $('ovStable').addEventListener('change',   e => e.target.checked && _setOverlay('stable'));
         $('ovBg').addEventListener('change',       e => e.target.checked && _setOverlay('bg'));
-        $('ovFg').addEventListener('change',       e => e.target.checked && _setOverlay('fg'));
-        // Segmentation outline checkbox — independent of overlay mode.
-        // When toggled on, seek the outline track to the current frame
-        // so the first paint isn't from a stale time, then render.
+        // Hand-boundary checkbox: trigger a fresh fetch when turned on
+        // so the user sees the contour for the current frame
+        // immediately; clear the cached data when turned off.
         $('cbShowOutline').addEventListener('change', e => {
             showOutline = e.target.checked;
-            if (showOutline && outlineVideoEl?.readyState >= 1 && trialMeta) {
-                const fps = trialMeta.fps || 30;
-                outlineVideoEl.currentTime = (currentFrame + 0.5) / fps;
-                outlineVideoEl.addEventListener('seeked', () => render(),
-                                                 { once: true });
+            if (showOutline) {
+                fetchOutline();
             } else {
+                outlineData = null;
                 render();
             }
         });

@@ -1,38 +1,36 @@
-"""Stabilisation + foreground/background mask extraction.
+"""Stabilisation + on-demand hand-boundary extraction.
 
-Two artifacts per trial, both directly consumable by MP/HRnet/DLC:
+One bake per trial produces ``stable.mp4`` and ``background.npz``.
+The hand boundary is computed on demand per frame by
+:func:`compute_outline_frame`, which reads from those two artifacts
+and returns a closed polygon -- no global fg.mp4 / outline.mp4 mp4s
+are written.
 
-1.  ``stable.mp4`` — every source frame warped into the reference
-    frame's coordinate system using the camera trajectory.  The static
-    scene stays put; only the hand (and any other moving parts) appears
-    to move.  Same resolution and layout as the source video, so any
-    consumer that reads the original video can read this one too.
+``stable.mp4`` -- every source frame warped into the reference frame's
+coordinate system using the camera trajectory.  The static scene stays
+put; only the hand (and any other moving parts) appears to move.  Same
+resolution and layout as the source video.
 
-2.  ``fg.mp4`` — grayscale per-frame foreground mask: the per-pixel
-    absolute difference between the stabilised frame and the static
-    background, max-pooled across BGR channels.  Bright = motion (hand);
-    dark = static scene.  Same resolution as the source.
-
-The static background needed to compute the mask is itself computed
-internally as a temporal median across uniformly-sampled stabilised
-frames.  It is saved as ``background.npz`` (+ PNGs for inspection)
-mainly as a diagnostic artifact; the mp4s are the operational outputs.
+``background.npz`` -- temporal median of stabilised samples (with the
+hand masked out via the dilated MP skeleton), plus the fitted CbCr
+skin model and the MP-ref keypoints, so downstream callers can
+reconstruct everything needed for per-frame mask work without
+re-loading MP or re-fitting the model.
 
 Inputs:
-    Camera trajectory (``camera_trajectory.npz``) must already exist —
+    Camera trajectory (``camera_trajectory.npz``) must already exist --
     compute it via the *Compute Trajectory* button first.
 
 Outputs in ``<dlc>/<subject>/preproc/<stem>/``:
     stable.mp4              stabilised source video
-    fg.mp4                  per-frame foreground mask (grayscale)
-    background.npz          temporal-median BG image + MAD + metadata
+    background.npz          BG image + MAD + skin model + MP-ref kpts
     background_OS.png       BG image, OS half (full-res preview)
     background_OD.png       BG image, OD half (stereo only)
     mad_OS.png, mad_OD.png  MAD heat-maps for quality inspection
 
-``H_to_ref[i]`` maps frame-i pixel coords → reference-frame pixel coords
-(forward direction).  We pass it to ``warpPerspective`` *without*
-``WARP_INVERSE_MAP`` — OpenCV then internally inverts it and samples
+``H_to_ref[i]`` maps frame-i pixel coords -> reference-frame pixel
+coords (forward direction).  We pass it to ``warpPerspective`` *without*
+``WARP_INVERSE_MAP`` -- OpenCV then internally inverts it and samples
 each destination pixel from ``inv(H_to_ref) @ (x, y)`` in the source,
 which is exactly what we want: a destination image where every pixel
 shows the scene point at that reference-frame location.
@@ -1089,29 +1087,37 @@ def compute_stable(
     return str(out_path)
 
 
-def compute_foreground(
+
+def compute_outline_frame(
     subject_name: str,
     trial_idx: int,
-    progress_callback=None,
-    cancel_event=None,
+    frame: int,
     dilation_px: int = 14,
-    image_thresh: float = 0.30,
-    min_width_px: int = 3,
-    edge_subtract_strength: float = 0.7,
-) -> str:
-    """Stage 2 of the bake: produce fg.mp4 + outline.mp4 from an existing
-    stable.mp4 + background.npz.
+    close_radius_px: int = 5,
+    simplify_eps_px: float = 3.0,
+) -> dict:
+    """On-demand hand boundary for one frame.
 
-    Cheap and re-runnable: no warpPerspective, no median, no MP re-load.
-    Reads stable.mp4 sequentially, computes per-frame:
+    Replaces the old compute_foreground bake: instead of writing an
+    fg.mp4 + outline.mp4 over the entire trial, this function returns
+    the contour of the hand for a single ``frame``, computed only
+    inside the dilated MP gate.  The UI calls it lazily as the user
+    scrubs frames or moves the dilation slider.
 
-      - fg_u8     = _build_fg_mask(stable_frame, BG, bg_edge_norm)
-      - hand_u8   = _build_image_aware_hand_mask(stable_frame, BG, kpts,
-                       skin_model, stamp_radius=dilation_px, ...)
-      - outline   = Canny(threshold(hand_u8))
+    Pipeline per side:
+      1. Build dilated MP gate (filled silhouette of joints + chains).
+      2. Compute |stable_frame - BG| inside the gate.
+      3. Otsu-threshold the gate-restricted motion (bimodal: BG vs hand).
+      4. Morphological close (disk radius ``close_radius_px``) to fill
+         palm-interior holes where skin happens to match BG.
+      5. Keep only the largest connected component (drop speckles).
+      6. Extract the outermost contour and simplify via Douglas-Peucker
+         (``simplify_eps_px`` -- preserves fingertip corners).
 
-    Skin model + MP-ref keypoints come from background.npz; bg edge map
-    is recomputed from the saved BG image (cheap, ~10 ms).
+    Returns:
+      ``{frame, is_stereo, OS: [[x,y],...], OD: [[x,y],...] | None}``.
+      Each contour is a closed polygon in reference-frame pixel
+      coordinates (the same space stable.mp4 frames live in).
     """
     from .video import build_trial_map
 
@@ -1132,33 +1138,30 @@ def compute_foreground(
     bg_R = d["background_R"] if is_stereo else None
     downscale = int(d["downscale"])
     n_frames = int(d["n_frames"])
-
     mp_kpts_ref_L = d["mp_kpts_ref_L"] if "mp_kpts_ref_L" in d.files else None
     mp_kpts_ref_R = d["mp_kpts_ref_R"] if "mp_kpts_ref_R" in d.files else None
 
-    def _skin(prefix):
-        m = f"skin_model_{prefix}_mean"
-        c = f"skin_model_{prefix}_cov_inv"
-        if m in d.files and c in d.files:
-            return {"mean": d[m], "cov_inv": d[c]}
-        return None
-    skin_model_L = _skin("L")
-    skin_model_R = _skin("R") if is_stereo else None
+    if frame < 0 or frame >= n_frames:
+        raise ValueError(f"frame {frame} out of range [0, {n_frames})")
 
     stable_path = _stable_path(subject_name, stem)
     if not stable_path.exists():
         raise RuntimeError(
-            f"No stable.mp4 for {subject_name}/{stem} -- "
-            "run Stabilise first.")
+            f"No stable.mp4 for {subject_name}/{stem} -- run Stabilise first.")
+
     cap = cv2.VideoCapture(str(stable_path))
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open stable.mp4: {stable_path}")
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    h_full = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    full_w_total = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    w_half = (full_w_total // 2) if is_stereo else full_w_total
+    cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame))
+    ok, img = cap.read()
+    cap.release()
+    if not ok or img is None:
+        raise RuntimeError(f"Failed to read frame {frame} from stable.mp4")
 
-    # Background upscale to full-res for diff-against-frame.
+    h_full = img.shape[0]
+    full_w = img.shape[1]
+    w_half = (full_w // 2) if is_stereo else full_w
+
     if downscale > 1:
         bg_L_full = cv2.resize(bg_L, (w_half, h_full), interpolation=cv2.INTER_LINEAR)
         bg_R_full = (cv2.resize(bg_R, (w_half, h_full), interpolation=cv2.INTER_LINEAR)
@@ -1166,134 +1169,75 @@ def compute_foreground(
     else:
         bg_L_full = bg_L
         bg_R_full = bg_R
-    bg_edge_L = _bg_edge_map(bg_L_full)
-    bg_edge_R = _bg_edge_map(bg_R_full) if is_stereo else None
 
-    # Kpt usability check (matches the old in-bake logic).
-    _MIN_KPT_FRAMES_FRAC = 0.10
-    def _usable_kpts(arr):
-        if arr is None:
-            return False
-        per_frame_valid = (~np.isnan(arr).any(axis=-1)).any(axis=-1)
-        return float(per_frame_valid.sum()) / max(1, arr.shape[0]) >= _MIN_KPT_FRAMES_FRAC
-    use_kpt_mask_L = _usable_kpts(mp_kpts_ref_L)
-    use_kpt_mask_R = _usable_kpts(mp_kpts_ref_R) if is_stereo else False
-    logger.info(
-        f"foreground mode: OS={'kpt' if use_kpt_mask_L else 'fg-fallback'}"
-        + (f", OD={'kpt' if use_kpt_mask_R else 'fg-fallback'}" if is_stereo else "")
-    )
+    def _side_contour(stable_side: np.ndarray, bg_full: np.ndarray,
+                       kpts: np.ndarray | None) -> list:
+        if kpts is None:
+            return []
+        if np.isnan(kpts).all():
+            return []
+        H, W = stable_side.shape[:2]
+        # 1. Dilated MP gate
+        kpt_region = _build_kpt_hand_region(
+            kpts, W, H,
+            stamp_radius=max(2, int(dilation_px)),
+            smooth_sigma=4.0)
+        gate = (kpt_region > 0.5).astype(np.uint8)
+        if gate.sum() < 100:
+            return []
+        # 2. Motion = max over BGR channels of |frame - BG|, uint8.
+        motion = np.abs(stable_side.astype(np.int16) - bg_full.astype(np.int16))
+        motion = motion.max(axis=-1).astype(np.uint8)
+        # 3. Otsu threshold over the gate-restricted motion only --
+        # gives a per-frame adaptive cut between "moving" (hand) and
+        # "still" (BG inside the gate).
+        gated_vals = motion[gate > 0]
+        if gated_vals.size < 100:
+            return []
+        thresh, _ = cv2.threshold(
+            gated_vals, 0, 255,
+            cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        binary = ((motion > thresh) & (gate > 0)).astype(np.uint8) * 255
+        # 4. Morphological close -- fills internal holes.
+        r = max(1, int(close_radius_px))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        # 5. Largest connected component.
+        n_lbl, lbl, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        if n_lbl <= 1:
+            return []
+        largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        # 6. Outermost contour + Douglas-Peucker smoothing.
+        binary = (lbl == largest).astype(np.uint8) * 255
+        contours, _hier = cv2.findContours(
+            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        if not contours:
+            return []
+        c = max(contours, key=cv2.contourArea)
+        if simplify_eps_px > 0:
+            c = cv2.approxPolyDP(c, epsilon=float(simplify_eps_px), closed=True)
+        return c.reshape(-1, 2).astype(int).tolist()
 
-    fg_path = _fg_path(subject_name, stem)
-    outline_path = _outline_path(subject_name, stem)
-    # Wipe any orphan ffmpeg from a previous hard-killed bake before
-    # opening our own pipes to the same files.
-    _kill_orphan_ffmpegs_for_dir(_preproc_dir(subject_name, stem))
-    fg_proc      = _open_ffmpeg_pipe(str(fg_path),      full_w_total, h_full, fps, "bgr24")
-    outline_proc = _open_ffmpeg_pipe(str(outline_path), full_w_total, h_full, fps, "bgr24")
+    if is_stereo:
+        os_img = img[:, :w_half]
+        od_img = img[:, w_half:]
+    else:
+        os_img = img
+        od_img = None
 
-    _OUTLINE_THRESH = 80
-
-    frames_written = 0
-    try:
-        for i in range(n_frames):
-            if cancel_event is not None and cancel_event.is_set():
-                raise InterruptedError("Job cancelled")
-            ok, frame = cap.read()
-            if not ok:
-                logger.warning(f"foreground: read failed at frame {i}; truncating")
-                break
-            if is_stereo:
-                warp_L = frame[:, :w_half]
-                warp_R = frame[:, w_half:]
-            else:
-                warp_L = frame
-                warp_R = None
-
-            # ── Left side
-            kpts_L_now = (mp_kpts_ref_L[i] if mp_kpts_ref_L is not None
-                          and i < mp_kpts_ref_L.shape[0] else None)
-            fg_L = _build_fg_mask(
-                warp_L, bg_L_full,
-                bg_edge_norm=bg_edge_L,
-                edge_subtract_strength=edge_subtract_strength)
-            fg_L_bgr = np.stack([fg_L, fg_L, fg_L], axis=-1)
-
-            if use_kpt_mask_L and kpts_L_now is not None:
-                hand_L_u8 = _build_image_aware_hand_mask(
-                    warp_L, bg_L_full, kpts_L_now, skin_model_L,
-                    stamp_radius=int(dilation_px),
-                    image_thresh=float(image_thresh),
-                    min_width_px=int(min_width_px),
-                    bg_edge_norm=bg_edge_L,
-                    edge_subtract_strength=float(edge_subtract_strength))
-            else:
-                hand_L_u8 = fg_L
-            binary_L = (hand_L_u8 > _OUTLINE_THRESH).astype(np.uint8) * 255
-            outline_L = cv2.Canny(binary_L, 50, 150)
-            outline_L = cv2.dilate(outline_L, np.ones((2, 2), np.uint8), iterations=1)
-            outline_L_bgr = np.stack([outline_L, outline_L, outline_L], axis=-1)
-
-            if is_stereo and warp_R is not None:
-                kpts_R_now = (mp_kpts_ref_R[i] if mp_kpts_ref_R is not None
-                              and i < mp_kpts_ref_R.shape[0] else None)
-                fg_R = _build_fg_mask(
-                    warp_R, bg_R_full,
-                    bg_edge_norm=bg_edge_R,
-                    edge_subtract_strength=edge_subtract_strength)
-                fg_R_bgr = np.stack([fg_R, fg_R, fg_R], axis=-1)
-                if use_kpt_mask_R and kpts_R_now is not None:
-                    hand_R_u8 = _build_image_aware_hand_mask(
-                        warp_R, bg_R_full, kpts_R_now, skin_model_R,
-                        stamp_radius=int(dilation_px),
-                        image_thresh=float(image_thresh),
-                        min_width_px=int(min_width_px),
-                        bg_edge_norm=bg_edge_R,
-                        edge_subtract_strength=float(edge_subtract_strength))
-                else:
-                    hand_R_u8 = fg_R
-                binary_R = (hand_R_u8 > _OUTLINE_THRESH).astype(np.uint8) * 255
-                outline_R = cv2.Canny(binary_R, 50, 150)
-                outline_R = cv2.dilate(outline_R, np.ones((2, 2), np.uint8), iterations=1)
-                outline_R_bgr = np.stack([outline_R, outline_R, outline_R], axis=-1)
-
-                fg_frame      = np.concatenate([fg_L_bgr,      fg_R_bgr],      axis=1)
-                outline_frame = np.concatenate([outline_L_bgr, outline_R_bgr], axis=1)
-            else:
-                fg_frame      = fg_L_bgr
-                outline_frame = outline_L_bgr
-
-            fg_proc.stdin.write(np.ascontiguousarray(fg_frame, dtype=np.uint8).tobytes())
-            outline_proc.stdin.write(np.ascontiguousarray(outline_frame, dtype=np.uint8).tobytes())
-            frames_written += 1
-
-            if progress_callback is not None and (i % 5 == 0):
-                try:
-                    progress_callback(100.0 * (i + 1) / max(1, n_frames))
-                except Exception:
-                    pass
-    finally:
-        cap.release()
-        for proc, name in ((fg_proc, "fg"), (outline_proc, "outline")):
-            try: proc.stdin.close()
-            except Exception: pass
-            try:
-                stderr_bytes = proc.stderr.read() if proc.stderr else b""
-                rc = proc.wait(timeout=600)
-                if rc != 0:
-                    logger.warning(f"ffmpeg ({name}) exited {rc}: "
-                                    f"{stderr_bytes.decode('utf-8', errors='replace')[:600]}")
-            except Exception as e:
-                logger.warning(f"ffmpeg ({name}) finalise error: {e}")
-            finally:
-                _retire_ffmpeg(proc)
-
-    if progress_callback is not None:
-        try: progress_callback(100.0)
-        except Exception: pass
-    logger.info(
-        f"foreground saved: {fg_path}, {outline_path}  "
-        f"frames_written={frames_written}/{n_frames}  dilation_px={dilation_px}")
-    return str(fg_path)
+    kpts_L = (mp_kpts_ref_L[frame] if (mp_kpts_ref_L is not None
+                                        and frame < mp_kpts_ref_L.shape[0])
+              else None)
+    kpts_R = (mp_kpts_ref_R[frame] if (mp_kpts_ref_R is not None
+                                        and frame < mp_kpts_ref_R.shape[0])
+              else None)
+    return {
+        "frame": int(frame),
+        "is_stereo": is_stereo,
+        "dilation_px": int(dilation_px),
+        "OS": _side_contour(os_img, bg_L_full, kpts_L),
+        "OD": _side_contour(od_img, bg_R_full, kpts_R) if is_stereo else None,
+    }
 
 
 # Backward-compat alias: older callers may still reach for
@@ -1333,8 +1277,6 @@ def summarise_background(subject_name: str, trial_stem: str, bg: dict) -> dict:
     mad_L = bg["mad_L"]
     h, w = bg_L.shape[:2]
     sp = _stable_path(subject_name, trial_stem)
-    fp = _fg_path(subject_name, trial_stem)
-    op = _outline_path(subject_name, trial_stem)
     return {
         "n_samples_used": int(bg["frames_sampled"].size),
         "frames_written": bg.get("frames_written", 0),
@@ -1351,9 +1293,6 @@ def summarise_background(subject_name: str, trial_stem: str, bg: dict) -> dict:
                             if bg["is_stereo"] else None),
         "stable_mp4_exists":  sp.exists(),
         "stable_mp4_size_mb": (sp.stat().st_size / 1e6) if sp.exists() else 0.0,
-        "fg_mp4_exists":      fp.exists(),
-        "fg_mp4_size_mb":     (fp.stat().st_size / 1e6) if fp.exists() else 0.0,
-        "outline_mp4_exists": op.exists(),
     }
 
 
@@ -1364,11 +1303,3 @@ def stable_mp4_path(subject_name: str, trial_stem: str) -> Path | None:
     return p if p.exists() else None
 
 
-def fg_mp4_path(subject_name: str, trial_stem: str) -> Path | None:
-    p = _fg_path(subject_name, trial_stem)
-    return p if p.exists() else None
-
-
-def outline_mp4_path(subject_name: str, trial_stem: str) -> Path | None:
-    p = _outline_path(subject_name, trial_stem)
-    return p if p.exists() else None

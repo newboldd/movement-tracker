@@ -152,19 +152,17 @@ def _spawn_preproc_job(
     name: str,
     trial_stem: str,
     trial_idx: int,
-    job_kind: str,                 # 'stable' or 'foreground'
+    job_kind: str,                 # 'stable' (only kind now)
     body: dict,
     job_type: str = "background",
 ) -> dict:
-    """Shared body for Stabilise and Foreground endpoints.
+    """Spawn the Stabilise bake worker thread.
 
-    Inserts a job row, spawns a worker thread that calls the right
-    stage function, and returns the job id + trial stem so the UI can
-    poll progress.  Splitting the bake into two endpoints lets users
-    iterate on mask/outline params without re-running the heavy
-    stabilise pass.
+    Hand-boundary work used to be a separate ``foreground`` job kind;
+    that is now computed on demand per frame and no longer routes
+    through this helper.
     """
-    from ..services.background import compute_stable, compute_foreground
+    from ..services.background import compute_stable
 
     with get_db_ctx() as db:
         db.execute(
@@ -184,22 +182,17 @@ def _spawn_preproc_job(
     cancel_event = threading.Event()
     registry._cancel_events[job_id] = cancel_event
 
-    if job_kind == "stable":
-        worker = compute_stable
-        allowed = ("max_samples", "downscale", "dilation_px")
-    elif job_kind == "foreground":
-        worker = compute_foreground
-        allowed = ("dilation_px", "image_thresh", "min_width_px",
-                   "edge_subtract_strength")
-    else:
+    if job_kind != "stable":
         raise HTTPException(500, f"bad job_kind: {job_kind}")
+    worker = compute_stable
+    allowed = ("max_samples", "downscale", "dilation_px")
 
     kwargs = {}
     for k in allowed:
         v = body.get(k)
         if v is None:
             continue
-        kwargs[k] = float(v) if k in ("image_thresh", "edge_subtract_strength") else int(v)
+        kwargs[k] = int(v)
 
     def _run():
         try:
@@ -261,19 +254,29 @@ def compute_stable_endpoint(subject_id: int, body: dict = Body(...)) -> dict:
                                 "stable", body)
 
 
-@router.post("/{subject_id}/compute_foreground")
-def compute_foreground_endpoint(subject_id: int, body: dict = Body(...)) -> dict:
-    """Stage 2: read stable.mp4 + background.npz and bake fg.mp4 +
-    outline.mp4.  Cheap and re-runnable -- use this to iterate on mask
-    parameters without re-running the heavy stabilise step."""
+@router.get("/{subject_id}/trial/{trial_idx}/outline_frame")
+def get_outline_frame(subject_id: int, trial_idx: int,
+                       frame: int, dilation_px: int = 14) -> dict:
+    """On-demand hand boundary for a single frame.
+
+    Replaces the old ``compute_foreground`` bake: the UI calls this as
+    the user scrubs frames or moves the dilation slider, and gets back
+    a closed contour polygon (per camera in stereo).  Cheap enough to
+    re-fetch interactively -- skips the warp pass entirely by reading
+    from stable.mp4.
+    """
+    from ..services.background import compute_outline_frame
     name = _subject_name(subject_id)
-    trial_idx = int(body.get("trial_idx", 0))
-    trials = build_trial_map(name)
-    if trial_idx < 0 or trial_idx >= len(trials):
-        raise HTTPException(400, "trial_idx out of range")
-    trial_stem = trials[trial_idx]["trial_name"]
-    return _spawn_preproc_job(subject_id, name, trial_stem, trial_idx,
-                                "foreground", body)
+    try:
+        return compute_outline_frame(name, trial_idx, int(frame),
+                                       dilation_px=int(dilation_px))
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except RuntimeError as e:
+        # Missing artifacts -- 404 so the UI can show "run Stabilise".
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @router.post("/{subject_id}/compute_background")
@@ -356,40 +359,6 @@ def get_stable_video(subject_id: int, trial_idx: int):
     p = stable_mp4_path(name, trial_stem)
     if p is None:
         raise HTTPException(404, "no stable.mp4 — run Compute Background")
-    return FileResponse(str(p), media_type="video/mp4")
-
-
-@router.get("/{subject_id}/trial/{trial_idx}/fg_video")
-def get_fg_video(subject_id: int, trial_idx: int):
-    """Serve the foreground-mask mp4.  Grayscale; bright pixels = moving
-    object (hand); dark = static scene."""
-    from ..services.background import fg_mp4_path
-
-    name = _subject_name(subject_id)
-    trials = build_trial_map(name)
-    if trial_idx < 0 or trial_idx >= len(trials):
-        raise HTTPException(400, f"trial_idx out of range")
-    trial_stem = trials[trial_idx]["trial_name"]
-    p = fg_mp4_path(name, trial_stem)
-    if p is None:
-        raise HTTPException(404, "no fg.mp4 — run Compute Background")
-    return FileResponse(str(p), media_type="video/mp4")
-
-
-@router.get("/{subject_id}/trial/{trial_idx}/outline_video")
-def get_outline_video(subject_id: int, trial_idx: int):
-    """Serve the per-frame contour of the hand mask (Canny edges,
-    1-pixel dilated).  Used for the 'show segmentation outline'
-    checkbox overlay."""
-    from ..services.background import outline_mp4_path
-    name = _subject_name(subject_id)
-    trials = build_trial_map(name)
-    if trial_idx < 0 or trial_idx >= len(trials):
-        raise HTTPException(400, f"trial_idx out of range")
-    trial_stem = trials[trial_idx]["trial_name"]
-    p = outline_mp4_path(name, trial_stem)
-    if p is None:
-        raise HTTPException(404, "no outline.mp4 — run Compute Stable + Mask")
     return FileResponse(str(p), media_type="video/mp4")
 
 
