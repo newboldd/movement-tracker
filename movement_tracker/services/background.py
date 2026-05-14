@@ -312,6 +312,37 @@ _FINGER_CHAINS = [
 ]
 
 
+def _reflect_thumb_cmc(kpts_ref: np.ndarray) -> np.ndarray | None:
+    """Synthetic ulnar-heel point: thumb CMC (joint 1) reflected across
+    the wrist -> middle-MCP axis.
+
+    MediaPipe has no landmark on the ulnar ("pinky-side") heel of the
+    palm -- joint 1 covers the radial heel, joint 17 the ulnar
+    knuckle, but the ulnar heel between them is bare.  That corner is
+    a recurring hand-mask miss.  Reflecting the radial thumb-CMC
+    corner across the palm's long axis (wrist 0 -> middle MCP 9)
+    drops a point right where the missing corner should be.
+
+    Returns ``(x, y)`` float64 or None if joints 0/1/9 aren't all
+    present.
+    """
+    w_pt   = kpts_ref[0]
+    cmc_pt = kpts_ref[1]
+    mid_pt = kpts_ref[9]
+    if (np.isnan(w_pt).any() or np.isnan(cmc_pt).any()
+            or np.isnan(mid_pt).any()):
+        return None
+    w_pt = w_pt.astype(np.float64)
+    axis = mid_pt.astype(np.float64) - w_pt
+    n = float(np.linalg.norm(axis))
+    if n < 1e-6:
+        return None
+    d = axis / n
+    v = cmc_pt.astype(np.float64) - w_pt
+    perp = v - np.dot(v, d) * d           # component perpendicular to the axis
+    return w_pt + (v - perp) - perp        # = cmc - 2 * perp
+
+
 def _build_kpt_hand_region(
     kpts_ref: np.ndarray,
     w: int, h: int,
@@ -331,7 +362,10 @@ def _build_kpt_hand_region(
        traces the skeleton segments instead of scattering midpoint
        stamps that leave bone-thin gaps.
     3. Draw thick lines along the MCP arc (joints 1-5-9-13-17) to
-       close the palm.
+       close the palm, plus a synthetic ulnar-heel point (thumb CMC
+       reflected across the wrist -> middle-MCP axis) so the
+       pinky-side heel of the palm -- which has no MP landmark -- is
+       covered.
     4. Gaussian-blur with a small sigma to feather the edges without
        expanding the silhouette much.
 
@@ -379,6 +413,25 @@ def _build_kpt_hand_region(
             continue
         cv2.line(canvas, _to_int(a), _to_int(b),
                   color=255, thickness=line_thick, lineType=cv2.LINE_AA)
+
+    # 3-ulnar. Synthetic ulnar-heel point -- thumb CMC reflected across
+    #   the wrist -> middle-MCP axis.  Stamp it and close the ulnar
+    #   palm edge (pinky-MCP -> reflected -> thumb-CMC) so the
+    #   pinky-side heel of the palm, which has no MP landmark, stops
+    #   being a recurring mask miss.
+    refl = _reflect_thumb_cmc(kpts_ref)
+    if refl is not None:
+        rpt = _to_int(refl)
+        if 0 <= rpt[0] < w and 0 <= rpt[1] < h:
+            cv2.circle(canvas, rpt, stamp_radius, 255, thickness=-1)
+        pinky = by_joint.get(17)
+        thumb_cmc = by_joint.get(1)
+        if pinky is not None:
+            cv2.line(canvas, _to_int(pinky), rpt,
+                      color=255, thickness=line_thick, lineType=cv2.LINE_AA)
+        if thumb_cmc is not None:
+            cv2.line(canvas, _to_int(thumb_cmc), rpt,
+                      color=255, thickness=line_thick, lineType=cv2.LINE_AA)
 
     # 3a. Optional forearm extension.  Used at Stabilize-time so the BG
     #     median masks the distal forearm out alongside the hand;

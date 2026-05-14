@@ -83,6 +83,28 @@
     ];
     // Palm-arc (MCP chain) for closing the silhouette.
     const _MP_PALM_CHAIN = [1, 5, 9, 13, 17];
+
+    /**
+     * Synthetic ulnar-heel point: thumb CMC (joint 1) reflected across
+     * the wrist (0) -> middle-MCP (9) axis.  Mirrors
+     * _reflect_thumb_cmc in background.py so the on-canvas previews
+     * show the same ulnar-palm coverage the server bakes in.
+     * ``f`` is a [21][2] keypoint array; returns [x, y] or null.
+     */
+    function _reflectThumbCmc(f) {
+        const has = j => f[j] && f[j][0] != null && f[j][1] != null;
+        if (!has(0) || !has(1) || !has(9)) return null;
+        const wx = f[0][0], wy = f[0][1];
+        let ax = f[9][0] - wx, ay = f[9][1] - wy;
+        const n = Math.hypot(ax, ay);
+        if (n < 1e-6) return null;
+        ax /= n; ay /= n;
+        const vx = f[1][0] - wx, vy = f[1][1] - wy;
+        const dot = vx * ax + vy * ay;
+        const perpx = vx - dot * ax, perpy = vy - dot * ay;
+        // reflected = cmc - 2 * perp
+        return [f[1][0] - 2 * perpx, f[1][1] - 2 * perpy];
+    }
     // Stereo controls: side toggle alternates between 'OS' and 'OD'.
     // The /api/deidentify/{id}/frame endpoint does the half-crop
     // server-side via the ``side=`` query param.
@@ -943,6 +965,23 @@
                     ctx.arc(f[j][0], f[j][1], dilation, 0, Math.PI * 2);
                     ctx.fill();
                 }
+                // Synthetic ulnar-heel point: reflected thumb CMC,
+                // closing the pinky-side palm edge (matches the
+                // server's _build_kpt_hand_region).
+                const _refl = _reflectThumbCmc(f);
+                if (_refl) {
+                    const _segTo = j => {
+                        if (!_hasPt(j)) return;
+                        ctx.beginPath();
+                        ctx.moveTo(f[j][0], f[j][1]);
+                        ctx.lineTo(_refl[0], _refl[1]);
+                        ctx.stroke();
+                    };
+                    _segTo(17); _segTo(1);
+                    ctx.beginPath();
+                    ctx.arc(_refl[0], _refl[1], dilation, 0, Math.PI * 2);
+                    ctx.fill();
+                }
                 ctx.restore();
             }
         }
@@ -986,6 +1025,18 @@
                         _seg(chain[ci], chain[ci + 1]);
                 for (let i = 0; i < _MP_PALM_CHAIN.length - 1; i++)
                     _seg(_MP_PALM_CHAIN[i], _MP_PALM_CHAIN[i + 1]);
+                // Synthetic ulnar-heel point closing the pinky-side
+                // palm edge (matches _build_kpt_hand_region).
+                const _zrefl = _reflectThumbCmc(f);
+                if (_zrefl) {
+                    for (const j of [17, 1]) {
+                        if (!_hasPt(j)) continue;
+                        ctx.beginPath();
+                        ctx.moveTo(f[j][0], f[j][1]);
+                        ctx.lineTo(_zrefl[0], _zrefl[1]);
+                        ctx.stroke();
+                    }
+                }
 
                 // 2. Forearm cone -- trapezoid from wrist (0) along
                 //    (wrist - MCP centroid).  Mirrors _build_forearm_cone.
