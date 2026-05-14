@@ -598,15 +598,24 @@
         return [(r - y) * 0.713 + 128, (b - y) * 0.564 + 128];
     }
 
+    // The keypoint patches the last skin-range fit actually sampled
+    // -- recorded in sub-rect coords so render() can outline them, so
+    // the user sees exactly which pixels fed the trial skin tone.
+    let _skinMaskPatches = [];   // [[x,y],...] sub-rect coords
+    let _skinMaskPatchR = 4;     // patch half-size, sub-rect coords
+
     /**
      * Trial-specific skin window from the current frame's MP keypoints
      * -- the client-side echo of _fit_skin_range_cbcr.  Samples small
      * patches at each keypoint in the half-res offscreen image,
      * collects Cr/Cb, returns {crLo,crHi,cbLo,cbHi} from the [2,98]
      * percentiles.  Null if too few samples (caller falls back to the
-     * universal box).
+     * universal box).  Side effect: populates _skinMaskPatches /
+     * _skinMaskPatchR with the patches it sampled (or [] on a null
+     * return) so the preview can outline them.
      */
     function _skinRangeFromKpts(imgData, cw, ch, drawSw, drawSh) {
+        _skinMaskPatches = [];
         if (!mpKeypoints) return null;
         const isOD = (currentSide === 'OD');
         const useRef = overlayMode !== 'off';
@@ -618,11 +627,13 @@
         const sx = cw / drawSw, sy = ch / drawSh;
         const d = imgData.data;
         const crs = [], cbs = [];
-        const R = 2;                               // patch half-size, px
+        const R = 2;                               // patch half-size, offscreen px
+        const patches = [];                        // sub-rect coords
         for (let j = 0; j < 21; j++) {
             if (!f[j] || f[j][0] == null || f[j][1] == null) continue;
             const ox = Math.round(f[j][0] * sx);
             const oy = Math.round(f[j][1] * sy);
+            patches.push([f[j][0], f[j][1]]);
             for (let dy = -R; dy <= R; dy++) {
                 const yy = oy + dy;
                 if (yy < 0 || yy >= ch) continue;
@@ -636,6 +647,9 @@
             }
         }
         if (crs.length < 50) return null;
+        // Fit succeeded -- expose the sampled patches for the overlay.
+        _skinMaskPatches = patches;
+        _skinMaskPatchR = R / Math.max(1e-6, sx);   // -> sub-rect px
         const pct = (a, p) => {
             const s = a.slice().sort((x, y) => x - y);
             return s[Math.min(s.length - 1,
@@ -933,6 +947,19 @@
                 ctx.save();
                 ctx.imageSmoothingEnabled = false;
                 ctx.drawImage(mask, 0, 0, drawSw, drawSh);
+                ctx.restore();
+            }
+            // Outline the keypoint patches that fed the trial skin-tone
+            // range, so the user sees exactly which pixels were sampled.
+            if (_skinMaskPatches.length) {
+                ctx.save();
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
+                ctx.lineWidth = 1.5 / Math.max(0.01, scale * bps);
+                const pr = _skinMaskPatchR;
+                for (let i = 0; i < _skinMaskPatches.length; i++) {
+                    const p = _skinMaskPatches[i];
+                    ctx.strokeRect(p[0] - pr, p[1] - pr, pr * 2, pr * 2);
+                }
                 ctx.restore();
             }
         }
