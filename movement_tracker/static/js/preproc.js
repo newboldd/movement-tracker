@@ -606,24 +606,32 @@
         return [(r - y) * 0.713 + 128, (b - y) * 0.564 + 128];
     }
 
-    // The keypoint patches the last skin-range fit actually sampled
-    // -- recorded in sub-rect coords so render() can outline them, so
-    // the user sees exactly which pixels fed the trial skin tone.
-    let _skinMaskPatches = [];   // [[x,y],...] sub-rect coords
-    let _skinMaskPatchR = 4;     // patch half-size, sub-rect coords
+    // The dilated-MP-skeleton region the last skin-range fit sampled
+    // from -- recorded as line segments (sub-rect coords) + a stroke
+    // width so render() can draw the region back, so the user sees
+    // exactly which pixels fed the trial skin tone.
+    let _skinSampleSegs   = [];  // [[x0,y0,x1,y1],...] sub-rect coords
+    let _skinSampleStrokeW = 0;  // stroke width, sub-rect px
+    let _skinSampleMaskCv = null;  // reusable offscreen mask canvas
+
+    // Tight-MP-mask half-thickness, sub-rect (~full-res) px -- echoes
+    // the server's _TIGHT_STAMP_DOWN (half the BG-mask dilation stamp).
+    const _SKIN_TIGHT_RADIUS = 7;
 
     /**
      * Trial-specific skin window from the current frame's MP keypoints
-     * -- the client-side echo of _fit_skin_range_cbcr.  Samples small
-     * patches at each keypoint in the half-res offscreen image,
-     * collects Cr/Cb, returns {crLo,crHi,cbLo,cbHi} from the [2,98]
-     * percentiles.  Null if too few samples (caller falls back to the
-     * universal box).  Side effect: populates _skinMaskPatches /
-     * _skinMaskPatchR with the patches it sampled (or [] on a null
-     * return) so the preview can outline them.
+     * -- the client-side echo of _fit_skin_range_cbcr.  Builds a
+     * dilated MP-skeleton region (same construction as the hand mask:
+     * thick strokes along the finger/palm chains + the ulnar-heel
+     * segments), then collects Cr/Cb from every offscreen pixel inside
+     * it and returns {crLo,crHi,cbLo,cbHi} from the [2,98] percentiles.
+     * Null if too few samples (caller falls back to the universal
+     * box).  Side effect: populates _skinSampleSegs / _skinSampleStrokeW
+     * with the region it sampled (or [] on a null return) so the
+     * preview can draw it.
      */
     function _skinRangeFromKpts(imgData, cw, ch, drawSw, drawSh) {
-        _skinMaskPatches = [];
+        _skinSampleSegs = [];
         if (!mpKeypoints) return null;
         const isOD = (currentSide === 'OD');
         const useRef = overlayMode !== 'off';
@@ -646,37 +654,78 @@
         }
         const sx = cw / drawSw, sy = ch / drawSh;
         const d = imgData.data;
-        const crs = [], cbs = [];
-        // Patch half-size in offscreen px.  The "MP dilate (color
-        // sample)" knob (full-res px) widens (+) or shrinks (-) it --
-        // the client echo of the server's erode/dilate of the tight
-        // MP mask.
+        const hasPt = j => f[j] && f[j][0] != null && f[j][1] != null;
+
+        // Stroke half-width: tight MP radius +/- the "MP dilate (color
+        // sample)" knob (full-res px) -- the client echo of the
+        // server's erode/dilate of the tight MP mask.
         const colorDilateSlider = $('colorDilateSlider');
         const colorDilatePx = colorDilateSlider
             ? parseInt(colorDilateSlider.value, 10) : 0;
-        const R = Math.max(1, Math.round(2 + colorDilatePx * sx * 0.25));
-        const patches = [];                        // sub-rect coords
-        for (let j = 0; j < 21; j++) {
-            if (!f[j] || f[j][0] == null || f[j][1] == null) continue;
-            const ox = Math.round(f[j][0] * sx);
-            const oy = Math.round(f[j][1] * sy);
-            patches.push([f[j][0], f[j][1]]);
-            for (let dy = -R; dy <= R; dy++) {
-                const yy = oy + dy;
-                if (yy < 0 || yy >= ch) continue;
-                for (let dx = -R; dx <= R; dx++) {
-                    const xx = ox + dx;
-                    if (xx < 0 || xx >= cw) continue;
-                    const i = (yy * cw + xx) * 4;
-                    const [cr, cb] = _rgbToCrCb(d[i], d[i + 1], d[i + 2]);
-                    crs.push(cr); cbs.push(cb);
-                }
+        const sampleRadius = Math.max(1, _SKIN_TIGHT_RADIUS + colorDilatePx);
+        const strokeWSub = sampleRadius * 2;          // sub-rect px
+
+        // Collect the skeleton segments (sub-rect coords): finger
+        // chains, palm arc, and the two ulnar-heel closers -- exactly
+        // the construction _build_kpt_hand_region uses on the server.
+        const segs = [];
+        const addSeg = (a, b) => {
+            if (hasPt(a) && hasPt(b))
+                segs.push([f[a][0], f[a][1], f[b][0], f[b][1]]);
+        };
+        for (const chain of _MP_FINGER_CHAINS)
+            for (let ci = 0; ci < chain.length - 1; ci++)
+                addSeg(chain[ci], chain[ci + 1]);
+        for (let i = 0; i < _MP_PALM_CHAIN.length - 1; i++)
+            addSeg(_MP_PALM_CHAIN[i], _MP_PALM_CHAIN[i + 1]);
+        const refl = _reflectThumbCmc(f);
+        if (refl) {
+            for (const j of [17, 1]) {
+                if (hasPt(j))
+                    segs.push([f[j][0], f[j][1], refl[0], refl[1]]);
             }
         }
+        if (!segs.length) return null;
+
+        // Rasterise the region into an offscreen mask at the same
+        // resolution as imgData, stroking the skeleton with round
+        // caps/joins so joints stamp as discs (like the server).
+        if (!_skinSampleMaskCv)
+            _skinSampleMaskCv = document.createElement('canvas');
+        _skinSampleMaskCv.width = cw;
+        _skinSampleMaskCv.height = ch;
+        const mctx = _skinSampleMaskCv.getContext(
+            '2d', { willReadFrequently: true });
+        mctx.clearRect(0, 0, cw, ch);
+        mctx.lineCap = 'round';
+        mctx.lineJoin = 'round';
+        mctx.strokeStyle = '#fff';
+        mctx.lineWidth = Math.max(1, strokeWSub * sx);
+        mctx.beginPath();
+        for (const s of segs) {
+            mctx.moveTo(s[0] * sx, s[1] * sy);
+            mctx.lineTo(s[2] * sx, s[3] * sy);
+        }
+        mctx.stroke();
+        let maskData;
+        try {
+            maskData = mctx.getImageData(0, 0, cw, ch).data;
+        } catch (e) {
+            return null;
+        }
+
+        // Collect Cr/Cb from every source pixel inside the region.
+        const crs = [], cbs = [];
+        for (let p = 0, n = cw * ch; p < n; p++) {
+            if (maskData[p * 4 + 3] === 0) continue;
+            const i = p * 4;
+            const [cr, cb] = _rgbToCrCb(d[i], d[i + 1], d[i + 2]);
+            crs.push(cr); cbs.push(cb);
+        }
         if (crs.length < 50) return null;
-        // Fit succeeded -- expose the sampled patches for the overlay.
-        _skinMaskPatches = patches;
-        _skinMaskPatchR = R / Math.max(1e-6, sx);   // -> sub-rect px
+        // Fit succeeded -- expose the sampled region for the overlay.
+        _skinSampleSegs = segs;
+        _skinSampleStrokeW = strokeWSub;
         const pct = (a, p) => {
             const s = a.slice().sort((x, y) => x - y);
             return s[Math.min(s.length - 1,
@@ -980,17 +1029,31 @@
                 ctx.drawImage(mask, 0, 0, drawSw, drawSh);
                 ctx.restore();
             }
-            // Outline the keypoint patches that fed the trial skin-tone
-            // range, so the user sees exactly which pixels were sampled.
-            if (_skinMaskPatches.length) {
+            // Show the dilated-MP-skeleton region that fed the trial
+            // skin-tone range, so the user sees exactly which pixels
+            // were sampled.  Same construction as the hand mask: thick
+            // translucent strokes along the skeleton, with a thin
+            // white centreline so the region reads clearly.
+            if (_skinSampleSegs.length) {
                 ctx.save();
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.30)';
+                ctx.lineWidth = _skinSampleStrokeW;
+                ctx.beginPath();
+                for (const s of _skinSampleSegs) {
+                    ctx.moveTo(s[0], s[1]);
+                    ctx.lineTo(s[2], s[3]);
+                }
+                ctx.stroke();
                 ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
                 ctx.lineWidth = 1.5 / Math.max(0.01, scale * bps);
-                const pr = _skinMaskPatchR;
-                for (let i = 0; i < _skinMaskPatches.length; i++) {
-                    const p = _skinMaskPatches[i];
-                    ctx.strokeRect(p[0] - pr, p[1] - pr, pr * 2, pr * 2);
+                ctx.beginPath();
+                for (const s of _skinSampleSegs) {
+                    ctx.moveTo(s[0], s[1]);
+                    ctx.lineTo(s[2], s[3]);
                 }
+                ctx.stroke();
                 ctx.restore();
             }
         }
