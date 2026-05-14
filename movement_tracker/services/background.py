@@ -879,26 +879,26 @@ def compute_stable(
         """Per-pixel temporal median ignoring hand-covered pixels.
 
         Pixels that were masked in EVERY sample frame (deep palm
-        interior on a near-stationary hand) get filled with the GLOBAL
-        median of non-hand pixels instead of the plain temporal median.
-        That global median is a representative "table colour" -- nothing
-        like skin -- so the per-frame fg mask still lights up across
-        the whole hand silhouette and Canny picks up only the external
-        boundary.  Losing the interior is fine: we only care about the
-        edge of the hand.
+        interior, wrist, thumb CMC on a near-stationary hand) are
+        filled with a bright-green sentinel ``[0, 255, 0]`` (BGR)
+        instead of a real BG colour.  Two benefits:
+
+          1. ``background_OS.png`` makes the always-hand region
+             unmistakable -- you can see at a glance which pixels
+             the BG could never observe.
+          2. ``|frame - green|`` is large for any skin / scene
+             colour, so those pixels always light up in the
+             foreground heatmap and in the Otsu binary, regardless
+             of this frame's hand pose.  No more flesh-colour
+             palm/wrist getting carved out by Otsu.
         """
         if not hand_mask.any():
             return np.median(stack, axis=0).astype(np.uint8)
         m4 = np.broadcast_to(hand_mask[..., None], stack.shape)
         masked = np.ma.masked_array(stack, mask=m4)
         med = np.ma.median(masked, axis=0)
-        # Global non-hand median (one BGR triplet) as the fill for
-        # always-masked pixels.
-        valid_samples = stack[~hand_mask]
-        if valid_samples.size > 0:
-            fill_color = np.median(valid_samples, axis=0)
-        else:
-            fill_color = np.array([128, 128, 128], dtype=np.float32)
+        # BGR bright green sentinel for always-masked pixels.
+        fill_color = np.array([0, 255, 0], dtype=np.uint8)
         bg = np.where(np.ma.getmaskarray(med),
                        fill_color.reshape(1, 1, 3),
                        np.ma.getdata(med))
@@ -1274,9 +1274,24 @@ def compute_outline_frame(
     always_hand_R = _upscale_bool(always_hand_R_down, w_half, h_full) \
                      if is_stereo else None
 
+    # Background edge map -- Sobel magnitude normalised to [0, 1].
+    # Subtracted from motion before Otsu so static high-contrast
+    # seams in the BG (table edges, monitor bezels) don't produce
+    # false outline boundaries when the hand crosses them.  True
+    # hand-vs-BG contrast usually dominates the BG edge, so the
+    # "true overlap" case is preserved by the subtraction surviving
+    # at high motion values.
+    bg_edge_L = _bg_edge_map(bg_L_full)
+    bg_edge_R = _bg_edge_map(bg_R_full) if is_stereo else None
+    # Stronger subtraction = fewer BG-edge artifacts but risks
+    # killing true overlap.  60 motion units at peak edge ~= 1/4 of
+    # the dynamic range, leaves room for the hand to dominate.
+    _BG_EDGE_PENALTY = 60.0
+
     def _side_outline(stable_side: np.ndarray, bg_full: np.ndarray,
                        kpts: np.ndarray | None,
-                       always_hand: np.ndarray | None) -> dict:
+                       always_hand: np.ndarray | None,
+                       bg_edge: np.ndarray | None) -> dict:
         """Returns ``{contour: [[x,y],...], fg: {b64, bbox} | None}``."""
         empty = {"contour": [], "fg": None}
         if kpts is None or np.isnan(kpts).all():
@@ -1291,9 +1306,15 @@ def compute_outline_frame(
         gate = (kpt_region > 0.5).astype(np.uint8)
         if gate.sum() < 100:
             return empty
-        # 2. Motion = max over BGR channels of |frame - BG|, uint8.
-        motion = np.abs(stable_side.astype(np.int16) - bg_full.astype(np.int16))
-        motion = motion.max(axis=-1).astype(np.uint8)
+        # 2. Motion = max over BGR channels of |frame - BG|, with the
+        # BG-edge map subtracted off so high-contrast BG seams don't
+        # show as motion when the hand crosses them.  Float for the
+        # subtraction, clipped back to uint8 [0, 255] afterwards.
+        motion_raw = np.abs(stable_side.astype(np.int16) - bg_full.astype(np.int16))
+        motion_f = motion_raw.max(axis=-1).astype(np.float32)
+        if bg_edge is not None:
+            motion_f = motion_f - _BG_EDGE_PENALTY * bg_edge
+        motion = np.clip(motion_f, 0.0, 255.0).astype(np.uint8)
         # Optional: foreground heatmap PNG cropped to the gate bbox.
         # Sent back so the UI can paint a JET-coloured fill over the
         # gate region, alpha == motion intensity (dark = transparent).
@@ -1355,8 +1376,8 @@ def compute_outline_frame(
     kpts_R = (mp_kpts_ref_R[frame] if (mp_kpts_ref_R is not None
                                         and frame < mp_kpts_ref_R.shape[0])
               else None)
-    os_out = _side_outline(os_img, bg_L_full, kpts_L, always_hand_L)
-    od_out = (_side_outline(od_img, bg_R_full, kpts_R, always_hand_R)
+    os_out = _side_outline(os_img, bg_L_full, kpts_L, always_hand_L, bg_edge_L)
+    od_out = (_side_outline(od_img, bg_R_full, kpts_R, always_hand_R, bg_edge_R)
                 if is_stereo else None)
     return {
         "frame": int(frame),
