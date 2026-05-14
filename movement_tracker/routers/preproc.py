@@ -256,7 +256,8 @@ def compute_stable_endpoint(subject_id: int, body: dict = Body(...)) -> dict:
 
 @router.get("/{subject_id}/trial/{trial_idx}/outline_frame")
 def get_outline_frame(subject_id: int, trial_idx: int,
-                       frame: int, dilation_px: int = 14) -> dict:
+                       frame: int, dilation_px: int = 14,
+                       include_fg: int = 0) -> dict:
     """On-demand hand boundary for a single frame.
 
     Replaces the old ``compute_foreground`` bake: the UI calls this as
@@ -264,16 +265,20 @@ def get_outline_frame(subject_id: int, trial_idx: int,
     a closed contour polygon (per camera in stereo).  Cheap enough to
     re-fetch interactively -- skips the warp pass entirely by reading
     from stable.mp4.
+
+    ``include_fg=1`` also returns a JET-coloured foreground heatmap
+    PNG cropped to the gate bbox (``fg_OS``, ``fg_OD``).  Off by
+    default since the encoding adds ~100 ms per side.
     """
     from ..services.background import compute_outline_frame
     name = _subject_name(subject_id)
     try:
         return compute_outline_frame(name, trial_idx, int(frame),
-                                       dilation_px=int(dilation_px))
+                                       dilation_px=int(dilation_px),
+                                       include_fg=bool(int(include_fg)))
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
     except RuntimeError as e:
-        # Missing artifacts -- 404 so the UI can show "run Stabilise".
         raise HTTPException(404, str(e))
     except ValueError as e:
         raise HTTPException(400, str(e))

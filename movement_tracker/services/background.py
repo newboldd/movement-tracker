@@ -317,6 +317,7 @@ def _build_kpt_hand_region(
     w: int, h: int,
     stamp_radius: int = 10,
     smooth_sigma: float = 4.0,
+    extend_forearm_px: int = 0,
 ) -> np.ndarray:
     """Tight hand-skeleton silhouette from MP keypoints.
 
@@ -378,6 +379,27 @@ def _build_kpt_hand_region(
             continue
         cv2.line(canvas, _to_int(a), _to_int(b),
                   color=255, thickness=line_thick, lineType=cv2.LINE_AA)
+
+    # 3a. Optional forearm extension.  Used at Stabilise-time so the BG
+    #     median masks the distal forearm out alongside the hand;
+    #     compute_outline_frame leaves this off (extend_forearm_px=0)
+    #     so the visible polygon still ends at the wrist.
+    if extend_forearm_px > 0 and 0 in by_joint:
+        wrist = by_joint[0].astype(np.float64)
+        mcp_pts = [by_joint[j].astype(np.float64) for j in (5, 9, 13, 17)
+                    if j in by_joint]
+        if mcp_pts:
+            mcp_centroid = np.mean(mcp_pts, axis=0)
+            forearm_dir = wrist - mcp_centroid
+            n = float(np.linalg.norm(forearm_dir))
+            if n > 1e-6:
+                forearm_dir = forearm_dir / n
+                forearm_end = wrist + forearm_dir * float(extend_forearm_px)
+                # Forearm is wider than a finger -- 1.5x line thickness.
+                forearm_thick = max(line_thick, int(round(line_thick * 1.5)))
+                cv2.line(canvas, _to_int(wrist), _to_int(forearm_end),
+                          color=255, thickness=forearm_thick,
+                          lineType=cv2.LINE_AA)
 
     # 4. Light smoothing for edge feather.
     if smooth_sigma > 0:
@@ -747,6 +769,11 @@ def compute_stable(
     # BG matches the patch added back in by the fg mask -- otherwise the
     # outline ends up tracing the seam between the two.
     _BG_MASK_STAMP_DOWN = max(2, int(dilation_px) // max(1, downscale))
+    # Extend the BG-mask stamp down the forearm so the distal forearm
+    # also gets masked out of the median.  Outline-time gate doesn't
+    # use this -- the visible polygon still cuts off at the wrist.
+    # ~100 full-res px ~= a few cm of forearm in a typical 1080p clip.
+    _BG_MASK_FOREARM_DOWN = max(0, 100 // max(1, downscale))
 
     # We have to re-seek because we already consumed frame 0.  Use a
     # sequential read with skip — VideoCapture seeks are unreliable on
@@ -794,7 +821,8 @@ def compute_stable(
             kpts_L_down = mp_kpts_ref_L[i] / max(1, downscale)
             region_L = _build_kpt_hand_region(
                 kpts_L_down, out_w, out_h,
-                stamp_radius=_BG_MASK_STAMP_DOWN, smooth_sigma=2.0)
+                stamp_radius=_BG_MASK_STAMP_DOWN, smooth_sigma=2.0,
+                extend_forearm_px=_BG_MASK_FOREARM_DOWN)
             hand_mask_L[s_idx] = region_L > 0.5
 
         if is_stereo and od_img is not None:
@@ -812,7 +840,8 @@ def compute_stable(
                 kpts_R_down = mp_kpts_ref_R[i] / max(1, downscale)
                 region_R = _build_kpt_hand_region(
                     kpts_R_down, out_w, out_h,
-                    stamp_radius=_BG_MASK_STAMP_DOWN, smooth_sigma=2.0)
+                    stamp_radius=_BG_MASK_STAMP_DOWN, smooth_sigma=2.0,
+                    extend_forearm_px=_BG_MASK_FOREARM_DOWN)
                 hand_mask_R[s_idx] = region_R > 0.5
 
         if progress_callback is not None:
@@ -1103,6 +1132,44 @@ def compute_stable(
 
 
 
+def _encode_fg_png(motion: np.ndarray, gate: np.ndarray) -> dict | None:
+    """Pack a small RGBA PNG of the foreground heatmap inside the gate.
+
+    Returns ``{b64, bbox: [x0,y0,x1,y1]}`` or None if the gate is empty.
+    ``b64`` is a base64-encoded RGBA PNG cropped to the gate bbox; the
+    alpha channel is the motion intensity itself, so dark / static
+    pixels are transparent and bright / moving pixels are saturated.
+    Colour is the JET colormap of the motion intensity.
+
+    The crop keeps the payload small (typically 20-80 KB per side for
+    a 200 px hand crop) and lets the UI position the image directly
+    via the bbox without resampling.
+    """
+    import base64
+    ys, xs = np.where(gate > 0)
+    if ys.size == 0:
+        return None
+    y0 = int(ys.min()); y1 = int(ys.max() + 1)
+    x0 = int(xs.min()); x1 = int(xs.max() + 1)
+    motion_crop = motion[y0:y1, x0:x1].copy()
+    gate_crop = gate[y0:y1, x0:x1]
+    # Zero out anything outside the gate so the alpha channel hides it.
+    motion_crop[gate_crop == 0] = 0
+    color = cv2.applyColorMap(motion_crop, cv2.COLORMAP_JET)
+    # Alpha channel: motion intensity, with a hard zero outside the
+    # gate.  Squared falloff so weak noise fades faster than the hand.
+    alpha = motion_crop.astype(np.float32) / 255.0
+    alpha = (alpha * alpha * 255.0).astype(np.uint8)
+    rgba = np.concatenate([color, alpha[..., None]], axis=-1)
+    ok, png = cv2.imencode('.png', rgba)
+    if not ok:
+        return None
+    return {
+        "b64": base64.b64encode(png.tobytes()).decode('ascii'),
+        "bbox": [x0, y0, x1, y1],
+    }
+
+
 def compute_outline_frame(
     subject_name: str,
     trial_idx: int,
@@ -1110,6 +1177,7 @@ def compute_outline_frame(
     dilation_px: int = 14,
     close_radius_px: int = 5,
     simplify_eps_px: float = 0.5,
+    include_fg: bool = False,
 ) -> dict:
     """On-demand hand boundary for one frame.
 
@@ -1205,31 +1273,38 @@ def compute_outline_frame(
     always_hand_R = _upscale_bool(always_hand_R_down, w_half, h_full) \
                      if is_stereo else None
 
-    def _side_contour(stable_side: np.ndarray, bg_full: np.ndarray,
+    def _side_outline(stable_side: np.ndarray, bg_full: np.ndarray,
                        kpts: np.ndarray | None,
-                       always_hand: np.ndarray | None) -> list:
-        if kpts is None:
-            return []
-        if np.isnan(kpts).all():
-            return []
+                       always_hand: np.ndarray | None) -> dict:
+        """Returns ``{contour: [[x,y],...], fg: {b64, bbox} | None}``."""
+        empty = {"contour": [], "fg": None}
+        if kpts is None or np.isnan(kpts).all():
+            return empty
         H, W = stable_side.shape[:2]
-        # 1. Dilated MP gate
+        # 1. Dilated MP gate (outline-time -- no forearm extension; the
+        # visible polygon stops at the wrist).
         kpt_region = _build_kpt_hand_region(
             kpts, W, H,
             stamp_radius=max(2, int(dilation_px)),
             smooth_sigma=4.0)
         gate = (kpt_region > 0.5).astype(np.uint8)
         if gate.sum() < 100:
-            return []
+            return empty
         # 2. Motion = max over BGR channels of |frame - BG|, uint8.
         motion = np.abs(stable_side.astype(np.int16) - bg_full.astype(np.int16))
         motion = motion.max(axis=-1).astype(np.uint8)
+        # Optional: foreground heatmap PNG cropped to the gate bbox.
+        # Sent back so the UI can paint a JET-coloured fill over the
+        # gate region, alpha == motion intensity (dark = transparent).
+        fg_pack = None
+        if include_fg:
+            fg_pack = _encode_fg_png(motion, gate)
         # 3. Otsu threshold over the gate-restricted motion only --
         # gives a per-frame adaptive cut between "moving" (hand) and
         # "still" (BG inside the gate).
         gated_vals = motion[gate > 0]
         if gated_vals.size < 100:
-            return []
+            return {"contour": [], "fg": fg_pack}
         thresh, _ = cv2.threshold(
             gated_vals, 0, 255,
             cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -1250,18 +1325,21 @@ def compute_outline_frame(
         # 6. Largest connected component.
         n_lbl, lbl, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
         if n_lbl <= 1:
-            return []
+            return {"contour": [], "fg": fg_pack}
         largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
         # 7. Outermost contour + Douglas-Peucker smoothing.
         binary = (lbl == largest).astype(np.uint8) * 255
         contours, _hier = cv2.findContours(
             binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         if not contours:
-            return []
+            return {"contour": [], "fg": fg_pack}
         c = max(contours, key=cv2.contourArea)
         if simplify_eps_px > 0:
             c = cv2.approxPolyDP(c, epsilon=float(simplify_eps_px), closed=True)
-        return c.reshape(-1, 2).astype(int).tolist()
+        return {
+            "contour": c.reshape(-1, 2).astype(int).tolist(),
+            "fg": fg_pack,
+        }
 
     if is_stereo:
         os_img = img[:, :w_half]
@@ -1276,14 +1354,20 @@ def compute_outline_frame(
     kpts_R = (mp_kpts_ref_R[frame] if (mp_kpts_ref_R is not None
                                         and frame < mp_kpts_ref_R.shape[0])
               else None)
+    os_out = _side_outline(os_img, bg_L_full, kpts_L, always_hand_L)
+    od_out = (_side_outline(od_img, bg_R_full, kpts_R, always_hand_R)
+                if is_stereo else None)
     return {
         "frame": int(frame),
         "is_stereo": is_stereo,
         "always_hand_available": always_hand_L is not None,
         "dilation_px": int(dilation_px),
-        "OS": _side_contour(os_img, bg_L_full, kpts_L, always_hand_L),
-        "OD": (_side_contour(od_img, bg_R_full, kpts_R, always_hand_R)
-                if is_stereo else None),
+        "OS": os_out["contour"],
+        "OD": od_out["contour"] if od_out else None,
+        # Foreground heatmap (when include_fg).  ``fg_OS`` /``fg_OD`` are
+        # ``{b64: "...", bbox: [x0,y0,x1,y1]}`` or null.
+        "fg_OS": os_out["fg"],
+        "fg_OD": od_out["fg"] if od_out else None,
     }
 
 

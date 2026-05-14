@@ -41,13 +41,19 @@
     let overlayMode = 'off';    // 'off' | 'stable' | 'bg'
     let stableVideoEl = null;   // hidden <video> tied to stable.mp4
     let showOutline = true;     // checkbox: show live-fetched hand boundary
+    let showFgFill = false;     // checkbox: also fetch + paint JET heatmap
     // Live outline state -- replaces the old fg.mp4 / outline.mp4 bake.
     // Server returns a per-frame closed-polygon contour for the
     // current dilation; we fetch it whenever the frame or slider
     // changes (debounced ~150 ms) and draw it on top of the canvas.
-    let outlineData = null;          // {frame, dilation_px, is_stereo, OS, OD}
+    let outlineData = null;          // {frame, dilation_px, is_stereo, OS, OD, fg_OS, fg_OD}
     let outlineFetchTimer = null;    // debounce handle
     let outlineFetchSeq = 0;         // request-id so late responses don't clobber newer state
+    // Foreground heatmap <img> elements (one per side) -- decoded
+    // out-of-band so the canvas drawImage path doesn't block on
+    // base64 -> bitmap on every render tick.
+    const fgImageEls = { OS: null, OD: null };
+    const fgImageBboxes = { OS: null, OD: null };
     // MP keypoints for the current trial — used to draw the dilated-
     // skeleton preview on the canvas while the Compute Stable + Mask
     // panel is open.  Two coordinate spaces:
@@ -313,11 +319,12 @@
         }
         // Stable button: enabled when trajectory exists.
         $('runStableBtn').disabled = !trajectory;
-        // Hand-boundary checkbox: enabled once stable.mp4 exists --
-        // we need the warped frame to compute the outline live.
+        // Hand-boundary + foreground-fill checkboxes: enabled once
+        // stable.mp4 exists -- both rely on the warped frame.
         const stableReady = !!(backgroundData && backgroundData.stable_mp4_exists);
         $('cbShowOutline').disabled = !stableReady;
-        if (stableReady && showOutline) scheduleOutlineFetch();
+        $('cbShowFgFill').disabled = !stableReady;
+        if (stableReady && (showOutline || showFgFill)) scheduleOutlineFetch();
     }
 
     function showBackgroundStats() {
@@ -430,27 +437,30 @@
     async function fetchOutline() {
         if (subjectId == null || currentTrialIdx < 0) return;
         if (!backgroundData || !backgroundData.stable_mp4_exists) return;
-        if (!showOutline) return;
+        if (!showOutline && !showFgFill) return;
         const dilSlider = $('fgDilateSlider');
         const dilationPx = dilSlider ? parseInt(dilSlider.value, 10) : 14;
         const frame = currentFrame;
         const seq = ++outlineFetchSeq;
+        const includeFg = showFgFill ? 1 : 0;
         const url = `/api/preproc/${subjectId}/trial/${trialMeta.trial_idx}/outline_frame`
-                  + `?frame=${frame}&dilation_px=${dilationPx}`;
+                  + `?frame=${frame}&dilation_px=${dilationPx}&include_fg=${includeFg}`;
         $('outlineStatus').textContent = 'Updating…';
         try {
             const resp = await fetch(url);
-            if (seq !== outlineFetchSeq) return;   // newer request superseded
+            if (seq !== outlineFetchSeq) return;
             if (!resp.ok) {
                 outlineData = null;
                 $('outlineStatus').textContent = `HTTP ${resp.status}`;
             } else {
                 outlineData = await resp.json();
+                _updateFgImages(outlineData);
                 const nOS = outlineData.OS ? outlineData.OS.length : 0;
                 const nOD = outlineData.OD ? outlineData.OD.length : 0;
                 $('outlineStatus').textContent =
                     `f${frame} d${dilationPx}px · OS ${nOS}pt` +
-                    (outlineData.is_stereo ? ` · OD ${nOD}pt` : '');
+                    (outlineData.is_stereo ? ` · OD ${nOD}pt` : '') +
+                    (includeFg ? ' · +fg' : '');
             }
         } catch (e) {
             if (seq === outlineFetchSeq) {
@@ -459,6 +469,28 @@
             }
         } finally {
             if (seq === outlineFetchSeq) render();
+        }
+    }
+
+    /**
+     * Decode the base64 JET-heatmap PNGs into HTMLImageElement objects
+     * so the canvas drawImage() path stays synchronous.  Called when a
+     * fresh outlineData response lands; clears the previous image if
+     * include_fg was off.
+     */
+    function _updateFgImages(data) {
+        for (const side of ['OS', 'OD']) {
+            const pack = data['fg_' + side];
+            if (pack && pack.b64) {
+                const img = new Image();
+                img.onload = () => render();
+                img.src = 'data:image/png;base64,' + pack.b64;
+                fgImageEls[side] = img;
+                fgImageBboxes[side] = pack.bbox;
+            } else {
+                fgImageEls[side] = null;
+                fgImageBboxes[side] = null;
+            }
         }
     }
 
@@ -547,8 +579,8 @@
         currentFrame = frameNum;
         if (!trialMeta) return Promise.resolve();
         $('frameDisplay').textContent = `Frame: ${frameNum} / ${nFrames}`;
-        // Hand-boundary refetch -- debounced so scrubbing isn't laggy.
-        if (showOutline) scheduleOutlineFetch();
+        // Hand-boundary / fg-heatmap refetch -- debounced so scrubbing isn't laggy.
+        if (showOutline || showFgFill) scheduleOutlineFetch();
         _refreshActiveVideo();
         const companions = _companionVideos();
         if (!videoEl || videoEl.readyState < 1) return Promise.resolve();
@@ -681,6 +713,24 @@
         // cropped out; live-frame source draws the whole image.
         ctx.drawImage(srcImage, drawSx, drawSy, drawSw, drawSh,
                                 0,      0,      drawSw, drawSh);
+
+        // Live foreground heatmap fill -- JET colormap of |frame - BG|
+        // inside the gate, painted UNDER the outline polygon.  Image
+        // is cropped to the gate bbox and positioned via outlineData.
+        if (showFgFill && outlineData
+            && outlineData.frame === currentFrame) {
+            const side = (currentSide === 'OD' && outlineData.is_stereo)
+                ? 'OD' : 'OS';
+            const img = fgImageEls[side];
+            const bbox = fgImageBboxes[side];
+            if (img && img.complete && img.naturalWidth > 0 && bbox) {
+                const [x0, y0, x1, y1] = bbox;
+                ctx.save();
+                ctx.globalAlpha = 0.65;
+                ctx.drawImage(img, x0, y0, x1 - x0, y1 - y0);
+                ctx.restore();
+            }
+        }
 
         // Live hand-boundary overlay -- draws the server-computed
         // closed polygon as a yellow stroked path, tracking the
@@ -1134,8 +1184,8 @@
                 // Instant feedback: re-render so the on-canvas
                 // dilated-skeleton preview tracks the slider.
                 try { render(); } catch (_e) {}
-                // Debounced backend fetch for the new outline.
-                if (showOutline) scheduleOutlineFetch();
+                // Debounced backend fetch for the new outline / heatmap.
+                if (showOutline || showFgFill) scheduleOutlineFetch();
             });
         }
         // Overlay radio group → mutually exclusive: live, stable.mp4.
@@ -1185,7 +1235,21 @@
             if (showOutline) {
                 fetchOutline();
             } else {
-                outlineData = null;
+                if (!showFgFill) outlineData = null;
+                render();
+            }
+        });
+        // Foreground-fill checkbox: independent of the outline checkbox
+        // -- you can show either one alone or both together.  Turning
+        // it on triggers a fresh fetch with include_fg=1 (the heatmap
+        // PNGs aren't included in plain outline fetches).
+        $('cbShowFgFill').addEventListener('change', e => {
+            showFgFill = e.target.checked;
+            if (showFgFill) {
+                fetchOutline();
+            } else {
+                fgImageEls.OS = fgImageEls.OD = null;
+                fgImageBboxes.OS = fgImageBboxes.OD = null;
                 render();
             }
         });
