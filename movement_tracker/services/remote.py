@@ -4970,38 +4970,37 @@ def main():
 
         # Now safe to import the real compute modules.
         from camera_motion import compute_camera_trajectory
-        from background    import compute_background
+        from background    import compute_stable, compute_foreground
 
         n_total = len(trials)
         for i, t in enumerate(trials):
             tname = t["trial_name"]
             ti = int(t["trial_idx"])
-            _write_status(status_file, status="running", phase="trajectory",
-                          current_trial=tname,
-                          progress_pct=100.0 * i / max(1, n_total))
             print(f"=== [{i+1}/{n_total}] {tname}: trajectory ===", flush=True)
 
-            # Per-trial split: trajectory ~25 %, background+mask bake ~75 %
-            # (the bake does full-res warps + four mp4 encodes, which
-            # dominates real time on every trial we've measured).
+            # Per-trial split: trajectory ~20%, stable ~60%, foreground ~20%.
             def _on_traj(pct, _i=i, _n=n_total):
-                local = 100.0 * (_i + (pct / 100.0) * 0.25) / _n
+                local = 100.0 * (_i + (pct / 100.0) * 0.20) / _n
                 _write_status(status_file, status="running", phase="trajectory",
                               current_trial=tname, progress_pct=local)
             compute_camera_trajectory(
                 subject_name, ti, progress_callback=_on_traj)
 
-            _write_status(status_file, status="running", phase="background",
-                          current_trial=tname,
-                          progress_pct=100.0 * (i + 0.25) / max(1, n_total))
-            print(f"=== [{i+1}/{n_total}] {tname}: background+mask ===", flush=True)
-
-            def _on_bg(pct, _i=i, _n=n_total):
-                local = 100.0 * (_i + 0.25 + (pct / 100.0) * 0.75) / _n
-                _write_status(status_file, status="running", phase="background",
+            print(f"=== [{i+1}/{n_total}] {tname}: stable ===", flush=True)
+            def _on_stable(pct, _i=i, _n=n_total):
+                local = 100.0 * (_i + 0.20 + (pct / 100.0) * 0.60) / _n
+                _write_status(status_file, status="running", phase="stable",
                               current_trial=tname, progress_pct=local)
-            compute_background(
-                subject_name, ti, progress_callback=_on_bg)
+            compute_stable(
+                subject_name, ti, progress_callback=_on_stable)
+
+            print(f"=== [{i+1}/{n_total}] {tname}: foreground ===", flush=True)
+            def _on_fg(pct, _i=i, _n=n_total):
+                local = 100.0 * (_i + 0.80 + (pct / 100.0) * 0.20) / _n
+                _write_status(status_file, status="running", phase="foreground",
+                              current_trial=tname, progress_pct=local)
+            compute_foreground(
+                subject_name, ti, progress_callback=_on_fg)
 
         _write_status(status_file, status="completed", progress_pct=100)
         print("=== All trials done ===", flush=True)

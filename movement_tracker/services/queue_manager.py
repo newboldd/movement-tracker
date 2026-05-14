@@ -732,12 +732,13 @@ class QueueManager:
                         local_executor.execute_blur(subject_names, job_id, log_path)
 
                     elif job_type == "preproc":
-                        # Per-trial preproc: camera trajectory followed by
-                        # background + stable.mp4 + fg.mp4 + outline.mp4
-                        # bake.  Same one-job-many-trials batching pattern
-                        # as the hrnet branch above.
+                        # Per-trial preproc: camera trajectory, then
+                        # stable.mp4 + background.npz, then fg.mp4 +
+                        # outline.mp4.  Three stages so users can re-run
+                        # just the foreground step from the UI without
+                        # redoing the heavy warp pass.
                         from ..services.camera_motion import compute_camera_trajectory
-                        from ..services.background import compute_background
+                        from ..services.background import compute_stable, compute_foreground
                         from ..services.jobs import registry as job_registry
                         from ..services.video import build_trial_map
                         from ..services.job_history import stage_timer, finalize_job_record
@@ -804,12 +805,10 @@ class QueueManager:
                                 tname = t.get("trial_name") or f"trial_{tidx}"
                                 _log(f"[{i+1}/{n_total}] {sub} {tname} (idx {tidx})")
                                 try:
-                                    # Phase A: trajectory (~25% of the trial's
-                                    # wall-clock; the bake in Phase B does
-                                    # full-resolution warping + four mp4
-                                    # encodes and dominates real time).
+                                    # Phase A: trajectory (~20% of the
+                                    # trial's wall-clock).
                                     def _on_traj(pct, _i=i):
-                                        _preproc_progress(_i, pct * 0.25, 0.25)
+                                        _preproc_progress(_i, pct * 0.20, 0.20)
                                     _log("  compute_camera_trajectory...")
                                     with stage_timer(job_id, "compute_trajectory",
                                                       subject=sub, trial=tname,
@@ -820,19 +819,34 @@ class QueueManager:
                                             cancel_event=cancel_event,
                                         )
                                     _log("  compute_camera_trajectory done")
-                                    # Phase B: background + mask bake (~75%).
-                                    def _on_bg(pct, _i=i):
-                                        _preproc_progress(_i, 25 + pct * 0.75, 0.75)
-                                    _log("  compute_background...")
-                                    with stage_timer(job_id, "compute_background",
+                                    # Phase B: stabilise (~60% -- full-res
+                                    # warp + stable.mp4 encode).
+                                    def _on_stable(pct, _i=i):
+                                        _preproc_progress(_i, 20 + pct * 0.60, 0.60)
+                                    _log("  compute_stable...")
+                                    with stage_timer(job_id, "compute_stable",
                                                       subject=sub, trial=tname,
                                                       target="local"):
-                                        compute_background(
+                                        compute_stable(
                                             sub, tidx,
-                                            progress_callback=_on_bg,
+                                            progress_callback=_on_stable,
                                             cancel_event=cancel_event,
                                         )
-                                    _log("  compute_background done")
+                                    _log("  compute_stable done")
+                                    # Phase C: foreground (~20% -- read
+                                    # stable, compute fg + outline).
+                                    def _on_fg(pct, _i=i):
+                                        _preproc_progress(_i, 80 + pct * 0.20, 0.20)
+                                    _log("  compute_foreground...")
+                                    with stage_timer(job_id, "compute_foreground",
+                                                      subject=sub, trial=tname,
+                                                      target="local"):
+                                        compute_foreground(
+                                            sub, tidx,
+                                            progress_callback=_on_fg,
+                                            cancel_event=cancel_event,
+                                        )
+                                    _log("  compute_foreground done")
                                 except InterruptedError:
                                     was_cancelled = True
                                     _log(f"  CANCELLED at {sub}/{tname}")

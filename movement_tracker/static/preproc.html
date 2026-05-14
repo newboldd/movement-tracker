@@ -42,6 +42,14 @@
         .pp-stat strong { color: var(--text); font-weight: 600; }
         .small-note { font-size: 10px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
 
+        /* Right-hand column: video on top, plot under it.  Wraps the
+           viewport + plot so the sidebar can span both vertically. */
+        .pp-stage {
+            flex: 1; min-width: 0;
+            display: flex; flex-direction: column;
+            min-height: 0;
+        }
+
         .pp-viewport {
             flex: 1; position: relative; min-height: 0;
             background: #111; overflow: hidden;
@@ -172,43 +180,16 @@
                 </div>
 
                 <div class="section">
-                    <h3>Stabilise + Mask</h3>
+                    <h3>Stabilise</h3>
                     <div class="small-note">
-                        Bakes two artifacts for downstream consumers:
-                        <strong>stable.mp4</strong> (every frame warped into
-                        the reference camera so the scene is stationary) and
-                        <strong>fg.mp4</strong> (per-pixel |frame − background|
-                        — bright = moving / hand, dark = static).  Requires
-                        trajectory first.
+                        Bakes <strong>stable.mp4</strong> (every frame
+                        warped into the reference camera so the scene is
+                        stationary) and <strong>background.png</strong>
+                        (temporal median over sampled frames, with the
+                        hand masked out).  Requires trajectory.
                     </div>
-                    <!-- Toggle button (same look + interaction as the
-                         Skeleton v3 button on the Labels page): clicking
-                         expands the panel below with a dilation slider,
-                         a Run button, and a Close button. -->
-                    <button class="btn btn-sm" id="runBackgroundBtn" style="width:100%;margin-top:8px;" disabled>Compute Stable + Mask</button>
-                    <div id="bgRunPanel" style="display:none;margin-top:6px;padding:8px;background:var(--bg);border-radius:var(--radius);border:1px solid var(--border);">
-                        <div style="font-size:10px;color:var(--text-muted);margin-bottom:6px;line-height:1.4;">
-                            Hand-segmentation mask stays strictly inside a
-                            dilation of the MP skeleton; the actual mask
-                            boundary inside that gate is image-driven
-                            (motion + skin colour).  Adjust the dilation
-                            below to widen or tighten the gate.
-                        </div>
-                        <div style="font-size:11px;margin-bottom:4px;">
-                            <div style="display:flex;justify-content:space-between;align-items:center;">
-                                <label style="color:var(--text-muted);">Skeleton dilation (px)</label>
-                                <span id="bgDilateVal" style="color:var(--text);font-weight:bold;">14</span>
-                            </div>
-                            <input type="range" id="bgDilateSlider" min="4" max="60" step="1" value="14"
-                                   title="Total dilation of the MP skeleton in image pixels.  ~14 px ≈ deidentify default (~1 cm in a typical 1080p clip)."
-                                   style="width:100%;cursor:pointer;height:5px;">
-                        </div>
-                        <div style="display:flex;gap:6px;margin-top:8px;">
-                            <button class="btn btn-sm btn-success" id="bgRunActualBtn" style="flex:1;">Run</button>
-                            <button class="btn btn-sm" id="bgRunCloseBtn">Close</button>
-                        </div>
-                    </div>
-                    <div id="backgroundStatus" class="pp-stat" style="margin-top:6px;"></div>
+                    <button class="btn btn-sm btn-success" id="runStableBtn" style="width:100%;margin-top:8px;" disabled>Compute Stable</button>
+                    <div id="stableStatus" class="pp-stat" style="margin-top:6px;"></div>
                     <div id="backgroundStats" class="pp-stat" style="margin-top:8px;"></div>
                     <div id="backgroundPreview" style="margin-top:8px;display:none;">
                         <div style="display:flex;gap:4px;align-items:flex-start;">
@@ -225,10 +206,35 @@
                         <label style="display:block;margin-top:2px;font-size:11px;color:var(--text-muted);">
                             <input type="radio" name="bgOverlay" id="ovBg"> Background (background.png)
                         </label>
+                    </div>
+                </div>
+
+                <div class="section">
+                    <h3>Foreground / Mask</h3>
+                    <div class="small-note">
+                        Reads <strong>stable.mp4</strong> and the
+                        background to produce <strong>fg.mp4</strong>
+                        (motion against BG) and
+                        <strong>outline.mp4</strong> (hand boundary).
+                        Cheap to re-run with different parameters --
+                        no re-warping.
+                    </div>
+                    <div style="margin-top:8px;font-size:11px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <label style="color:var(--text-muted);">Skeleton dilation (px)</label>
+                            <span id="fgDilateVal" style="color:var(--text);font-weight:bold;">14</span>
+                        </div>
+                        <input type="range" id="fgDilateSlider" min="4" max="60" step="1" value="14"
+                               title="Total dilation of the MP skeleton in image pixels.  Sets the outer bound of the hand mask gate; the actual outline still follows image content inside this region."
+                               style="width:100%;cursor:pointer;height:5px;">
+                    </div>
+                    <button class="btn btn-sm btn-success" id="runForegroundBtn" style="width:100%;margin-top:8px;" disabled>Compute Foreground</button>
+                    <div id="foregroundStatus" class="pp-stat" style="margin-top:6px;"></div>
+                    <div style="margin-top:8px;">
                         <label style="display:block;margin-top:2px;font-size:11px;color:var(--text-muted);">
                             <input type="radio" name="bgOverlay" id="ovFg"> Foreground mask (fg.mp4)
                         </label>
-                        <label style="display:block;margin-top:8px;font-size:11px;color:var(--text-muted);">
+                        <label style="display:block;margin-top:6px;font-size:11px;color:var(--text-muted);">
                             <input type="checkbox" id="cbShowOutline" disabled> Show segmentation outline
                         </label>
                     </div>
@@ -244,22 +250,23 @@
                 </div>
             </div>
 
-            <div class="pp-viewport"><canvas id="canvas"></canvas></div>
-        </div>
-
-        <div class="pp-plotpanel">
-            <canvas id="trajPlot"></canvas>
-            <div class="pp-plot-legend">
-                <div><span class="sw" style="background:#ff6b6b;"></span>tx OS</div>
-                <div><span class="sw" style="background:#4dabf7;"></span>tx OD</div>
-                <div><span class="sw" style="background:#ffa94d;"></span>ty OS</div>
-                <div><span class="sw" style="background:#74c0fc;"></span>ty OD</div>
-                <div><span class="sw" style="background:#fbc02d;"></span>rot°</div>
-                <div style="margin-top:6px;">
-                    <span style="display:inline-block;width:8px;height:8px;background:#e53935;vertical-align:middle;"></span>
-                    jerk frame
+            <div class="pp-stage">
+                <div class="pp-viewport"><canvas id="canvas"></canvas></div>
+                <div class="pp-plotpanel">
+                    <canvas id="trajPlot"></canvas>
+                    <div class="pp-plot-legend">
+                        <div><span class="sw" style="background:#ff6b6b;"></span>tx OS</div>
+                        <div><span class="sw" style="background:#4dabf7;"></span>tx OD</div>
+                        <div><span class="sw" style="background:#ffa94d;"></span>ty OS</div>
+                        <div><span class="sw" style="background:#74c0fc;"></span>ty OD</div>
+                        <div><span class="sw" style="background:#fbc02d;"></span>rot°</div>
+                        <div style="margin-top:6px;">
+                            <span style="display:inline-block;width:8px;height:8px;background:#e53935;vertical-align:middle;"></span>
+                            jerk frame
+                        </div>
+                        <div id="osodAgree" style="margin-top:6px;color:var(--text);"></div>
+                    </div>
                 </div>
-                <div id="osodAgree" style="margin-top:6px;color:var(--text);"></div>
             </div>
         </div>
 
@@ -294,6 +301,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/preproc.js?v=23"></script>
+    <script src="/static/js/preproc.js?v=24"></script>
 </body>
 </html>

@@ -147,30 +147,34 @@ def get_trajectory(subject_id: int, trial_idx: int) -> dict:
 
 # ── Background extraction ────────────────────────────────────────────────
 
-@router.post("/{subject_id}/compute_background")
-def compute_background_endpoint(subject_id: int, body: dict = Body(...)) -> dict:
-    """Spawn a background-extraction job for one trial.
+def _spawn_preproc_job(
+    subject_id: int,
+    name: str,
+    trial_stem: str,
+    trial_idx: int,
+    job_kind: str,                 # 'stable' or 'foreground'
+    body: dict,
+    job_type: str = "background",
+) -> dict:
+    """Shared body for Stabilise and Foreground endpoints.
 
-    Body: ``{trial_idx: int, max_samples?: int, downscale?: int}``.
-
-    Requires a saved camera trajectory — the worker raises if missing,
-    which surfaces as a ``failed`` job with a clear error message.
+    Inserts a job row, spawns a worker thread that calls the right
+    stage function, and returns the job id + trial stem so the UI can
+    poll progress.  Splitting the bake into two endpoints lets users
+    iterate on mask/outline params without re-running the heavy
+    stabilise pass.
     """
-    from ..services.background import compute_background
-
-    name = _subject_name(subject_id)
-    trial_idx = int(body.get("trial_idx", 0))
-    trials = build_trial_map(name)
-    if trial_idx < 0 or trial_idx >= len(trials):
-        raise HTTPException(400, f"trial_idx out of range")
-    trial_stem = trials[trial_idx]["trial_name"]
+    from ..services.background import compute_stable, compute_foreground
 
     with get_db_ctx() as db:
         db.execute(
             "INSERT INTO jobs (subject_id, job_type, status, params_json) "
-            "VALUES (?, 'background', 'pending', ?)",
-            (subject_id, json.dumps({"trial_idx": trial_idx,
-                                      "trial_name": trial_stem})),
+            "VALUES (?, ?, 'pending', ?)",
+            (subject_id, job_type, json.dumps({
+                "trial_idx": trial_idx,
+                "trial_name": trial_stem,
+                "kind": job_kind,
+            })),
         )
         job = db.execute(
             "SELECT * FROM jobs WHERE subject_id = ? ORDER BY id DESC LIMIT 1",
@@ -180,10 +184,22 @@ def compute_background_endpoint(subject_id: int, body: dict = Body(...)) -> dict
     cancel_event = threading.Event()
     registry._cancel_events[job_id] = cancel_event
 
+    if job_kind == "stable":
+        worker = compute_stable
+        allowed = ("max_samples", "downscale", "dilation_px")
+    elif job_kind == "foreground":
+        worker = compute_foreground
+        allowed = ("dilation_px", "image_thresh", "min_width_px",
+                   "edge_subtract_strength")
+    else:
+        raise HTTPException(500, f"bad job_kind: {job_kind}")
+
     kwargs = {}
-    for k in ("max_samples", "downscale", "dilation_px"):
-        if body.get(k) is not None:
-            kwargs[k] = int(body[k])
+    for k in allowed:
+        v = body.get(k)
+        if v is None:
+            continue
+        kwargs[k] = float(v) if k in ("image_thresh", "edge_subtract_strength") else int(v)
 
     def _run():
         try:
@@ -198,7 +214,7 @@ def compute_background_endpoint(subject_id: int, body: dict = Body(...)) -> dict
                 with get_db_ctx() as db:
                     db.execute("UPDATE jobs SET progress_pct=? WHERE id=?",
                                (round(float(pct), 1), job_id))
-            compute_background(
+            worker(
                 name, trial_idx,
                 progress_callback=on_progress,
                 cancel_event=cancel_event,
@@ -216,7 +232,7 @@ def compute_background_endpoint(subject_id: int, body: dict = Body(...)) -> dict
                     "finished_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,),
                 )
         except Exception as e:
-            logger.exception(f"Background job {job_id} failed")
+            logger.exception(f"{job_kind} job {job_id} failed")
             with get_db_ctx() as db:
                 db.execute(
                     "UPDATE jobs SET status='failed', error_msg=?, "
@@ -228,6 +244,50 @@ def compute_background_endpoint(subject_id: int, body: dict = Body(...)) -> dict
 
     threading.Thread(target=_run, daemon=True).start()
     return {"job_id": job_id, "trial_stem": trial_stem}
+
+
+@router.post("/{subject_id}/compute_stable")
+def compute_stable_endpoint(subject_id: int, body: dict = Body(...)) -> dict:
+    """Stage 1: warp every frame to the reference and bake stable.mp4
+    plus background.npz (with skin model + MP-ref keypoints saved for
+    the foreground stage)."""
+    name = _subject_name(subject_id)
+    trial_idx = int(body.get("trial_idx", 0))
+    trials = build_trial_map(name)
+    if trial_idx < 0 or trial_idx >= len(trials):
+        raise HTTPException(400, "trial_idx out of range")
+    trial_stem = trials[trial_idx]["trial_name"]
+    return _spawn_preproc_job(subject_id, name, trial_stem, trial_idx,
+                                "stable", body)
+
+
+@router.post("/{subject_id}/compute_foreground")
+def compute_foreground_endpoint(subject_id: int, body: dict = Body(...)) -> dict:
+    """Stage 2: read stable.mp4 + background.npz and bake fg.mp4 +
+    outline.mp4.  Cheap and re-runnable -- use this to iterate on mask
+    parameters without re-running the heavy stabilise step."""
+    name = _subject_name(subject_id)
+    trial_idx = int(body.get("trial_idx", 0))
+    trials = build_trial_map(name)
+    if trial_idx < 0 or trial_idx >= len(trials):
+        raise HTTPException(400, "trial_idx out of range")
+    trial_stem = trials[trial_idx]["trial_name"]
+    return _spawn_preproc_job(subject_id, name, trial_stem, trial_idx,
+                                "foreground", body)
+
+
+@router.post("/{subject_id}/compute_background")
+def compute_background_endpoint_compat(subject_id: int, body: dict = Body(...)) -> dict:
+    """Backward-compat: runs Stage 1 only.  Prefer /compute_stable +
+    /compute_foreground for new clients."""
+    name = _subject_name(subject_id)
+    trial_idx = int(body.get("trial_idx", 0))
+    trials = build_trial_map(name)
+    if trial_idx < 0 or trial_idx >= len(trials):
+        raise HTTPException(400, "trial_idx out of range")
+    trial_stem = trials[trial_idx]["trial_name"]
+    return _spawn_preproc_job(subject_id, name, trial_stem, trial_idx,
+                                "stable", body)
 
 
 @router.get("/{subject_id}/trial/{trial_idx}/background")

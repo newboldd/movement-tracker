@@ -264,9 +264,10 @@
             $('trajectoryStatus').textContent = `Load error: ${e.message}`;
         }
         updateCameraControls();
-        // Trajectory readiness gates the Background button.
-        const bgBtn = $('runBackgroundBtn');
-        if (bgBtn) bgBtn.disabled = !trajectory;
+        // Trajectory readiness gates Stabilise.  Foreground is gated
+        // separately on stable.mp4 existing -- see refreshBackgroundFromServer.
+        const stableBtn = $('runStableBtn');
+        if (stableBtn) stableBtn.disabled = !trajectory;
         drawPlot();
         render();
     }
@@ -291,12 +292,12 @@
             } else {
                 backgroundData = null;
                 $('dot-background').classList.remove('done', 'running', 'failed');
-                $('backgroundStatus').textContent = trajectory
+                $('stableStatus').textContent = trajectory
                     ? 'Not computed yet.'
                     : 'Waiting for trajectory (run step 1 first).';
+                $('foregroundStatus').textContent = '';
                 $('backgroundStats').textContent = '';
                 $('backgroundPreview').style.display = 'none';
-                // Force overlay back to live frame.
                 overlayMode = 'off';
                 if ($('ovOff'))    $('ovOff').checked = true;
                 if ($('ovStable'))     $('ovStable').disabled = true;
@@ -305,10 +306,13 @@
                 if ($('cbShowOutline')) $('cbShowOutline').disabled = true;
             }
         } catch (e) {
-            $('backgroundStatus').textContent = `Load error: ${e.message}`;
+            $('stableStatus').textContent = `Load error: ${e.message}`;
         }
-        // Enable the Compute button only once a trajectory exists.
-        $('runBackgroundBtn').disabled = !trajectory;
+        // Stable button: enabled when trajectory exists.
+        // Foreground button: enabled when stable.mp4 exists.
+        $('runStableBtn').disabled = !trajectory;
+        $('runForegroundBtn').disabled =
+            !(backgroundData && backgroundData.stable_mp4_exists);
     }
 
     function showBackgroundStats() {
@@ -382,55 +386,73 @@
         }, { once: true });
     }
 
-    async function computeBackground() {
-        if (subjectId == null || currentTrialIdx < 0) return;
-        if (!trajectory) {
-            $('backgroundStatus').textContent = 'Run Compute Trajectory first.';
-            return;
-        }
-        // Skeleton-dilation slider in the inline panel controls the
-        // hand-mask gate radius (in image pixels).  Default 14 ≈ deidentify
-        // hand_mask_radius + smooth ≈ 1 cm in a typical 1080p hand crop.
-        const dilSlider = $('bgDilateSlider');
-        const dilationPx = dilSlider ? parseInt(dilSlider.value, 10) : 14;
+    /**
+     * Spawn a preproc job (stable or foreground) and stream its status
+     * into ``statusEl``.  Stable + Foreground are now separate endpoints
+     * + separate buttons; this helper handles the common SSE wiring.
+     */
+    async function _runPreprocJob(endpoint, body, statusElId) {
+        const statusEl = $(statusElId);
         try {
-            const res = await api(`/api/preproc/${subjectId}/compute_background`, {
+            const res = await api(`/api/preproc/${subjectId}/${endpoint}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    trial_idx: trialMeta.trial_idx,
-                    dilation_px: dilationPx,
-                }),
+                body: JSON.stringify(body),
             });
             bgJobId = res.job_id;
             $('dot-background').classList.add('running');
             $('dot-background').classList.remove('done', 'failed');
-            $('backgroundStatus').textContent = `Job ${bgJobId} starting…`;
+            statusEl.textContent = `Job ${bgJobId} starting…`;
             if (bgEvtSource) bgEvtSource.close();
             bgEvtSource = new EventSource(`/api/jobs/${bgJobId}/stream`);
             bgEvtSource.onmessage = async ev => {
                 const d = JSON.parse(ev.data);
                 if (d.status === 'running') {
                     const pct = d.progress_pct ? Math.round(d.progress_pct) : 0;
-                    $('backgroundStatus').textContent = `Running… ${pct}%`;
+                    statusEl.textContent = `Running… ${pct}%`;
                 } else if (d.status === 'completed') {
                     bgEvtSource.close(); bgEvtSource = null;
-                    $('backgroundStatus').textContent = 'Done.';
+                    statusEl.textContent = 'Done.';
                     await refreshBackgroundFromServer();
                 } else if (d.status === 'failed') {
                     bgEvtSource.close(); bgEvtSource = null;
                     $('dot-background').classList.remove('running');
                     $('dot-background').classList.add('failed');
-                    $('backgroundStatus').textContent = `Failed: ${d.error_msg || ''}`;
+                    statusEl.textContent = `Failed: ${d.error_msg || ''}`;
                 } else if (d.status === 'cancelled') {
                     bgEvtSource.close(); bgEvtSource = null;
                     $('dot-background').classList.remove('running');
-                    $('backgroundStatus').textContent = 'Cancelled.';
+                    statusEl.textContent = 'Cancelled.';
                 }
             };
         } catch (e) {
-            $('backgroundStatus').textContent = `Error: ${e.message}`;
+            statusEl.textContent = `Error: ${e.message}`;
         }
+    }
+
+    async function computeStable() {
+        if (subjectId == null || currentTrialIdx < 0) return;
+        if (!trajectory) {
+            $('stableStatus').textContent = 'Run Compute Trajectory first.';
+            return;
+        }
+        await _runPreprocJob('compute_stable', {
+            trial_idx: trialMeta.trial_idx,
+        }, 'stableStatus');
+    }
+
+    async function computeForeground() {
+        if (subjectId == null || currentTrialIdx < 0) return;
+        if (!backgroundData || !backgroundData.stable_mp4_exists) {
+            $('foregroundStatus').textContent = 'Run Compute Stable first.';
+            return;
+        }
+        const dilSlider = $('fgDilateSlider');
+        const dilationPx = dilSlider ? parseInt(dilSlider.value, 10) : 14;
+        await _runPreprocJob('compute_foreground', {
+            trial_idx: trialMeta.trial_idx,
+            dilation_px: dilationPx,
+        }, 'foregroundStatus');
     }
 
     function showTrajectoryStats() {
@@ -667,15 +689,16 @@
             ctx.globalCompositeOperation = 'source-over';
         }
 
-        // Dilated MP-skeleton preview while the Compute Stable + Mask
-        // panel is open.  Draws the same shape the bake will use as
-        // its hand-mask gate: thick lines along every adjacent joint
-        // pair in each finger chain, plus the palm-MCP arc, with line
-        // thickness = 2 × dilation_px and joint dots at the same radius.
-        const _bgPanel = document.getElementById('bgRunPanel');
-        if (_bgPanel && _bgPanel.style.display === 'block' && mpKeypoints) {
-            const dilSlider = document.getElementById('bgDilateSlider');
-            const dilation = dilSlider ? parseInt(dilSlider.value, 10) : 14;
+        // Dilated MP-skeleton preview, shown while the Foreground
+        // section's dilation slider is in focus / being dragged so the
+        // user can see what gate they're about to use.  Draws thick
+        // strokes along every adjacent joint pair in each finger chain
+        // plus the palm-MCP arc, line thickness = 2 x dilation_px.
+        const _fgSlider = document.getElementById('fgDilateSlider');
+        const _showDilPreview = _fgSlider
+            && (document.activeElement === _fgSlider) && mpKeypoints;
+        if (_showDilPreview) {
+            const dilation = parseInt(_fgSlider.value, 10) || 14;
             // Choose coord system: live frame uses raw MP, every other
             // overlay (stable / fg / bg) draws on ref-space
             // pixels so we need the warped keypoints.
@@ -1086,35 +1109,17 @@
         $('prevSubjectBtn').addEventListener('click', prevSubject);
         $('nextSubjectBtn').addEventListener('click', nextSubject);
         $('runTrajectoryBtn').addEventListener('click', computeTrajectory);
-        // Compute Stable + Mask is now an inline menu toggle (matches the
-        // Skeleton v3 button on the Labels page).  Clicking the title
-        // button expands a panel with the dilation slider, Run, and Close.
-        const _bgRunBtn   = $('runBackgroundBtn');
-        const _bgRunPanel = $('bgRunPanel');
-        const _bgRunActual = $('bgRunActualBtn');
-        const _bgRunClose  = $('bgRunCloseBtn');
-        const _bgDilateSlider = $('bgDilateSlider');
-        const _bgDilateVal    = $('bgDilateVal');
-        function _setBgPanelOpen(open) {
-            _bgRunPanel.style.display = open ? 'block' : 'none';
-            _bgRunBtn.classList.toggle('active', open);
-            // Need a redraw so the dilated-skeleton preview appears /
-            // disappears on the canvas.
-            try { render(); } catch (_e) {}
-        }
-        _bgRunBtn.addEventListener('click', () => {
-            const isOpen = _bgRunPanel.style.display === 'block';
-            _setBgPanelOpen(!isOpen);
-        });
-        _bgRunClose.addEventListener('click', () => _setBgPanelOpen(false));
-        _bgRunActual.addEventListener('click', () => {
-            _setBgPanelOpen(false);    // collapse panel as the job kicks off
-            computeBackground();
-        });
-        if (_bgDilateSlider && _bgDilateVal) {
-            _bgDilateSlider.addEventListener('input', () => {
-                _bgDilateVal.textContent = _bgDilateSlider.value;
-                // Re-render so the on-canvas preview tracks the slider.
+        // Two preproc stages, two buttons.  Stabilise is the heavy
+        // warp+median pass; Foreground iterates cheaply on top of it.
+        $('runStableBtn').addEventListener('click', computeStable);
+        $('runForegroundBtn').addEventListener('click', computeForeground);
+        const _fgDilateSlider = $('fgDilateSlider');
+        const _fgDilateVal    = $('fgDilateVal');
+        if (_fgDilateSlider && _fgDilateVal) {
+            _fgDilateSlider.addEventListener('input', () => {
+                _fgDilateVal.textContent = _fgDilateSlider.value;
+                // Re-render so the on-canvas dilated-skeleton preview
+                // tracks the slider.
                 try { render(); } catch (_e) {}
             });
         }
