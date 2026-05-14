@@ -289,8 +289,8 @@
                                 <label style="color:var(--text-muted);">Threshold scale</label>
                                 <span id="outlineThreshVal" style="color:var(--text);font-weight:bold;">1.00</span>
                             </div>
-                            <input type="range" id="outlineThreshSlider" min="0.5" max="1.5" step="0.05" value="1"
-                                   title="Scales the automatic per-frame Otsu motion threshold.  Below 1 lets more (lower-motion) pixels count as hand -- a slightly larger outline; above 1 is stricter.  Still image-informed: it only shifts the cut on the real |frame - background| score."
+                            <input type="range" id="outlineThreshSlider" min="0.1" max="3" step="0.05" value="1"
+                                   title="Scales the automatic per-frame Otsu motion threshold.  Below 1 lets more (lower-motion) pixels count as hand -- a larger outline; above 1 is stricter.  Still image-informed: it only shifts the cut on the real |frame - background| score."
                                    style="width:100%;cursor:pointer;height:5px;">
                         </div>
                         <div style="margin-top:8px;font-size:11px;">
