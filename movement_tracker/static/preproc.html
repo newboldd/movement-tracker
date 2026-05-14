@@ -364,6 +364,10 @@
                     <label class="pp-viz-row" style="display:flex;align-items:center;gap:6px;margin-top:8px;">
                         <input type="checkbox" id="cbShowOutline" disabled checked> Show hand boundary
                     </label>
+                    <label class="pp-viz-row" style="display:flex;align-items:center;gap:6px;"
+                           title="Overlays the other camera's hand boundary (green), translated to optimally align with this camera's.  Red marks sides on the other camera's background edges; those red sides are ignored when computing the alignment.">
+                        <input type="checkbox" id="cbShowOtherBoundary" disabled> Show other camera's boundary
+                    </label>
                     <label class="pp-viz-row" style="display:flex;align-items:center;gap:6px;">
                         <input type="checkbox" id="cbShowFgFill" disabled> Show foreground fill (JET heatmap)
                     </label>
@@ -421,6 +425,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/preproc.js?v=57"></script>
+    <script src="/static/js/preproc.js?v=58"></script>
 </body>
 </html>

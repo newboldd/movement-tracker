@@ -68,6 +68,8 @@
         return cv;
     }
     let showOutline = true;     // checkbox: show live-fetched hand boundary
+    let showOtherBoundary = false;  // checkbox: the other camera's boundary,
+                                    // translated to align with this one
     let showFgFill = false;     // checkbox: also fetch + paint JET heatmap
     const fgFillOpacity = 1.0;  // JET foreground fill always fully opaque
     // Transient previews: shown only while the relevant slider is being
@@ -129,21 +131,20 @@
     // Background will actually do.
     let _skinMaskCanvas = null;
     let _skinMaskKey = null;
-    // Offscreen canvas + cache key for the background-edge band preview
-    // (client-side echo of _bg_edge_map + threshold + dilate on the
-    // server).  Invalidated whenever the background images reload.
-    // ``_bgEdgeBin`` is the underlying binary band (Uint8Array) so the
-    // outline drawing can flag polygon sides that sit on a BG edge;
-    // ``_bgEdgeBinScale`` maps full-res reference coords to band coords.
-    let _bgEdgeCanvas = null;
-    let _bgEdgeKey = null;
-    let _bgEdgeBin = null;
-    let _bgEdgeBinW = 0, _bgEdgeBinH = 0, _bgEdgeBinScale = 0.5;
-    // Per-pixel Sobel gradient of the background (edge-normal
-    // direction) + a "meaningful gradient" magnitude-squared cutoff.
-    // Used to mark an outline side red only when it runs ALONG a BG
-    // edge (parallel), not when it crosses one.
-    let _bgEdgeGradX = null, _bgEdgeGradY = null, _bgEdgeGradT2 = 0;
+    // Per-side background-edge band cache (client-side echo of
+    // _bg_edge_map + threshold + dilate on the server).  Each entry is
+    // {key, canvas, bin, w, h, scale, gradX, gradY, gradT2} -- the band
+    // canvas for the flash preview, plus the binary band + per-pixel
+    // Sobel gradient so the outline drawing can flag polygon sides
+    // running ALONG a BG edge.  Keyed OS/OD so both cameras' bands can
+    // be queried at once (needed for the other-camera overlay).
+    // Invalidated whenever the background images reload.
+    const _bgEdge = { OS: null, OD: null };
+    // Cached optimal translation aligning the other camera's boundary
+    // onto the current one.  Recomputed when outlineData / side change.
+    let _otherAlign = null;       // {dx, dy} or null
+    let _otherAlignData = null;   // the outlineData it was computed for
+    let _otherAlignSide = null;
     // Live outline state -- replaces the old fg.mp4 / outline.mp4 bake.
     // Server returns a per-frame closed-polygon contour for the
     // current dilation; we fetch it whenever the frame or slider
@@ -482,8 +483,11 @@
         if ($('ovRefined')) $('ovRefined').disabled = !refinedReady;
         $('cbShowOutline').disabled = !bgReady;
         $('cbShowFgFill').disabled = !bgReady;
+        if ($('cbShowOtherBoundary'))
+            $('cbShowOtherBoundary').disabled = !bgReady || !b.is_stereo;
         if ($('runOutlinesBtn')) $('runOutlinesBtn').disabled = !bgReady;
-        if (bgReady && (showOutline || showFgFill)) scheduleOutlineFetch();
+        if (bgReady && (showOutline || showFgFill || showOtherBoundary))
+            scheduleOutlineFetch();
     }
 
     function showBackgroundStats() {
@@ -535,9 +539,9 @@
         const t = Date.now();   // bust HTTP cache after recompute
         $('ovBg').disabled = true;
         bgFullOS = bgFullOD = refinedFullOS = refinedFullOD = null;
-        // background changed -> drop cached edge band
-        _bgEdgeKey = null; _bgEdgeBin = null;
-        _bgEdgeGradX = _bgEdgeGradY = null;
+        // background changed -> drop cached edge bands + alignment
+        _bgEdge.OS = _bgEdge.OD = null;
+        _otherAlign = null; _otherAlignData = null;
         // On load: upscale the (downscaled) PNG to full-res for the
         // overlay coord space, then re-render -- the canvas 'bg'
         // overlay draws from the full-res canvas, so if the user (or a
@@ -706,7 +710,7 @@
     async function fetchOutline() {
         if (subjectId == null || currentTrialIdx < 0) return;
         if (!backgroundData || !backgroundData.stable_mp4_exists) return;
-        if (!showOutline && !showFgFill) return;
+        if (!showOutline && !showFgFill && !showOtherBoundary) return;
         const dilSlider = $('fgDilateSlider');
         const dilationPx = dilSlider ? parseInt(dilSlider.value, 10) : 14;
         const openSlider = $('fgOpenSlider');
@@ -1015,25 +1019,26 @@
     }
 
     /**
-     * Background-edge band for the current side -- the client-side echo
-     * of the server's _bg_edge_map + threshold + dilate (the
+     * Background-edge band for ``side`` ('OS' / 'OD') -- the client-side
+     * echo of the server's _bg_edge_map + threshold + dilate (the
      * ``edge_band`` of the outline's step-5b retraction).  Sobel
-     * magnitude of the background image, 99th-percentile normalized,
-     * thresholded by "BG-edge threshold" and dilated by "BG-edge band
-     * width".  Returns an RGBA <canvas> (orange where the band is,
-     * transparent elsewhere), or null if no background is loaded yet.
-     * Cached by side + slider values; invalidated on background reload.
+     * magnitude of that camera's background, 99th-percentile
+     * normalized, thresholded by "BG-edge threshold" and dilated by
+     * "BG-edge band width".  Caches into ``_bgEdge[side]`` (band canvas
+     * + binary band + per-pixel gradient); returns the cache entry, or
+     * null if that camera's background isn't loaded yet.
      */
-    function _bgEdgeBand() {
-        const isOD = (currentSide === 'OD');
+    function _bgEdgeBand(side) {
+        const isOD = (side === 'OD');
         const bcv = (isOD && backgroundData && backgroundData.is_stereo)
             ? (refinedFullOD || bgFullOD)
             : (refinedFullOS || bgFullOS);
         if (!bcv || !bcv.width) return null;
         const thr = parseFloat(($('bgEdgeThreshSlider') || {}).value || 0.35);
         const band = parseInt(($('bgEdgeBandSlider') || {}).value || 3, 10);
-        const key = `${currentSide}|${bcv.width}x${bcv.height}|${thr}|${band}`;
-        if (key === _bgEdgeKey && _bgEdgeCanvas) return _bgEdgeCanvas;
+        const key = `${side}|${bcv.width}x${bcv.height}|${thr}|${band}`;
+        const cached = _bgEdge[side];
+        if (cached && cached.key === key) return cached;
         // Work at half-res -- plenty for a preview.
         const cw = Math.max(3, Math.round(bcv.width / 2));
         const ch = Math.max(3, Math.round(bcv.height / 2));
@@ -1086,24 +1091,24 @@
             }
         }
         tctx.putImageData(img, 0, 0);
-        _bgEdgeCanvas = tmp;
-        _bgEdgeKey = key;
-        // Keep the binary band + gradient for the outline edge test.
-        _bgEdgeBin = bin;
-        _bgEdgeBinW = cw; _bgEdgeBinH = ch;
-        _bgEdgeBinScale = cw / bcv.width;
-        _bgEdgeGradX = gradX; _bgEdgeGradY = gradY;
-        _bgEdgeGradT2 = (0.35 * thr * p99) * (0.35 * thr * p99);
-        return _bgEdgeCanvas;
+        const entry = {
+            key, canvas: tmp, bin, w: cw, h: ch,
+            scale: cw / bcv.width, gradX, gradY,
+            gradT2: (0.35 * thr * p99) * (0.35 * thr * p99),
+        };
+        _bgEdge[side] = entry;
+        return entry;
     }
 
-    /** True if a polygon side (full-res reference coords) runs ALONG a
-     *  background edge -- mostly on the BG-edge band AND, where the
-     *  band has a clear gradient, mostly parallel to that edge (not
-     *  crossing it).  Samples ~every 2 px along the side. */
-    function _segOnBgEdge(x0, y0, x1, y1) {
-        if (!_bgEdgeBin) return false;
-        const s = _bgEdgeBinScale;
+    /** True if a polygon side (full-res reference coords of ``side``'s
+     *  camera) runs ALONG that camera's background edge -- mostly on
+     *  the BG-edge band AND, where the band has a clear gradient,
+     *  mostly parallel to that edge (not crossing it).  Samples ~every
+     *  2 px along the side. */
+    function _segOnBgEdge(x0, y0, x1, y1, side) {
+        const be = _bgEdge[side];
+        if (!be || !be.bin) return false;
+        const s = be.scale, W = be.w, H = be.h;
         const dx = x1 - x0, dy = y1 - y0;
         const len = Math.hypot(dx, dy);
         if (len < 1e-3) return false;
@@ -1114,18 +1119,17 @@
             const t = i / n;
             const bx = Math.round((x0 + dx * t) * s);
             const by = Math.round((y0 + dy * t) * s);
-            if (bx < 0 || by < 0 || bx >= _bgEdgeBinW || by >= _bgEdgeBinH)
-                continue;
+            if (bx < 0 || by < 0 || bx >= W || by >= H) continue;
             inBounds++;
-            const idx = by * _bgEdgeBinW + bx;
-            if (!_bgEdgeBin[idx]) continue;
+            const idx = by * W + bx;
+            if (!be.bin[idx]) continue;
             onBand++;
             // Where the band has a clear gradient, the side runs ALONG
             // the edge when its direction is ~perpendicular to the
             // gradient (the edge-normal): |sideDir . gradUnit| small.
-            const gx = _bgEdgeGradX[idx], gy = _bgEdgeGradY[idx];
+            const gx = be.gradX[idx], gy = be.gradY[idx];
             const g2 = gx * gx + gy * gy;
-            if (g2 < _bgEdgeGradT2) continue;
+            if (g2 < be.gradT2) continue;
             dirN++;
             const dot = Math.abs((sdx * gx + sdy * gy) / Math.sqrt(g2));
             if (dot < 0.5) par++;                    // within ~30 deg of parallel
@@ -1135,6 +1139,81 @@
         // crossing it).  If the band stretch had no clear gradient at
         // all, stay conservative and don't mark it red.
         return dirN > 0 && par >= 0.5 * dirN;
+    }
+
+    /**
+     * Optimal translation to align the OTHER camera's boundary onto
+     * the current one.  Dense-samples both polygons (~every 3 px),
+     * drops points on red (BG-edge) segments -- those are unreliable
+     * -- then votes every pairwise offset into a 2D accumulator
+     * centred on the centroid difference.  The peak (of the 3x3-summed
+     * accumulator) is the translation that makes the MOST sampled
+     * points coincide, i.e. it prefers a large portion exactly
+     * aligned even if that pulls other edges apart.  Returns {dx,dy}.
+     */
+    function _computeOtherAlign(curPoly, otherPoly, curSide, otherSide) {
+        const SP = 3;            // sample spacing, px
+        const R = 130;           // accumulator half-extent around the
+                                 // centroid-difference seed, px
+        // Dense, red-filtered samples along a closed polygon.
+        const _sample = (poly, side) => {
+            const pts = [];
+            const n = poly.length;
+            for (let i = 0; i < n; i++) {
+                const a = poly[i], b = poly[(i + 1) % n];
+                if (_segOnBgEdge(a[0], a[1], b[0], b[1], side)) continue;
+                const dx = b[0] - a[0], dy = b[1] - a[1];
+                const L = Math.hypot(dx, dy);
+                const steps = Math.max(1, Math.round(L / SP));
+                for (let k = 0; k < steps; k++) {
+                    const t = k / steps;
+                    pts.push([a[0] + dx * t, a[1] + dy * t]);
+                }
+            }
+            return pts;
+        };
+        const cur = _sample(curPoly, curSide);
+        const other = _sample(otherPoly, otherSide);
+        if (cur.length < 8 || other.length < 8) {
+            // Not enough reliable edge -- fall back to centroid match.
+            const c = _centroid(curPoly), o = _centroid(otherPoly);
+            return { dx: c[0] - o[0], dy: c[1] - o[1] };
+        }
+        const cc = _centroid(cur), oc = _centroid(other);
+        const t0x = Math.round(cc[0] - oc[0]);
+        const t0y = Math.round(cc[1] - oc[1]);
+        const W = 2 * R + 1;
+        const acc = new Uint16Array(W * W);
+        for (let i = 0; i < other.length; i++) {
+            const px = other[i][0], py = other[i][1];
+            for (let j = 0; j < cur.length; j++) {
+                const ix = Math.round(cur[j][0] - px - t0x) + R;
+                if (ix < 0 || ix >= W) continue;
+                const iy = Math.round(cur[j][1] - py - t0y) + R;
+                if (iy < 0 || iy >= W) continue;
+                acc[iy * W + ix]++;
+            }
+        }
+        // Peak of the 3x3-summed accumulator -- "exactly aligned" with
+        // a +/-1 px tolerance for the polygon's integer coords.
+        let best = -1, bx = R, by = R;
+        for (let y = 1; y < W - 1; y++) {
+            for (let x = 1; x < W - 1; x++) {
+                let s = 0;
+                for (let dy = -1; dy <= 1; dy++)
+                    for (let dx = -1; dx <= 1; dx++)
+                        s += acc[(y + dy) * W + (x + dx)];
+                if (s > best) { best = s; bx = x; by = y; }
+            }
+        }
+        return { dx: (bx - R) + t0x, dy: (by - R) + t0y };
+    }
+
+    function _centroid(pts) {
+        let sx = 0, sy = 0;
+        for (let i = 0; i < pts.length; i++) { sx += pts[i][0]; sy += pts[i][1]; }
+        const n = Math.max(1, pts.length);
+        return [sx / n, sy / n];
     }
 
     function showTrajectoryStats() {
@@ -1217,7 +1296,7 @@
         if (!trialMeta) return Promise.resolve();
         $('frameDisplay').textContent = `Frame: ${frameNum} / ${nFrames}`;
         // Hand-boundary / fg-heatmap refetch -- debounced so scrubbing isn't laggy.
-        if (showOutline || showFgFill) scheduleOutlineFetch();
+        if (showOutline || showFgFill || showOtherBoundary) scheduleOutlineFetch();
         _refreshActiveVideo();
         const companions = _companionVideos();
         if (!videoEl || videoEl.readyState < 1) return Promise.resolve();
@@ -1408,11 +1487,11 @@
         // background edges the outline's step-5b retraction acts on.
         // Flashed while the Hand Boundary "BG-edge ..." sliders move.
         if (showBgEdge && srcImage) {
-            const band = _bgEdgeBand();
-            if (band) {
+            const be = _bgEdgeBand(currentSide);
+            if (be && be.canvas) {
                 ctx.save();
                 ctx.imageSmoothingEnabled = false;
-                ctx.drawImage(band, 0, 0, drawSw, drawSh);
+                ctx.drawImage(be.canvas, 0, 0, drawSw, drawSh);
                 ctx.restore();
             }
         }
@@ -1435,11 +1514,36 @@
             }
         }
 
+        // Stroke a closed polygon, batching consecutive same-colour
+        // sides into one path.  ``segColor(a, b)`` -> CSS colour for
+        // the side a->b; ``ox``/``oy`` translate the drawn path (used
+        // for the other camera's aligned boundary).
+        function _strokePoly(pts, segColor, ox, oy) {
+            ox = ox || 0; oy = oy || 0;
+            const N = pts.length;
+            let curColor = null;
+            for (let i = 0; i < N; i++) {
+                const a = pts[i], b = pts[(i + 1) % N];
+                const col = segColor(a, b);
+                if (col !== curColor) {
+                    if (curColor !== null) ctx.stroke();
+                    ctx.strokeStyle = col;
+                    ctx.beginPath();
+                    ctx.moveTo(a[0] + ox, a[1] + oy);
+                    curColor = col;
+                }
+                ctx.lineTo(b[0] + ox, b[1] + oy);
+            }
+            if (curColor !== null) ctx.stroke();
+        }
+
         // Live hand-boundary overlay -- draws the server-computed
-        // closed polygon as a yellow stroked path, tracking the
-        // current side's contour from outlineData.  No mp4 reads,
-        // no compositing -- just a vector path that scales cleanly
-        // with the zoom transform.
+        // closed polygon as a yellow stroked path (red where a side
+        // runs along a background edge), tracking the current side's
+        // contour from outlineData.
+        const YELLOW = 'rgba(255, 235, 59, 0.95)';
+        const RED    = 'rgba(255, 64, 48, 0.95)';
+        const GREEN  = 'rgba(70, 220, 90, 0.95)';
         if (showOutline && outlineData
             && outlineData.frame === currentFrame) {
             const pts = (currentSide === 'OD' && outlineData.is_stereo)
@@ -1452,31 +1556,51 @@
                 // Stay 2px wide on screen regardless of zoom.  We're
                 // inside the (scale * bps) transform, so divide.
                 ctx.lineWidth = 2 / Math.max(0.01, scale * bps);
-                // Sides that sit on a background edge are drawn red --
-                // the BG-edge band the retraction step acts on.  Make
-                // sure the band is computed (cached after the first
-                // call) so _segOnBgEdge can query it.
-                _bgEdgeBand();
-                // Walk the closed polygon, batching consecutive sides
-                // of the same colour into one stroked path.
-                const YELLOW = 'rgba(255, 235, 59, 0.95)';
-                const RED    = 'rgba(255, 64, 48, 0.95)';
-                const N = pts.length;
-                let curColor = null;
-                for (let i = 0; i < N; i++) {
-                    const a = pts[i], b = pts[(i + 1) % N];
-                    const onEdge = _segOnBgEdge(a[0], a[1], b[0], b[1]);
-                    const col = onEdge ? RED : YELLOW;
-                    if (col !== curColor) {
-                        if (curColor !== null) ctx.stroke();
-                        ctx.strokeStyle = col;
-                        ctx.beginPath();
-                        ctx.moveTo(a[0], a[1]);
-                        curColor = col;
-                    }
-                    ctx.lineTo(b[0], b[1]);
+                // Sides on a background edge are drawn red.  Make sure
+                // this side's band is computed (cached) for the test.
+                _bgEdgeBand(currentSide);
+                _strokePoly(pts, (a, b) =>
+                    _segOnBgEdge(a[0], a[1], b[0], b[1], currentSide)
+                        ? RED : YELLOW);
+                ctx.restore();
+            }
+        }
+
+        // Other camera's boundary, translated to optimally align with
+        // this camera's.  Drawn green, still red where a side runs
+        // along the OTHER camera's background edges (computed in the
+        // other camera's own coords, then the whole path is shifted).
+        if (showOtherBoundary && outlineData
+            && outlineData.is_stereo
+            && outlineData.frame === currentFrame) {
+            const curSide = (currentSide === 'OD') ? 'OD' : 'OS';
+            const otherSide = (curSide === 'OD') ? 'OS' : 'OD';
+            const curPts = (curSide === 'OD') ? outlineData.OD : outlineData.OS;
+            const otherPts = (otherSide === 'OD') ? outlineData.OD : outlineData.OS;
+            if (curPts && curPts.length >= 3
+                && otherPts && otherPts.length >= 3) {
+                // Both cameras' BG-edge bands feed the red test + the
+                // red-aware alignment.
+                _bgEdgeBand(curSide);
+                _bgEdgeBand(otherSide);
+                // Recompute the alignment only when the data / side
+                // changed (a slider move re-fetches outlineData).
+                if (_otherAlign === null
+                    || _otherAlignData !== outlineData
+                    || _otherAlignSide !== curSide) {
+                    _otherAlign = _computeOtherAlign(
+                        curPts, otherPts, curSide, otherSide);
+                    _otherAlignData = outlineData;
+                    _otherAlignSide = curSide;
                 }
-                if (curColor !== null) ctx.stroke();
+                const { dx, dy } = _otherAlign;
+                ctx.save();
+                ctx.lineJoin = 'round';
+                ctx.lineCap = 'round';
+                ctx.lineWidth = 2 / Math.max(0.01, scale * bps);
+                _strokePoly(otherPts, (a, b) =>
+                    _segOnBgEdge(a[0], a[1], b[0], b[1], otherSide)
+                        ? RED : GREEN, dx, dy);
                 ctx.restore();
             }
         }
@@ -2103,7 +2227,7 @@
                 // dilated-skeleton preview tracks the slider.
                 try { render(); } catch (_e) {}
                 // Debounced backend fetch for the new outline / heatmap.
-                if (showOutline || showFgFill) scheduleOutlineFetch();
+                if (showOutline || showFgFill || showOtherBoundary) scheduleOutlineFetch();
             });
         }
         // Background-edge retraction sliders + strand-clip slider: all
@@ -2126,7 +2250,7 @@
             sl.addEventListener('input', () => {
                 vl.textContent = fmt(sl.value);
                 if (flashEdge) _flashBgEdge();
-                if (showOutline || showFgFill) scheduleOutlineFetch();
+                if (showOutline || showFgFill || showOtherBoundary) scheduleOutlineFetch();
             });
         }
         // Overlay radio group → mutually exclusive: live, stable.mp4.
@@ -2178,10 +2302,26 @@
             if (showOutline) {
                 fetchOutline();
             } else {
-                if (!showFgFill) outlineData = null;
+                if (!showFgFill && !showOtherBoundary) outlineData = null;
                 render();
             }
         });
+        // Other-camera boundary checkbox: needs outlineData (which
+        // carries both cameras' polygons), so fetch it if not present;
+        // turning off just re-renders.
+        if ($('cbShowOtherBoundary')) {
+            $('cbShowOtherBoundary').addEventListener('change', e => {
+                showOtherBoundary = e.target.checked;
+                if (showOtherBoundary) {
+                    _otherAlign = null;
+                    if (outlineData && outlineData.frame === currentFrame) render();
+                    else fetchOutline();
+                } else {
+                    if (!showFgFill && !showOutline) outlineData = null;
+                    render();
+                }
+            });
+        }
         // Foreground-fill checkbox: independent of the outline checkbox
         // -- you can show either one alone or both together.  Turning
         // it on triggers a fresh fetch with include_fg=1 (the heatmap
