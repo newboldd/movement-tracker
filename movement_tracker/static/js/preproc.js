@@ -132,8 +132,13 @@
     // Offscreen canvas + cache key for the background-edge band preview
     // (client-side echo of _bg_edge_map + threshold + dilate on the
     // server).  Invalidated whenever the background images reload.
+    // ``_bgEdgeBin`` is the underlying binary band (Uint8Array) so the
+    // outline drawing can flag polygon sides that sit on a BG edge;
+    // ``_bgEdgeBinScale`` maps full-res reference coords to band coords.
     let _bgEdgeCanvas = null;
     let _bgEdgeKey = null;
+    let _bgEdgeBin = null;
+    let _bgEdgeBinW = 0, _bgEdgeBinH = 0, _bgEdgeBinScale = 0.5;
     // Live outline state -- replaces the old fg.mp4 / outline.mp4 bake.
     // Server returns a per-frame closed-polygon contour for the
     // current dilation; we fetch it whenever the frame or slider
@@ -524,7 +529,8 @@
         const t = Date.now();   // bust HTTP cache after recompute
         $('ovBg').disabled = true;
         bgFullOS = bgFullOD = refinedFullOS = refinedFullOD = null;
-        _bgEdgeKey = null;   // background changed -> drop cached edge band
+        // background changed -> drop cached edge band
+        _bgEdgeKey = null; _bgEdgeBin = null;
         // On load: upscale the (downscaled) PNG to full-res for the
         // overlay coord space, then re-render -- the canvas 'bg'
         // overlay draws from the full-res canvas, so if the user (or a
@@ -1045,7 +1051,32 @@
         tctx.putImageData(img, 0, 0);
         _bgEdgeCanvas = tmp;
         _bgEdgeKey = key;
+        // Keep the binary band for the outline edge-overlap test.
+        _bgEdgeBin = bin;
+        _bgEdgeBinW = cw; _bgEdgeBinH = ch;
+        _bgEdgeBinScale = cw / bcv.width;
         return _bgEdgeCanvas;
+    }
+
+    /** True if a polygon side (full-res reference coords) mostly sits
+     *  on the background-edge band.  Samples ~every 2 px along it. */
+    function _segOnBgEdge(x0, y0, x1, y1) {
+        if (!_bgEdgeBin) return false;
+        const s = _bgEdgeBinScale;
+        const dx = x1 - x0, dy = y1 - y0;
+        const len = Math.hypot(dx, dy);
+        const n = Math.max(1, Math.round(len / 2));
+        let hit = 0, tot = 0;
+        for (let i = 0; i <= n; i++) {
+            const t = i / n;
+            const bx = Math.round((x0 + dx * t) * s);
+            const by = Math.round((y0 + dy * t) * s);
+            if (bx < 0 || by < 0 || bx >= _bgEdgeBinW || by >= _bgEdgeBinH)
+                continue;
+            tot++;
+            if (_bgEdgeBin[by * _bgEdgeBinW + bx]) hit++;
+        }
+        return tot > 0 && hit / tot >= 0.5;
     }
 
     function showTrajectoryStats() {
@@ -1358,19 +1389,36 @@
                 : outlineData.OS;
             if (pts && pts.length >= 3) {
                 ctx.save();
-                ctx.strokeStyle = 'rgba(255, 235, 59, 0.95)';   // MP-yellow
                 ctx.lineJoin = 'round';
                 ctx.lineCap = 'round';
                 // Stay 2px wide on screen regardless of zoom.  We're
                 // inside the (scale * bps) transform, so divide.
                 ctx.lineWidth = 2 / Math.max(0.01, scale * bps);
-                ctx.beginPath();
-                ctx.moveTo(pts[0][0], pts[0][1]);
-                for (let i = 1; i < pts.length; i++) {
-                    ctx.lineTo(pts[i][0], pts[i][1]);
+                // Sides that sit on a background edge are drawn red --
+                // the BG-edge band the retraction step acts on.  Make
+                // sure the band is computed (cached after the first
+                // call) so _segOnBgEdge can query it.
+                _bgEdgeBand();
+                // Walk the closed polygon, batching consecutive sides
+                // of the same colour into one stroked path.
+                const YELLOW = 'rgba(255, 235, 59, 0.95)';
+                const RED    = 'rgba(255, 64, 48, 0.95)';
+                const N = pts.length;
+                let curColor = null;
+                for (let i = 0; i < N; i++) {
+                    const a = pts[i], b = pts[(i + 1) % N];
+                    const onEdge = _segOnBgEdge(a[0], a[1], b[0], b[1]);
+                    const col = onEdge ? RED : YELLOW;
+                    if (col !== curColor) {
+                        if (curColor !== null) ctx.stroke();
+                        ctx.strokeStyle = col;
+                        ctx.beginPath();
+                        ctx.moveTo(a[0], a[1]);
+                        curColor = col;
+                    }
+                    ctx.lineTo(b[0], b[1]);
                 }
-                ctx.closePath();
-                ctx.stroke();
+                if (curColor !== null) ctx.stroke();
                 ctx.restore();
             }
         }
