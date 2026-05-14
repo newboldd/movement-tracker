@@ -963,9 +963,11 @@ def compute_stable(
         raise RuntimeError(f"Cannot reopen video for bake pass: {video_path}")
 
     frames_written = 0
+    interrupted = False
     try:
         for i in range(n_frames):
             if cancel_event is not None and cancel_event.is_set():
+                interrupted = True
                 raise InterruptedError("Job cancelled")
             ok, frame = cap.read()
             if not ok:
@@ -1017,6 +1019,12 @@ def compute_stable(
             logger.warning(f"ffmpeg (stable) finalise error: {e}")
         finally:
             _retire_ffmpeg(stable_proc)
+        # Cancelled mid-bake -> stable.mp4 is a partial file.  Unlink it
+        # so the UI shows "not stabilized" rather than enabling
+        # Background against a truncated video.
+        if interrupted:
+            try: stable_path.unlink()
+            except FileNotFoundError: pass
 
     if progress_callback is not None:
         try: progress_callback(100.0)
