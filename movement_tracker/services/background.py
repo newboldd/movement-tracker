@@ -711,6 +711,11 @@ def _refine_bg_color_based(
     # Box radius (px, downscaled BG resolution) for the local-background
     # average -- big enough to reach real background around the hand.
     _LOCAL_BG_BOX = 31
+    # The skin mask is dilated + hole-filled by this many px before
+    # sampling background colours, so skin pixels the classifier missed
+    # (shadowed, below the leniency threshold, or enclosed inside the
+    # hand silhouette) aren't mistaken for acceptable background.
+    _FLESH_EXCL_DILATE = 5
 
     bg_ycc = cv2.cvtColor(bg_initial, cv2.COLOR_BGR2YCrCb)
     flesh_in_bg = _is_skin_ycc(bg_ycc, leniency=skin_leniency,
@@ -722,12 +727,27 @@ def _refine_bg_color_based(
     if refine_mask is not None:
         rec = flesh_in_bg & (refine_mask > 0)
         if rec.any():
+            # Dilated + hole-filled skin mask: skin pixels the
+            # classifier missed (dark/shadowed, or holes inside the
+            # hand) get excluded from the background colour search so
+            # they can't pass as acceptable background.
+            flesh_u8 = (flesh_in_bg.astype(np.uint8)) * 255
+            _ff = flesh_u8.copy()
+            _ffm = np.zeros((flesh_u8.shape[0] + 2,
+                             flesh_u8.shape[1] + 2), np.uint8)
+            cv2.floodFill(_ff, _ffm, (0, 0), 255)   # flood the border BG
+            flesh_filled = flesh_u8 | cv2.bitwise_not(_ff)  # + enclosed holes
+            _k = 2 * _FLESH_EXCL_DILATE + 1
+            flesh_excl = cv2.dilate(
+                flesh_filled,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_k, _k)))
+
             # Local background colour: box-blur bg_initial weighted by
             # the non-flesh mask, so each pixel gets the mean colour of
             # nearby confirmed-background (outside-the-skin-mask)
             # pixels.  ``local_bg_valid`` is False where the
             # neighbourhood held no background pixels at all.
-            non_flesh = (~flesh_in_bg).astype(np.float32)
+            non_flesh = (flesh_excl == 0).astype(np.float32)
             ksz = (_LOCAL_BG_BOX, _LOCAL_BG_BOX)
             wsum = cv2.blur(non_flesh, ksz)
             bg_f = bg_initial.astype(np.float32)
