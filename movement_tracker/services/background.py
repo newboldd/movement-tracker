@@ -688,17 +688,30 @@ def _refine_bg_color_based(
     Over ``refine_mask`` (the palm zone + forearm cone), every
     flesh-colored BG pixel is re-derived per-pixel: classify its
     ``N`` sample colors skin / not-skin, and if at least one sample
-    isn't skin, fill with the median of the non-skin samples --
-    recovering the background that peeked through between movements.
-    Only when *every* sample is skin (no non-skin color is available
-    anywhere for that pixel) is it painted the green sentinel and
-    recorded as always-hand.
+    isn't skin, take the median of the non-skin samples as a
+    candidate background colour.
+
+    The candidate is only *accepted* if it actually looks like the
+    surrounding background -- it's compared to the local mean of
+    nearby confirmed-background pixels (pixels outside the skin
+    mask).  This rejects "non-skin" samples that are really just
+    hand at an odd shade / in shadow.  When the candidate isn't
+    close enough (or every sample is skin, or there's no nearby
+    background to compare against) the pixel is painted the green
+    sentinel and recorded as always-hand.
 
     ``dark_boost`` widens the skin window for darker pixels (see
     :func:`_is_skin_ycc`).
 
     Returns ``(refined_bg, always_hand_color_mask)``.
     """
+    # A recovered colour is accepted only if every channel is within
+    # this many levels of the local background mean.
+    _RECOVER_SIM_THRESH = 35
+    # Box radius (px, downscaled BG resolution) for the local-background
+    # average -- big enough to reach real background around the hand.
+    _LOCAL_BG_BOX = 31
+
     bg_ycc = cv2.cvtColor(bg_initial, cv2.COLOR_BGR2YCrCb)
     flesh_in_bg = _is_skin_ycc(bg_ycc, leniency=skin_leniency,
                                 skin_range=skin_range, dark_boost=dark_boost)
@@ -706,12 +719,25 @@ def _refine_bg_color_based(
     always_hand = np.zeros(bg_initial.shape[:2], dtype=bool)
     green = np.array([0, 255, 0], dtype=np.uint8)
 
-    # Per-pixel non-skin median over the whole refine region.  A pixel
-    # is greened ONLY if every sample is skin -- if any sample shows a
-    # non-skin colour, that colour is used instead.
     if refine_mask is not None:
         rec = flesh_in_bg & (refine_mask > 0)
         if rec.any():
+            # Local background colour: box-blur bg_initial weighted by
+            # the non-flesh mask, so each pixel gets the mean colour of
+            # nearby confirmed-background (outside-the-skin-mask)
+            # pixels.  ``local_bg_valid`` is False where the
+            # neighbourhood held no background pixels at all.
+            non_flesh = (~flesh_in_bg).astype(np.float32)
+            ksz = (_LOCAL_BG_BOX, _LOCAL_BG_BOX)
+            wsum = cv2.blur(non_flesh, ksz)
+            bg_f = bg_initial.astype(np.float32)
+            local_bg = np.empty_like(bg_f)
+            for c in range(3):
+                local_bg[..., c] = cv2.blur(bg_f[..., c] * non_flesh, ksz)
+            safe = np.maximum(wsum, 1e-6)
+            local_bg /= safe[..., None]
+            local_bg_valid = wsum > 1e-3
+
             rec_ys, rec_xs = np.where(rec)
             n = int(rec_ys.size)
             N = stack.shape[0]
@@ -727,12 +753,21 @@ def _refine_bg_color_based(
             masked = np.ma.masked_array(samples, mask=m)
             med = np.ma.median(masked, axis=0)               # (n, 3)
             all_skin = np.ma.getmaskarray(med).any(axis=-1)   # (n,)
-            refined[rec_ys, rec_xs] = np.ma.getdata(med).astype(np.uint8)
-            if all_skin.any():
-                gys = rec_ys[all_skin]
-                gxs = rec_xs[all_skin]
-                refined[gys, gxs] = green
-                always_hand[gys, gxs] = True
+            cand = np.ma.getdata(med).astype(np.float32)      # (n, 3)
+
+            # Accept the recovered colour only where it matches the
+            # local background; otherwise green it.
+            lbg_pts = local_bg[rec_ys, rec_xs]                # (n, 3)
+            lbg_ok = local_bg_valid[rec_ys, rec_xs]           # (n,)
+            color_diff = np.abs(cand - lbg_pts).max(axis=-1)  # (n,)
+            accept = (~all_skin) & lbg_ok & (color_diff <= _RECOVER_SIM_THRESH)
+
+            ays = rec_ys[accept]; axs = rec_xs[accept]
+            refined[ays, axs] = cand[accept].astype(np.uint8)
+            greened = ~accept
+            gys = rec_ys[greened]; gxs = rec_xs[greened]
+            refined[gys, gxs] = green
+            always_hand[gys, gxs] = True
 
     return refined, always_hand
 
