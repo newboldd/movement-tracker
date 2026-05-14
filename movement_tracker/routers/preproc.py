@@ -320,8 +320,8 @@ def get_outline_frame(subject_id: int, trial_idx: int,
 def compute_background_endpoint(subject_id: int, body: dict = Body(...)) -> dict:
     """Stage 2a: read stable.mp4 + camera trajectory + MP keypoints,
     compute the raw masked-median background, and save
-    background.npz + the bg_samples.npz sidecar.  Requires Stabilize
-    to have produced stable.mp4 first."""
+    background.npz.  Requires Stabilize to have produced stable.mp4
+    first."""
     name = _subject_name(subject_id)
     trial_idx = int(body.get("trial_idx", 0))
     trials = build_trial_map(name)
@@ -335,10 +335,11 @@ def compute_background_endpoint(subject_id: int, body: dict = Body(...)) -> dict
 @router.post("/{subject_id}/refine_background")
 def refine_background_endpoint(subject_id: int, body: dict = Body(...)) -> dict:
     """Stage 2b ("Remove stump"): apply the colour-based refinement to
-    the already-computed median background, swapping flesh-coloured BG
-    pixels for a non-skin sample colour where available (green only
-    where every sample is skin), and save background_refined.npz.
-    Requires Compute Background to have produced the sidecar first."""
+    the already-computed median background, re-reading stable.mp4 and
+    using every trial frame to swap flesh-coloured BG pixels for a
+    non-skin sample colour where available (green only where every
+    sample is skin), and save background_refined.npz.  Requires
+    Compute Background (background.npz) + stable.mp4."""
     name = _subject_name(subject_id)
     trial_idx = int(body.get("trial_idx", 0))
     trials = build_trial_map(name)

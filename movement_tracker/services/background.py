@@ -210,13 +210,6 @@ def _background_path(subject_name: str, trial_stem: str) -> Path:
     return _preproc_dir(subject_name, trial_stem) / "background.npz"
 
 
-def _bg_samples_path(subject_name: str, trial_stem: str) -> Path:
-    """Sidecar holding the downscaled sample stack + per-frame hand
-    masks from Stage 2a, so Stage 2b ("Remove stump") can refine
-    without re-reading stable.mp4."""
-    return _preproc_dir(subject_name, trial_stem) / "bg_samples.npz"
-
-
 def _background_refined_path(subject_name: str, trial_stem: str) -> Path:
     """Stump-removed background (Stage 2b -- "Remove stump")."""
     return _preproc_dir(subject_name, trial_stem) / "background_refined.npz"
@@ -650,46 +643,28 @@ def _build_forearm_cone(
     return cone
 
 
-def _build_palm_zone(
-    hand_mask_stack: np.ndarray,
-    grow_px: int,
-) -> np.ndarray:
-    """"Definitely-hand" palm zone: union of the per-sample-frame MP
-    hand gates, dilated outward by ``grow_px``.
-
-    Flesh-colored pixels inside this zone are forced to the green
-    sentinel (always-hand) -- no color recovery is attempted, because
-    the hand was demonstrably here and any "background color" the
-    recovery would find is really just the hand at a different angle /
-    lighting.  The ``grow_px`` slider lets the user reach chunks like
-    the ulnar palm that the raw MP gate clips.
-
-    ``hand_mask_stack`` is the ``(n_samples, h, w)`` bool array built
-    during the sample pass.  Returns an ``(h, w)`` uint8 mask.
-    """
-    base = hand_mask_stack.any(axis=0).astype(np.uint8) * 255
-    if grow_px > 0:
-        r = int(grow_px)
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
-        base = cv2.dilate(base, k)
-    return base
-
-
 def _refine_bg_color_based(
     bg_initial: np.ndarray,
-    stack: np.ndarray,
-    refine_mask: np.ndarray | None = None,
+    refine_mask: np.ndarray,
+    refine_idx_map: np.ndarray,
+    refine_samples: np.ndarray,
     skin_leniency: float = 1.0,
     skin_range: tuple | None = None,
     dark_boost: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Second BG-median pass that fixes flesh-colored BG pixels.
 
-    Over ``refine_mask`` (the palm zone + forearm cone), every
-    flesh-colored BG pixel is re-derived per-pixel: classify its
-    ``N`` sample colors skin / not-skin, and if at least one sample
-    isn't skin, take the median of the non-skin samples as a
-    candidate background colour.
+    ``refine_samples`` is an ``(N, n_refine, 3)`` stack of per-frame
+    BGR colours sampled at exactly the ``refine_mask`` pixels (the
+    palm zone + forearm cone), and ``refine_idx_map`` is an
+    ``(h, w)`` int array mapping each refine pixel to its column in
+    ``refine_samples`` (-1 elsewhere).  Sampling only the refine
+    region lets the caller hold *every* trial frame in memory.
+
+    Over ``refine_mask`` every flesh-colored BG pixel is re-derived
+    per-pixel: classify its ``N`` sample colors skin / not-skin, and
+    if at least one sample isn't skin, take the median of the
+    non-skin samples as a candidate background colour.
 
     The candidate is only *accepted* if it actually looks like the
     surrounding background -- it's compared to the local mean of
@@ -724,7 +699,7 @@ def _refine_bg_color_based(
     always_hand = np.zeros(bg_initial.shape[:2], dtype=bool)
     green = np.array([0, 255, 0], dtype=np.uint8)
 
-    if refine_mask is not None:
+    if refine_mask is not None and refine_samples.shape[0] > 0:
         rec = flesh_in_bg & (refine_mask > 0)
         if rec.any():
             # Dilated + hole-filled skin mask: skin pixels the
@@ -760,8 +735,10 @@ def _refine_bg_color_based(
 
             rec_ys, rec_xs = np.where(rec)
             n = int(rec_ys.size)
-            N = stack.shape[0]
-            samples = stack[:, rec_ys, rec_xs, :]
+            N = refine_samples.shape[0]
+            # rec is a subset of refine_mask, so every idx here is >= 0.
+            rec_sidx = refine_idx_map[rec_ys, rec_xs]
+            samples = refine_samples[:, rec_sidx, :]
             samples_ycc = cv2.cvtColor(
                 samples.reshape(N * n, 1, 3),
                 cv2.COLOR_BGR2YCrCb,
@@ -1149,16 +1126,17 @@ def compute_stable(
         if ok_to_promote and not interrupted:
             # Clean finish: atomically swap the new bake into place,
             # then invalidate the now-stale derivatives (background +
-            # refined + samples sidecar + fg/outline/hand were computed
-            # against the OLD warp).
+            # refined + fg/outline/hand were computed against the OLD
+            # warp).  ``bg_samples.npz`` is a legacy sidecar -- no
+            # longer written, but cleaned up here if one lingers.
             os.replace(str(stable_tmp), str(stable_path))
             _pd = _preproc_dir(subject_name, stem)
             for p in (_background_path(subject_name, stem),
-                      _bg_samples_path(subject_name, stem),
                       _background_refined_path(subject_name, stem),
                       _fg_path(subject_name, stem),
                       _outline_path(subject_name, stem),
                       _hand_path(subject_name, stem),
+                      _pd / "bg_samples.npz",
                       _pd / "background_OS.png", _pd / "background_OD.png",
                       _pd / "mad_OS.png", _pd / "mad_OD.png",
                       _pd / "background_refined_OS.png",
@@ -1207,10 +1185,9 @@ def compute_background(
     temporal median, and saves the **raw masked-median background** --
     every pixel is just a median colour, no green sentinel.
 
-    Also writes a sidecar ``bg_samples.npz`` (the downscaled sample
-    stack + per-frame hand masks) so :func:`refine_background` --
-    "Remove stump" -- can do the colour-based refinement without
-    re-reading stable.mp4.
+    :func:`refine_background` ("Remove stump") re-reads stable.mp4
+    itself for the colour-based refinement, so this stage writes no
+    sample-stack sidecar.
 
     Re-runnable cheaply so the user can iterate without re-running the
     heavy Stabilize step.  Invalidates any stale ``background_refined``
@@ -1444,7 +1421,10 @@ def compute_background(
         try: progress_callback(78.0)
         except Exception: pass
 
-    # ── Save background.npz + bg_samples.npz sidecar + PNGs ─────────
+    # ── Save background.npz + PNGs ─────────────────────────────────
+    # ``refine_background`` ("Remove stump") re-reads stable.mp4
+    # itself -- using *all* frames, not a sampled subset -- so there's
+    # no sample-stack sidecar to write here.
     out_dir = _preproc_dir(subject_name, stem)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = _background_path(subject_name, stem)
@@ -1473,22 +1453,6 @@ def compute_background(
         np.savez_compressed(_fh, **save_kwargs)
     os.replace(str(tmp_npz), str(out_path))
 
-    # Sidecar: the downscaled sample stack + per-frame hand masks, so
-    # refine_background ("Remove stump") can run without re-reading
-    # stable.mp4.
-    samples_kwargs = dict(
-        stack_L=stack_L,
-        hand_mask_L=hand_mask_L,
-    )
-    if is_stereo:
-        samples_kwargs["stack_R"] = stack_R
-        samples_kwargs["hand_mask_R"] = hand_mask_R
-    samples_path = _bg_samples_path(subject_name, stem)
-    tmp_samples = out_dir / "bg_samples.npz.tmp"
-    with open(tmp_samples, "wb") as _fh:
-        np.savez_compressed(_fh, **samples_kwargs)
-    os.replace(str(tmp_samples), str(samples_path))
-
     _atomic_imwrite(out_dir, "background_OS.png", bg_L)
     _atomic_imwrite(out_dir, "mad_OS.png", mad_L)
     if is_stereo:
@@ -1496,10 +1460,12 @@ def compute_background(
         _atomic_imwrite(out_dir, "mad_OD.png", mad_R)
 
     # The raw median just changed -- any previous stump-removed
-    # background was derived from the OLD median, so drop it.
+    # background was derived from the OLD median, so drop it.  Also
+    # clean up a legacy bg_samples.npz sidecar if one lingers.
     for p in (_background_refined_path(subject_name, stem),
               out_dir / "background_refined_OS.png",
-              out_dir / "background_refined_OD.png"):
+              out_dir / "background_refined_OD.png",
+              out_dir / "bg_samples.npz"):
         try: p.unlink()
         except FileNotFoundError: pass
 
@@ -1507,7 +1473,7 @@ def compute_background(
         try: progress_callback(100.0)
         except Exception: pass
     logger.info(
-        f"background.npz + bg_samples.npz saved: {out_path}  "
+        f"background.npz saved: {out_path}  "
         f"N_samples={n_samples}  stereo={is_stereo}  downscale={downscale}")
     return str(out_path)
 
@@ -1523,14 +1489,16 @@ def refine_background(
     dark_boost: float = 1.0,
 ) -> str:
     """Stage 2b of the preproc bake -- "Remove stump": produce
-    background_refined.npz from the raw median + the sample sidecar.
+    background_refined.npz from the raw median.
 
     Loads ``background.npz`` (raw median + MP keypoints + meta) and
-    ``bg_samples.npz`` (the downscaled sample stack + per-frame hand
-    masks), then over the palm zone + forearm cone re-derives every
-    flesh-coloured BG pixel: a non-skin sample colour is used where
-    one is available, the green sentinel only where every sample is
-    skin.
+    re-reads stable.mp4, sampling **every** trial frame at the palm
+    zone + forearm cone pixels.  Over that region each flesh-coloured
+    BG pixel is re-derived: a non-skin sample colour is used where one
+    is available (and it matches the local background), the green
+    sentinel only where every sample is skin / no match is found.
+    Using all frames -- not a sampled subset -- gives each pixel the
+    most chances to find its true background colour.
 
     Knobs:
       - ``palm_grow_px`` -- "MP dilate (mask)": grows the palm zone.
@@ -1543,8 +1511,8 @@ def refine_background(
       - ``dark_boost`` -- >= 1 widens the skin window further for
         darker pixels (uniform when 1.0).
 
-    Cheap to re-run -- no stable.mp4 read.  Requires
-    :func:`compute_background` to have produced the sidecar first.
+    Requires :func:`compute_background` (background.npz) and
+    :func:`compute_stable` (stable.mp4) to have run first.
     """
     from .video import build_trial_map
 
@@ -1554,10 +1522,9 @@ def refine_background(
     stem = tmap[trial_idx]["trial_name"]
 
     bg_path = _background_path(subject_name, stem)
-    samples_path = _bg_samples_path(subject_name, stem)
-    if not bg_path.exists() or not samples_path.exists():
+    if not bg_path.exists():
         raise RuntimeError(
-            f"No background.npz / bg_samples.npz for {subject_name}/{stem} "
+            f"No background.npz for {subject_name}/{stem} "
             "-- run Compute Background first.")
 
     d = np.load(str(bg_path))
@@ -1568,64 +1535,172 @@ def refine_background(
     n_frames = int(d["n_frames"])
     ref = int(d["reference_frame"])
     dilation_px = int(d["dilation_px"]) if "dilation_px" in d.files else 14
-    frames_sampled = d["frames_sampled"]
     mp_kpts_ref_L = d["mp_kpts_ref_L"] if "mp_kpts_ref_L" in d.files else None
     mp_kpts_ref_R = d["mp_kpts_ref_R"] if "mp_kpts_ref_R" in d.files else None
+    out_h, out_w = bg_L.shape[:2]
 
-    s = np.load(str(samples_path))
-    stack_L = s["stack_L"]
-    hand_mask_L = s["hand_mask_L"]
-    stack_R = s["stack_R"] if (is_stereo and "stack_R" in s.files) else None
-    hand_mask_R = (s["hand_mask_R"]
-                   if (is_stereo and "hand_mask_R" in s.files) else None)
-    out_h, out_w = stack_L.shape[1:3]
+    stable_path = _stable_path(subject_name, stem)
+    if not stable_path.exists():
+        raise RuntimeError(
+            f"No stable.mp4 for {subject_name}/{stem} -- run Stabilize first.")
+    probe = cv2.VideoCapture(str(stable_path))
+    if not probe.isOpened():
+        raise RuntimeError(f"Cannot open stable.mp4: {stable_path}")
+    stable_n = int(probe.get(cv2.CAP_PROP_FRAME_COUNT))
+    probe.release()
+    if stable_n < int(n_frames * 0.95):
+        raise RuntimeError(
+            f"stable.mp4 has only {stable_n} frames but background.npz "
+            f"expects {n_frames} -- re-run Stabilize, then Compute Background.")
+    effective_n = min(n_frames, stable_n)
 
-    if progress_callback is not None:
-        try: progress_callback(10.0)
-        except Exception: pass
-
-    # ── Harvest skin pixels from the sample stack ──────────────────
-    # Tight MP mask (half the BG-mask dilation stamp), then the "MP
-    # dilate (color sample)" knob erodes / dilates it.
     _BG_MASK_STAMP_DOWN = max(2, int(dilation_px) // max(1, downscale))
+    _BG_MASK_FOREARM_DOWN = max(0, 100 // max(1, downscale))
     _TIGHT_STAMP_DOWN = max(2, _BG_MASK_STAMP_DOWN // 2)
     color_dilate_down = int(round(color_dilate_px / max(1, downscale)))
+    palm_grow_down = max(0, int(palm_grow_px) // max(1, downscale))
 
-    def _harvest_skin(stack, kpts_ref, sink):
-        if kpts_ref is None:
-            return
-        for s_idx, fr in enumerate(frames_sampled):
-            fr = int(fr)
-            if fr >= kpts_ref.shape[0]:
-                continue
-            kpts_down = kpts_ref[fr] / max(1, downscale)
-            tight = _build_kpt_hand_region(
-                kpts_down, out_w, out_h,
-                stamp_radius=_TIGHT_STAMP_DOWN, smooth_sigma=0.0,
-                extend_forearm_px=0)
-            tb = (tight > 0.5).astype(np.uint8)
-            if color_dilate_down != 0:
-                ksz = 2 * abs(color_dilate_down) + 1
-                kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksz, ksz))
-                tb = (cv2.erode(tb, kern) if color_dilate_down < 0
-                      else cv2.dilate(tb, kern))
-            else:
-                tb = cv2.erode(tb, cv2.getStructuringElement(
-                    cv2.MORPH_ELLIPSE, (3, 3)))
-            if tb.any():
-                sink.append(stack[s_idx][tb > 0])
+    # ── Phase 0: refine region (palm zone + forearm cone) from MP ──
+    # Built from keypoints alone -- no video read.  The palm zone is
+    # the grown union of every frame's dilated MP gate; ``gate_isect``
+    # is the intersection (pixels gated in *every* frame -> always-hand).
+    def _build_region(kpts_ref):
+        gate_union = np.zeros((out_h, out_w), dtype=bool)
+        gate_isect = None
+        if kpts_ref is not None:
+            for f in range(min(effective_n, kpts_ref.shape[0])):
+                kf = kpts_ref[f]
+                if np.isnan(kf).all():
+                    continue
+                g = _build_kpt_hand_region(
+                    kf / max(1, downscale), out_w, out_h,
+                    stamp_radius=_BG_MASK_STAMP_DOWN, smooth_sigma=0.0,
+                    extend_forearm_px=_BG_MASK_FOREARM_DOWN) > 0.5
+                gate_union |= g
+                gate_isect = g.copy() if gate_isect is None else (gate_isect & g)
+        if gate_isect is None:
+            gate_isect = np.zeros((out_h, out_w), dtype=bool)
+        if palm_grow_down > 0:
+            _k = 2 * palm_grow_down + 1
+            palm = cv2.dilate(
+                gate_union.astype(np.uint8),
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_k, _k))) > 0
+        else:
+            palm = gate_union
+        cone = _build_forearm_cone(kpts_ref, np.arange(effective_n),
+                                   out_w, out_h, downscale)
+        return (palm | (cone > 0)), gate_isect
 
-    skin_px_L: list[np.ndarray] = []
-    skin_px_R: list[np.ndarray] = []
-    _harvest_skin(stack_L, mp_kpts_ref_L, skin_px_L)
-    if is_stereo:
-        _harvest_skin(stack_R, mp_kpts_ref_R, skin_px_R)
+    refine_L, gate_isect_L = _build_region(mp_kpts_ref_L)
+    refine_R, gate_isect_R = (_build_region(mp_kpts_ref_R)
+                              if is_stereo else (None, None))
 
     if progress_callback is not None:
-        try: progress_callback(35.0)
+        try: progress_callback(12.0)
         except Exception: pass
 
-    # ── Color-based refinement: palm zone + forearm cone ───────────
+    refine_ys_L, refine_xs_L = np.where(refine_L)
+    n_ref_L = int(refine_ys_L.size)
+    idx_map_L = np.full((out_h, out_w), -1, dtype=np.int64)
+    idx_map_L[refine_ys_L, refine_xs_L] = np.arange(n_ref_L)
+    if is_stereo:
+        refine_ys_R, refine_xs_R = np.where(refine_R)
+        n_ref_R = int(refine_ys_R.size)
+        idx_map_R = np.full((out_h, out_w), -1, dtype=np.int64)
+        idx_map_R[refine_ys_R, refine_xs_R] = np.arange(n_ref_R)
+    else:
+        n_ref_R = 0
+
+    # RAM guard: hold every frame's colours at the refine pixels.  A
+    # huge refine region (e.g. downscale 1) can still overflow -- fall
+    # back to a strided subset of frames if so.
+    per_frame_bytes = (n_ref_L + n_ref_R) * 3
+    stride = 1
+    if per_frame_bytes > 0:
+        max_frames = max(8, int(_MAX_RAM_BYTES / per_frame_bytes))
+        if effective_n > max_frames:
+            stride = (effective_n + max_frames - 1) // max_frames
+    picked = np.arange(0, effective_n, stride, dtype=np.int64)
+    n_eff = int(picked.size)
+    pick_lookup = {int(f): i for i, f in enumerate(picked)}
+    picked_set = set(int(f) for f in picked)
+    if stride > 1:
+        logger.info(f"refine: refine region too large for all {effective_n} "
+                    f"frames; using {n_eff} (stride {stride})")
+
+    refine_samples_L = np.empty((n_eff, n_ref_L, 3), dtype=np.uint8)
+    refine_samples_R = (np.empty((n_eff, n_ref_R, 3), dtype=np.uint8)
+                        if is_stereo else None)
+
+    # ── Phase 1: read stable.mp4, gather refine samples + skin px ──
+    skin_px_L: list[np.ndarray] = []
+    skin_px_R: list[np.ndarray] = []
+
+    def _harvest(warp_d, kf, sink):
+        if kf is None or np.isnan(kf).all():
+            return
+        tight = _build_kpt_hand_region(
+            kf / max(1, downscale), out_w, out_h,
+            stamp_radius=_TIGHT_STAMP_DOWN, smooth_sigma=0.0,
+            extend_forearm_px=0)
+        tb = (tight > 0.5).astype(np.uint8)
+        if color_dilate_down != 0:
+            ksz = 2 * abs(color_dilate_down) + 1
+            kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksz, ksz))
+            tb = (cv2.erode(tb, kern) if color_dilate_down < 0
+                  else cv2.dilate(tb, kern))
+        else:
+            tb = cv2.erode(tb, cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (3, 3)))
+        if tb.any():
+            sink.append(warp_d[tb > 0])
+
+    cap = cv2.VideoCapture(str(stable_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open stable.mp4: {stable_path}")
+    w_half = None
+    for i in range(effective_n):
+        if cancel_event is not None and cancel_event.is_set():
+            cap.release()
+            raise InterruptedError("Job cancelled")
+        ok, frame = cap.read()
+        if not ok:
+            logger.warning(f"refine: read failed at frame {i}; truncating")
+            break
+        if i not in picked_set:
+            continue
+        s_idx = pick_lookup[i]
+        if w_half is None:
+            w_half = (frame.shape[1] // 2) if is_stereo else frame.shape[1]
+        if is_stereo:
+            warp_L = frame[:, :w_half]; warp_R = frame[:, w_half:]
+        else:
+            warp_L = frame; warp_R = None
+        warp_L_d = (cv2.resize(warp_L, (out_w, out_h),
+                               interpolation=cv2.INTER_AREA)
+                    if downscale > 1 else warp_L)
+        refine_samples_L[s_idx] = warp_L_d[refine_ys_L, refine_xs_L]
+        if mp_kpts_ref_L is not None and i < mp_kpts_ref_L.shape[0]:
+            _harvest(warp_L_d, mp_kpts_ref_L[i], skin_px_L)
+        if is_stereo and warp_R is not None:
+            warp_R_d = (cv2.resize(warp_R, (out_w, out_h),
+                                   interpolation=cv2.INTER_AREA)
+                        if downscale > 1 else warp_R)
+            refine_samples_R[s_idx] = warp_R_d[refine_ys_R, refine_xs_R]
+            if mp_kpts_ref_R is not None and i < mp_kpts_ref_R.shape[0]:
+                _harvest(warp_R_d, mp_kpts_ref_R[i], skin_px_R)
+        if progress_callback is not None:
+            try:
+                progress_callback(12.0 + 60.0 * (s_idx + 1) / max(1, n_eff))
+            except Exception:
+                pass
+    cap.release()
+
+    if progress_callback is not None:
+        try: progress_callback(74.0)
+        except Exception: pass
+
+    # ── Phase 2: skin range + colour-based refinement ──────────────
     # ``skin_leniency == 0`` skips it -- refined == raw median, nothing
     # greened.
     skin_range_L = None
@@ -1640,25 +1715,17 @@ def refine_background(
             f"refine skin range: L={skin_range_L} "
             f"(n={0 if skin_px_L_all is None else len(skin_px_L_all)})"
             + (f", R={skin_range_R}" if is_stereo else ""))
-
-        palm_grow_down = max(0, int(palm_grow_px) // max(1, downscale))
-        palm_zone_L = _build_palm_zone(hand_mask_L, palm_grow_down)
-        cone_L = _build_forearm_cone(mp_kpts_ref_L, frames_sampled,
-                                     out_w, out_h, downscale)
-        refine_L = (palm_zone_L > 0) | (cone_L > 0)
         bg_L, always_hand_color_L_down = _refine_bg_color_based(
-            bg_L, stack_L, refine_mask=refine_L,
+            bg_L, refine_L, idx_map_L, refine_samples_L,
             skin_leniency=skin_leniency, skin_range=skin_range_L,
             dark_boost=dark_boost)
+        del refine_samples_L
         if is_stereo:
-            palm_zone_R = _build_palm_zone(hand_mask_R, palm_grow_down)
-            cone_R = _build_forearm_cone(mp_kpts_ref_R, frames_sampled,
-                                         out_w, out_h, downscale)
-            refine_R = (palm_zone_R > 0) | (cone_R > 0)
             bg_R, always_hand_color_R_down = _refine_bg_color_based(
-                bg_R, stack_R, refine_mask=refine_R,
+                bg_R, refine_R, idx_map_R, refine_samples_R,
                 skin_leniency=skin_leniency, skin_range=skin_range_R,
                 dark_boost=dark_boost)
+            del refine_samples_R
         else:
             always_hand_color_R_down = None
     else:
@@ -1668,15 +1735,14 @@ def refine_background(
         always_hand_color_R_down = (np.zeros((out_h, out_w), dtype=bool)
                                     if is_stereo else None)
 
-    always_hand_L_down = hand_mask_L.all(axis=0) | always_hand_color_L_down
-    if hand_mask_R is not None:
-        always_hand_R_down = (hand_mask_R.all(axis=0)
-                              | always_hand_color_R_down)
+    always_hand_L_down = gate_isect_L | always_hand_color_L_down
+    if is_stereo:
+        always_hand_R_down = gate_isect_R | always_hand_color_R_down
     else:
         always_hand_R_down = None
 
     if progress_callback is not None:
-        try: progress_callback(85.0)
+        try: progress_callback(90.0)
         except Exception: pass
 
     # ── Save background_refined.npz + PNGs ─────────────────────────
@@ -1712,7 +1778,8 @@ def refine_background(
         try: progress_callback(100.0)
         except Exception: pass
     logger.info(f"background_refined.npz saved: {out_path}  "
-                f"stereo={is_stereo}  skin_leniency={skin_leniency}")
+                f"stereo={is_stereo}  frames_used={n_eff}/{effective_n}  "
+                f"skin_leniency={skin_leniency}")
     return str(out_path)
 
 
