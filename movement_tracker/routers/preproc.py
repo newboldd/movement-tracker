@@ -164,7 +164,8 @@ def _spawn_preproc_job(
     computed on demand per frame and doesn't route through here.
     """
     from ..services.background import (
-        compute_stable, compute_background, refine_background)
+        compute_stable, compute_background, refine_background,
+        compute_outlines_all)
 
     with get_db_ctx() as db:
         db.execute(
@@ -200,6 +201,14 @@ def _spawn_preproc_job(
         allowed = ("palm_grow_px", "color_dilate_px", "skin_leniency",
                    "dark_boost")
         float_params = ("skin_leniency", "dark_boost")
+    elif job_kind == "outlines":
+        # Bake the hand boundary for every frame at the current
+        # Hand-Boundary settings -> outlines.json.
+        worker = compute_outlines_all
+        allowed = ("dilation_px", "open_radius_px", "bg_edge_band_thresh",
+                   "bg_edge_band_dilate", "bg_edge_open_radius",
+                   "threshold_scale")
+        float_params = ("bg_edge_band_thresh", "threshold_scale")
     else:
         raise HTTPException(500, f"bad job_kind: {job_kind}")
 
@@ -348,6 +357,22 @@ def refine_background_endpoint(subject_id: int, body: dict = Body(...)) -> dict:
     trial_stem = trials[trial_idx]["trial_name"]
     return _spawn_preproc_job(subject_id, name, trial_stem, trial_idx,
                                 "refine", body)
+
+
+@router.post("/{subject_id}/compute_outlines")
+def compute_outlines_endpoint(subject_id: int, body: dict = Body(...)) -> dict:
+    """Bake the hand boundary for every trial frame at the current
+    Hand-Boundary settings, saving outlines.json.  Reads stable.mp4
+    sequentially; requires Compute Background (background.npz) +
+    stable.mp4."""
+    name = _subject_name(subject_id)
+    trial_idx = int(body.get("trial_idx", 0))
+    trials = build_trial_map(name)
+    if trial_idx < 0 or trial_idx >= len(trials):
+        raise HTTPException(400, "trial_idx out of range")
+    trial_stem = trials[trial_idx]["trial_name"]
+    return _spawn_preproc_job(subject_id, name, trial_stem, trial_idx,
+                                "outlines", body)
 
 
 @router.get("/{subject_id}/trial/{trial_idx}/background")

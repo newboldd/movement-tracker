@@ -482,6 +482,7 @@
         if ($('ovRefined')) $('ovRefined').disabled = !refinedReady;
         $('cbShowOutline').disabled = !bgReady;
         $('cbShowFgFill').disabled = !bgReady;
+        if ($('runOutlinesBtn')) $('runOutlinesBtn').disabled = !bgReady;
         if (bgReady && (showOutline || showFgFill)) scheduleOutlineFetch();
     }
 
@@ -669,6 +670,30 @@
                                 color_dilate_px: colorDilatePx,
                                 skin_leniency: skinLeniency,
                                 dark_boost: darkBoost });
+    }
+
+    /** Bake the hand boundary for every frame at the current
+     *  Hand-Boundary slider settings -> outlines.json. */
+    async function computeOutlines() {
+        if (subjectId == null || currentTrialIdx < 0) return;
+        if (!backgroundData || !backgroundData.available) {
+            $('outlinesBakeStatus').textContent = 'Run Compute Background first.';
+            return;
+        }
+        const _i = (id, dflt) => {
+            const s = $(id); return s ? parseInt(s.value, 10) : dflt;
+        };
+        const _f = (id, dflt) => {
+            const s = $(id); return s ? parseFloat(s.value) : dflt;
+        };
+        await _runPreprocJob('compute_outlines', 'outlinesBakeStatus', {
+            dilation_px:          _i('fgDilateSlider', 14),
+            open_radius_px:       _i('fgOpenSlider', 0),
+            bg_edge_band_thresh:  _f('bgEdgeThreshSlider', 0.35),
+            bg_edge_band_dilate:  _i('bgEdgeBandSlider', 3),
+            bg_edge_open_radius:  _i('bgEdgeClipSlider', 5),
+            threshold_scale:      _f('outlineThreshSlider', 1.0),
+        });
     }
 
     /**
@@ -2000,6 +2025,8 @@
         $('runStableBtn').addEventListener('click', computeStable);
         $('runMedianBtn').addEventListener('click', computeMedian);
         $('runRefineBtn').addEventListener('click', computeRefine);
+        if ($('runOutlinesBtn'))
+            $('runOutlinesBtn').addEventListener('click', computeOutlines);
         // "MP dilate (mask)" slider: a Remove-stump param.  While the
         // user drags it, the palm-zone preview flashes on over the
         // Background (raw median) view so they can see the hard

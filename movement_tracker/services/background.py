@@ -37,6 +37,7 @@ shows the scene point at that reference-frame location.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -1153,6 +1154,7 @@ def compute_stable(
                       _outline_path(subject_name, stem),
                       _hand_path(subject_name, stem),
                       _pd / "bg_samples.npz",
+                      _pd / "outlines.json",
                       _pd / "background_OS.png", _pd / "background_OD.png",
                       _pd / "mad_OS.png", _pd / "mad_OD.png",
                       _pd / "background_refined_OS.png",
@@ -1475,12 +1477,14 @@ def compute_background(
         _atomic_imwrite(out_dir, "background_OD.png", bg_R)
         _atomic_imwrite(out_dir, "mad_OD.png", mad_R)
 
-    # The raw median just changed -- any previous stump-removed
-    # background was derived from the OLD median, so drop it.  Also
-    # clean up a legacy bg_samples.npz sidecar if one lingers.
+    # The raw median just changed -- the stump-removed background and
+    # any baked outlines were derived from the OLD median, so drop
+    # them.  Also clean up a legacy bg_samples.npz sidecar if one
+    # lingers.
     for p in (_background_refined_path(subject_name, stem),
               out_dir / "background_refined_OS.png",
               out_dir / "background_refined_OD.png",
+              out_dir / "outlines.json",
               out_dir / "bg_samples.npz"):
         try: p.unlink()
         except FileNotFoundError: pass
@@ -1790,6 +1794,11 @@ def refine_background(
     if is_stereo:
         _atomic_imwrite(out_dir, "background_refined_OD.png", bg_R)
 
+    # The refined background just changed -- any baked outlines were
+    # computed against the old one, so drop them.
+    try: (out_dir / "outlines.json").unlink()
+    except FileNotFoundError: pass
+
     if progress_callback is not None:
         try: progress_callback(100.0)
         except Exception: pass
@@ -1840,6 +1849,298 @@ def _encode_fg_png(motion: np.ndarray, gate: np.ndarray) -> dict | None:
     }
 
 
+# Stronger subtraction = fewer BG-edge artifacts but risks killing
+# true overlap.  60 motion units at peak edge ~= 1/4 of the dynamic
+# range, leaves room for the hand to dominate.
+_BG_EDGE_PENALTY = 60.0
+
+
+def _side_outline(
+    stable_side: np.ndarray,
+    bg_full: np.ndarray,
+    kpts: np.ndarray | None,
+    always_hand: np.ndarray | None,
+    bg_edge: np.ndarray | None,
+    *,
+    dilation_px: int,
+    close_radius_px: int,
+    open_radius_px: int,
+    simplify_eps_px: float,
+    include_fg: bool,
+    bg_edge_band_thresh: float,
+    bg_edge_band_dilate: int,
+    bg_edge_open_radius: int,
+    threshold_scale: float,
+) -> dict:
+    """One camera side's hand boundary.  Returns
+    ``{contour: [[x,y],...], fg: {b64, bbox} | None}``.
+
+    Pipeline: dilated MP gate -> |frame-BG| motion (bg-edge penalised)
+    -> Otsu (scaled by ``threshold_scale``) -> OR always-hand ->
+    close -> bg-edge correction (the ``bg_edge_*`` knobs) -> open
+    (``open_radius_px``) -> largest component -> Douglas-Peucker
+    contour (``simplify_eps_px``)."""
+    _BG_EDGE_BAND_THRESH = float(bg_edge_band_thresh)
+    _BG_EDGE_BAND_DILATE = max(0, int(bg_edge_band_dilate))
+    _BG_EDGE_OPEN_RADIUS = max(0, int(bg_edge_open_radius))
+    empty = {"contour": [], "fg": None}
+    if kpts is None or np.isnan(kpts).all():
+        return empty
+    H, W = stable_side.shape[:2]
+    # 1. Dilated MP gate (outline-time -- no forearm extension; the
+    # visible polygon stops at the wrist).
+    kpt_region = _build_kpt_hand_region(
+        kpts, W, H,
+        stamp_radius=max(2, int(dilation_px)),
+        smooth_sigma=4.0)
+    gate = (kpt_region > 0.5).astype(np.uint8)
+    if gate.sum() < 100:
+        return empty
+    # 2. Motion = max over BGR channels of |frame - BG|, with the
+    # BG-edge map subtracted off so high-contrast BG seams don't
+    # show as motion when the hand crosses them.  Float for the
+    # subtraction, clipped back to uint8 [0, 255] afterwards.
+    motion_raw = np.abs(stable_side.astype(np.int16) - bg_full.astype(np.int16))
+    # ``motion_unpen`` is the raw |frame-BG| score; ``motion`` has
+    # the bg-edge penalty subtracted.  Both are kept: the penalty
+    # avoids edge-bleed false-positives, but it also suppresses real
+    # hand (e.g. a fingertip) crossing an edge -- step 5b uses the
+    # un-penalized score to recover those.
+    motion_unpen = motion_raw.max(axis=-1).astype(np.float32)
+    motion_f = motion_unpen.copy()
+    if bg_edge is not None:
+        motion_f = motion_f - _BG_EDGE_PENALTY * bg_edge
+    motion = np.clip(motion_f, 0.0, 255.0).astype(np.uint8)
+    # Detect bright-green sentinel pixels in the BG.  |frame - green|
+    # is huge for any skin-colored hand pixel and would saturate
+    # the JET heatmap, making nearby moderately-bright hand pixels
+    # look dim by comparison.  Replace their motion with the 80th
+    # percentile of nearby non-green gate motion so they read as
+    # "bright but not max" -- in the orange/red band of JET, on the
+    # high end of the rest of the heatmap but not pinned to red.
+    green_mask = ((bg_full[..., 0] < 50)
+                   & (bg_full[..., 1] > 200)
+                   & (bg_full[..., 2] < 50)
+                   & (gate > 0))
+    if green_mask.any():
+        non_green_gate = (gate > 0) & ~green_mask
+        if non_green_gate.any():
+            local_p80 = int(np.percentile(motion[non_green_gate], 80))
+            motion[green_mask] = local_p80
+    # Optional: foreground heatmap PNG cropped to the gate bbox.
+    # Sent back so the UI can paint a JET-colored fill over the
+    # gate region.  Now uniformly visible thanks to the green
+    # normalization above.
+    fg_pack = None
+    if include_fg:
+        fg_pack = _encode_fg_png(motion, gate)
+    # 3. Otsu threshold over the gate-restricted motion only --
+    # gives a per-frame adaptive cut between "moving" (hand) and
+    # "still" (BG inside the gate).
+    gated_vals = motion[gate > 0]
+    if gated_vals.size < 100:
+        return {"contour": [], "fg": fg_pack}
+    thresh, _ = cv2.threshold(
+        gated_vals, 0, 255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # ``threshold_scale`` shifts the automatic Otsu cut: < 1 lets
+    # more (lower-motion) pixels count as hand -> a slightly larger
+    # outline; > 1 is stricter.  Still image-informed -- it only
+    # moves the cut point on the real |frame-BG| score.
+    thresh = float(thresh) * float(threshold_scale)
+    binary = ((motion > thresh) & (gate > 0))
+    # 4. OR with the always-hand map.  Pixels whose BG fell back to
+    # the global non-skin fill were structurally inside the hand
+    # every sample frame, so they belong inside the boundary even
+    # when this frame's pose makes them blend with the synthetic
+    # BG color.  Also clip to the gate so we never extend outside
+    # the dilated MP silhouette.
+    if always_hand is not None:
+        binary = binary | (always_hand & (gate > 0))
+    binary = binary.astype(np.uint8) * 255
+    # 5. Morphological close -- fills internal holes.
+    r = max(1, int(close_radius_px))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    # 5b. Background-edge correction.  A strong static edge cuts
+    # both ways: the per-pixel bg-edge penalty can leave a thin
+    # |frame-BG| bleed band hugging the edge (false growth), and it
+    # can also suppress a real fingertip crossing the edge (false
+    # clipping).  This step does both:
+    #   - RETRACT: inside the dilated bg-edge band, drop mask pixels
+    #     that don't survive a morphological open -- thin bleed
+    #     bands (narrower than 2 * _BG_EDGE_OPEN_RADIUS) go away.
+    #   - GROW: take the UN-penalized detection's solid blobs
+    #     outside the band (real hand the penalty didn't suppress,
+    #     incl. a fingertip past the edge) and bridge them to the
+    #     hand across the band with a close -- so a clipped
+    #     fingertip is filled back in.
+    # always-hand pixels are kept throughout; outside the band the
+    # mask is untouched.
+    if bg_edge is not None and _BG_EDGE_OPEN_RADIUS > 0:
+        edge_band = (bg_edge > _BG_EDGE_BAND_THRESH).astype(np.uint8)
+        if edge_band.any():
+            edge_band = cv2.dilate(
+                edge_band,
+                cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE,
+                    (2 * _BG_EDGE_BAND_DILATE + 1,) * 2))
+            in_band = edge_band > 0
+            eo = _BG_EDGE_OPEN_RADIUS
+            eo_kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * eo + 1, 2 * eo + 1))
+
+            # RETRACT: drop thin bleed inside the band.
+            opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, eo_kernel)
+            retracted = binary.copy()
+            retracted[in_band & (opened == 0)] = 0
+
+            # GROW: solid un-penalized detections outside the band
+            # (the part of a clipped fingertip past the edge, plus
+            # the hand body) -- thin bleed is excluded by ``& ~band``
+            # and by the open.
+            unpen = (((motion_unpen > thresh) & (gate > 0))
+                     .astype(np.uint8) * 255)
+            unpen[in_band] = 0
+            detect_solid = cv2.morphologyEx(unpen, cv2.MORPH_OPEN, eo_kernel)
+            seed = cv2.bitwise_or(retracted, detect_solid)
+            # Bridge hand <-> fingertip blob across the band with a
+            # close whose kernel spans the band; only the new pixels
+            # that land inside the band are added back.
+            br = _BG_EDGE_BAND_DILATE + eo
+            bridge_k = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * br + 1, 2 * br + 1))
+            bridged = cv2.morphologyEx(seed, cv2.MORPH_CLOSE, bridge_k)
+            grow = cv2.bitwise_and(
+                bridged, edge_band.astype(np.uint8) * 255)
+            binary = cv2.bitwise_or(seed, grow)
+
+            if always_hand is not None:
+                binary[always_hand & (gate > 0)] = 255
+            # Never spill outside the dilated MP gate.
+            binary[gate == 0] = 0
+    # 6. Morphological open -- clips thin strands / webs.  Erode
+    # then dilate by the same disk: anything narrower than
+    # 2 * open_radius_px disappears, fingertips (much wider)
+    # survive.  0 = off.
+    if open_radius_px > 0:
+        ro = int(open_radius_px)
+        ok_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * ro + 1, 2 * ro + 1))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, ok_kernel)
+    # 7. Largest connected component.
+    n_lbl, lbl, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    if n_lbl <= 1:
+        return {"contour": [], "fg": fg_pack}
+    largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    # 8. Outermost contour + Douglas-Peucker smoothing.
+    binary = (lbl == largest).astype(np.uint8) * 255
+    contours, _hier = cv2.findContours(
+        binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return {"contour": [], "fg": fg_pack}
+    c = max(contours, key=cv2.contourArea)
+    if simplify_eps_px > 0:
+        c = cv2.approxPolyDP(c, epsilon=float(simplify_eps_px), closed=True)
+    return {
+        "contour": c.reshape(-1, 2).astype(int).tolist(),
+        "fg": fg_pack,
+    }
+
+
+def _load_outline_context(subject_name: str, trial_idx: int) -> dict:
+    """Load the frame-independent inputs for the hand-boundary
+    pipeline: the (upscaled) background, always-hand maps, bg-edge
+    maps, MP keypoints + the stable.mp4 path / dims.  Shared by
+    :func:`compute_outline_frame` (one frame) and
+    :func:`compute_outlines_all` (every frame).  Prefers the
+    stump-removed background; falls back to the raw median when
+    "Remove stump" hasn't run yet.
+    """
+    from .video import build_trial_map
+
+    tmap = build_trial_map(subject_name)
+    if trial_idx < 0 or trial_idx >= len(tmap):
+        raise ValueError(f"trial_idx {trial_idx} out of range ({len(tmap)} trials)")
+    stem = tmap[trial_idx]["trial_name"]
+
+    bg_path = _background_path(subject_name, stem)
+    if not bg_path.exists():
+        raise RuntimeError(
+            f"No background.npz for {subject_name}/{stem} -- "
+            "run Compute Background first.")
+    d = np.load(str(bg_path))
+    is_stereo = bool(d["is_stereo"])
+    downscale = int(d["downscale"])
+    n_frames = int(d["n_frames"])
+    mp_kpts_ref_L = d["mp_kpts_ref_L"] if "mp_kpts_ref_L" in d.files else None
+    mp_kpts_ref_R = d["mp_kpts_ref_R"] if "mp_kpts_ref_R" in d.files else None
+
+    refined_path = _background_refined_path(subject_name, stem)
+    if refined_path.exists():
+        r = np.load(str(refined_path))
+        bg_L = r["refined_L"]
+        bg_R = r["refined_R"] if is_stereo else None
+        always_hand_L_down = (r["always_hand_L_down"]
+                              if "always_hand_L_down" in r.files else None)
+        always_hand_R_down = (r["always_hand_R_down"]
+                              if "always_hand_R_down" in r.files else None)
+    else:
+        bg_L = d["background_L"]
+        bg_R = d["background_R"] if is_stereo else None
+        always_hand_L_down = None
+        always_hand_R_down = None
+
+    stable_path = _stable_path(subject_name, stem)
+    if not stable_path.exists():
+        raise RuntimeError(
+            f"No stable.mp4 for {subject_name}/{stem} -- run Stabilize first.")
+    probe = cv2.VideoCapture(str(stable_path))
+    if not probe.isOpened():
+        raise RuntimeError(f"Cannot open stable.mp4: {stable_path}")
+    ok, first = probe.read()
+    probe.release()
+    if not ok or first is None:
+        raise RuntimeError("Failed to read first frame of stable.mp4")
+    h_full = first.shape[0]
+    full_w = first.shape[1]
+    w_half = (full_w // 2) if is_stereo else full_w
+
+    if downscale > 1:
+        bg_L_full = cv2.resize(bg_L, (w_half, h_full), interpolation=cv2.INTER_LINEAR)
+        bg_R_full = (cv2.resize(bg_R, (w_half, h_full), interpolation=cv2.INTER_LINEAR)
+                     if is_stereo else None)
+    else:
+        bg_L_full = bg_L
+        bg_R_full = bg_R
+
+    # Upscale always-hand masks to full-res (nearest-neighbor preserves
+    # the binary nature -- never interpolate a "maybe" pixel into being).
+    def _upscale_bool(m):
+        if m is None:
+            return None
+        return cv2.resize(m.astype(np.uint8), (w_half, h_full),
+                          interpolation=cv2.INTER_NEAREST).astype(bool)
+    always_hand_L = _upscale_bool(always_hand_L_down)
+    always_hand_R = _upscale_bool(always_hand_R_down) if is_stereo else None
+
+    # Background edge map -- Sobel magnitude normalized to [0, 1].
+    # Subtracted from motion before Otsu so static high-contrast seams
+    # in the BG (table edges, monitor bezels) don't produce false
+    # outline boundaries when the hand crosses them.
+    bg_edge_L = _bg_edge_map(bg_L_full)
+    bg_edge_R = _bg_edge_map(bg_R_full) if is_stereo else None
+
+    return {
+        "stem": stem, "is_stereo": is_stereo, "n_frames": n_frames,
+        "w_half": w_half, "h_full": h_full, "stable_path": stable_path,
+        "mp_kpts_ref_L": mp_kpts_ref_L, "mp_kpts_ref_R": mp_kpts_ref_R,
+        "bg_L_full": bg_L_full, "bg_R_full": bg_R_full,
+        "always_hand_L": always_hand_L, "always_hand_R": always_hand_R,
+        "bg_edge_L": bg_edge_L, "bg_edge_R": bg_edge_R,
+    }
+
+
 def compute_outline_frame(
     subject_name: str,
     trial_idx: int,
@@ -1856,306 +2157,29 @@ def compute_outline_frame(
 ) -> dict:
     """On-demand hand boundary for one frame.
 
-    Replaces the old compute_foreground bake: instead of writing an
-    fg.mp4 + outline.mp4 over the entire trial, this function returns
-    the contour of the hand for a single ``frame``, computed only
-    inside the dilated MP gate.  The UI calls it lazily as the user
-    scrubs frames or moves the dilation slider.
+    The UI calls this lazily as the user scrubs frames or moves a
+    slider.  See :func:`_side_outline` for the per-side pipeline.
 
-    Pipeline per side:
-      1. Build dilated MP gate (filled silhouette of joints + chains).
-      2. Compute |stable_frame - BG| inside the gate.
-      3. Otsu-threshold the gate-restricted motion (bimodal: BG vs hand).
-      4. OR with the always-hand map (pixels covered by the MP gate in
-         every sample frame during Stabilize -- their BG fell back to
-         a synthetic color, so we force them to count as hand always).
-      5. Morphological close (disk radius ``close_radius_px``) to fill
-         palm-interior holes where skin happens to match BG.
-      6. Morphological open (disk radius ``open_radius_px``) to clip
-         thin strands / webs jutting off the boundary.  0 = no
-         clipping; bump it to trim noise without shaving fingertips
-         (they're far wider than the kernel at sane values).
-      7. Keep only the largest connected component (drop speckles).
-      8. Extract the outermost contour and simplify via Douglas-Peucker
-         (``simplify_eps_px`` -- 0.5 keeps ~10x more points than 3.0,
-         giving a smooth boundary while still removing 1 px jitter).
-
-    Returns:
-      ``{frame, is_stereo, OS: [[x,y],...], OD: [[x,y],...] | None}``.
-      Each contour is a closed polygon in reference-frame pixel
-      coordinates (the same space stable.mp4 frames live in).
+    Returns ``{frame, is_stereo, OS: [[x,y],...], OD: [...] | None,
+    fg_OS, fg_OD}`` -- each contour a closed polygon in reference-
+    frame pixel coordinates.
     """
-    from .video import build_trial_map
-
-    tmap = build_trial_map(subject_name)
-    if trial_idx < 0 or trial_idx >= len(tmap):
-        raise ValueError(f"trial_idx {trial_idx} out of range ({len(tmap)} trials)")
-    trial = tmap[trial_idx]
-    stem = trial["trial_name"]
-
-    bg_path = _background_path(subject_name, stem)
-    if not bg_path.exists():
-        raise RuntimeError(
-            f"No background.npz for {subject_name}/{stem} -- "
-            "run Stabilize first.")
-    d = np.load(str(bg_path))
-    is_stereo = bool(d["is_stereo"])
-    downscale = int(d["downscale"])
-    n_frames = int(d["n_frames"])
-    mp_kpts_ref_L = d["mp_kpts_ref_L"] if "mp_kpts_ref_L" in d.files else None
-    mp_kpts_ref_R = d["mp_kpts_ref_R"] if "mp_kpts_ref_R" in d.files else None
-
-    # Prefer the stump-removed background + its always-hand map for the
-    # foreground diff; fall back to the raw median when "Remove stump"
-    # hasn't been run yet.
-    refined_path = _background_refined_path(subject_name, stem)
-    if refined_path.exists():
-        r = np.load(str(refined_path))
-        bg_L = r["refined_L"]
-        bg_R = r["refined_R"] if is_stereo else None
-        always_hand_L_down = (r["always_hand_L_down"]
-                              if "always_hand_L_down" in r.files else None)
-        always_hand_R_down = (r["always_hand_R_down"]
-                              if "always_hand_R_down" in r.files else None)
-    else:
-        bg_L = d["background_L"]
-        bg_R = d["background_R"] if is_stereo else None
-        always_hand_L_down = None
-        always_hand_R_down = None
-
+    ctx = _load_outline_context(subject_name, trial_idx)
+    n_frames = ctx["n_frames"]
     if frame < 0 or frame >= n_frames:
         raise ValueError(f"frame {frame} out of range [0, {n_frames})")
 
-    stable_path = _stable_path(subject_name, stem)
-    if not stable_path.exists():
-        raise RuntimeError(
-            f"No stable.mp4 for {subject_name}/{stem} -- run Stabilize first.")
-
-    cap = cv2.VideoCapture(str(stable_path))
+    cap = cv2.VideoCapture(str(ctx["stable_path"]))
     if not cap.isOpened():
-        raise RuntimeError(f"Cannot open stable.mp4: {stable_path}")
+        raise RuntimeError(f"Cannot open stable.mp4: {ctx['stable_path']}")
     cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame))
     ok, img = cap.read()
     cap.release()
     if not ok or img is None:
         raise RuntimeError(f"Failed to read frame {frame} from stable.mp4")
 
-    h_full = img.shape[0]
-    full_w = img.shape[1]
-    w_half = (full_w // 2) if is_stereo else full_w
-
-    if downscale > 1:
-        bg_L_full = cv2.resize(bg_L, (w_half, h_full), interpolation=cv2.INTER_LINEAR)
-        bg_R_full = (cv2.resize(bg_R, (w_half, h_full), interpolation=cv2.INTER_LINEAR)
-                     if is_stereo else None)
-    else:
-        bg_L_full = bg_L
-        bg_R_full = bg_R
-
-    # Upscale always-hand masks to full-res (nearest-neighbor preserves
-    # the binary nature -- never interpolate a "maybe" pixel into being).
-    def _upscale_bool(m, w, h):
-        if m is None:
-            return None
-        u = cv2.resize(m.astype(np.uint8), (w, h),
-                        interpolation=cv2.INTER_NEAREST)
-        return u.astype(bool)
-    always_hand_L = _upscale_bool(always_hand_L_down, w_half, h_full)
-    always_hand_R = _upscale_bool(always_hand_R_down, w_half, h_full) \
-                     if is_stereo else None
-
-    # Background edge map -- Sobel magnitude normalized to [0, 1].
-    # Subtracted from motion before Otsu so static high-contrast
-    # seams in the BG (table edges, monitor bezels) don't produce
-    # false outline boundaries when the hand crosses them.  True
-    # hand-vs-BG contrast usually dominates the BG edge, so the
-    # "true overlap" case is preserved by the subtraction surviving
-    # at high motion values.
-    bg_edge_L = _bg_edge_map(bg_L_full)
-    bg_edge_R = _bg_edge_map(bg_R_full) if is_stereo else None
-    # Stronger subtraction = fewer BG-edge artifacts but risks
-    # killing true overlap.  60 motion units at peak edge ~= 1/4 of
-    # the dynamic range, leaves room for the hand to dominate.
-    _BG_EDGE_PENALTY = 60.0
-    # Background-edge retraction (caller-tunable): bg_edge values above
-    # ``bg_edge_band_thresh`` count as a "strong static edge"; the band
-    # around them (dilated by ``bg_edge_band_dilate``) is opened off the
-    # mask with radius ``bg_edge_open_radius`` -- thin |frame-BG| bleed
-    # hugging the edge is removed, solid hand crossing it survives.
-    # ``bg_edge_open_radius == 0`` disables the retraction.
-    _BG_EDGE_BAND_THRESH = float(bg_edge_band_thresh)
-    _BG_EDGE_BAND_DILATE = max(0, int(bg_edge_band_dilate))
-    _BG_EDGE_OPEN_RADIUS = max(0, int(bg_edge_open_radius))
-
-    def _side_outline(stable_side: np.ndarray, bg_full: np.ndarray,
-                       kpts: np.ndarray | None,
-                       always_hand: np.ndarray | None,
-                       bg_edge: np.ndarray | None) -> dict:
-        """Returns ``{contour: [[x,y],...], fg: {b64, bbox} | None}``."""
-        empty = {"contour": [], "fg": None}
-        if kpts is None or np.isnan(kpts).all():
-            return empty
-        H, W = stable_side.shape[:2]
-        # 1. Dilated MP gate (outline-time -- no forearm extension; the
-        # visible polygon stops at the wrist).
-        kpt_region = _build_kpt_hand_region(
-            kpts, W, H,
-            stamp_radius=max(2, int(dilation_px)),
-            smooth_sigma=4.0)
-        gate = (kpt_region > 0.5).astype(np.uint8)
-        if gate.sum() < 100:
-            return empty
-        # 2. Motion = max over BGR channels of |frame - BG|, with the
-        # BG-edge map subtracted off so high-contrast BG seams don't
-        # show as motion when the hand crosses them.  Float for the
-        # subtraction, clipped back to uint8 [0, 255] afterwards.
-        motion_raw = np.abs(stable_side.astype(np.int16) - bg_full.astype(np.int16))
-        # ``motion_unpen`` is the raw |frame-BG| score; ``motion`` has
-        # the bg-edge penalty subtracted.  Both are kept: the penalty
-        # avoids edge-bleed false-positives, but it also suppresses real
-        # hand (e.g. a fingertip) crossing an edge -- step 5b uses the
-        # un-penalized score to recover those.
-        motion_unpen = motion_raw.max(axis=-1).astype(np.float32)
-        motion_f = motion_unpen.copy()
-        if bg_edge is not None:
-            motion_f = motion_f - _BG_EDGE_PENALTY * bg_edge
-        motion = np.clip(motion_f, 0.0, 255.0).astype(np.uint8)
-        # Detect bright-green sentinel pixels in the BG.  |frame - green|
-        # is huge for any skin-colored hand pixel and would saturate
-        # the JET heatmap, making nearby moderately-bright hand pixels
-        # look dim by comparison.  Replace their motion with the 80th
-        # percentile of nearby non-green gate motion so they read as
-        # "bright but not max" -- in the orange/red band of JET, on the
-        # high end of the rest of the heatmap but not pinned to red.
-        green_mask = ((bg_full[..., 0] < 50)
-                       & (bg_full[..., 1] > 200)
-                       & (bg_full[..., 2] < 50)
-                       & (gate > 0))
-        if green_mask.any():
-            non_green_gate = (gate > 0) & ~green_mask
-            if non_green_gate.any():
-                local_p80 = int(np.percentile(motion[non_green_gate], 80))
-                motion[green_mask] = local_p80
-        # Optional: foreground heatmap PNG cropped to the gate bbox.
-        # Sent back so the UI can paint a JET-colored fill over the
-        # gate region.  Now uniformly visible thanks to the green
-        # normalization above.
-        fg_pack = None
-        if include_fg:
-            fg_pack = _encode_fg_png(motion, gate)
-        # 3. Otsu threshold over the gate-restricted motion only --
-        # gives a per-frame adaptive cut between "moving" (hand) and
-        # "still" (BG inside the gate).
-        gated_vals = motion[gate > 0]
-        if gated_vals.size < 100:
-            return {"contour": [], "fg": fg_pack}
-        thresh, _ = cv2.threshold(
-            gated_vals, 0, 255,
-            cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        # ``threshold_scale`` shifts the automatic Otsu cut: < 1 lets
-        # more (lower-motion) pixels count as hand -> a slightly larger
-        # outline; > 1 is stricter.  Still image-informed -- it only
-        # moves the cut point on the real |frame-BG| score.
-        thresh = float(thresh) * float(threshold_scale)
-        binary = ((motion > thresh) & (gate > 0))
-        # 4. OR with the always-hand map.  Pixels whose BG fell back to
-        # the global non-skin fill were structurally inside the hand
-        # every sample frame, so they belong inside the boundary even
-        # when this frame's pose makes them blend with the synthetic
-        # BG color.  Also clip to the gate so we never extend outside
-        # the dilated MP silhouette.
-        if always_hand is not None:
-            binary = binary | (always_hand & (gate > 0))
-        binary = binary.astype(np.uint8) * 255
-        # 5. Morphological close -- fills internal holes.
-        r = max(1, int(close_radius_px))
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
-        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-        # 5b. Background-edge correction.  A strong static edge cuts
-        # both ways: the per-pixel bg-edge penalty can leave a thin
-        # |frame-BG| bleed band hugging the edge (false growth), and it
-        # can also suppress a real fingertip crossing the edge (false
-        # clipping).  This step does both:
-        #   - RETRACT: inside the dilated bg-edge band, drop mask pixels
-        #     that don't survive a morphological open -- thin bleed
-        #     bands (narrower than 2 * _BG_EDGE_OPEN_RADIUS) go away.
-        #   - GROW: take the UN-penalized detection's solid blobs
-        #     outside the band (real hand the penalty didn't suppress,
-        #     incl. a fingertip past the edge) and bridge them to the
-        #     hand across the band with a close -- so a clipped
-        #     fingertip is filled back in.
-        # always-hand pixels are kept throughout; outside the band the
-        # mask is untouched.
-        if bg_edge is not None and _BG_EDGE_OPEN_RADIUS > 0:
-            edge_band = (bg_edge > _BG_EDGE_BAND_THRESH).astype(np.uint8)
-            if edge_band.any():
-                edge_band = cv2.dilate(
-                    edge_band,
-                    cv2.getStructuringElement(
-                        cv2.MORPH_ELLIPSE,
-                        (2 * _BG_EDGE_BAND_DILATE + 1,) * 2))
-                in_band = edge_band > 0
-                eo = _BG_EDGE_OPEN_RADIUS
-                eo_kernel = cv2.getStructuringElement(
-                    cv2.MORPH_ELLIPSE, (2 * eo + 1, 2 * eo + 1))
-
-                # RETRACT: drop thin bleed inside the band.
-                opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, eo_kernel)
-                retracted = binary.copy()
-                retracted[in_band & (opened == 0)] = 0
-
-                # GROW: solid un-penalized detections outside the band
-                # (the part of a clipped fingertip past the edge, plus
-                # the hand body) -- thin bleed is excluded by ``& ~band``
-                # and by the open.
-                unpen = (((motion_unpen > thresh) & (gate > 0))
-                         .astype(np.uint8) * 255)
-                unpen[in_band] = 0
-                detect_solid = cv2.morphologyEx(unpen, cv2.MORPH_OPEN, eo_kernel)
-                seed = cv2.bitwise_or(retracted, detect_solid)
-                # Bridge hand <-> fingertip blob across the band with a
-                # close whose kernel spans the band; only the new pixels
-                # that land inside the band are added back.
-                br = _BG_EDGE_BAND_DILATE + eo
-                bridge_k = cv2.getStructuringElement(
-                    cv2.MORPH_ELLIPSE, (2 * br + 1, 2 * br + 1))
-                bridged = cv2.morphologyEx(seed, cv2.MORPH_CLOSE, bridge_k)
-                grow = cv2.bitwise_and(
-                    bridged, edge_band.astype(np.uint8) * 255)
-                binary = cv2.bitwise_or(seed, grow)
-
-                if always_hand is not None:
-                    binary[always_hand & (gate > 0)] = 255
-                # Never spill outside the dilated MP gate.
-                binary[gate == 0] = 0
-        # 6. Morphological open -- clips thin strands / webs.  Erode
-        # then dilate by the same disk: anything narrower than
-        # 2 * open_radius_px disappears, fingertips (much wider)
-        # survive.  0 = off.
-        if open_radius_px > 0:
-            ro = int(open_radius_px)
-            ok_kernel = cv2.getStructuringElement(
-                cv2.MORPH_ELLIPSE, (2 * ro + 1, 2 * ro + 1))
-            binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, ok_kernel)
-        # 7. Largest connected component.
-        n_lbl, lbl, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-        if n_lbl <= 1:
-            return {"contour": [], "fg": fg_pack}
-        largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-        # 8. Outermost contour + Douglas-Peucker smoothing.
-        binary = (lbl == largest).astype(np.uint8) * 255
-        contours, _hier = cv2.findContours(
-            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        if not contours:
-            return {"contour": [], "fg": fg_pack}
-        c = max(contours, key=cv2.contourArea)
-        if simplify_eps_px > 0:
-            c = cv2.approxPolyDP(c, epsilon=float(simplify_eps_px), closed=True)
-        return {
-            "contour": c.reshape(-1, 2).astype(int).tolist(),
-            "fg": fg_pack,
-        }
-
+    is_stereo = ctx["is_stereo"]
+    w_half = ctx["w_half"]
     if is_stereo:
         os_img = img[:, :w_half]
         od_img = img[:, w_half:]
@@ -2163,19 +2187,28 @@ def compute_outline_frame(
         os_img = img
         od_img = None
 
-    kpts_L = (mp_kpts_ref_L[frame] if (mp_kpts_ref_L is not None
-                                        and frame < mp_kpts_ref_L.shape[0])
+    kw = dict(
+        dilation_px=dilation_px, close_radius_px=close_radius_px,
+        open_radius_px=open_radius_px, simplify_eps_px=simplify_eps_px,
+        include_fg=include_fg, bg_edge_band_thresh=bg_edge_band_thresh,
+        bg_edge_band_dilate=bg_edge_band_dilate,
+        bg_edge_open_radius=bg_edge_open_radius,
+        threshold_scale=threshold_scale,
+    )
+    mkL = ctx["mp_kpts_ref_L"]; mkR = ctx["mp_kpts_ref_R"]
+    kpts_L = (mkL[frame] if (mkL is not None and frame < mkL.shape[0])
               else None)
-    kpts_R = (mp_kpts_ref_R[frame] if (mp_kpts_ref_R is not None
-                                        and frame < mp_kpts_ref_R.shape[0])
+    kpts_R = (mkR[frame] if (mkR is not None and frame < mkR.shape[0])
               else None)
-    os_out = _side_outline(os_img, bg_L_full, kpts_L, always_hand_L, bg_edge_L)
-    od_out = (_side_outline(od_img, bg_R_full, kpts_R, always_hand_R, bg_edge_R)
-                if is_stereo else None)
+    os_out = _side_outline(os_img, ctx["bg_L_full"], kpts_L,
+                           ctx["always_hand_L"], ctx["bg_edge_L"], **kw)
+    od_out = (_side_outline(od_img, ctx["bg_R_full"], kpts_R,
+                            ctx["always_hand_R"], ctx["bg_edge_R"], **kw)
+              if is_stereo else None)
     return {
         "frame": int(frame),
         "is_stereo": is_stereo,
-        "always_hand_available": always_hand_L is not None,
+        "always_hand_available": ctx["always_hand_L"] is not None,
         "dilation_px": int(dilation_px),
         "OS": os_out["contour"],
         "OD": od_out["contour"] if od_out else None,
@@ -2184,6 +2217,99 @@ def compute_outline_frame(
         "fg_OS": os_out["fg"],
         "fg_OD": od_out["fg"] if od_out else None,
     }
+
+
+def compute_outlines_all(
+    subject_name: str,
+    trial_idx: int,
+    progress_callback=None,
+    cancel_event=None,
+    dilation_px: int = 14,
+    close_radius_px: int = 5,
+    open_radius_px: int = 0,
+    simplify_eps_px: float = 0.5,
+    bg_edge_band_thresh: float = 0.35,
+    bg_edge_band_dilate: int = 3,
+    bg_edge_open_radius: int = 5,
+    threshold_scale: float = 1.0,
+) -> str:
+    """Bake the hand boundary for *every* trial frame with the given
+    settings and save it to ``outlines.json``.
+
+    Reads stable.mp4 sequentially (no per-frame seeking) and runs the
+    same per-side pipeline as :func:`compute_outline_frame`.  The JSON
+    holds ``{n_frames, is_stereo, params, frames: [{OS, OD}, ...]}``
+    with each contour a closed polygon in reference-frame pixels.
+    """
+    ctx = _load_outline_context(subject_name, trial_idx)
+    stem = ctx["stem"]
+    is_stereo = ctx["is_stereo"]
+    n_frames = ctx["n_frames"]
+    w_half = ctx["w_half"]
+    mkL = ctx["mp_kpts_ref_L"]; mkR = ctx["mp_kpts_ref_R"]
+
+    kw = dict(
+        dilation_px=int(dilation_px), close_radius_px=int(close_radius_px),
+        open_radius_px=int(open_radius_px),
+        simplify_eps_px=float(simplify_eps_px), include_fg=False,
+        bg_edge_band_thresh=float(bg_edge_band_thresh),
+        bg_edge_band_dilate=int(bg_edge_band_dilate),
+        bg_edge_open_radius=int(bg_edge_open_radius),
+        threshold_scale=float(threshold_scale),
+    )
+
+    cap = cv2.VideoCapture(str(ctx["stable_path"]))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open stable.mp4: {ctx['stable_path']}")
+    frames_out: list[dict] = []
+    for i in range(n_frames):
+        if cancel_event is not None and cancel_event.is_set():
+            cap.release()
+            raise InterruptedError("Job cancelled")
+        ok, img = cap.read()
+        if not ok:
+            logger.warning(f"outlines bake: read failed at frame {i}; truncating")
+            break
+        if is_stereo:
+            os_img = img[:, :w_half]
+            od_img = img[:, w_half:]
+        else:
+            os_img = img
+            od_img = None
+        kpts_L = (mkL[i] if (mkL is not None and i < mkL.shape[0]) else None)
+        kpts_R = (mkR[i] if (mkR is not None and i < mkR.shape[0]) else None)
+        os_out = _side_outline(os_img, ctx["bg_L_full"], kpts_L,
+                               ctx["always_hand_L"], ctx["bg_edge_L"], **kw)
+        od_out = (_side_outline(od_img, ctx["bg_R_full"], kpts_R,
+                                ctx["always_hand_R"], ctx["bg_edge_R"], **kw)
+                  if is_stereo else None)
+        frames_out.append({
+            "OS": os_out["contour"],
+            "OD": od_out["contour"] if od_out else None,
+        })
+        if progress_callback is not None:
+            try:
+                progress_callback(100.0 * (i + 1) / max(1, n_frames))
+            except Exception:
+                pass
+    cap.release()
+
+    out_dir = _preproc_dir(subject_name, stem)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "outlines.json"
+    payload = {
+        "n_frames": len(frames_out),
+        "is_stereo": is_stereo,
+        "params": kw,
+        "frames": frames_out,
+    }
+    tmp = out_dir / "outlines.json.tmp"
+    with open(tmp, "w") as fh:
+        json.dump(payload, fh)
+    os.replace(str(tmp), str(out_path))
+    logger.info(f"outlines.json saved: {out_path}  "
+                f"frames={len(frames_out)}/{n_frames}")
+    return str(out_path)
 
 
 def load_background(subject_name: str, trial_stem: str) -> dict | None:
