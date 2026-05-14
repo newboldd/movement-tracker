@@ -24,11 +24,31 @@
             width: 280px; flex-shrink: 0;
             background: var(--bg-card);
             border-right: 1px solid var(--border);
+            /* Column: scrollable pipeline on top, pinned viz panel below. */
+            display: flex; flex-direction: column;
+            overflow: hidden;
+        }
+        /* The pipeline sections (Status / Camera Motion / Stabilise /
+           Background / Hand Boundary / Exclude) scroll; the View panel
+           stays pinned at the bottom. */
+        .pp-sidebar-scroll {
+            flex: 1; min-height: 0;
             overflow-y: auto; padding: 12px;
+        }
+        .pp-viz-panel {
+            flex-shrink: 0;
+            border-top: 2px solid var(--border);
+            background: var(--bg-card);
+            padding: 10px 12px;
+            max-height: 46%;
+            overflow-y: auto;
         }
         .pp-sidebar h3 { font-size: 13px; color: var(--text-muted); margin: 0 0 8px; }
         .pp-sidebar .section { margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
         .pp-sidebar .section:last-child { border-bottom: none; }
+        .pp-viz-panel h3 { font-size: 13px; color: var(--text-muted); margin: 0 0 8px; }
+        .pp-viz-row { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+        .pp-viz-row.first { margin-top: 0; }
         .pp-step { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
         .pp-step .step-dot {
             display: inline-block; width: 10px; height: 10px; border-radius: 50%;
@@ -151,132 +171,146 @@
     <div class="pp-outer">
         <div class="pp-main">
             <div class="pp-sidebar">
-                <div class="section">
-                    <h3>Pipeline Status</h3>
-                    <div class="pp-step"><span class="step-dot" id="dot-trajectory"></span><span class="step-name">1. Camera trajectory</span></div>
-                    <div class="pp-step"><span class="step-dot" id="dot-background"></span><span class="step-name">2. Background</span></div>
-                    <div class="pp-step"><span class="step-dot" id="dot-quality"></span><span class="step-name" style="color:var(--text-muted);">3. Frame quality  (later)</span></div>
-                    <div class="pp-step"><span class="step-dot" id="dot-calib"></span><span class="step-name" style="color:var(--text-muted);">4. Calibration check  (later)</span></div>
+                <div class="pp-sidebar-scroll">
+                    <div class="section">
+                        <h3>Pipeline Status</h3>
+                        <div class="pp-step"><span class="step-dot" id="dot-trajectory"></span><span class="step-name">1. Camera trajectory</span></div>
+                        <div class="pp-step"><span class="step-dot" id="dot-background"></span><span class="step-name">2. Background</span></div>
+                        <div class="pp-step"><span class="step-dot" id="dot-quality"></span><span class="step-name" style="color:var(--text-muted);">3. Frame quality  (later)</span></div>
+                        <div class="pp-step"><span class="step-dot" id="dot-calib"></span><span class="step-name" style="color:var(--text-muted);">4. Calibration check  (later)</span></div>
+                    </div>
+
+                    <div class="section">
+                        <h3>Camera Motion</h3>
+                        <div class="small-note">
+                            ORB+RANSAC homography per frame.  Background dominates the
+                            match; hand pixels reject as outliers.  Reference frame
+                            picked as the most-stable view of the trial.
+                        </div>
+                        <button class="btn btn-sm btn-success" id="runTrajectoryBtn" style="width:100%;margin-top:8px;">Compute Trajectory</button>
+                        <div id="trajectoryStatus" class="pp-stat" style="margin-top:6px;"></div>
+                        <div id="trajectoryStats" class="pp-stat" style="margin-top:8px;"></div>
+                    </div>
+
+                    <div class="section">
+                        <h3>Stabilise</h3>
+                        <div class="small-note">
+                            Bakes <strong>stable.mp4</strong> -- every frame
+                            warped into the reference camera so the scene is
+                            stationary.  The heavy step; run once.  Requires
+                            trajectory.
+                        </div>
+                        <button class="btn btn-sm btn-success" id="runStableBtn" style="width:100%;margin-top:8px;" disabled>Compute Stable</button>
+                        <div id="stableStatus" class="pp-stat" style="margin-top:6px;"></div>
+                    </div>
+
+                    <div class="section">
+                        <h3>Background</h3>
+                        <div class="small-note">
+                            Samples <strong>stable.mp4</strong>, takes the
+                            temporal median with the hand + forearm masked
+                            out, runs the colour-based forearm refinement,
+                            and saves <strong>background.npz</strong>.
+                            Cheap to re-run.  Requires stable.mp4.
+                        </div>
+                        <div style="margin-top:8px;font-size:11px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;">
+                                <label style="color:var(--text-muted);">Palm zone grow (px)</label>
+                                <span id="palmGrowVal" style="color:var(--text);font-weight:bold;">15</span>
+                            </div>
+                            <input type="range" id="palmGrowSlider" min="0" max="80" step="1" value="15"
+                                   title="Grows the MP hand region outward.  Flesh-coloured pixels inside the grown zone are forced to always-hand (green), instead of having a background colour recovered.  Raise this to capture chunks like the ulnar palm that the raw MP gate clips."
+                                   style="width:100%;cursor:pointer;height:5px;">
+                        </div>
+                        <div style="margin-top:8px;font-size:11px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;">
+                                <label style="color:var(--text-muted);">Skin colour leniency</label>
+                                <span id="skinLeniencyVal" style="color:var(--text);font-weight:bold;">1.00</span>
+                            </div>
+                            <input type="range" id="skinLeniencySlider" min="0.5" max="2" step="0.05" value="1"
+                                   title="Scales the YCrCb skin-colour acceptance window.  >1 = more lenient (more pixels count as hand-coloured), <1 = stricter.  Affects the colour-based forearm refinement."
+                                   style="width:100%;cursor:pointer;height:5px;">
+                        </div>
+                        <button class="btn btn-sm btn-success" id="runBackgroundBtn" style="width:100%;margin-top:8px;" disabled>Compute Background</button>
+                        <div id="backgroundStatus" class="pp-stat" style="margin-top:6px;"></div>
+                        <div id="backgroundStats" class="pp-stat" style="margin-top:8px;"></div>
+                        <div id="backgroundPreview" style="margin-top:8px;display:none;">
+                            <div style="display:flex;gap:4px;align-items:flex-start;">
+                                <img id="bgThumbOS" style="width:48%;border:1px solid var(--border);border-radius:4px;" title="OS background">
+                                <img id="bgThumbOD" style="width:48%;border:1px solid var(--border);border-radius:4px;display:none;" title="OD background">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="section">
+                        <h3>Hand Boundary</h3>
+                        <div class="small-note">
+                            Live overlay: for the current frame, the server
+                            runs Otsu + morphology + contour extraction
+                            inside the dilated MP gate and returns a closed
+                            polygon.  Adjust the slider to widen / tighten
+                            the gate -- the boundary updates in place.
+                            Requires <strong>stable.mp4</strong>.
+                        </div>
+                        <div style="margin-top:8px;font-size:11px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;">
+                                <label style="color:var(--text-muted);">Skeleton dilation (px)</label>
+                                <span id="fgDilateVal" style="color:var(--text);font-weight:bold;">14</span>
+                            </div>
+                            <input type="range" id="fgDilateSlider" min="4" max="60" step="1" value="14"
+                                   title="Total dilation of the MP skeleton in image pixels.  Sets the outer bound of the hand region; the actual boundary follows image content inside this gate."
+                                   style="width:100%;cursor:pointer;height:5px;">
+                        </div>
+                        <div style="margin-top:8px;font-size:11px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;">
+                                <label style="color:var(--text-muted);">Strand clip (px)</label>
+                                <span id="fgOpenVal" style="color:var(--text);font-weight:bold;">0</span>
+                            </div>
+                            <input type="range" id="fgOpenSlider" min="0" max="12" step="1" value="0"
+                                   title="Morphological-open radius.  Clips thin strands / webs jutting off the boundary.  0 = off; fingertips (much wider than the kernel) survive at sane values."
+                                   style="width:100%;cursor:pointer;height:5px;">
+                        </div>
+                        <div id="outlineStatus" class="pp-stat" style="margin-top:6px;"></div>
+                    </div>
+
+                    <div class="section">
+                        <h3>Exclude Trial</h3>
+                        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-muted);">
+                            <input type="checkbox" id="cbExcludeTrial" disabled>
+                            Mark as unusable
+                        </label>
+                        <div class="small-note">Flags this trial for downstream filters.  Non-destructive — no results are deleted.  (wiring in phase E)</div>
+                    </div>
                 </div>
 
-                <div class="section">
-                    <h3>Camera Motion</h3>
-                    <div class="small-note">
-                        ORB+RANSAC homography per frame.  Background dominates the
-                        match; hand pixels reject as outliers.  Reference frame
-                        picked as the most-stable view of the trial.
-                    </div>
-                    <button class="btn btn-sm btn-success" id="runTrajectoryBtn" style="width:100%;margin-top:8px;">Compute Trajectory</button>
-                    <div id="trajectoryStatus" class="pp-stat" style="margin-top:6px;"></div>
-                    <div id="trajectoryStats" class="pp-stat" style="margin-top:8px;"></div>
-                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);margin-top:10px;">
-                        <input type="checkbox" id="cbStabilizedView">
-                        Stabilised view
+                <!-- Pinned visualization panel: stays put while the
+                     pipeline sections above scroll. -->
+                <div class="pp-viz-panel">
+                    <h3>View / Overlays</h3>
+                    <label class="pp-viz-row first" style="display:flex;align-items:center;gap:6px;">
+                        <input type="checkbox" id="cbStabilizedView"> Stabilised view
                     </label>
-                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);margin-top:4px;">
-                        <input type="checkbox" id="cbShowJerks" checked>
-                        Mark jerks
+                    <label class="pp-viz-row" style="display:flex;align-items:center;gap:6px;">
+                        <input type="checkbox" id="cbShowJerks" checked> Mark jerks
                     </label>
-                </div>
-
-                <div class="section">
-                    <h3>Stabilise</h3>
-                    <div class="small-note">
-                        Bakes <strong>stable.mp4</strong> -- every frame
-                        warped into the reference camera so the scene is
-                        stationary.  The heavy step; run once.  Requires
-                        trajectory.
-                    </div>
-                    <button class="btn btn-sm btn-success" id="runStableBtn" style="width:100%;margin-top:8px;" disabled>Compute Stable</button>
-                    <div id="stableStatus" class="pp-stat" style="margin-top:6px;"></div>
-                    <label style="display:block;margin-top:8px;font-size:11px;color:var(--text-muted);">
+                    <div class="pp-viz-row" style="margin-top:8px;color:var(--text);font-weight:600;">Viewport overlay:</div>
+                    <label class="pp-viz-row" style="display:block;">
                         <input type="radio" name="bgOverlay" id="ovOff" checked> Off (live frame)
                     </label>
-                    <label style="display:block;margin-top:2px;font-size:11px;color:var(--text-muted);">
+                    <label class="pp-viz-row" style="display:block;">
                         <input type="radio" name="bgOverlay" id="ovStable"> Stabilised (stable.mp4)
                     </label>
-                </div>
-
-                <div class="section">
-                    <h3>Background</h3>
-                    <div class="small-note">
-                        Samples <strong>stable.mp4</strong>, takes the
-                        temporal median with the hand + forearm masked
-                        out, runs the colour-based forearm refinement,
-                        and saves <strong>background.npz</strong>.
-                        Cheap to re-run.  Requires stable.mp4.
-                    </div>
-                    <div style="margin-top:8px;font-size:11px;">
-                        <div style="display:flex;justify-content:space-between;align-items:center;">
-                            <label style="color:var(--text-muted);">Palm zone grow (px)</label>
-                            <span id="palmGrowVal" style="color:var(--text);font-weight:bold;">15</span>
-                        </div>
-                        <input type="range" id="palmGrowSlider" min="0" max="80" step="1" value="15"
-                               title="Grows the MP hand region outward.  Flesh-coloured pixels inside the grown zone are forced to always-hand (green), instead of having a background colour recovered.  Raise this to capture chunks like the ulnar palm that the raw MP gate clips."
-                               style="width:100%;cursor:pointer;height:5px;">
-                    </div>
-                    <div style="margin-top:8px;font-size:11px;">
-                        <div style="display:flex;justify-content:space-between;align-items:center;">
-                            <label style="color:var(--text-muted);">Skin colour leniency</label>
-                            <span id="skinLeniencyVal" style="color:var(--text);font-weight:bold;">1.00</span>
-                        </div>
-                        <input type="range" id="skinLeniencySlider" min="0.5" max="2" step="0.05" value="1"
-                               title="Scales the YCrCb skin-colour acceptance window.  >1 = more lenient (more pixels count as hand-coloured), <1 = stricter.  Affects the colour-based forearm refinement."
-                               style="width:100%;cursor:pointer;height:5px;">
-                    </div>
-                    <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);margin-top:8px;">
-                        <input type="checkbox" id="cbPreviewZones" checked>
-                        Preview palm zone + forearm cone
+                    <label class="pp-viz-row" style="display:block;">
+                        <input type="radio" name="bgOverlay" id="ovBg"> Background (background.png)
                     </label>
-                    <button class="btn btn-sm btn-success" id="runBackgroundBtn" style="width:100%;margin-top:8px;" disabled>Compute Background</button>
-                    <div id="backgroundStatus" class="pp-stat" style="margin-top:6px;"></div>
-                    <div id="backgroundStats" class="pp-stat" style="margin-top:8px;"></div>
-                    <div id="backgroundPreview" style="margin-top:8px;display:none;">
-                        <div style="display:flex;gap:4px;align-items:flex-start;">
-                            <img id="bgThumbOS" style="width:48%;border:1px solid var(--border);border-radius:4px;" title="OS background">
-                            <img id="bgThumbOD" style="width:48%;border:1px solid var(--border);border-radius:4px;display:none;" title="OD background">
-                        </div>
-                        <label style="display:block;margin-top:8px;font-size:11px;color:var(--text-muted);">
-                            <input type="radio" name="bgOverlay" id="ovBg"> Background (background.png)
-                        </label>
-                    </div>
-                </div>
-
-                <div class="section">
-                    <h3>Hand Boundary</h3>
-                    <div class="small-note">
-                        Live overlay: for the current frame, the server
-                        runs Otsu + morphology + contour extraction
-                        inside the dilated MP gate and returns a closed
-                        polygon.  Adjust the slider to widen / tighten
-                        the gate -- the boundary updates in place.
-                        Requires <strong>stable.mp4</strong>.
-                    </div>
-                    <div style="margin-top:8px;font-size:11px;">
-                        <div style="display:flex;justify-content:space-between;align-items:center;">
-                            <label style="color:var(--text-muted);">Skeleton dilation (px)</label>
-                            <span id="fgDilateVal" style="color:var(--text);font-weight:bold;">14</span>
-                        </div>
-                        <input type="range" id="fgDilateSlider" min="4" max="60" step="1" value="14"
-                               title="Total dilation of the MP skeleton in image pixels.  Sets the outer bound of the hand region; the actual boundary follows image content inside this gate."
-                               style="width:100%;cursor:pointer;height:5px;">
-                    </div>
-                    <div style="margin-top:8px;font-size:11px;">
-                        <div style="display:flex;justify-content:space-between;align-items:center;">
-                            <label style="color:var(--text-muted);">Strand clip (px)</label>
-                            <span id="fgOpenVal" style="color:var(--text);font-weight:bold;">0</span>
-                        </div>
-                        <input type="range" id="fgOpenSlider" min="0" max="12" step="1" value="0"
-                               title="Morphological-open radius.  Clips thin strands / webs jutting off the boundary.  0 = off; fingertips (much wider than the kernel) survive at sane values."
-                               style="width:100%;cursor:pointer;height:5px;">
-                    </div>
-                    <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);margin-top:8px;">
-                        <input type="checkbox" id="cbShowOutline" disabled checked>
-                        Show hand boundary
+                    <label class="pp-viz-row" style="display:flex;align-items:center;gap:6px;margin-top:8px;">
+                        <input type="checkbox" id="cbPreviewZones" checked> Preview palm zone + forearm cone
                     </label>
-                    <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);margin-top:4px;">
-                        <input type="checkbox" id="cbShowFgFill" disabled>
-                        Show foreground fill (JET heatmap inside gate)
+                    <label class="pp-viz-row" style="display:flex;align-items:center;gap:6px;">
+                        <input type="checkbox" id="cbShowOutline" disabled checked> Show hand boundary
+                    </label>
+                    <label class="pp-viz-row" style="display:flex;align-items:center;gap:6px;">
+                        <input type="checkbox" id="cbShowFgFill" disabled> Show foreground fill (JET heatmap)
                     </label>
                     <div id="fgOpacityWrap" style="margin-top:4px;margin-left:20px;font-size:11px;color:var(--text-muted);">
                         <div style="display:flex;justify-content:space-between;align-items:center;">
@@ -287,16 +321,6 @@
                                title="Opacity of the JET foreground fill (0 = invisible, 1 = solid)."
                                style="width:100%;cursor:pointer;height:5px;">
                     </div>
-                    <div id="outlineStatus" class="pp-stat" style="margin-top:6px;"></div>
-                </div>
-
-                <div class="section">
-                    <h3>Exclude Trial</h3>
-                    <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-muted);">
-                        <input type="checkbox" id="cbExcludeTrial" disabled>
-                        Mark as unusable
-                    </label>
-                    <div class="small-note">Flags this trial for downstream filters.  Non-destructive — no results are deleted.  (wiring in phase E)</div>
                 </div>
             </div>
 
@@ -351,6 +375,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/preproc.js?v=30"></script>
+    <script src="/static/js/preproc.js?v=31"></script>
 </body>
 </html>
