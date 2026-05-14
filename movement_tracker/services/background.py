@@ -1107,6 +1107,8 @@ def compute_background(
     downscale:   int = _DEFAULT_DOWNSCALE,
     dilation_px: int = 14,
     palm_grow_px: int = 15,
+    color_dilate_px: int = 0,
+    min_confidence: float = 0.0,
     skin_leniency: float = 1.0,
 ) -> str:
     """Stage 2 of the preproc bake: produce background.npz.
@@ -1115,11 +1117,21 @@ def compute_background(
     warpPerspective in the sample pass), stamps a downscaled MP-gate
     region per sample frame so the hand can be excluded from the
     temporal median, runs the color-based forearm refinement, fits
-    a CbCr skin model, and saves the result.
+    a trial-specific skin range, and saves the result.
+
+    Two independent MP-dilation knobs:
+      - ``palm_grow_px`` -- "MP dilate (mask)": grows the palm zone
+        (the force-green hard-boundary region).
+      - ``color_dilate_px`` -- "MP dilate (color sample)": erodes
+        (negative) or dilates (positive) the MP region that skin
+        pixels are SAMPLED from for the trial skin-range fit.
+        Negative lets the sampling region pull in tighter than the
+        raw skeleton.
+    ``min_confidence`` drops frames whose MP hand-detection
+    confidence is below it from the color sampling.
 
     Re-runnable cheaply (~30 s for a typical trial) so the user can
-    iterate on cylinder length / dilation / skin range without
-    re-running the heavy Stabilize step.
+    iterate without re-running the heavy Stabilize step.
 
     Requires :func:`compute_stable` to have produced stable.mp4
     first; raises ``RuntimeError`` otherwise.
@@ -1211,6 +1223,8 @@ def compute_background(
     # ── Phase 0: MP keypoints -> reference-frame coords ──────────────
     mp_kpts_ref_L: np.ndarray | None = None
     mp_kpts_ref_R: np.ndarray | None = None
+    mp_conf_L: np.ndarray | None = None
+    mp_conf_R: np.ndarray | None = None
     try:
         mp = load_mediapipe_prelabels(subject_name)
         if mp is not None:
@@ -1231,12 +1245,29 @@ def compute_background(
                     out[fi] = _warp_kpts_2d(trial_lm[fi], H_chain[fi])
                 return out
 
+            def _prepare_conf(all_conf):
+                # Per-frame MP confidence sliced to the trial range,
+                # padded to n_frames with 0 (treated as low-confidence).
+                if all_conf is None or np.size(all_conf) == 0:
+                    return None
+                all_conf = np.asarray(all_conf, dtype=np.float64).reshape(-1)
+                end_c = min(start_frame + n_frames, all_conf.shape[0])
+                if end_c <= start_frame:
+                    return None
+                out = np.zeros(n_frames, dtype=np.float64)
+                seg = all_conf[start_frame:end_c]
+                out[:seg.shape[0]] = seg
+                return out
+
             mp_kpts_ref_L = _prepare_kpts(os_lm_all, H_L)
+            mp_conf_L = _prepare_conf(mp.get("confidence_OS"))
             if is_stereo and od_lm_all is not None:
                 mp_kpts_ref_R = _prepare_kpts(od_lm_all, H_R)
+                mp_conf_R = _prepare_conf(mp.get("confidence_OD"))
     except Exception as e:
         logger.warning(f"MP load for bg masking failed; bg will include hand: {e}")
         mp_kpts_ref_L = mp_kpts_ref_R = None
+        mp_conf_L = mp_conf_R = None
 
     # Allocate stacks + hand-region masks at downscaled resolution.
     stack_L = np.empty((n_samples, out_h, out_w, 3), dtype=np.uint8)
@@ -1248,21 +1279,36 @@ def compute_background(
     _BG_MASK_STAMP_DOWN = max(2, int(dilation_px) // max(1, downscale))
     _BG_MASK_FOREARM_DOWN = max(0, 100 // max(1, downscale))
     # Tight MP mask for the trial-specific skin-range fit: half the
-    # dilation stamp, no forearm extension, no feather, then eroded
-    # 1 px -- a conservative "definitely hand" core.  Its pixels feed
-    # _fit_skin_range_cbcr; harvested per frame into these lists.
+    # dilation stamp, no forearm extension, no feather -- a conservative
+    # "definitely hand" core.  Its pixels feed _fit_skin_range_cbcr;
+    # harvested per frame into these lists.  The "MP dilate (color
+    # sample)" knob (``color_dilate_px``) then erodes (negative) or
+    # dilates (positive) that core so the user can tighten the colour
+    # sample away from non-hand pixels or loosen it to catch more skin.
     _TIGHT_STAMP_DOWN = max(2, _BG_MASK_STAMP_DOWN // 2)
-    _TIGHT_ERODE = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    color_dilate_down = int(round(color_dilate_px / max(1, downscale)))
     skin_px_L: list[np.ndarray] = []
     skin_px_R: list[np.ndarray] = []
 
     def _harvest_skin(warp_d, kpts_down, sink):
-        """Collect BGR pixels under a tight, eroded MP mask."""
+        """Collect BGR pixels under a tight MP mask, adjusted by
+        ``color_dilate_down`` (erode if negative, dilate if positive)."""
         tight = _build_kpt_hand_region(
             kpts_down, out_w, out_h,
             stamp_radius=_TIGHT_STAMP_DOWN, smooth_sigma=0.0,
             extend_forearm_px=0)
-        tb = cv2.erode((tight > 0.5).astype(np.uint8), _TIGHT_ERODE)
+        tb = (tight > 0.5).astype(np.uint8)
+        if color_dilate_down != 0:
+            ksz = 2 * abs(color_dilate_down) + 1
+            kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksz, ksz))
+            if color_dilate_down < 0:
+                tb = cv2.erode(tb, kern)
+            else:
+                tb = cv2.dilate(tb, kern)
+        else:
+            # Default still trims a 1 px rim to stay off the boundary.
+            tb = cv2.erode(tb, cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (3, 3)))
         if tb.any():
             sink.append(warp_d[tb > 0])
 
@@ -1305,7 +1351,10 @@ def compute_background(
                 stamp_radius=_BG_MASK_STAMP_DOWN, smooth_sigma=2.0,
                 extend_forearm_px=_BG_MASK_FOREARM_DOWN)
             hand_mask_L[s_idx] = region_L > 0.5
-            _harvest_skin(warp_L_d, kpts_L_down, skin_px_L)
+            conf_ok_L = (mp_conf_L is None or i >= mp_conf_L.shape[0]
+                         or mp_conf_L[i] >= min_confidence)
+            if conf_ok_L:
+                _harvest_skin(warp_L_d, kpts_L_down, skin_px_L)
 
         if is_stereo and warp_R is not None:
             if downscale > 1:
@@ -1322,7 +1371,10 @@ def compute_background(
                     stamp_radius=_BG_MASK_STAMP_DOWN, smooth_sigma=2.0,
                     extend_forearm_px=_BG_MASK_FOREARM_DOWN)
                 hand_mask_R[s_idx] = region_R > 0.5
-                _harvest_skin(warp_R_d, kpts_R_down, skin_px_R)
+                conf_ok_R = (mp_conf_R is None or i >= mp_conf_R.shape[0]
+                             or mp_conf_R[i] >= min_confidence)
+                if conf_ok_R:
+                    _harvest_skin(warp_R_d, kpts_R_down, skin_px_R)
 
         if progress_callback is not None:
             try:

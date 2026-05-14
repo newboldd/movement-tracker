@@ -190,8 +190,9 @@ def _spawn_preproc_job(
     elif job_kind == "background":
         worker = compute_background
         allowed = ("max_samples", "downscale", "dilation_px",
-                    "palm_grow_px", "skin_leniency")
-        float_params = ("skin_leniency",)
+                    "palm_grow_px", "color_dilate_px", "min_confidence",
+                    "skin_leniency")
+        float_params = ("skin_leniency", "min_confidence")
     else:
         raise HTTPException(500, f"bad job_kind: {job_kind}")
 
@@ -408,9 +409,11 @@ def get_mp_keypoints(subject_id: int, trial_idx: int) -> dict:
     system using the camera trajectory.  Used by the preproc page to
     draw a dilated-skeleton preview on the canvas.
 
-    Returns ``{n_frames, raw_OS, raw_OD, ref_OS, ref_OD}``.  Each array
-    has shape ``(N, 21, 2)`` serialised as nested lists, with ``null``
-    in place of NaN.  Missing if MediaPipe prelabels aren't available.
+    Returns ``{n_frames, raw_OS, raw_OD, ref_OS, ref_OD, conf_OS,
+    conf_OD}``.  The keypoint arrays have shape ``(N, 21, 2)`` serialised
+    as nested lists, with ``null`` in place of NaN; the conf arrays are
+    length-N per-frame floats.  Missing if MediaPipe prelabels aren't
+    available.
     """
     import numpy as np
     from ..services.mediapipe_prelabel import load_mediapipe_prelabels
@@ -435,6 +438,17 @@ def get_mp_keypoints(subject_id: int, trial_idx: int) -> dict:
     raw_os = os_lm[start_frame:end].astype(float)
     raw_od = (od_lm[start_frame:end].astype(float)
               if od_lm is not None else None)
+
+    # Per-frame MP detection confidence, sliced to the trial range, so
+    # the client can drop low-confidence frames from skin-colour sampling.
+    def _conf_slice(c):
+        if c is None or np.size(c) == 0:
+            return None
+        c = np.asarray(c, dtype=float).reshape(-1)
+        return c[start_frame:min(start_frame + n_frames, c.shape[0])].tolist()
+
+    conf_os = _conf_slice(mp.get("confidence_OS"))
+    conf_od = _conf_slice(mp.get("confidence_OD"))
 
     # Apply the saved trajectory (if any) to land the keypoints in ref
     # coords -- so the client can overlay the dilated skeleton on the
@@ -483,6 +497,8 @@ def get_mp_keypoints(subject_id: int, trial_idx: int) -> dict:
         "raw_OD":    _to_json(raw_od),
         "ref_OS":    _to_json(ref_os),
         "ref_OD":    _to_json(ref_od),
+        "conf_OS":   conf_os,
+        "conf_OD":   conf_od,
     }
 
 

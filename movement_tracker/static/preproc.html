@@ -215,11 +215,29 @@
                         </div>
                         <div style="margin-top:8px;font-size:11px;">
                             <div style="display:flex;justify-content:space-between;align-items:center;">
-                                <label style="color:var(--text-muted);">Palm zone grow (px)</label>
+                                <label style="color:var(--text-muted);">MP dilate (mask)</label>
                                 <span id="palmGrowVal" style="color:var(--text);font-weight:bold;">15</span>
                             </div>
                             <input type="range" id="palmGrowSlider" min="0" max="80" step="1" value="15"
-                                   title="Grows the MP hand region outward.  Flesh-colored pixels inside the grown zone are forced to always-hand (green), instead of having a background color recovered.  Raise this to capture chunks like the ulnar palm that the raw MP gate clips."
+                                   title="Grows the MP hand region outward to set the hard hand boundary.  Flesh-colored pixels inside the grown zone are forced to always-hand (green), instead of having a background color recovered.  Raise this to capture chunks like the ulnar palm that the raw MP gate clips."
+                                   style="width:100%;cursor:pointer;height:5px;">
+                        </div>
+                        <div style="margin-top:8px;font-size:11px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;">
+                                <label style="color:var(--text-muted);">MP dilate (color sample)</label>
+                                <span id="colorDilateVal" style="color:var(--text);font-weight:bold;">0</span>
+                            </div>
+                            <input type="range" id="colorDilateSlider" min="-20" max="60" step="1" value="0"
+                                   title="Erodes (negative) or dilates (positive) the tight MP mask used to sample this trial's skin tone.  Negative values tighten the sample away from non-hand pixels at the hand edge; positive values loosen it to catch more skin."
+                                   style="width:100%;cursor:pointer;height:5px;">
+                        </div>
+                        <div style="margin-top:8px;font-size:11px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;">
+                                <label style="color:var(--text-muted);">Min MP confidence (color sample)</label>
+                                <span id="minConfVal" style="color:var(--text);font-weight:bold;">0.00</span>
+                            </div>
+                            <input type="range" id="minConfSlider" min="0" max="1" step="0.01" value="0"
+                                   title="Frames whose MP hand-detection confidence is below this threshold are excluded from skin-tone sampling.  Raise it to keep only confident detections out of the color fit."
                                    style="width:100%;cursor:pointer;height:5px;">
                         </div>
                         <div style="margin-top:8px;font-size:11px;">
@@ -373,6 +391,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/preproc.js?v=40"></script>
+    <script src="/static/js/preproc.js?v=41"></script>
 </body>
 </html>

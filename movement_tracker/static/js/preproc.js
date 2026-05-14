@@ -75,7 +75,7 @@
     //   ref_OS / ref_OD : same keypoints warped into stable.mp4 ref
     //                     coords via the saved trajectory.  Used for
     //                     stable / fg / bg overlays.
-    let mpKeypoints = null;     // { raw_OS, raw_OD, ref_OS, ref_OD, n_frames }
+    let mpKeypoints = null;     // { raw_OS, raw_OD, ref_OS, ref_OD, conf_OS, conf_OD, n_frames }
     // MediaPipe finger chain joint indices (same convention as the
     // service module).
     const _MP_FINGER_CHAINS = [
@@ -505,10 +505,18 @@
         }
         const palmSlider = $('palmGrowSlider');
         const palmGrowPx = palmSlider ? parseInt(palmSlider.value, 10) : 15;
+        const colorDilateSlider = $('colorDilateSlider');
+        const colorDilatePx = colorDilateSlider
+            ? parseInt(colorDilateSlider.value, 10) : 0;
+        const minConfSlider = $('minConfSlider');
+        const minConfidence = minConfSlider
+            ? parseFloat(minConfSlider.value) : 0.0;
         const lenSlider = $('skinLeniencySlider');
         const skinLeniency = lenSlider ? parseFloat(lenSlider.value) : 1.0;
         await _runPreprocJob('compute_background', 'backgroundStatus',
                               { palm_grow_px: palmGrowPx,
+                                color_dilate_px: colorDilatePx,
+                                min_confidence: minConfidence,
                                 skin_leniency: skinLeniency });
     }
 
@@ -624,10 +632,29 @@
             : (isOD ? mpKeypoints.raw_OD : mpKeypoints.raw_OS);
         const f = arr && currentFrame < arr.length ? arr[currentFrame] : null;
         if (!f) return null;
+        // Confidence gate: drop this frame from the sample if its MP
+        // detection confidence is below the "Min MP confidence" knob.
+        const minConfSlider = $('minConfSlider');
+        const minConf = minConfSlider ? parseFloat(minConfSlider.value) : 0.0;
+        if (minConf > 0) {
+            const conf = isOD ? mpKeypoints.conf_OD : mpKeypoints.conf_OS;
+            if (conf && currentFrame < conf.length
+                    && conf[currentFrame] != null
+                    && conf[currentFrame] < minConf) {
+                return null;
+            }
+        }
         const sx = cw / drawSw, sy = ch / drawSh;
         const d = imgData.data;
         const crs = [], cbs = [];
-        const R = 2;                               // patch half-size, offscreen px
+        // Patch half-size in offscreen px.  The "MP dilate (color
+        // sample)" knob (full-res px) widens (+) or shrinks (-) it --
+        // the client echo of the server's erode/dilate of the tight
+        // MP mask.
+        const colorDilateSlider = $('colorDilateSlider');
+        const colorDilatePx = colorDilateSlider
+            ? parseInt(colorDilateSlider.value, 10) : 0;
+        const R = Math.max(1, Math.round(2 + colorDilatePx * sx * 0.25));
         const patches = [];                        // sub-rect coords
         for (let j = 0; j < 21; j++) {
             if (!f[j] || f[j][0] == null || f[j][1] == null) continue;
@@ -678,8 +705,12 @@
     function _updateSkinMask(srcImage, drawSx, drawSy, drawSw, drawSh) {
         const lenSlider = $('skinLeniencySlider');
         const leniency = lenSlider ? parseFloat(lenSlider.value) : 1.0;
-        const key = `${currentFrame}|${leniency}|${overlayMode}|`
-                  + `${currentSide}|${drawSw}x${drawSh}`;
+        const cdSlider = $('colorDilateSlider');
+        const colorDilate = cdSlider ? parseInt(cdSlider.value, 10) : 0;
+        const mcSlider = $('minConfSlider');
+        const minConf = mcSlider ? parseFloat(mcSlider.value) : 0.0;
+        const key = `${currentFrame}|${leniency}|${colorDilate}|${minConf}|`
+                  + `${overlayMode}|${currentSide}|${drawSw}x${drawSh}`;
         if (key === _skinMaskKey && _skinMaskCanvas) return _skinMaskCanvas;
         // Classify at half-res -- plenty for a preview, ~4x faster.
         const cw = Math.max(1, Math.round(drawSw / 2));
@@ -1575,6 +1606,28 @@
             _skinLenSlider.addEventListener('input', () => {
                 _skinLenVal.textContent =
                     parseFloat(_skinLenSlider.value).toFixed(2);
+                if (showSkinMask) try { render(); } catch (_e) {}
+            });
+        }
+        // MP dilate (color sample): a Background bake param, but it
+        // also widens/shrinks the patches the live skin-mask preview
+        // samples -- re-render so the magenta overlay tracks it.
+        const _colorDilateSlider = $('colorDilateSlider');
+        const _colorDilateVal    = $('colorDilateVal');
+        if (_colorDilateSlider && _colorDilateVal) {
+            _colorDilateSlider.addEventListener('input', () => {
+                _colorDilateVal.textContent = _colorDilateSlider.value;
+                if (showSkinMask) try { render(); } catch (_e) {}
+            });
+        }
+        // Min MP confidence (color sample): a Background bake param;
+        // also gates the live preview's per-frame skin sample.
+        const _minConfSlider = $('minConfSlider');
+        const _minConfVal    = $('minConfVal');
+        if (_minConfSlider && _minConfVal) {
+            _minConfSlider.addEventListener('input', () => {
+                _minConfVal.textContent =
+                    parseFloat(_minConfSlider.value).toFixed(2);
                 if (showSkinMask) try { render(); } catch (_e) {}
             });
         }
