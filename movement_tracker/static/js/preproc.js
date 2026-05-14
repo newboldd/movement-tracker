@@ -1042,10 +1042,11 @@
                     }
                 }
 
-                // 2. Forearm cone -- trapezoid whose base edge is the
-                //    palm-heel line (thumb CMC <-> reflected ulnar
-                //    heel), widening toward the elbow.  Mirrors
-                //    _build_forearm_cone.
+                // 2. Forearm cone -- trapezoid positioned ON the
+                //    palm-heel line (midpoint of thumb CMC <->
+                //    reflected ulnar heel) but kept WIDE: base width
+                //    = MCP knuckle spread x 1.2, widening toward the
+                //    elbow.  Mirrors _build_forearm_cone.
                 const mcpIdx = [5, 9, 13, 17].filter(_hasPt);
                 const _crefl = _reflectThumbCmc(f);
                 if (_hasPt(0) && mcpIdx.length && _hasPt(1) && _crefl) {
@@ -1057,25 +1058,24 @@
                     const dn = Math.hypot(dx, dy);
                     if (dn > 1e-3) {
                         dx /= dn; dy /= dn;
-                        // Base edge = thumb CMC (radial) <-> reflected
-                        // ulnar heel.
-                        const baseA = f[1], baseB = _crefl;
-                        const baseMid = [(baseA[0] + baseB[0]) / 2,
-                                          (baseA[1] + baseB[1]) / 2];
-                        const baseW = Math.hypot(baseA[0] - baseB[0],
-                                                  baseA[1] - baseB[1]);
+                        const px = -dy, py = dx;          // perpendicular
+                        // Base sits at the heel-line midpoint.
+                        const baseMid = [(f[1][0] + _crefl[0]) / 2,
+                                          (f[1][1] + _crefl[1]) / 2];
+                        // Width = MCP spread x 1.2 (wide, like before).
+                        let baseW = 30;
+                        if (_hasPt(5) && _hasPt(17)) {
+                            baseW = Math.hypot(f[5][0] - f[17][0],
+                                                f[5][1] - f[17][1]) * 1.2;
+                        }
                         const tipW = baseW * 1.8;
-                        const len = 220;               // full-res px
+                        const len = 220;                  // full-res px
                         const ex = baseMid[0] + dx * len;
                         const ey = baseMid[1] + dy * len;
-                        const _u = (vx, vy) => {
-                            const n = Math.hypot(vx, vy);
-                            return n > 1e-6 ? [vx / n, vy / n] : [-dy, dx];
-                        };
-                        const ua = _u(baseA[0] - baseMid[0], baseA[1] - baseMid[1]);
-                        const ub = _u(baseB[0] - baseMid[0], baseB[1] - baseMid[1]);
-                        const tipA = [ex + ua[0] * tipW / 2, ey + ua[1] * tipW / 2];
-                        const tipB = [ex + ub[0] * tipW / 2, ey + ub[1] * tipW / 2];
+                        const baseA = [baseMid[0] + px * baseW / 2, baseMid[1] + py * baseW / 2];
+                        const baseB = [baseMid[0] - px * baseW / 2, baseMid[1] - py * baseW / 2];
+                        const tipA  = [ex + px * tipW / 2, ey + py * tipW / 2];
+                        const tipB  = [ex - px * tipW / 2, ey - py * tipW / 2];
                         ctx.fillStyle = 'rgba(0, 200, 255, 0.18)';
                         ctx.strokeStyle = 'rgba(0, 200, 255, 0.7)';
                         ctx.lineWidth = 2 / Math.max(0.01, scale * bps);

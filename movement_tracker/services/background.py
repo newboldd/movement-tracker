@@ -556,37 +556,36 @@ def _build_forearm_cone(
     forearm_dir /= norm
     perp = np.array([-forearm_dir[1], forearm_dir[0]], dtype=np.float64)
 
-    # Base edge -- the palm-heel line if we have the thumb CMC and its
-    # reflection, otherwise a perpendicular segment at the wrist.
+    # Base POSITION -- the midpoint of the palm-heel line (thumb CMC
+    # <-> reflected ulnar heel), which lies on the forearm axis right
+    # at the heel.  This anchors the cone top to the heel line.  When
+    # the CMC / reflection aren't available, fall back to the wrist.
     if cmc_pts and refl_pts:
-        base_a = np.median(cmc_pts, axis=0) / ds      # radial heel
-        base_b = np.median(refl_pts, axis=0) / ds     # ulnar heel
+        cmc_med  = np.median(cmc_pts, axis=0) / ds
+        refl_med = np.median(refl_pts, axis=0) / ds
+        base_mid = (cmc_med + refl_med) * 0.5
     else:
-        if mcp5s and mcp17s:
-            m5 = np.median(mcp5s, axis=0) / ds
-            m17 = np.median(mcp17s, axis=0) / ds
-            base_w = max(float(np.linalg.norm(m5 - m17) * 1.2),
-                          float(fallback_width_px // ds))
-        else:
-            base_w = float(max(8, fallback_width_px // ds))
-        base_a = wrist_med + perp * (base_w / 2.0)
-        base_b = wrist_med - perp * (base_w / 2.0)
+        base_mid = wrist_med
 
-    base_mid = (base_a + base_b) * 0.5
-    base_w = float(np.linalg.norm(base_a - base_b))
+    # Base WIDTH -- independent of the heel-line length: keep it wide,
+    # the MCP knuckle spread x 1.2 (the pre-heel-line behaviour).
+    if mcp5s and mcp17s:
+        m5 = np.median(mcp5s, axis=0) / ds
+        m17 = np.median(mcp17s, axis=0) / ds
+        base_w = max(float(np.linalg.norm(m5 - m17) * 1.2),
+                      float(fallback_width_px // ds))
+    else:
+        base_w = float(max(8, fallback_width_px // ds))
     tip_w = base_w * float(cone_factor)
 
     length_down = max(2, max_length_px // ds)
     end = base_mid + forearm_dir * length_down
 
-    # Tip corners: extend each base corner's offset (from base_mid)
-    # out to tip_w at the far end.  base_a->base_b->tip_b->tip_a is a
-    # proper non-crossing trapezoid regardless of which side is which.
-    def _unit(v):
-        n = float(np.linalg.norm(v))
-        return v / n if n > 1e-6 else perp
-    tip_a = end + _unit(base_a - base_mid) * (tip_w / 2.0)
-    tip_b = end + _unit(base_b - base_mid) * (tip_w / 2.0)
+    # Trapezoid: narrow base on the heel line, wide tip at the elbow.
+    base_a = base_mid + perp * (base_w / 2.0)
+    base_b = base_mid - perp * (base_w / 2.0)
+    tip_a  = end      + perp * (tip_w / 2.0)
+    tip_b  = end      - perp * (tip_w / 2.0)
     poly = np.array([base_a, base_b, tip_b, tip_a], dtype=np.int32)
 
     cone = np.zeros((out_h, out_w), dtype=np.uint8)
