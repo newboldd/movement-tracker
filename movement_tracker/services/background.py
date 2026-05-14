@@ -888,6 +888,15 @@ def compute_stable(
     else:
         bg_R = np.zeros_like(bg_L)
         mad_R = np.zeros_like(mad_L)
+    # Pixels that were under the dilated MP gate in EVERY sample frame.
+    # These are guaranteed-hand: the BG median had to fall back to the
+    # global non-skin colour for them.  Save the map (downscaled, bool)
+    # so compute_outline_frame can force them inside every boundary --
+    # otherwise per-frame Otsu can carve them out when the hand pose
+    # makes them blend with the synthetic BG fill.
+    always_hand_L_down = hand_mask_L.all(axis=0)
+    always_hand_R_down = (hand_mask_R.all(axis=0)
+                           if hand_mask_R is not None else None)
     del hand_mask_L
     if hand_mask_R is not None:
         del hand_mask_R
@@ -1068,6 +1077,12 @@ def compute_stable(
     if skin_model_R is not None:
         save_kwargs["skin_model_R_mean"]    = skin_model_R["mean"]
         save_kwargs["skin_model_R_cov_inv"] = skin_model_R["cov_inv"]
+    # Always-hand maps so the live outline can force these pixels
+    # inside the boundary regardless of per-frame motion.
+    if always_hand_L_down is not None:
+        save_kwargs["always_hand_L_down"] = always_hand_L_down
+    if always_hand_R_down is not None:
+        save_kwargs["always_hand_R_down"] = always_hand_R_down
     np.savez_compressed(str(out_path), **save_kwargs)
 
     cv2.imwrite(str(out_dir / "background_OS.png"), bg_L)
@@ -1094,7 +1109,7 @@ def compute_outline_frame(
     frame: int,
     dilation_px: int = 14,
     close_radius_px: int = 5,
-    simplify_eps_px: float = 3.0,
+    simplify_eps_px: float = 0.5,
 ) -> dict:
     """On-demand hand boundary for one frame.
 
@@ -1108,11 +1123,15 @@ def compute_outline_frame(
       1. Build dilated MP gate (filled silhouette of joints + chains).
       2. Compute |stable_frame - BG| inside the gate.
       3. Otsu-threshold the gate-restricted motion (bimodal: BG vs hand).
-      4. Morphological close (disk radius ``close_radius_px``) to fill
+      4. OR with the always-hand map (pixels covered by the MP gate in
+         every sample frame during Stabilise -- their BG fell back to
+         a synthetic colour, so we force them to count as hand always).
+      5. Morphological close (disk radius ``close_radius_px``) to fill
          palm-interior holes where skin happens to match BG.
-      5. Keep only the largest connected component (drop speckles).
-      6. Extract the outermost contour and simplify via Douglas-Peucker
-         (``simplify_eps_px`` -- preserves fingertip corners).
+      6. Keep only the largest connected component (drop speckles).
+      7. Extract the outermost contour and simplify via Douglas-Peucker
+         (``simplify_eps_px`` -- 0.5 keeps ~10x more points than 3.0,
+         giving a smooth boundary while still removing 1 px jitter).
 
     Returns:
       ``{frame, is_stereo, OS: [[x,y],...], OD: [[x,y],...] | None}``.
@@ -1140,6 +1159,10 @@ def compute_outline_frame(
     n_frames = int(d["n_frames"])
     mp_kpts_ref_L = d["mp_kpts_ref_L"] if "mp_kpts_ref_L" in d.files else None
     mp_kpts_ref_R = d["mp_kpts_ref_R"] if "mp_kpts_ref_R" in d.files else None
+    always_hand_L_down = (d["always_hand_L_down"]
+                          if "always_hand_L_down" in d.files else None)
+    always_hand_R_down = (d["always_hand_R_down"]
+                          if "always_hand_R_down" in d.files else None)
 
     if frame < 0 or frame >= n_frames:
         raise ValueError(f"frame {frame} out of range [0, {n_frames})")
@@ -1170,8 +1193,21 @@ def compute_outline_frame(
         bg_L_full = bg_L
         bg_R_full = bg_R
 
+    # Upscale always-hand masks to full-res (nearest-neighbour preserves
+    # the binary nature -- never interpolate a "maybe" pixel into being).
+    def _upscale_bool(m, w, h):
+        if m is None:
+            return None
+        u = cv2.resize(m.astype(np.uint8), (w, h),
+                        interpolation=cv2.INTER_NEAREST)
+        return u.astype(bool)
+    always_hand_L = _upscale_bool(always_hand_L_down, w_half, h_full)
+    always_hand_R = _upscale_bool(always_hand_R_down, w_half, h_full) \
+                     if is_stereo else None
+
     def _side_contour(stable_side: np.ndarray, bg_full: np.ndarray,
-                       kpts: np.ndarray | None) -> list:
+                       kpts: np.ndarray | None,
+                       always_hand: np.ndarray | None) -> list:
         if kpts is None:
             return []
         if np.isnan(kpts).all():
@@ -1197,17 +1233,26 @@ def compute_outline_frame(
         thresh, _ = cv2.threshold(
             gated_vals, 0, 255,
             cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        binary = ((motion > thresh) & (gate > 0)).astype(np.uint8) * 255
-        # 4. Morphological close -- fills internal holes.
+        binary = ((motion > thresh) & (gate > 0))
+        # 4. OR with the always-hand map.  Pixels whose BG fell back to
+        # the global non-skin fill were structurally inside the hand
+        # every sample frame, so they belong inside the boundary even
+        # when this frame's pose makes them blend with the synthetic
+        # BG colour.  Also clip to the gate so we never extend outside
+        # the dilated MP silhouette.
+        if always_hand is not None:
+            binary = binary | (always_hand & (gate > 0))
+        binary = binary.astype(np.uint8) * 255
+        # 5. Morphological close -- fills internal holes.
         r = max(1, int(close_radius_px))
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-        # 5. Largest connected component.
+        # 6. Largest connected component.
         n_lbl, lbl, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
         if n_lbl <= 1:
             return []
         largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-        # 6. Outermost contour + Douglas-Peucker smoothing.
+        # 7. Outermost contour + Douglas-Peucker smoothing.
         binary = (lbl == largest).astype(np.uint8) * 255
         contours, _hier = cv2.findContours(
             binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
@@ -1234,9 +1279,11 @@ def compute_outline_frame(
     return {
         "frame": int(frame),
         "is_stereo": is_stereo,
+        "always_hand_available": always_hand_L is not None,
         "dilation_px": int(dilation_px),
-        "OS": _side_contour(os_img, bg_L_full, kpts_L),
-        "OD": _side_contour(od_img, bg_R_full, kpts_R) if is_stereo else None,
+        "OS": _side_contour(os_img, bg_L_full, kpts_L, always_hand_L),
+        "OD": (_side_contour(od_img, bg_R_full, kpts_R, always_hand_R)
+                if is_stereo else None),
     }
 
 
