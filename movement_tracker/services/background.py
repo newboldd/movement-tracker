@@ -303,6 +303,60 @@ def _build_kpt_hand_region(
     return canvas.astype(np.float32) / 255.0
 
 
+def _bg_edge_map(bg_full: np.ndarray) -> np.ndarray:
+    """Normalised Sobel-magnitude of the background image.
+
+    Strong edges in the BG (table seams, monitor bezels, high-contrast
+    decor) produce huge |frame - BG| activations the instant the hand
+    crosses them, even though the actual local pixel change is small.
+    Subtracting this map from the motion score wipes those edge-only
+    activations while leaving genuine smooth skin/background transitions
+    intact.  Returns a (h, w) float32 in [0, 1].
+    """
+    g = cv2.cvtColor(bg_full, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    sx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
+    sy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
+    mag = np.sqrt(sx * sx + sy * sy)
+    # 99th percentile normalisation -- a few extreme pixels don't blow
+    # out the rest of the map.
+    p = float(np.percentile(mag, 99.0))
+    if p <= 1e-6:
+        return np.zeros_like(mag)
+    return np.clip(mag / p, 0.0, 1.0)
+
+
+def _smooth_binary_mask(
+    binary: np.ndarray,
+    *,
+    min_width_px: int = 3,
+) -> np.ndarray:
+    """Remove thin webs and tiny speckles without shaving fingertips.
+
+    1. Morphological opening with an elliptical kernel of radius
+       ``min_width_px`` -- erodes everything that's narrower than the
+       kernel, then dilates back.  Webs/strands narrower than
+       ``2 * min_width_px`` disappear; fingertips (typically 15+ px
+       wide at 1080p) survive because their interior has pixels well
+       inside the kernel.
+    2. Keep only the LARGEST connected component (the hand).  Any
+       remaining specks elsewhere -- a moving piece of paper, a head
+       glimpse -- get dropped.
+
+    Input/output: (h, w) uint8 with values 0 or 255.
+    """
+    if not binary.any():
+        return binary
+    r = max(1, int(min_width_px))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+    n_lbl, lbl, stats, _ = cv2.connectedComponentsWithStats(opened, connectivity=8)
+    if n_lbl <= 1:
+        return opened
+    # stats[0] is the background label -- skip it.
+    largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    return np.where(lbl == largest, np.uint8(255), np.uint8(0))
+
+
 def _build_image_aware_hand_mask(
     warped_frame: np.ndarray,
     bg_full: np.ndarray,
@@ -315,6 +369,9 @@ def _build_image_aware_hand_mask(
     motion_norm: float = 50.0,
     image_thresh: float = 0.30,       # require stronger image signal inside the gate
     feather_sigma: float = 1.5,
+    bg_edge_norm: np.ndarray | None = None,
+    edge_subtract_strength: float = 0.7,
+    min_width_px: int = 3,
 ) -> np.ndarray:
     """Hand mask that follows the actual hand pixels inside a deidentify-style
     keypoint-region gate.
@@ -324,12 +381,13 @@ def _build_image_aware_hand_mask(
          chains, smoothed (see :func:`_build_kpt_hand_region`).  This is
          the GEOMETRIC bound -- "anywhere the hand might plausibly be".
       2. ``image_score`` = per-pixel max of:
-           - motion: |warped - background| / motion_norm, clipped to [0,1]
+           - motion: |warped - background| / motion_norm, clipped to [0,1],
+             with the background edge map subtracted off so BG seams
+             don't leak through.
            - skin colour: exp(-Mahalanobis(CbCr) / scale) if a skin model
              was fit.
-         Both are image-driven, so the score is high where the actual hand
-         pixels are and low on the background even inside ``kpt_region``.
-      3. Multiply ``kpt_region`` × ``image_score``, threshold, feather edges.
+      3. Multiply ``kpt_region`` x ``image_score``, threshold, feather edges,
+         then a width-aware prune to drop thin webs / speckles.
 
     Result: a binary-ish uint8 mask, dark everywhere except where the
     image actually looks like a hand inside the keypoint silhouette.
@@ -340,70 +398,39 @@ def _build_image_aware_hand_mask(
     H, W = warped_frame.shape[:2]
 
     # 1. Geometric gate -- tight binary silhouette ~1 cm out from the
-    #    MP skeleton (matching the deidentify hand mask in shape).  The
-    #    0.5 threshold cuts cleanly at the soft edge of the
-    #    stamp+blur, so the gate ends ~``stamp_radius + smooth_sigma``
-    #    pixels from each skeleton point -- not the long Gaussian tail.
+    #    MP skeleton (matching the deidentify hand mask in shape).
     kpt_region = _build_kpt_hand_region(kpts_ref, W, H,
                                           stamp_radius=stamp_radius,
                                           smooth_sigma=region_sigma)
     kpt_gate = (kpt_region > region_thresh).astype(np.float32)
 
-    # 2. Image-feature score (motion + colour).
+    # 2a. Motion, with bg-edge penalty.  Pixels that are bright in the
+    #     BG edge map get their motion suppressed -- a hand crossing a
+    #     table seam shouldn't light up the whole seam.
     motion = np.abs(warped_frame.astype(np.int16) - bg_full.astype(np.int16))
     motion = motion.max(axis=-1).astype(np.float32) / float(motion_norm)
+    if bg_edge_norm is not None and edge_subtract_strength > 0:
+        motion = motion - float(edge_subtract_strength) * bg_edge_norm
     np.clip(motion, 0.0, 1.0, out=motion)
 
+    # 2b. Colour similarity (when a skin model was fit).
     if skin_model is not None:
         color = _color_similarity(warped_frame, skin_model)
         image_score = np.maximum(motion, color)
     else:
         image_score = motion
 
-    # 3. Gate + threshold + feather.
-    #    The mask is HARD-CLIPPED to the gate before AND after the feather:
-    #    the feather alone would blur the binary outside the gate by a
-    #    pixel or two, smearing motion / colour activity past the
-    #    dilation boundary.  Multiplying the feathered result by the
-    #    gate again guarantees the mask is strictly zero everywhere
-    #    outside the dilated MP skeleton.
+    # 3. Gate + threshold + smoothness prune + feather.
     gated = kpt_gate * image_score
     binary = (gated > image_thresh).astype(np.uint8) * 255
+    binary = _smooth_binary_mask(binary, min_width_px=min_width_px)
 
     if feather_sigma > 0:
         feathered = cv2.GaussianBlur(binary, (0, 0), float(feather_sigma))
     else:
         feathered = binary
-    # Final strict clip: zero outside the gate, original value inside.
     out = (feathered.astype(np.float32) * kpt_gate).clip(0, 255).astype(np.uint8)
     return out
-
-
-def _build_kpt_proximity_mask(kpts_ref: np.ndarray, w: int, h: int,
-                                sigma: float = 30.0) -> np.ndarray:
-    """Soft hand mask via Gaussian-blurred keypoint stamps.
-
-    Each keypoint at ``(x, y)`` writes a single 1.0 into a zero canvas,
-    which is then blurred by ``cv2.GaussianBlur(sigma)``.  Peak values
-    are renormalised so a single point post-blur reaches 1.0 (the raw
-    blur peak for a delta is ~1/(2πσ²) ≈ tiny).
-    """
-    mask = np.zeros((h, w), dtype=np.float32)
-    valid = ~np.isnan(kpts_ref).any(axis=-1)
-    if not valid.any():
-        return mask
-    n_stamped = 0
-    for x, y in kpts_ref[valid]:
-        xi, yi = int(round(float(x))), int(round(float(y)))
-        if 0 <= xi < w and 0 <= yi < h:
-            mask[yi, xi] = 1.0
-            n_stamped += 1
-    if n_stamped == 0:
-        return mask
-    blurred = cv2.GaussianBlur(mask, (0, 0), sigma)
-    # Restore peak to ~1 so the final mask is in approx-[0,1].
-    peak_factor = 2.0 * np.pi * sigma * sigma
-    return np.clip(blurred * peak_factor, 0.0, 1.0)
 
 
 def _fit_skin_model_cbcr(sampled_frames: np.ndarray,
@@ -464,57 +491,35 @@ def _color_similarity(frame_bgr: np.ndarray, skin_model: dict,
     return np.exp(-m_sq / float(scale)).astype(np.float32)
 
 
-def _build_enhanced_fg_mask(
+def _build_fg_mask(
     warped_frame: np.ndarray,
     bg_full: np.ndarray,
-    kpts_ref: np.ndarray | None,
-    skin_model: dict | None,
     motion_norm: float = 60.0,
-    kpt_sigma: float = 30.0,
-    w_motion: float = 0.3,
-    w_kpt: float = 0.5,
-    w_color: float = 0.2,
+    bg_edge_norm: np.ndarray | None = None,
+    edge_subtract_strength: float = 0.7,
 ) -> np.ndarray:
-    """Combine motion + keypoint proximity + skin-colour similarity into a
-    single (H, W) uint8 mask.  Weights are redistributed when a signal
-    isn't available so the remaining ones still hit a 1.0 peak.
+    """Raw motion mask: per-pixel ``|warped_frame - bg_full|`` scaled to
+    a uint8 in [0, 255].
 
-    motion_norm = the |frame−BG| value that should map to 1.0; ~60 lands
-    the hand on full intensity given the typical mask range.
+    motion_norm: the |frame-BG| value that maps to 1.0.
+
+    bg_edge_norm: optional Sobel-magnitude map of the BG, normalised to
+    [0,1].  When present, motion is reduced by
+    ``edge_subtract_strength * bg_edge_norm`` so BG seams don't
+    dominate when the hand crosses them.  This is a correction (removes
+    a known false signal), not an enhancement.
+
+    Previously this function also added an MP keypoint Gaussian and a
+    CbCr skin-colour boost.  Both have been removed: the downstream
+    pipeline already gates by MP, so adding non-motion signals here
+    distorts what fg.mp4 represents.
     """
-    H, W = warped_frame.shape[:2]
-
-    # 1) Motion
     motion = np.abs(warped_frame.astype(np.int16) - bg_full.astype(np.int16))
     motion = motion.max(axis=-1).astype(np.float32) / motion_norm
+    if bg_edge_norm is not None and edge_subtract_strength > 0:
+        motion = motion - float(edge_subtract_strength) * bg_edge_norm
     np.clip(motion, 0.0, 1.0, out=motion)
-
-    # 2) Keypoint proximity (zero when unavailable)
-    if kpts_ref is not None:
-        kpt = _build_kpt_proximity_mask(kpts_ref, W, H, sigma=kpt_sigma)
-    else:
-        kpt = None
-
-    # 3) Colour similarity (zero when unavailable)
-    if skin_model is not None:
-        color = _color_similarity(warped_frame, skin_model)
-    else:
-        color = None
-
-    # Weight redistribution: if a signal is missing, its weight is split
-    # evenly between the remaining ones so the peak stays near 1.
-    have_kpt = kpt is not None
-    have_color = color is not None
-    if have_kpt and have_color:
-        combined = motion * w_motion + kpt * w_kpt + color * w_color
-    elif have_kpt:
-        combined = motion * (w_motion + w_color * 0.5) + kpt * (w_kpt + w_color * 0.5)
-    elif have_color:
-        combined = motion * (w_motion + w_kpt * 0.5) + color * (w_color + w_kpt * 0.5)
-    else:
-        combined = motion   # fall back to plain motion-only
-
-    return np.clip(combined * 255.0, 0.0, 255.0).astype(np.uint8)
+    return (motion * 255.0).astype(np.uint8)
 
 
 def compute_background(
@@ -596,11 +601,60 @@ def compute_background(
         n_samples = int(frames_sampled.size)
         sample_lookup = {int(f): i for i, f in enumerate(frames_sampled)}
 
+    # ── Phase 0: load MP prelabels + warp to ref coords ──────────────
+    # We need the per-sample-frame hand region during the sampling pass
+    # so we can MASK OUT the hand from the temporal median.  Without
+    # this step, near-stationary subjects bake the palm right into the
+    # background -- exactly what produces the false shadow edges that
+    # bleed into fg.mp4 and the outline.  Skin-model fitting needs the
+    # warped stack and waits until Phase 1.5 below.
+    mp_kpts_ref_L: np.ndarray | None = None
+    mp_kpts_ref_R: np.ndarray | None = None
+    try:
+        from .mediapipe_prelabel import load_mediapipe_prelabels
+        mp = load_mediapipe_prelabels(subject_name)
+        if mp is not None:
+            os_lm_all = mp.get("OS_landmarks")
+            od_lm_all = mp.get("OD_landmarks") if is_stereo else None
+
+            def _prepare_kpts(all_lm, H_chain):
+                if all_lm is None or all_lm.size == 0:
+                    return None
+                end_lm = min(start_frame + n_frames, all_lm.shape[0])
+                if end_lm <= start_frame:
+                    return None
+                trial_lm = all_lm[start_frame:end_lm].astype(np.float64, copy=True)
+                trial_lm = _interpolate_keypoints(trial_lm)
+                n_lm = trial_lm.shape[0]
+                out = np.full((n_frames, 21, 2), np.nan, dtype=np.float64)
+                for fi in range(min(n_lm, H_chain.shape[0])):
+                    out[fi] = _warp_kpts_2d(trial_lm[fi], H_chain[fi])
+                return out
+
+            mp_kpts_ref_L = _prepare_kpts(os_lm_all, H_L)
+            if is_stereo and od_lm_all is not None:
+                mp_kpts_ref_R = _prepare_kpts(od_lm_all, H_R)
+    except Exception as e:
+        logger.warning(f"MP load for bg masking failed; bg will include hand: {e}")
+        mp_kpts_ref_L = mp_kpts_ref_R = None
+
     # Allocate the warped-frame stacks.  uint8 keeps RAM minimal; the
     # median is computed per-channel with a uint8 result anyway.
     stack_L = np.empty((n_samples, out_h, out_w, 3), dtype=np.uint8)
     stack_R = (np.empty((n_samples, out_h, out_w, 3), dtype=np.uint8)
                if is_stereo else None)
+    # Per-sample-frame hand-region mask (True = drop from BG median).
+    # Built from the dilated MP skeleton, downscaled.  Size matches the
+    # downscaled stack so we can mask the median directly without a
+    # second resize.
+    hand_mask_L = np.zeros((n_samples, out_h, out_w), dtype=bool)
+    hand_mask_R = (np.zeros((n_samples, out_h, out_w), dtype=bool)
+                   if is_stereo else None)
+    # Skeleton stamp radius for BG masking, in downscaled pixels.  Use
+    # the same dilation as the hand-mask gate so the patch removed from
+    # BG matches the patch added back in by the fg mask -- otherwise the
+    # outline ends up tracing the seam between the two.
+    _BG_MASK_STAMP_DOWN = max(2, int(dilation_px) // max(1, downscale))
 
     # We have to re-seek because we already consumed frame 0.  Use a
     # sequential read with skip — VideoCapture seeks are unreliable on
@@ -644,6 +698,12 @@ def compute_background(
             warp_L = cv2.resize(warp_L, (out_w, out_h),
                                  interpolation=cv2.INTER_AREA)
         stack_L[s_idx] = warp_L
+        if mp_kpts_ref_L is not None and i < mp_kpts_ref_L.shape[0]:
+            kpts_L_down = mp_kpts_ref_L[i] / max(1, downscale)
+            region_L = _build_kpt_hand_region(
+                kpts_L_down, out_w, out_h,
+                stamp_radius=_BG_MASK_STAMP_DOWN, smooth_sigma=2.0)
+            hand_mask_L[s_idx] = region_L > 0.5
 
         if is_stereo and od_img is not None:
             warp_R = cv2.warpPerspective(
@@ -655,6 +715,13 @@ def compute_background(
                 warp_R = cv2.resize(warp_R, (out_w, out_h),
                                      interpolation=cv2.INTER_AREA)
             stack_R[s_idx] = warp_R
+            if (mp_kpts_ref_R is not None
+                    and i < mp_kpts_ref_R.shape[0]):
+                kpts_R_down = mp_kpts_ref_R[i] / max(1, downscale)
+                region_R = _build_kpt_hand_region(
+                    kpts_R_down, out_w, out_h,
+                    stamp_radius=_BG_MASK_STAMP_DOWN, smooth_sigma=2.0)
+                hand_mask_R[s_idx] = region_R > 0.5
 
         if progress_callback is not None:
             try:
@@ -681,22 +748,57 @@ def compute_background(
         except Exception: pass
 
     # ── Per-pixel temporal median + MAD ─────────────────────────────────
-    # np.median over (n_samples, H, W, 3) → (H, W, 3).  For uint8 input
-    # the result is float; cast back.  We compute MAD = median(|x - med|)
-    # for a robust spread measure that flags moving regions.
-    bg_L = np.median(stack_L, axis=0).astype(np.uint8)
+    # np.ma.median over (n_samples, H, W, 3) -> (H, W, 3).  When MP
+    # gave us a per-frame hand mask we exclude those pixels per-frame,
+    # which keeps the near-stationary palm out of the BG median.  Pixels
+    # that were masked in EVERY sample frame fall back to the plain
+    # median so the BG is never undefined.  MAD = median(|x - med|) is a
+    # robust spread measure used as a quality heat-map.
+    def _masked_median(stack: np.ndarray, hand_mask: np.ndarray) -> np.ndarray:
+        """Per-pixel temporal median ignoring hand-covered pixels.
+
+        Pixels that were masked in EVERY sample frame (deep palm
+        interior on a near-stationary hand) get filled with the GLOBAL
+        median of non-hand pixels instead of the plain temporal median.
+        That global median is a representative "table colour" -- nothing
+        like skin -- so the per-frame fg mask still lights up across
+        the whole hand silhouette and Canny picks up only the external
+        boundary.  Losing the interior is fine: we only care about the
+        edge of the hand.
+        """
+        if not hand_mask.any():
+            return np.median(stack, axis=0).astype(np.uint8)
+        m4 = np.broadcast_to(hand_mask[..., None], stack.shape)
+        masked = np.ma.masked_array(stack, mask=m4)
+        med = np.ma.median(masked, axis=0)
+        # Global non-hand median (one BGR triplet) as the fill for
+        # always-masked pixels.
+        valid_samples = stack[~hand_mask]
+        if valid_samples.size > 0:
+            fill_color = np.median(valid_samples, axis=0)
+        else:
+            fill_color = np.array([128, 128, 128], dtype=np.float32)
+        bg = np.where(np.ma.getmaskarray(med),
+                       fill_color.reshape(1, 1, 3),
+                       np.ma.getdata(med))
+        return bg.astype(np.uint8)
+
+    bg_L = _masked_median(stack_L, hand_mask_L)
     dev_L = np.abs(stack_L.astype(np.int16) - bg_L.astype(np.int16))
     mad_L = np.median(dev_L, axis=0).max(axis=-1).astype(np.uint8)
     del dev_L   # stack_L kept alive for Phase 1.5 skin-model fit
 
     if is_stereo:
-        bg_R = np.median(stack_R, axis=0).astype(np.uint8)
+        bg_R = _masked_median(stack_R, hand_mask_R)
         dev_R = np.abs(stack_R.astype(np.int16) - bg_R.astype(np.int16))
         mad_R = np.median(dev_R, axis=0).max(axis=-1).astype(np.uint8)
         del dev_R
     else:
         bg_R = np.zeros_like(bg_L)
         mad_R = np.zeros_like(mad_L)
+    del hand_mask_L
+    if hand_mask_R is not None:
+        del hand_mask_R
 
     # For the diff-against-BG step we need a full-resolution BG.  Upscale
     # the half-res median back up if a downscale was applied.
@@ -708,72 +810,43 @@ def compute_background(
         bg_L_full = bg_L
         bg_R_full = bg_R
 
-    # ── Phase 1.5: load MediaPipe + fit skin model (best-effort) ──────
-    # When MP prelabels exist for the subject, warp each frame's hand
-    # keypoints into reference coords up-front, then fit a CbCr skin
-    # model from pixels at the keypoints in the sampled stack.  These
-    # become extra signals for the per-frame fg mask built in Phase 2.
-    mp_kpts_ref_L: np.ndarray | None = None
-    mp_kpts_ref_R: np.ndarray | None = None
+    # Background edge map -- subtracted from motion later so high-
+    # contrast BG seams don't leak through the hand mask.
+    bg_edge_L = _bg_edge_map(bg_L_full)
+    bg_edge_R = _bg_edge_map(bg_R_full) if is_stereo else None
+
+    # ── Phase 1.5: fit CbCr skin model from sampled stack ────────────
+    # MP keypoints (already warped to ref in Phase 0) tell us where
+    # skin pixels live in each sample frame.  We collect those pixels
+    # and fit a Gaussian in CbCr space so per-frame fg masks can use
+    # colour similarity alongside motion.  Best-effort: if any of this
+    # fails the bake just falls back to motion-only masks.
     skin_model_L: dict | None = None
     skin_model_R: dict | None = None
     try:
-        from .mediapipe_prelabel import load_mediapipe_prelabels
-        mp = load_mediapipe_prelabels(subject_name)
-        if mp is not None:
-            os_lm_all = mp.get("OS_landmarks")
-            od_lm_all = mp.get("OD_landmarks") if is_stereo else None
+        def _kpts_at_downscale(kpts_ref_arr):
+            if kpts_ref_arr is None:
+                return []
+            return [kpts_ref_arr[fi] / max(1, downscale)
+                    for fi in frames_sampled]
 
-            def _prepare_kpts(all_lm: np.ndarray, H_chain: np.ndarray) -> np.ndarray | None:
-                if all_lm is None or all_lm.size == 0:
-                    return None
-                end_lm = min(start_frame + n_frames, all_lm.shape[0])
-                if end_lm <= start_frame:
-                    return None
-                trial_lm = all_lm[start_frame:end_lm].astype(np.float64, copy=True)
-                # Interpolate NaN gaps so every frame has at least an
-                # estimated keypoint position (better than mask collapse).
-                trial_lm = _interpolate_keypoints(trial_lm)
-                # Warp keypoints frame-by-frame into ref coords.
-                n_lm = trial_lm.shape[0]
-                out = np.full((n_frames, 21, 2), np.nan, dtype=np.float64)
-                for fi in range(min(n_lm, H_chain.shape[0])):
-                    out[fi] = _warp_kpts_2d(trial_lm[fi], H_chain[fi])
-                return out
+        if mp_kpts_ref_L is not None:
+            skin_model_L = _fit_skin_model_cbcr(
+                stack_L, _kpts_at_downscale(mp_kpts_ref_L))
+        if is_stereo and mp_kpts_ref_R is not None:
+            skin_model_R = _fit_skin_model_cbcr(
+                stack_R, _kpts_at_downscale(mp_kpts_ref_R))
 
-            mp_kpts_ref_L = _prepare_kpts(os_lm_all, H_L)
-            if is_stereo and od_lm_all is not None:
-                mp_kpts_ref_R = _prepare_kpts(od_lm_all, H_R)
-
-            # Fit skin model from the already-warped sample stack.
-            # Keypoints are at full-res but stack_L is at downscaled res
-            # — scale the keypoints to match before sampling.
-            def _kpts_at_downscale(kpts_ref_arr: np.ndarray | None) -> list[np.ndarray]:
-                if kpts_ref_arr is None:
-                    return []
-                return [kpts_ref_arr[fi] / max(1, downscale)
-                        for fi in frames_sampled]
-
-            if mp_kpts_ref_L is not None:
-                skin_model_L = _fit_skin_model_cbcr(
-                    stack_L, _kpts_at_downscale(mp_kpts_ref_L))
-            if is_stereo and mp_kpts_ref_R is not None:
-                skin_model_R = _fit_skin_model_cbcr(
-                    stack_R, _kpts_at_downscale(mp_kpts_ref_R))
-
-            n_lm_L = (int(np.sum(~np.isnan(mp_kpts_ref_L[:, 0, 0])))
-                      if mp_kpts_ref_L is not None else 0)
-            logger.info(
-                f"Enhanced fg mask: MP loaded, {n_lm_L}/{n_frames} frames "
-                f"with valid OS keypoints; skin model: "
-                f"L={'yes' if skin_model_L else 'no'}, "
-                f"R={'yes' if skin_model_R else 'no'}"
-            )
-        else:
-            logger.info("Enhanced fg mask: no MP prelabels — motion-only fallback")
+        n_lm_L = (int(np.sum(~np.isnan(mp_kpts_ref_L[:, 0, 0])))
+                  if mp_kpts_ref_L is not None else 0)
+        logger.info(
+            f"Enhanced fg mask: {n_lm_L}/{n_frames} frames with valid OS "
+            f"keypoints; skin model: "
+            f"L={'yes' if skin_model_L else 'no'}, "
+            f"R={'yes' if skin_model_R else 'no'}"
+        )
     except Exception as e:
-        logger.warning(f"Enhanced fg mask setup failed; motion-only: {e}")
-        mp_kpts_ref_L = mp_kpts_ref_R = None
+        logger.warning(f"Skin-model fit failed; motion-only fg: {e}")
         skin_model_L = skin_model_R = None
 
     # Sampling stacks are large (n_samples × H × W × 3) — free them now
@@ -817,13 +890,8 @@ def compute_background(
     except FileNotFoundError: pass
     outline_path = _outline_path(subject_name, stem)
     outline_proc = _open_ffmpeg_pipe(str(outline_path), full_w_total, h_full, fps, "bgr24")
-    # Sigma for the keypoint Gaussian on hand.mp4 — wider than the
-    # one inside _build_enhanced_fg_mask so the smooth blob reliably
-    # covers the hand silhouette beyond the literal landmark positions.
-    _HAND_KPT_SIGMA = 45.0
-    _HAND_BOOST = 1.6   # multiplies the renormalised blob so the hand interior saturates
-    _OUTLINE_THRESH = 80   # 0–255; hand-mask threshold for the outline contour
-    _MIN_KPT_FRAMES_FRAC = 0.10   # need at least 10% of frames with usable kpts
+    _OUTLINE_THRESH = 80           # 0-255; hand-mask threshold for the outline contour
+    _MIN_KPT_FRAMES_FRAC = 0.10    # need at least 10% of frames with usable kpts
 
     # Decide once per side whether we can use the kpt-based mask or
     # have to fall back to the foreground mask.  ``mp_kpts_ref_L`` can be
@@ -867,28 +935,26 @@ def compute_background(
                 flags=cv2.INTER_LINEAR,
                 borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0),
             )
-            # FG mask: combines motion (|warped − BG|), MP keypoint
-            # proximity (Gaussian blobs around the 21 hand landmarks),
-            # and CbCr skin-tone similarity.  Falls back to motion-only
-            # if MP wasn't available for this trial.
+            # FG mask: raw |warped - BG|, with the BG-edge map subtracted
+            # off so static high-contrast seams don't dominate when the
+            # hand crosses them.  No MP/colour enhancement -- downstream
+            # uses the dilated-skeleton gate; any boost here would distort
+            # what fg.mp4 actually measures (motion against background).
             kpts_L_now = (mp_kpts_ref_L[i] if mp_kpts_ref_L is not None
                           and i < mp_kpts_ref_L.shape[0] else None)
-            fg_L = _build_enhanced_fg_mask(
-                warp_L, bg_L_full, kpts_L_now, skin_model_L)
+            fg_L = _build_fg_mask(warp_L, bg_L_full, bg_edge_norm=bg_edge_L)
             # Replicate to 3 channels so ffmpeg's bgr24 pipe is happy.
             fg_L_bgr = np.stack([fg_L, fg_L, fg_L], axis=-1)
 
             # Hand mask: image-aware silhouette gated by a deidentify-style
-            # keypoint region (filled circles + finger chain midpoints).
-            # The geometric gate bounds the search to the hand area; the
-            # actual mask values come from motion + skin-colour inside
-            # that gate, so the boundary follows real image content and
-            # not just the keypoint Gaussian blobs.  Falls back to the
-            # plain FG mask when MP keypoints aren't usable.
+            # keypoint region.  Boundary follows real pixel content;
+            # bg-edge subtraction kills BG-seam leakage; width-aware
+            # prune trims thin webs without shaving fingertips.
             if use_kpt_mask_L and kpts_L_now is not None:
                 hand_L_u8 = _build_image_aware_hand_mask(
                     warp_L, bg_L_full, kpts_L_now, skin_model_L,
-                    stamp_radius=int(dilation_px))
+                    stamp_radius=int(dilation_px),
+                    bg_edge_norm=bg_edge_L)
             else:
                 hand_L_u8 = fg_L
             # Outline = thin contour at the 'hand vs not-hand' threshold.
@@ -907,14 +973,14 @@ def compute_background(
                 )
                 kpts_R_now = (mp_kpts_ref_R[i] if mp_kpts_ref_R is not None
                               and i < mp_kpts_ref_R.shape[0] else None)
-                fg_R = _build_enhanced_fg_mask(
-                    warp_R, bg_R_full, kpts_R_now, skin_model_R)
+                fg_R = _build_fg_mask(warp_R, bg_R_full, bg_edge_norm=bg_edge_R)
                 fg_R_bgr = np.stack([fg_R, fg_R, fg_R], axis=-1)
 
                 if use_kpt_mask_R and kpts_R_now is not None:
                     hand_R_u8 = _build_image_aware_hand_mask(
                         warp_R, bg_R_full, kpts_R_now, skin_model_R,
-                        stamp_radius=int(dilation_px))
+                        stamp_radius=int(dilation_px),
+                        bg_edge_norm=bg_edge_R)
                 else:
                     hand_R_u8 = fg_R
                 binary_R = (hand_R_u8 > _OUTLINE_THRESH).astype(np.uint8) * 255
