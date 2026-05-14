@@ -591,10 +591,14 @@
             ? parseInt(colorDilateSlider.value, 10) : 0;
         const lenSlider = $('skinLeniencySlider');
         const skinLeniency = lenSlider ? parseFloat(lenSlider.value) : 1.0;
+        const darkBoostSlider = $('darkBoostSlider');
+        const darkBoost = darkBoostSlider
+            ? parseFloat(darkBoostSlider.value) : 1.0;
         await _runPreprocJob('refine_background', 'backgroundStatus',
                               { palm_grow_px: palmGrowPx,
                                 color_dilate_px: colorDilatePx,
-                                skin_leniency: skinLeniency });
+                                skin_leniency: skinLeniency,
+                                dark_boost: darkBoost });
     }
 
     /**
@@ -821,7 +825,9 @@
         const leniency = lenSlider ? parseFloat(lenSlider.value) : 1.0;
         const cdSlider = $('colorDilateSlider');
         const colorDilate = cdSlider ? parseInt(cdSlider.value, 10) : 0;
-        const key = `${currentFrame}|${leniency}|${colorDilate}|`
+        const dbSlider = $('darkBoostSlider');
+        const darkBoost = dbSlider ? parseFloat(dbSlider.value) : 1.0;
+        const key = `${currentFrame}|${leniency}|${colorDilate}|${darkBoost}|`
                   + `${overlayMode}|${currentSide}|${drawSw}x${drawSh}`;
         if (key === _skinMaskKey && _skinMaskCanvas) return _skinMaskCanvas;
         // Classify at half-res -- plenty for a preview, ~4x faster.
@@ -846,11 +852,20 @@
         const rng = _skinRangeFromKpts(img, cw, ch, drawSw, drawSh)
                  || _SKIN_UNIVERSAL;
         const crC = (rng.crLo + rng.crHi) / 2;
-        const crH = (rng.crHi - rng.crLo) / 2 * leniency;
+        const crHalf = (rng.crHi - rng.crLo) / 2;
         const cbC = (rng.cbLo + rng.cbHi) / 2;
-        const cbH = (rng.cbHi - rng.cbLo) / 2 * leniency;
+        const cbHalf = (rng.cbHi - rng.cbLo) / 2;
+        // "Dark-color boost": effective leniency is scaled per-pixel by
+        // 1 + (darkBoost-1)*(1 - Y/255) -- bright pixels untouched, dark
+        // pixels get the full boost.  Mirrors _is_skin_ycc on the server.
+        const dbExtra = darkBoost - 1;
         for (let i = 0; i < d.length; i += 4) {
-            const [cr, cb] = _rgbToCrCb(d[i], d[i + 1], d[i + 2]);
+            const r = d[i], g = d[i + 1], b = d[i + 2];
+            const y = 0.299 * r + 0.587 * g + 0.114 * b;
+            const eff = dbExtra > 0
+                ? leniency * (1 + dbExtra * (1 - y / 255)) : leniency;
+            const crH = crHalf * eff, cbH = cbHalf * eff;
+            const [cr, cb] = _rgbToCrCb(r, g, b);
             if (cr >= crC - crH && cr <= crC + crH &&
                 cb >= cbC - cbH && cb <= cbC + cbH) {
                 d[i] = 255; d[i + 1] = 0; d[i + 2] = 255; d[i + 3] = 130;
@@ -1748,7 +1763,8 @@
         function _syncMpDilateEnabled() {
             if (!_skinLenSlider) return;
             const off = parseFloat(_skinLenSlider.value) <= 0;
-            for (const id of ['colorDilateSlider', 'palmGrowSlider']) {
+            for (const id of ['darkBoostSlider', 'colorDilateSlider',
+                              'palmGrowSlider']) {
                 const sl = $(id);
                 if (!sl) continue;
                 sl.disabled = off;
@@ -1761,6 +1777,18 @@
                 _skinLenVal.textContent =
                     parseFloat(_skinLenSlider.value).toFixed(2);
                 _syncMpDilateEnabled();
+                _flashSkinMask('bg');
+            });
+        }
+        // "Dark-color boost" slider: a Remove-stump param.  Widens the
+        // skin window for darker pixels; flashes the skin-color preview
+        // over the Background (raw median) view, like skin leniency.
+        const _darkBoostSlider = $('darkBoostSlider');
+        const _darkBoostVal    = $('darkBoostVal');
+        if (_darkBoostSlider && _darkBoostVal) {
+            _darkBoostSlider.addEventListener('input', () => {
+                _darkBoostVal.textContent =
+                    parseFloat(_darkBoostSlider.value).toFixed(1);
                 _flashSkinMask('bg');
             });
         }

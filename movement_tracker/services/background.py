@@ -490,7 +490,8 @@ _SKIN_CB_LO, _SKIN_CB_HI = 80, 130
 
 
 def _is_skin_ycc(ycc: np.ndarray, leniency: float = 1.0,
-                 skin_range: tuple | None = None) -> np.ndarray:
+                 skin_range: tuple | None = None,
+                 dark_boost: float = 1.0) -> np.ndarray:
     """Boolean mask of skin-colored pixels.  Input is a YCrCb image
     (any shape ending in 3), output is the same shape minus the last
     axis.
@@ -502,6 +503,12 @@ def _is_skin_ycc(ycc: np.ndarray, leniency: float = 1.0,
     ``leniency`` scales whichever window is in play around its
     center: 1.0 = the window as-is, >1 widens it (more pixels count
     as skin), <1 narrows it.
+
+    ``dark_boost`` >= 1 widens the window further for darker pixels:
+    the effective leniency is multiplied per-pixel by
+    ``1 + (dark_boost - 1) * (1 - Y/255)`` so the brightest pixels are
+    untouched and the darkest get the full boost.  1.0 = no brightness
+    dependence (uniform window).
     """
     cr = ycc[..., 1]
     cb = ycc[..., 2]
@@ -510,10 +517,14 @@ def _is_skin_ycc(ycc: np.ndarray, leniency: float = 1.0,
     else:
         cr_lo, cr_hi = _SKIN_CR_LO, _SKIN_CR_HI
         cb_lo, cb_hi = _SKIN_CB_LO, _SKIN_CB_HI
+    eff = float(leniency)
+    if dark_boost > 1.0:
+        y = ycc[..., 0].astype(np.float32)
+        eff = eff * (1.0 + (float(dark_boost) - 1.0) * (1.0 - y / 255.0))
     cr_c = (cr_lo + cr_hi) * 0.5
-    cr_h = (cr_hi - cr_lo) * 0.5 * float(leniency)
+    cr_h = (cr_hi - cr_lo) * 0.5 * eff
     cb_c = (cb_lo + cb_hi) * 0.5
-    cb_h = (cb_hi - cb_lo) * 0.5 * float(leniency)
+    cb_h = (cb_hi - cb_lo) * 0.5 * eff
     return ((cr >= cr_c - cr_h) & (cr <= cr_c + cr_h)
             & (cb >= cb_c - cb_h) & (cb <= cb_c + cb_h))
 
@@ -670,6 +681,7 @@ def _refine_bg_color_based(
     refine_mask: np.ndarray | None = None,
     skin_leniency: float = 1.0,
     skin_range: tuple | None = None,
+    dark_boost: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Second BG-median pass that fixes flesh-colored BG pixels.
 
@@ -682,11 +694,14 @@ def _refine_bg_color_based(
     anywhere for that pixel) is it painted the green sentinel and
     recorded as always-hand.
 
+    ``dark_boost`` widens the skin window for darker pixels (see
+    :func:`_is_skin_ycc`).
+
     Returns ``(refined_bg, always_hand_color_mask)``.
     """
     bg_ycc = cv2.cvtColor(bg_initial, cv2.COLOR_BGR2YCrCb)
     flesh_in_bg = _is_skin_ycc(bg_ycc, leniency=skin_leniency,
-                                skin_range=skin_range)
+                                skin_range=skin_range, dark_boost=dark_boost)
     refined = bg_initial.copy()
     always_hand = np.zeros(bg_initial.shape[:2], dtype=bool)
     green = np.array([0, 255, 0], dtype=np.uint8)
@@ -706,7 +721,8 @@ def _refine_bg_color_based(
                 cv2.COLOR_BGR2YCrCb,
             ).reshape(N, n, 3)
             is_skin = _is_skin_ycc(samples_ycc, leniency=skin_leniency,
-                                    skin_range=skin_range)              # (N, n)
+                                    skin_range=skin_range,
+                                    dark_boost=dark_boost)              # (N, n)
             m = np.broadcast_to(is_skin[..., None], samples.shape)
             masked = np.ma.masked_array(samples, mask=m)
             med = np.ma.median(masked, axis=0)               # (n, 3)
@@ -1449,6 +1465,7 @@ def refine_background(
     palm_grow_px: int = 15,
     color_dilate_px: int = 0,
     skin_leniency: float = 1.0,
+    dark_boost: float = 1.0,
 ) -> str:
     """Stage 2b of the preproc bake -- "Remove stump": produce
     background_refined.npz from the raw median + the sample sidecar.
@@ -1467,7 +1484,9 @@ def refine_background(
         skin tone is sampled from.
       - ``skin_leniency`` -- scales the trial skin Cr/Cb window;
         ``0`` skips the refinement entirely (refined == raw median,
-        nothing greened) and the two MP-dilate knobs have no effect.
+        nothing greened) and the other knobs have no effect.
+      - ``dark_boost`` -- >= 1 widens the skin window further for
+        darker pixels (uniform when 1.0).
 
     Cheap to re-run -- no stable.mp4 read.  Requires
     :func:`compute_background` to have produced the sidecar first.
@@ -1574,7 +1593,8 @@ def refine_background(
         refine_L = (palm_zone_L > 0) | (cone_L > 0)
         bg_L, always_hand_color_L_down = _refine_bg_color_based(
             bg_L, stack_L, refine_mask=refine_L,
-            skin_leniency=skin_leniency, skin_range=skin_range_L)
+            skin_leniency=skin_leniency, skin_range=skin_range_L,
+            dark_boost=dark_boost)
         if is_stereo:
             palm_zone_R = _build_palm_zone(hand_mask_R, palm_grow_down)
             cone_R = _build_forearm_cone(mp_kpts_ref_R, frames_sampled,
@@ -1582,7 +1602,8 @@ def refine_background(
             refine_R = (palm_zone_R > 0) | (cone_R > 0)
             bg_R, always_hand_color_R_down = _refine_bg_color_based(
                 bg_R, stack_R, refine_mask=refine_R,
-                skin_leniency=skin_leniency, skin_range=skin_range_R)
+                skin_leniency=skin_leniency, skin_range=skin_range_R,
+                dark_boost=dark_boost)
         else:
             always_hand_color_R_down = None
     else:

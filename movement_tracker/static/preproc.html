@@ -229,6 +229,15 @@
                         </div>
                         <div style="margin-top:8px;font-size:11px;">
                             <div style="display:flex;justify-content:space-between;align-items:center;">
+                                <label style="color:var(--text-muted);">Dark-color boost</label>
+                                <span id="darkBoostVal" style="color:var(--text);font-weight:bold;">1.0</span>
+                            </div>
+                            <input type="range" id="darkBoostSlider" min="1" max="4" step="0.1" value="1"
+                                   title="Boosts skin color leniency as pixels get darker: the window stays the same width for bright pixels and widens toward this multiple for the darkest.  1 = uniform width regardless of brightness.  Disabled when Skin color leniency is 0."
+                                   style="width:100%;cursor:pointer;height:5px;">
+                        </div>
+                        <div style="margin-top:8px;font-size:11px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;">
                                 <label style="color:var(--text-muted);">MP dilate (color sample)</label>
                                 <span id="colorDilateVal" style="color:var(--text);font-weight:bold;">0</span>
                             </div>
@@ -383,6 +392,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/preproc.js?v=47"></script>
+    <script src="/static/js/preproc.js?v=48"></script>
 </body>
 </html>

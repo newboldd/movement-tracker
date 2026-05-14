@@ -197,8 +197,9 @@ def _spawn_preproc_job(
         # Stage 2b: "Remove stump" -- colour-based refinement of the
         # already-computed median.
         worker = refine_background
-        allowed = ("palm_grow_px", "color_dilate_px", "skin_leniency")
-        float_params = ("skin_leniency",)
+        allowed = ("palm_grow_px", "color_dilate_px", "skin_leniency",
+                   "dark_boost")
+        float_params = ("skin_leniency", "dark_boost")
     else:
         raise HTTPException(500, f"bad job_kind: {job_kind}")
 
