@@ -966,11 +966,14 @@ def compute_stable(
     out_dir = _preproc_dir(subject_name, stem)
     out_dir.mkdir(parents=True, exist_ok=True)
     stable_path = _stable_path(subject_name, stem)
-    # Bake into a .tmp sibling and os.replace() it into place only on
+    # Bake into a temp sibling and os.replace() it into place only on
     # a clean finish.  A cancelled / failed run then leaves the
     # previous good stable.mp4 (and its derivatives) completely
     # untouched -- the job is a no-op rather than a destructive one.
-    stable_tmp = stable_path.with_name(stable_path.name + ".tmp")
+    # The temp name keeps the .mp4 extension (stable.tmp.mp4) so
+    # ffmpeg can still infer the output container format from it.
+    stable_tmp = stable_path.with_name(
+        f"{stable_path.stem}.tmp{stable_path.suffix}")
     _kill_orphan_ffmpegs_for_dir(out_dir)
 
     stable_proc = _open_ffmpeg_pipe(
