@@ -1890,6 +1890,13 @@ def compute_outline_frame(
     # killing true overlap.  60 motion units at peak edge ~= 1/4 of
     # the dynamic range, leaves room for the hand to dominate.
     _BG_EDGE_PENALTY = 60.0
+    # Background-edge retraction: bg_edge values above this count as a
+    # "strong static edge"; the band around them is opened off the mask
+    # (thin |frame-BG| bleed that hugs the edge is removed, solid hand
+    # crossing it survives).  Radius in full-res px.
+    _BG_EDGE_BAND_THRESH = 0.35
+    _BG_EDGE_BAND_DILATE = 3
+    _BG_EDGE_OPEN_RADIUS = 5
 
     def _side_outline(stable_side: np.ndarray, bg_full: np.ndarray,
                        kpts: np.ndarray | None,
@@ -1964,6 +1971,30 @@ def compute_outline_frame(
         r = max(1, int(close_radius_px))
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        # 5b. Background-edge retraction.  Even with the per-pixel
+        # bg-edge penalty, the mask can still grow a thin |frame-BG|
+        # bleed band that hugs a strong static edge -- and then the
+        # outline locks onto that edge.  Inside the dilated bg-edge
+        # band, replace the mask with its morphological opening: a thin
+        # band (narrower than 2 * _BG_EDGE_OPEN_RADIUS) is wiped, while
+        # a solid hand region crossing the edge -- and any always-hand
+        # pixel -- survives.  Outside the band the mask is untouched.
+        if bg_edge is not None:
+            edge_band = (bg_edge > _BG_EDGE_BAND_THRESH).astype(np.uint8)
+            if edge_band.any():
+                edge_band = cv2.dilate(
+                    edge_band,
+                    cv2.getStructuringElement(
+                        cv2.MORPH_ELLIPSE,
+                        (2 * _BG_EDGE_BAND_DILATE + 1,) * 2))
+                eo = _BG_EDGE_OPEN_RADIUS
+                eo_kernel = cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE, (2 * eo + 1, 2 * eo + 1))
+                opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, eo_kernel)
+                keep = (edge_band == 0) | (opened > 0)
+                if always_hand is not None:
+                    keep = keep | (always_hand & (gate > 0))
+                binary = np.where(keep, binary, 0).astype(np.uint8)
         # 6. Morphological open -- clips thin strands / webs.  Erode
         # then dilate by the same disk: anything narrower than
         # 2 * open_radius_px disappears, fingertips (much wider)
