@@ -427,9 +427,85 @@ def _is_skin_ycc(ycc: np.ndarray) -> np.ndarray:
             & (cb >= _SKIN_CB_LO) & (cb <= _SKIN_CB_HI))
 
 
+def _build_forearm_cylinder(
+    kpts_per_frame: np.ndarray | None,
+    frames_sampled: np.ndarray,
+    out_w: int,
+    out_h: int,
+    downscale: int,
+    max_length_px: int = 200,
+    fallback_width_px: int = 30,
+) -> np.ndarray:
+    """Capsule mask along the forearm, used to restrict color-based
+    BG refinement to a localised arm region instead of the whole frame.
+
+    Geometry, computed from the sampled MP keypoints:
+      - Anchor: median wrist position (joint 0) over the sampled frames.
+      - Direction: wrist - median(MCP_5/9/13/17) -- the forearm axis
+        pointing away from the palm.
+      - Width: |MCP_5 - MCP_17| x 1.2 (index-MCP to pinky-MCP, a decent
+        proxy for wrist/forearm width).  Falls back to
+        ``fallback_width_px`` when those joints are missing.
+      - Length: ``max_length_px`` (downscaled).  The actual flesh
+        coverage stops naturally at the sleeve / non-skin boundary
+        when the color-based pass walks pixels inside this capsule.
+
+    Returns an ``(out_h, out_w)`` uint8 mask (0 or 255) at downscaled
+    BG resolution.  All coordinates are first divided by ``downscale``.
+    """
+    if kpts_per_frame is None or frames_sampled.size == 0:
+        return np.zeros((out_h, out_w), dtype=np.uint8)
+    wrists, mcp5s, mcp17s, centroids = [], [], [], []
+    for fi in frames_sampled:
+        if fi >= kpts_per_frame.shape[0]:
+            continue
+        k = kpts_per_frame[fi]
+        if not np.isnan(k[0]).any():
+            wrists.append(k[0])
+        if not np.isnan(k[5]).any():
+            mcp5s.append(k[5])
+        if not np.isnan(k[17]).any():
+            mcp17s.append(k[17])
+        mcps = [k[j] for j in (5, 9, 13, 17) if not np.isnan(k[j]).any()]
+        if mcps:
+            centroids.append(np.mean(mcps, axis=0))
+    if not wrists or not centroids:
+        return np.zeros((out_h, out_w), dtype=np.uint8)
+
+    ds = max(1, int(downscale))
+    wrist_med = np.median(wrists, axis=0) / ds
+    centroid_med = np.median(centroids, axis=0) / ds
+    forearm_dir = wrist_med - centroid_med
+    norm = float(np.linalg.norm(forearm_dir))
+    if norm < 1e-6:
+        return np.zeros((out_h, out_w), dtype=np.uint8)
+    forearm_dir /= norm
+
+    if mcp5s and mcp17s:
+        m5 = np.median(mcp5s, axis=0) / ds
+        m17 = np.median(mcp17s, axis=0) / ds
+        width = max(int(round(np.linalg.norm(m5 - m17) * 1.2)),
+                     fallback_width_px // ds)
+    else:
+        width = max(8, fallback_width_px // ds)
+
+    length_down = max(2, max_length_px // ds)
+    end = wrist_med + forearm_dir * length_down
+
+    cylinder = np.zeros((out_h, out_w), dtype=np.uint8)
+    cv2.line(
+        cylinder,
+        (int(round(float(wrist_med[0]))), int(round(float(wrist_med[1])))),
+        (int(round(float(end[0]))),         int(round(float(end[1])))),
+        color=255, thickness=int(max(2, width)), lineType=cv2.LINE_AA,
+    )
+    return cylinder
+
+
 def _refine_bg_color_based(
     bg_initial: np.ndarray,
     stack: np.ndarray,
+    region_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Second BG-median pass that fixes pixels which came out
     flesh-coloured in the first pass.
@@ -451,6 +527,11 @@ def _refine_bg_color_based(
     """
     bg_ycc = cv2.cvtColor(bg_initial, cv2.COLOR_BGR2YCrCb)
     flesh_in_bg = _is_skin_ycc(bg_ycc)
+    if region_mask is not None:
+        # Restrict refinement to the supplied region (e.g. a forearm
+        # cylinder).  Without this, distant skin-toned objects in the
+        # scene get rewritten too -- way too aggressive.
+        flesh_in_bg = flesh_in_bg & (region_mask > 0)
     if not flesh_in_bg.any():
         return bg_initial.copy(), np.zeros(bg_initial.shape[:2], dtype=bool)
 
@@ -998,16 +1079,22 @@ def compute_stable(
         bg_R = np.zeros_like(bg_L)
         mad_R = np.zeros_like(mad_L)
 
-    # ── Second BG pass: colour-based refinement of flesh pixels ──────
-    # Any pixel that came out skin-coloured in the first median (palm
-    # interior, wrist, thumb CMC, and -- crucially -- forearm pixels
-    # that drift outside the MP gate) gets re-evaluated.  Per pixel:
-    # if there's a non-skin colour anywhere in its sample history, we
-    # use the median of those non-skin samples; otherwise the pixel
-    # becomes a green sentinel that the outline path force-includes.
-    bg_L, always_hand_color_L_down = _refine_bg_color_based(bg_L, stack_L)
+    # ── Second BG pass: colour-based refinement, forearm-only ────────
+    # Walk only flesh-coloured pixels inside a forearm cylinder
+    # extending from the wrist along (wrist - MCP centroid).  Outside
+    # the cylinder we don't search for skin colours at all (catching
+    # arbitrary scene pixels was way too aggressive).  The cylinder's
+    # natural sleeve / non-skin boundary inside it determines how far
+    # the arm refinement actually reaches.
+    cyl_L = _build_forearm_cylinder(mp_kpts_ref_L, frames_sampled,
+                                       out_w, out_h, downscale)
+    bg_L, always_hand_color_L_down = _refine_bg_color_based(
+        bg_L, stack_L, region_mask=cyl_L)
     if is_stereo:
-        bg_R, always_hand_color_R_down = _refine_bg_color_based(bg_R, stack_R)
+        cyl_R = _build_forearm_cylinder(mp_kpts_ref_R, frames_sampled,
+                                           out_w, out_h, downscale)
+        bg_R, always_hand_color_R_down = _refine_bg_color_based(
+            bg_R, stack_R, region_mask=cyl_R)
     else:
         always_hand_color_R_down = None
 
@@ -1417,11 +1504,10 @@ def compute_outline_frame(
         # Detect bright-green sentinel pixels in the BG.  |frame - green|
         # is huge for any skin-coloured hand pixel and would saturate
         # the JET heatmap, making nearby moderately-bright hand pixels
-        # look dim by comparison.  Replace their motion with the median
-        # motion of nearby non-green gate pixels so they read as
-        # "normal hand region" in the heatmap instead of a max-bright
-        # spike.  The always-hand OR step in #4 still force-includes
-        # them in the outline.
+        # look dim by comparison.  Replace their motion with the 80th
+        # percentile of nearby non-green gate motion so they read as
+        # "bright but not max" -- in the orange/red band of JET, on the
+        # high end of the rest of the heatmap but not pinned to red.
         green_mask = ((bg_full[..., 0] < 50)
                        & (bg_full[..., 1] > 200)
                        & (bg_full[..., 2] < 50)
@@ -1429,8 +1515,8 @@ def compute_outline_frame(
         if green_mask.any():
             non_green_gate = (gate > 0) & ~green_mask
             if non_green_gate.any():
-                local_median = int(np.median(motion[non_green_gate]))
-                motion[green_mask] = local_median
+                local_p80 = int(np.percentile(motion[non_green_gate], 80))
+                motion[green_mask] = local_p80
         # Optional: foreground heatmap PNG cropped to the gate bbox.
         # Sent back so the UI can paint a JET-coloured fill over the
         # gate region.  Now uniformly visible thanks to the green
