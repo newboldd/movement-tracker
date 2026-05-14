@@ -942,20 +942,15 @@ def compute_stable(
     out_dir = _preproc_dir(subject_name, stem)
     out_dir.mkdir(parents=True, exist_ok=True)
     stable_path = _stable_path(subject_name, stem)
+    # Bake into a .tmp sibling and os.replace() it into place only on
+    # a clean finish.  A cancelled / failed run then leaves the
+    # previous good stable.mp4 (and its derivatives) completely
+    # untouched -- the job is a no-op rather than a destructive one.
+    stable_tmp = stable_path.with_name(stable_path.name + ".tmp")
     _kill_orphan_ffmpegs_for_dir(out_dir)
 
     stable_proc = _open_ffmpeg_pipe(
-        str(stable_path), full_w_total, h_full, fps, "bgr24")
-    # background.npz produced by the OLD compute_stable is also stale
-    # the moment stable.mp4 changes -- the median / always-hand maps
-    # were computed against the previous warp.  Unlink anything that
-    # would let the UI keep showing the old overlay.
-    for p in (_background_path(subject_name, stem),
-              _fg_path(subject_name, stem),
-              _outline_path(subject_name, stem),
-              _hand_path(subject_name, stem)):
-        try: p.unlink()
-        except FileNotFoundError: pass
+        str(stable_tmp), full_w_total, h_full, fps, "bgr24")
 
     # Fresh capture for the sequential bake read -- no seeking.
     cap = cv2.VideoCapture(video_path)
@@ -964,6 +959,7 @@ def compute_stable(
 
     frames_written = 0
     interrupted = False
+    ok_to_promote = False
     try:
         for i in range(n_frames):
             if cancel_event is not None and cancel_event.is_set():
@@ -1005,6 +1001,11 @@ def compute_stable(
                     progress_callback(100.0 * (i + 1) / max(1, n_frames))
                 except Exception:
                     pass
+        # Loop finished or hit a clean source-EOF break -- the .tmp is
+        # a complete bake and may be promoted.  An exception (incl.
+        # the cancel InterruptedError) skips this and leaves
+        # ok_to_promote False.
+        ok_to_promote = True
     finally:
         cap.release()
         try: stable_proc.stdin.close()
@@ -1015,15 +1016,28 @@ def compute_stable(
             if rc != 0:
                 logger.warning(f"ffmpeg (stable) exited {rc}: "
                                 f"{stderr_bytes.decode('utf-8', errors='replace')[:600]}")
+                ok_to_promote = False
         except Exception as e:
             logger.warning(f"ffmpeg (stable) finalise error: {e}")
+            ok_to_promote = False
         finally:
             _retire_ffmpeg(stable_proc)
-        # Cancelled mid-bake -> stable.mp4 is a partial file.  Unlink it
-        # so the UI shows "not stabilized" rather than enabling
-        # Background against a truncated video.
-        if interrupted:
-            try: stable_path.unlink()
+
+        if ok_to_promote and not interrupted:
+            # Clean finish: atomically swap the new bake into place,
+            # then invalidate the now-stale derivatives (background.npz
+            # + fg/outline/hand were computed against the OLD warp).
+            os.replace(str(stable_tmp), str(stable_path))
+            for p in (_background_path(subject_name, stem),
+                      _fg_path(subject_name, stem),
+                      _outline_path(subject_name, stem),
+                      _hand_path(subject_name, stem)):
+                try: p.unlink()
+                except FileNotFoundError: pass
+        else:
+            # Cancelled / failed -> discard the partial .tmp; the
+            # previous stable.mp4 + derivatives are left intact.
+            try: stable_tmp.unlink()
             except FileNotFoundError: pass
 
     if progress_callback is not None:
@@ -1386,13 +1400,28 @@ def compute_background(
         save_kwargs["always_hand_L_down"] = always_hand_L_down
     if always_hand_R_down is not None:
         save_kwargs["always_hand_R_down"] = always_hand_R_down
-    np.savez_compressed(str(out_path), **save_kwargs)
 
-    cv2.imwrite(str(out_dir / "background_OS.png"), bg_L)
-    cv2.imwrite(str(out_dir / "mad_OS.png"), mad_L)
+    # Write every artifact to a temp sibling, then os.replace() it
+    # into place.  A crash mid-write can't corrupt the previous good
+    # background.npz / PNGs -- the swap is atomic.  np.savez_compressed
+    # gets a file handle (so it doesn't append a second .npz); imwrite
+    # gets a *.tmp.png name so it still infers the PNG encoder.
+    tmp_npz = out_dir / "background.npz.tmp"
+    with open(tmp_npz, "wb") as _fh:
+        np.savez_compressed(_fh, **save_kwargs)
+    os.replace(str(tmp_npz), str(out_path))
+
+    def _atomic_png(img, name):
+        final = out_dir / name
+        tmp = out_dir / (final.stem + ".tmp" + final.suffix)
+        cv2.imwrite(str(tmp), img)
+        os.replace(str(tmp), str(final))
+
+    _atomic_png(bg_L,  "background_OS.png")
+    _atomic_png(mad_L, "mad_OS.png")
     if is_stereo:
-        cv2.imwrite(str(out_dir / "background_OD.png"), bg_R)
-        cv2.imwrite(str(out_dir / "mad_OD.png"), mad_R)
+        _atomic_png(bg_R,  "background_OD.png")
+        _atomic_png(mad_R, "mad_OD.png")
 
     if progress_callback is not None:
         try: progress_callback(100.0)
