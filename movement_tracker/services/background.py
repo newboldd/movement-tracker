@@ -675,6 +675,10 @@ def _refine_bg_color_based(
     background to compare against) the pixel is painted the green
     sentinel and recorded as always-hand.
 
+    Only the largest connected always-hand blob is kept -- free-
+    floating green specks elsewhere revert to their raw-median
+    colour.
+
     ``dark_boost`` widens the skin window for darker pixels (see
     :func:`_is_skin_ycc`).
 
@@ -765,6 +769,18 @@ def _refine_bg_color_based(
             gys = rec_ys[greened]; gxs = rec_xs[greened]
             refined[gys, gxs] = green
             always_hand[gys, gxs] = True
+
+            # Keep only the main always-hand blob: free-floating green
+            # specks elsewhere are spurious, so revert them to their
+            # raw-median colour and drop them from always-hand.
+            n_lbl, lbl, stats, _ = cv2.connectedComponentsWithStats(
+                always_hand.astype(np.uint8), connectivity=8)
+            if n_lbl > 2:        # background + more than one blob
+                largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+                speck = always_hand & (lbl != largest)
+                if speck.any():
+                    refined[speck] = bg_initial[speck]
+                    always_hand[speck] = False
 
     return refined, always_hand
 
