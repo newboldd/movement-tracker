@@ -70,6 +70,8 @@
     let showOutline = true;     // checkbox: show live-fetched hand boundary
     let showOtherBoundary = false;  // checkbox: the other camera's boundary,
                                     // translated to align with this one
+    let showRefinedBoundary = false; // checkbox: this camera's boundary with
+                                     // its red runs patched from the other
     let showFgFill = false;     // checkbox: also fetch + paint JET heatmap
     const fgFillOpacity = 1.0;  // JET foreground fill always fully opaque
     // Transient previews: shown only while the relevant slider is being
@@ -145,6 +147,11 @@
     let _otherAlign = null;       // {dx, dy} or null
     let _otherAlignData = null;   // the outlineData it was computed for
     let _otherAlignSide = null;
+    // Cached refined outline: this camera's boundary with its red runs
+    // patched from the other camera's original.  {pts, segColors}.
+    let _refinedOutline = null;
+    let _refinedOutlineData = null;
+    let _refinedOutlineSide = null;
     // Live outline state -- replaces the old fg.mp4 / outline.mp4 bake.
     // Server returns a per-frame closed-polygon contour for the
     // current dilation; we fetch it whenever the frame or slider
@@ -485,8 +492,11 @@
         $('cbShowFgFill').disabled = !bgReady;
         if ($('cbShowOtherBoundary'))
             $('cbShowOtherBoundary').disabled = !bgReady || !b.is_stereo;
+        if ($('cbShowRefinedBoundary'))
+            $('cbShowRefinedBoundary').disabled = !bgReady || !b.is_stereo;
         if ($('runOutlinesBtn')) $('runOutlinesBtn').disabled = !bgReady;
-        if (bgReady && (showOutline || showFgFill || showOtherBoundary))
+        if (bgReady && (showOutline || showFgFill || showOtherBoundary
+                        || showRefinedBoundary))
             scheduleOutlineFetch();
     }
 
@@ -539,9 +549,11 @@
         const t = Date.now();   // bust HTTP cache after recompute
         $('ovBg').disabled = true;
         bgFullOS = bgFullOD = refinedFullOS = refinedFullOD = null;
-        // background changed -> drop cached edge bands + alignment
+        // background changed -> drop cached edge bands + alignment +
+        // refined outline
         _bgEdge.OS = _bgEdge.OD = null;
         _otherAlign = null; _otherAlignData = null;
+        _refinedOutline = null; _refinedOutlineData = null;
         // On load: upscale the (downscaled) PNG to full-res for the
         // overlay coord space, then re-render -- the canvas 'bg'
         // overlay draws from the full-res canvas, so if the user (or a
@@ -710,7 +722,8 @@
     async function fetchOutline() {
         if (subjectId == null || currentTrialIdx < 0) return;
         if (!backgroundData || !backgroundData.stable_mp4_exists) return;
-        if (!showOutline && !showFgFill && !showOtherBoundary) return;
+        if (!showOutline && !showFgFill && !showOtherBoundary
+            && !showRefinedBoundary) return;
         const dilSlider = $('fgDilateSlider');
         const dilationPx = dilSlider ? parseInt(dilSlider.value, 10) : 14;
         const openSlider = $('fgOpenSlider');
@@ -1216,6 +1229,200 @@
         return [sx / n, sy / n];
     }
 
+    /** (Re)compute the cached other-camera alignment translation if the
+     *  outlineData / side it was computed for has changed. */
+    function _ensureOtherAlign(curPts, otherPts, curSide, otherSide) {
+        if (_otherAlign === null
+            || _otherAlignData !== outlineData
+            || _otherAlignSide !== curSide) {
+            _otherAlign = _computeOtherAlign(curPts, otherPts, curSide, otherSide);
+            _otherAlignData = outlineData;
+            _otherAlignSide = curSide;
+        }
+        return _otherAlign;
+    }
+
+    /**
+     * Refined boundary for the current camera: its own outline with
+     * every red run (a side running along a background edge -- locally
+     * unreliable) patched from the OTHER camera's original outline,
+     * which is reliable exactly there because background edges are
+     * camera-specific.
+     *
+     * Per red run:
+     *   - find an anchor on each side -- the junction yellow vertex, or
+     *     hop outward up to 3 vertices to one that lands within
+     *     _REFINE_ANCHOR_THRESH px of the aligned other outline (any
+     *     yellow vertices skipped to reach it are absorbed/rewritten);
+     *     stop hopping at another red run.
+     *   - splice in the corresponding arc of the (translated) other
+     *     outline between the two anchors, rubber-banded so its ends
+     *     land exactly on the anchors.
+     *   - bail (keep the original red) if no anchor is found within 3
+     *     hops, or if that other-camera arc is itself mostly red.
+     *
+     * Returns {pts: [[x,y]...], segColors: ['own'|'borrowed'|
+     * 'unresolved'...]} -- a closed polygon + per-segment provenance.
+     */
+    function _refineOutline(curPoly, curSide, otherPoly, otherSide, align) {
+        const THRESH = 6;          // "very close to the green line", px
+        const MAXHOP = 3;          // max yellow vertices to hop for an anchor
+        const SP = 3;              // other-outline densification, px
+        const GREEN_RED_FRAC = 0.5; // bail if the borrowed arc is this red
+        const N = curPoly.length;
+        const own = () => ({ pts: curPoly, segColors: curPoly.map(() => 'own') });
+        if (N < 3) return own();
+        _bgEdgeBand(curSide); _bgEdgeBand(otherSide);
+        // Classify this camera's segments.
+        const curRed = [];
+        for (let i = 0; i < N; i++) {
+            const a = curPoly[i], b = curPoly[(i + 1) % N];
+            curRed.push(_segOnBgEdge(a[0], a[1], b[0], b[1], curSide));
+        }
+        if (!curRed.some(Boolean)) return own();
+        const M = otherPoly.length;
+        if (M < 3 || curRed.every(Boolean)) {
+            return { pts: curPoly,
+                     segColors: curRed.map(r => r ? 'unresolved' : 'own') };
+        }
+        // Densify the translated other outline + per-point redness.
+        const dense = [], denseRed = [];
+        for (let j = 0; j < M; j++) {
+            const a = otherPoly[j], b = otherPoly[(j + 1) % M];
+            const red = _segOnBgEdge(a[0], a[1], b[0], b[1], otherSide);
+            const dx = b[0] - a[0], dy = b[1] - a[1];
+            const steps = Math.max(1, Math.round(Math.hypot(dx, dy) / SP));
+            for (let k = 0; k < steps; k++) {
+                const t = k / steps;
+                dense.push([a[0] + dx * t + align.dx, a[1] + dy * t + align.dy]);
+                denseRed.push(red);
+            }
+        }
+        const D = dense.length;
+        const nearest = (p) => {
+            let bi = 0, bd = Infinity;
+            for (let k = 0; k < D; k++) {
+                const ex = dense[k][0] - p[0], ey = dense[k][1] - p[1];
+                const d2 = ex * ex + ey * ey;
+                if (d2 < bd) { bd = d2; bi = k; }
+            }
+            return { idx: bi, dist: Math.sqrt(bd) };
+        };
+        const closeIdx = curPoly.map(p => {
+            const nr = nearest(p);
+            return nr.dist <= THRESH ? nr.idx : -1;
+        });
+        // Red runs: maximal contiguous true spans of curRed, scanned
+        // from a yellow segment so none wraps.
+        let s0 = -1;
+        for (let i = 0; i < N; i++) if (!curRed[i]) { s0 = i; break; }
+        const runs = [];
+        let runStart = -1;
+        for (let c = 0; c < N; c++) {
+            const i = (s0 + c) % N;
+            if (curRed[i]) {
+                if (runStart < 0) runStart = i;
+            } else if (runStart >= 0) {
+                runs.push([runStart, (i - 1 + N) % N]);  // seg span
+                runStart = -1;
+            }
+        }
+        // A run that reaches the end of the scan closes at the segment
+        // just before s0 (which is yellow).
+        if (runStart >= 0) runs.push([runStart, (s0 - 1 + N) % N]);
+        // Anchor search on one side of a run.  ``dir`` is -1 (left of
+        // the run) or +1 (right).  ``v0`` is the junction vertex.
+        const findAnchor = (v0, dir) => {
+            let v = v0;
+            for (let hop = 0; hop <= MAXHOP; hop++) {
+                if (closeIdx[v] >= 0) return v;
+                // segment we'd cross to hop one more vertex outward
+                const seg = dir < 0 ? (v - 1 + N) % N : v;
+                if (curRed[seg]) return -1;          // hit another red run
+                v = (v + dir + N) % N;
+            }
+            return -1;
+        };
+        // Build a patch per run; skip on conflict / bail.
+        const consumed = new Array(N).fill(false);
+        const jumpTo = {};                 // aLeft vertex -> patch
+        for (const [segS, segE] of runs) {
+            const lj = segS;               // left junction vertex
+            const rj = (segE + 1) % N;     // right junction vertex
+            const aL = findAnchor(lj, -1);
+            const aR = findAnchor(rj, +1);
+            if (aL < 0 || aR < 0) continue;          // unanchorable -> bail
+            // Vertices strictly between aL and aR (through the run).
+            const interior = [];
+            for (let v = (aL + 1) % N; v !== aR; v = (v + 1) % N)
+                interior.push(v);
+            if (interior.some(v => consumed[v]) || jumpTo[aL]) continue; // overlap
+            // Corresponding arc of the dense other outline.
+            const gL = closeIdx[aL], gR = closeIdx[aR];
+            const fwd = [], bwd = [];
+            for (let k = gL; ; k = (k + 1) % D) { fwd.push(k); if (k === gR) break; }
+            for (let k = gL; ; k = (k - 1 + D) % D) { bwd.push(k); if (k === gR) break; }
+            // Pick the arc whose midpoint is nearer the run midpoint.
+            const runMid = curPoly[(segS + Math.floor((((segE + 1) % N) - segS + N) % N
+                                                       / 2)) % N];
+            const arcMidD = (arc) => {
+                const m = dense[arc[Math.floor(arc.length / 2)]];
+                return (m[0] - runMid[0]) ** 2 + (m[1] - runMid[1]) ** 2;
+            };
+            let arc = arcMidD(fwd) <= arcMidD(bwd) ? fwd : bwd;
+            if (arc.length < 2) continue;
+            // Bail if the borrowed arc is itself mostly red.
+            let redN = 0;
+            for (const k of arc) if (denseRed[k]) redN++;
+            if (redN / arc.length > GREEN_RED_FRAC) continue;
+            // Rubber-band: snap arc ends onto the anchors, distributing
+            // the correction linearly along the arc.
+            const A = curPoly[aL], B = curPoly[aR];
+            const e0x = A[0] - dense[arc[0]][0], e0y = A[1] - dense[arc[0]][1];
+            const e1x = B[0] - dense[arc[arc.length - 1]][0];
+            const e1y = B[1] - dense[arc[arc.length - 1]][1];
+            const patchPts = [], patchColors = [];
+            for (let k = 0; k < arc.length; k++) {
+                const f = k / (arc.length - 1);
+                const d = dense[arc[k]];
+                patchPts.push([d[0] + e0x * (1 - f) + e1x * f,
+                               d[1] + e0y * (1 - f) + e1y * f]);
+                if (k > 0) {
+                    patchColors.push((denseRed[arc[k - 1]] || denseRed[arc[k]])
+                                     ? 'unresolved' : 'borrowed');
+                }
+            }
+            jumpTo[aL] = { aRight: aR, patchPts, patchColors };
+            for (const v of interior) consumed[v] = true;
+        }
+        if (Object.keys(jumpTo).length === 0) {
+            return { pts: curPoly,
+                     segColors: curRed.map(r => r ? 'unresolved' : 'own') };
+        }
+        // Assemble the refined closed polygon by walking the ring.
+        let v0 = -1;
+        for (let v = 0; v < N; v++) if (!consumed[v]) { v0 = v; break; }
+        if (v0 < 0) return own();
+        const outPts = [], segColors = [];
+        let i = v0;
+        do {
+            outPts.push(curPoly[i]);
+            const J = jumpTo[i];
+            if (J) {
+                for (let k = 1; k < J.patchPts.length - 1; k++) {
+                    segColors.push(J.patchColors[k - 1]);
+                    outPts.push(J.patchPts[k]);
+                }
+                segColors.push(J.patchColors[J.patchColors.length - 1]);
+                i = J.aRight;                // curPoly[aRight] emitted next loop
+            } else {
+                segColors.push(curRed[i] ? 'unresolved' : 'own');
+                i = (i + 1) % N;
+            }
+        } while (i !== v0);
+        return { pts: outPts, segColors };
+    }
+
     function showTrajectoryStats() {
         if (!trajectory) return;
         const njerk = trajectory.jerk_flag.filter(Boolean).length;
@@ -1296,7 +1503,7 @@
         if (!trialMeta) return Promise.resolve();
         $('frameDisplay').textContent = `Frame: ${frameNum} / ${nFrames}`;
         // Hand-boundary / fg-heatmap refetch -- debounced so scrubbing isn't laggy.
-        if (showOutline || showFgFill || showOtherBoundary) scheduleOutlineFetch();
+        if (showOutline || showFgFill || showOtherBoundary || showRefinedBoundary) scheduleOutlineFetch();
         _refreshActiveVideo();
         const companions = _companionVideos();
         if (!videoEl || videoEl.readyState < 1) return Promise.resolve();
@@ -1515,16 +1722,16 @@
         }
 
         // Stroke a closed polygon, batching consecutive same-colour
-        // sides into one path.  ``segColor(a, b)`` -> CSS colour for
-        // the side a->b; ``ox``/``oy`` translate the drawn path (used
-        // for the other camera's aligned boundary).
+        // sides into one path.  ``segColor(a, b, i)`` -> CSS colour for
+        // the side a->b (index i); ``ox``/``oy`` translate the drawn
+        // path (used for the other camera's aligned boundary).
         function _strokePoly(pts, segColor, ox, oy) {
             ox = ox || 0; oy = oy || 0;
             const N = pts.length;
             let curColor = null;
             for (let i = 0; i < N; i++) {
                 const a = pts[i], b = pts[(i + 1) % N];
-                const col = segColor(a, b);
+                const col = segColor(a, b, i);
                 if (col !== curColor) {
                     if (curColor !== null) ctx.stroke();
                     ctx.strokeStyle = col;
@@ -1566,11 +1773,10 @@
             }
         }
 
-        // Other camera's boundary, translated to optimally align with
-        // this camera's.  Drawn green, still red where a side runs
-        // along the OTHER camera's background edges (computed in the
-        // other camera's own coords, then the whole path is shifted).
-        if (showOtherBoundary && outlineData
+        // Cross-camera overlays: the other camera's aligned boundary,
+        // and/or this camera's red runs patched from it.  Both need the
+        // two cameras' polygons + BG-edge bands + the alignment.
+        if ((showOtherBoundary || showRefinedBoundary) && outlineData
             && outlineData.is_stereo
             && outlineData.frame === currentFrame) {
             const curSide = (currentSide === 'OD') ? 'OD' : 'OS';
@@ -1583,24 +1789,38 @@
                 // red-aware alignment.
                 _bgEdgeBand(curSide);
                 _bgEdgeBand(otherSide);
-                // Recompute the alignment only when the data / side
-                // changed (a slider move re-fetches outlineData).
-                if (_otherAlign === null
-                    || _otherAlignData !== outlineData
-                    || _otherAlignSide !== curSide) {
-                    _otherAlign = _computeOtherAlign(
-                        curPts, otherPts, curSide, otherSide);
-                    _otherAlignData = outlineData;
-                    _otherAlignSide = curSide;
-                }
-                const { dx, dy } = _otherAlign;
+                const align = _ensureOtherAlign(
+                    curPts, otherPts, curSide, otherSide);
                 ctx.save();
                 ctx.lineJoin = 'round';
                 ctx.lineCap = 'round';
                 ctx.lineWidth = 2 / Math.max(0.01, scale * bps);
-                _strokePoly(otherPts, (a, b) =>
-                    _segOnBgEdge(a[0], a[1], b[0], b[1], otherSide)
-                        ? RED : GREEN, dx, dy);
+                // Other camera's boundary -- green, red where it runs
+                // along the OTHER camera's BG edges (its own coords),
+                // the whole path shifted by the alignment.
+                if (showOtherBoundary) {
+                    _strokePoly(otherPts, (a, b) =>
+                        _segOnBgEdge(a[0], a[1], b[0], b[1], otherSide)
+                            ? RED : GREEN, align.dx, align.dy);
+                }
+                // Refined boundary -- this camera's outline with red
+                // runs patched from the other.  Provenance colours:
+                // yellow = own, green = borrowed, red = unresolved.
+                if (showRefinedBoundary) {
+                    if (_refinedOutline === null
+                        || _refinedOutlineData !== outlineData
+                        || _refinedOutlineSide !== curSide) {
+                        _refinedOutline = _refineOutline(
+                            curPts, curSide, otherPts, otherSide, align);
+                        _refinedOutlineData = outlineData;
+                        _refinedOutlineSide = curSide;
+                    }
+                    const ref = _refinedOutline;
+                    const COL = { own: YELLOW, borrowed: GREEN,
+                                  unresolved: RED };
+                    _strokePoly(ref.pts,
+                        (a, b, i) => COL[ref.segColors[i]] || YELLOW);
+                }
                 ctx.restore();
             }
         }
@@ -2227,7 +2447,7 @@
                 // dilated-skeleton preview tracks the slider.
                 try { render(); } catch (_e) {}
                 // Debounced backend fetch for the new outline / heatmap.
-                if (showOutline || showFgFill || showOtherBoundary) scheduleOutlineFetch();
+                if (showOutline || showFgFill || showOtherBoundary || showRefinedBoundary) scheduleOutlineFetch();
             });
         }
         // Background-edge retraction sliders + strand-clip slider: all
@@ -2250,7 +2470,7 @@
             sl.addEventListener('input', () => {
                 vl.textContent = fmt(sl.value);
                 if (flashEdge) _flashBgEdge();
-                if (showOutline || showFgFill || showOtherBoundary) scheduleOutlineFetch();
+                if (showOutline || showFgFill || showOtherBoundary || showRefinedBoundary) scheduleOutlineFetch();
             });
         }
         // Overlay radio group → mutually exclusive: live, stable.mp4.
@@ -2302,7 +2522,7 @@
             if (showOutline) {
                 fetchOutline();
             } else {
-                if (!showFgFill && !showOtherBoundary) outlineData = null;
+                if (!showFgFill && !showOtherBoundary && !showRefinedBoundary) outlineData = null;
                 render();
             }
         });
@@ -2317,7 +2537,22 @@
                     if (outlineData && outlineData.frame === currentFrame) render();
                     else fetchOutline();
                 } else {
-                    if (!showFgFill && !showOutline) outlineData = null;
+                    if (!showFgFill && !showOutline && !showRefinedBoundary) outlineData = null;
+                    render();
+                }
+            });
+        }
+        // Refined-boundary checkbox: same data needs as the other-camera
+        // overlay (both cameras' polygons).
+        if ($('cbShowRefinedBoundary')) {
+            $('cbShowRefinedBoundary').addEventListener('change', e => {
+                showRefinedBoundary = e.target.checked;
+                if (showRefinedBoundary) {
+                    _otherAlign = null; _refinedOutline = null;
+                    if (outlineData && outlineData.frame === currentFrame) render();
+                    else fetchOutline();
+                } else {
+                    if (!showFgFill && !showOutline && !showOtherBoundary) outlineData = null;
                     render();
                 }
             });

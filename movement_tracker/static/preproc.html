@@ -368,6 +368,10 @@
                            title="Overlays the other camera's hand boundary (green), translated to optimally align with this camera's.  Red marks sides on the other camera's background edges; those red sides are ignored when computing the alignment.">
                         <input type="checkbox" id="cbShowOtherBoundary" disabled> Show other camera's boundary
                     </label>
+                    <label class="pp-viz-row" style="display:flex;align-items:center;gap:6px;"
+                           title="This camera's boundary with every red run (a side running along a background edge) patched from the other camera's outline, which is reliable there since background edges are camera-specific.  Yellow = own, green = borrowed from the other camera, red = unresolved (both cameras edge-blocked there).">
+                        <input type="checkbox" id="cbShowRefinedBoundary" disabled> Show refined boundary
+                    </label>
                     <label class="pp-viz-row" style="display:flex;align-items:center;gap:6px;">
                         <input type="checkbox" id="cbShowFgFill" disabled> Show foreground fill (JET heatmap)
                     </label>
@@ -425,6 +429,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/preproc.js?v=58"></script>
+    <script src="/static/js/preproc.js?v=59"></script>
 </body>
 </html>
