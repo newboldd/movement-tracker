@@ -1314,7 +1314,7 @@ const manoViewer = (() => {
         $('showMP2D').addEventListener('change', e => { showMP2D = e.target.checked; updateLayerFlags(); });
         $('showStereo2D')?.addEventListener('change', e => {
             showStereo2D = e.target.checked;
-            if (!showStereo2D) stereoSelectedJoint = null;
+            if (!showStereo2D && !showStereoOutline2D) stereoSelectedJoint = null;
             const wrap = $('stereoConfWrap');
             if (wrap) wrap.style.display = showStereo2D ? 'flex' : 'none';
             updateLayerFlags();
@@ -1327,6 +1327,7 @@ const manoViewer = (() => {
         });
         $('showStereoOutline2D')?.addEventListener('change', e => {
             showStereoOutline2D = e.target.checked;
+            if (!showStereoOutline2D && !showStereo2D) stereoSelectedJoint = null;
             updateLayerFlags();
         });
         $('showOutline2D')?.addEventListener('change', e => {
@@ -3618,11 +3619,36 @@ const manoViewer = (() => {
             }
         }
 
-        // Stereo (outline) -- same display as Stereo but driven by the
-        // outline-based alignment + light-purple crosses (#ce93d8).
+        // Stereo (outline) -- same display as Stereo but driven by
+        // the outline-based alignment + light-purple crosses
+        // (#ce93d8).  No hand-wide bbox -- the whole-hand alignment
+        // uses the ENTIRE outline, not a cropped patch.  Per-joint
+        // dashed bbox on click, same as Stereo.
         if (showStereoOutline2D && trialData?.has_stereo_outline) {
             const stereoKp = isLeft ? trialData.stereo_outline_tracked_L
                                     : trialData.stereo_outline_tracked_R;
+            const mpHere = isLeft ? trialData.mp_tracked_L
+                                  : trialData.mp_tracked_R;
+            // Per-joint bbox for selected joint (dashed).
+            if (stereoSelectedJoint != null && mpHere && mpHere[fn]) {
+                const pt = mpHere[fn][stereoSelectedJoint];
+                if (pt) {
+                    const perJoint = trialData.stereo_crop_halves_per_joint;
+                    const ch = (Array.isArray(perJoint) && perJoint[stereoSelectedJoint] != null)
+                        ? perJoint[stereoSelectedJoint]
+                        : (trialData.stereo_crop_half != null ? trialData.stereo_crop_half : 40);
+                    const cx = pt[0] * pixelScale;
+                    const cy = pt[1] * pixelScale;
+                    const w = (2 * ch + 1) * pixelScale;
+                    ctx.save();
+                    ctx.strokeStyle = '#ce93d8';
+                    ctx.lineWidth = 1.2;
+                    ctx.setLineDash([4, 3]);
+                    ctx.strokeRect(cx - w / 2, cy - w / 2, w, w);
+                    ctx.setLineDash([]);
+                    ctx.restore();
+                }
+            }
             if (stereoKp && stereoKp[fn]) {
                 const respFrame = trialData.stereo_outline_response?.[fn];
                 for (let j = 0; j < 21; j++) {
@@ -5309,13 +5335,12 @@ const manoViewer = (() => {
             // Pink crosses sit on the video canvas below this overlay,
             // so we have to do the hit-test HERE rather than on the
             // videoCanvas (whose click handler the overlay blocks).
-            if (showStereo2D && trialData?.has_stereo) {
+            if ((showStereo2D && trialData?.has_stereo)
+                || (showStereoOutline2D && trialData?.has_stereo_outline)) {
                 const cRect = canvas.getBoundingClientRect();
                 const cmx = (e.clientX - cRect.left - offsetX) / scale;
                 const cmy = (e.clientY - cRect.top  - offsetY) / scale;
                 const _isLeft = currentSide === cameraNames[0];
-                const sArr = _isLeft ? trialData.stereo_tracked_L
-                                      : trialData.stereo_tracked_R;
                 const _midline = vidW / 2;
                 const _pixelScale = canvas.width / (cameraMode === 'stereo'
                     ? (_isLeft ? _midline : vidW - _midline)
@@ -5323,8 +5348,19 @@ const manoViewer = (() => {
                 const HIT_R = 12 / _pixelScale;
                 const HIT_R2 = HIT_R * HIT_R;
                 const fn = currentFrame;
-                if (sArr?.[fn]) {
-                    let sBest = null;
+                // Search both variants' crosses; nearer one wins.
+                const candidates = [];
+                if (showStereo2D && trialData?.has_stereo) {
+                    candidates.push(_isLeft ? trialData.stereo_tracked_L
+                                            : trialData.stereo_tracked_R);
+                }
+                if (showStereoOutline2D && trialData?.has_stereo_outline) {
+                    candidates.push(_isLeft ? trialData.stereo_outline_tracked_L
+                                            : trialData.stereo_outline_tracked_R);
+                }
+                let sBest = null;
+                for (const sArr of candidates) {
+                    if (!sArr?.[fn]) continue;
                     for (let j = 0; j < 21; j++) {
                         if (!isJointVisible(j) || !sArr[fn][j]) continue;
                         const jx = sArr[fn][j][0], jy = sArr[fn][j][1];
@@ -5334,11 +5370,11 @@ const manoViewer = (() => {
                             sBest = { j, d2 };
                         }
                     }
-                    if (sBest) {
-                        stereoSelectedJoint = (stereoSelectedJoint === sBest.j) ? null : sBest.j;
-                        render();
-                        return;
-                    }
+                }
+                if (sBest) {
+                    stereoSelectedJoint = (stereoSelectedJoint === sBest.j) ? null : sBest.j;
+                    render();
+                    return;
                 }
             }
 

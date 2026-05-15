@@ -1762,22 +1762,27 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
 
         sa = (load_stereo_align(subject_name, _stereo_trial_idx)
               if _stereo_trial_idx is not None else None)
-        if sa is not None:
-            _emit_stereo(sa, "stereo_tracked_L", "stereo_tracked_R",
-                         "stereo_response", "has_stereo")
-            result["stereo_crop_half"] = int(sa.get("crop_half", _DEFAULT_CROP_HALF))
-            result["stereo_hand_crop_half"] = int(sa.get("hand_crop_half", _HAND_CROP_HALF))
-            result["stereo_crop_halves_per_joint"] = [
-                int(x) for x in (sa.get("crop_halves_per_joint")
-                                  or _default_per_joint(21))
-            ]
         sa_out = (load_stereo_align(subject_name, _stereo_trial_idx,
                                      use_outline=True)
                   if _stereo_trial_idx is not None else None)
+        if sa is not None:
+            _emit_stereo(sa, "stereo_tracked_L", "stereo_tracked_R",
+                         "stereo_response", "has_stereo")
         if sa_out is not None:
             _emit_stereo(sa_out, "stereo_outline_tracked_L",
                          "stereo_outline_tracked_R",
                          "stereo_outline_response", "has_stereo_outline")
+        # Per-joint + hand crop sizes (used by the frontend to draw
+        # the local-registration bbox).  Both variants share the same
+        # constants, so emit them if EITHER bake produced an npz.
+        _sa_meta = sa if sa is not None else sa_out
+        if _sa_meta is not None:
+            result["stereo_crop_half"] = int(_sa_meta.get("crop_half", _DEFAULT_CROP_HALF))
+            result["stereo_hand_crop_half"] = int(_sa_meta.get("hand_crop_half", _HAND_CROP_HALF))
+            result["stereo_crop_halves_per_joint"] = [
+                int(x) for x in (_sa_meta.get("crop_halves_per_joint")
+                                  or _default_per_joint(21))
+            ]
     except Exception as _e:
         logger.debug(f"stereo_align load skipped: {_e}")
 

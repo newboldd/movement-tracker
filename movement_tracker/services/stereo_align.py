@@ -157,6 +157,83 @@ def _outline_mask_image(poly_orig, h_full: int, half_w: int) -> np.ndarray:
     return mask
 
 
+def _densify_poly(poly, sp: float = 3.0) -> np.ndarray:
+    """Resample a closed polygon (Nx1x2 int32 or Nx2 array-like) at
+    ~``sp`` px spacing.  Returns an (M, 2) float32 array.  Empty if
+    the polygon is missing / degenerate."""
+    if poly is None:
+        return np.zeros((0, 2), dtype=np.float32)
+    pts = np.asarray(poly, dtype=np.float32).reshape(-1, 2)
+    if pts.shape[0] < 3:
+        return np.zeros((0, 2), dtype=np.float32)
+    out = []
+    n = pts.shape[0]
+    for i in range(n):
+        a = pts[i]
+        b = pts[(i + 1) % n]
+        d = b - a
+        L = float(np.hypot(d[0], d[1]))
+        steps = max(1, int(round(L / float(sp))))
+        for k in range(steps):
+            t = k / steps
+            out.append(a + d * t)
+    return np.asarray(out, dtype=np.float32)
+
+
+def _voting_align(os_poly, od_poly, sample_sp: float = 3.0,
+                   max_radius: int = 130) -> tuple[float, float, float]:
+    """Vote pairwise offsets between two dense polygon samples into a
+    2D accumulator centred on the centroid difference; the peak (of
+    the 3x3-summed accumulator) is the translation that aligns the
+    MOST sampled points.  Returns ``(dx, dy, response)`` where the
+    response is ``peak_votes / max(1, len(os_samples))`` -- roughly
+    the fraction of OS points that found a match.
+
+    Mirrors the preproc page's _computeOtherAlign so the whole-hand
+    alignment for outline-driven stereo uses the entire silhouette,
+    not a cropped patch.
+    """
+    os_pts = _densify_poly(os_poly, sample_sp)
+    od_pts = _densify_poly(od_poly, sample_sp)
+    if os_pts.shape[0] < 8 or od_pts.shape[0] < 8:
+        # Not enough to vote; fall back to a pure centroid match.
+        if os_pts.size and od_pts.size:
+            c1 = od_pts.mean(axis=0); c2 = os_pts.mean(axis=0)
+            return float(c1[0] - c2[0]), float(c1[1] - c2[1]), float('nan')
+        return 0.0, 0.0, float('nan')
+    cc = od_pts.mean(axis=0); oc = os_pts.mean(axis=0)
+    t0x = int(round(float(cc[0] - oc[0])))
+    t0y = int(round(float(cc[1] - oc[1])))
+    R = int(max_radius)
+    W = 2 * R + 1
+    acc = np.zeros(W * W, dtype=np.uint32)
+    for i in range(os_pts.shape[0]):
+        px = os_pts[i, 0]; py = os_pts[i, 1]
+        # ix = round(q.x - px - t0x) + R; vectorise over q.
+        ix = np.rint(od_pts[:, 0] - px - t0x).astype(np.int64) + R
+        iy = np.rint(od_pts[:, 1] - py - t0y).astype(np.int64) + R
+        ok = (ix >= 0) & (ix < W) & (iy >= 0) & (iy < W)
+        if not ok.any():
+            continue
+        flat = iy[ok] * W + ix[ok]
+        np.add.at(acc, flat, 1)
+    acc = acc.reshape(W, W)
+    # 3x3-summed peak -- "exactly aligned within +/-1 px".
+    s = (acc[1:-1, 1:-1]
+         + acc[:-2, 1:-1] + acc[2:, 1:-1]
+         + acc[1:-1, :-2] + acc[1:-1, 2:]
+         + acc[:-2, :-2] + acc[:-2, 2:]
+         + acc[2:, :-2] + acc[2:, 2:])
+    by_x = int(np.argmax(s))
+    by, bx = divmod(by_x, W - 2)
+    by += 1; bx += 1   # shift back into the un-sliced grid
+    peak = int(s.flat[by_x])
+    dx = (bx - R) + t0x
+    dy = (by - R) + t0y
+    resp = peak / float(max(1, os_pts.shape[0]))
+    return float(dx), float(dy), float(min(1.0, resp))
+
+
 # ── Main entry point ───────────────────────────────────────────────────────
 
 def run_stereo_align(subject_name: str, trial_idx: int,
@@ -297,9 +374,28 @@ def run_stereo_align(subject_name: str, trial_idx: int,
         od_frame = OD_lm[gf]
 
         # ── Pass 1: hand-wide alignment ────────────────────────────
+        # Image mode: phase-correlate two big crops around the hand
+        # centroid.  Outline mode: vote pairwise offsets of the
+        # densely-sampled ENTIRE outline (same approach the preproc
+        # page's cross-camera overlay uses) -- no crop, no patch.
         os_valid = ~np.isnan(os_frame[:, 0])
         od_valid = ~np.isnan(od_frame[:, 0])
-        if os_valid.any() and od_valid.any():
+        if use_outline:
+            try:
+                ref_dx, ref_dy, ref_r = _voting_align(os_poly, od_poly)
+            except Exception as e:
+                logger.debug(f"voting align failed at frame {gf}: {e}")
+                ref_dx = ref_dy = 0.0
+                ref_r = float('nan')
+            hand_shifts[fi, 0] = ref_dx
+            hand_shifts[fi, 1] = ref_dy
+            hand_response[fi] = ref_r
+            # Even if MP is missing this frame, the outline-vote shift
+            # is still a valid base for per-joint clamping (assuming
+            # MP is at least present where joints will be processed).
+            base_dx = float(ref_dx) if np.isfinite(ref_dx) else None
+            base_dy = float(ref_dy) if np.isfinite(ref_dy) else None
+        elif os_valid.any() and od_valid.any():
             os_cent = os_frame[os_valid].mean(axis=0)
             od_cent = od_frame[od_valid].mean(axis=0)
             os_big = _crop(img_OS, int(round(float(os_cent[0]))),
