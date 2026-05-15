@@ -1185,15 +1185,17 @@
      * points coincide, i.e. it prefers a large portion exactly
      * aligned even if that pulls other edges apart.  Returns {dx,dy}.
      */
-    function _computeOtherAlign(curPoly, otherPoly, curSide, otherSide, spread) {
+    function _computeOtherAlign(curPoly, otherPoly, curSide, otherSide) {
         const SP = 3;            // sample spacing, px
         const R = 130;           // accumulator half-extent around the
                                  // centroid-difference seed, px
-        // Dense, red-filtered samples along a closed polygon -- with
-        // the per-segment red classification dilated by ``spread`` so
-        // segments adjacent to red ones are also excluded.
+        // Dense, red-filtered samples along a closed polygon.  The
+        // "Red spread" slider is deliberately NOT applied here -- it
+        // only changes which CUR-camera segments get refined; the
+        // alignment uses each camera's raw red classification so it
+        // doesn't lose voters along the way.
         const _sample = (poly, side) => {
-            const red = _classifyPolyRed(poly, side, spread);
+            const red = _classifyPolyRed(poly, side, 0);
             const pts = [];
             const n = poly.length;
             for (let i = 0; i < n; i++) {
@@ -1255,14 +1257,13 @@
 
     /** (Re)compute the cached other-camera alignment translation if the
      *  outlineData / side it was computed for has changed.  The
-     *  red-spread slider invalidates the cache via ``_otherAlign =
-     *  null`` in its input handler. */
-    function _ensureOtherAlign(curPts, otherPts, curSide, otherSide, spread) {
+     *  alignment is independent of the "Red spread" slider. */
+    function _ensureOtherAlign(curPts, otherPts, curSide, otherSide) {
         if (_otherAlign === null
             || _otherAlignData !== outlineData
             || _otherAlignSide !== curSide) {
             _otherAlign = _computeOtherAlign(
-                curPts, otherPts, curSide, otherSide, spread);
+                curPts, otherPts, curSide, otherSide);
             _otherAlignData = outlineData;
             _otherAlignSide = curSide;
         }
@@ -1309,9 +1310,13 @@
             return { pts: curPoly,
                      segColors: curRed.map(r => r ? 'unresolved' : 'own') };
         }
-        // Densify the translated other outline + per-point redness
-        // (with the same red spread).
-        const otherRed = _classifyPolyRed(otherPoly, otherSide, spread);
+        // Densify the translated other outline + per-point redness.
+        // Red spread is intentionally NOT applied to the other camera
+        // -- it only decides which CUR segments to refine; when
+        // considering the other camera as a SOURCE for replacement,
+        // its raw red classification is what we want (no dilation
+        // shrinking the borrowable arc).
+        const otherRed = _classifyPolyRed(otherPoly, otherSide, 0);
         const dense = [], denseRed = [];
         for (let j = 0; j < M; j++) {
             const a = otherPoly[j], b = otherPoly[(j + 1) % M];
@@ -1823,16 +1828,19 @@
                 _bgEdgeBand(curSide);
                 _bgEdgeBand(otherSide);
                 const align = _ensureOtherAlign(
-                    curPts, otherPts, curSide, otherSide, _redSpread);
+                    curPts, otherPts, curSide, otherSide);
                 ctx.save();
                 ctx.lineJoin = 'round';
                 ctx.lineCap = 'round';
                 ctx.lineWidth = 2 / Math.max(0.01, scale * bps);
                 // Other camera's boundary -- green, red where it runs
                 // along the OTHER camera's BG edges (its own coords),
-                // the whole path shifted by the alignment.
+                // the whole path shifted by the alignment.  Red spread
+                // is NOT applied here -- the other camera is treated
+                // as a source of replacement segments, so its raw red
+                // classification is what's relevant.
                 if (showOtherBoundary) {
-                    const oRed = _classifyPolyRed(otherPts, otherSide, _redSpread);
+                    const oRed = _classifyPolyRed(otherPts, otherSide, 0);
                     _strokePoly(otherPts, (a, b, i) => oRed[i] ? RED : GREEN,
                                 align.dx, align.dy);
                 }
@@ -2512,7 +2520,10 @@
         // cached alignment / refined polygon (anything they affect),
         // and re-render.
         const _refineSliders = [
-            ['redSpreadSlider',  'redSpreadVal',  v => v, true],
+            // Red spread is now CUR-only -- the alignment + green
+            // replacement source use the raw classification -- so it
+            // doesn't invalidate _otherAlign, only _refinedOutline.
+            ['redSpreadSlider',  'redSpreadVal',  v => v, false],
             ['anchorHopsSlider', 'anchorHopsVal', v => v, false],
             ['anchorDistSlider', 'anchorDistVal', v => v, false],
         ];

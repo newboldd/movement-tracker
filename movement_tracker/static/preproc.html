@@ -335,7 +335,7 @@
                                 <span id="redSpreadVal" style="color:var(--text);font-weight:bold;">0</span>
                             </div>
                             <input type="range" id="redSpreadSlider" min="0" max="10" step="1" value="0"
-                                   title="Dilates the red (BG-edge) classification along the outline: each pass marks any yellow segment adjacent to a red one as red too.  Larger = more generous near-an-edge treatment for the refined-boundary anchor search and alignment."
+                                   title="Dilates the red (BG-edge) classification on the active camera by N segments -- each yellow segment within N of a red one also counts as red, so more of the outline gets flagged for refinement.  Applied only to the camera being refined; the other camera (the source of replacement segments) and the cross-camera alignment use the raw classification."
                                    style="width:100%;cursor:pointer;height:5px;">
                         </div>
                         <div style="margin-top:8px;font-size:11px;">
@@ -456,6 +456,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/preproc.js?v=60"></script>
+    <script src="/static/js/preproc.js?v=61"></script>
 </body>
 </html>
