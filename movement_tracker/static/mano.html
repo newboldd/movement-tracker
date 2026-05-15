@@ -180,6 +180,19 @@
                     <span id="stereoConfVal" style="min-width:24px; text-align:right; color:var(--text);">0.00</span>
                 </span>
 
+                <!-- 1c. Stereo (outline) -- same alignment but driven
+                     by the preproc-baked hand outlines instead of the
+                     raw image. -->
+                <span style="color:var(--text-muted);padding-left:18px;"><span class="layer-swatch" style="background:#ce93d8;"></span> Stereo (outline)</span>
+                <input type="checkbox" id="showStereoOutline2D" style="margin:0;justify-self:center;">
+                <span></span><span></span>
+
+                <!-- 1d. Outline -- the current camera's hand boundary
+                     polygon from the preproc bake. -->
+                <span style="color:var(--text-muted);"><span class="layer-swatch" style="background:#ffd54f;"></span> Outline</span>
+                <input type="checkbox" id="showOutline2D" style="margin:0;justify-self:center;">
+                <span></span><span></span>
+
                 <!-- 2. Vision -->
                 <span style="color:var(--text-muted);"><span class="layer-swatch" style="background:#2196f3;"></span> Vision</span>
                 <input type="checkbox" id="showVision2D" style="margin:0;justify-self:center;">
@@ -351,6 +364,11 @@
                 <div style="font-size:10px;color:var(--text-muted);margin-bottom:6px;line-height:1.4;">
                     Phase-correlate cropped patches around each MP label across cameras (no label info used).  Stereo model then draws the partner-camera label translated into the current view so cross-camera disagreement is visible.
                 </div>
+                <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);margin-bottom:6px;cursor:pointer;"
+                       title="Use the preproc-baked hand outline (filled silhouette) instead of the raw image for phase correlation.  Robust to texture/lighting differences between cameras.  Requires Compute boundary - all frames to have been run in Pre-proc.  Result is saved to stereo_align_outline.npz and shown by the 'Stereo (outline)' model row.">
+                    <input type="checkbox" id="useStereoOutlineChk" style="margin:0;">
+                    Use outline
+                </label>
                 <div style="display:flex;gap:4px;">
                     <button class="btn btn-sm btn-success" id="runStereoGoBtn" style="flex:1;">Run</button>
                     <button class="btn btn-sm" id="stereoCloseBtn" style="flex:0 0 30px;">×</button>
@@ -992,7 +1010,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/mano.js?v=342" type="module"></script>
+    <script src="/static/js/mano.js?v=343" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

@@ -106,16 +106,81 @@ def _align_phase(os_crop: np.ndarray, od_crop: np.ndarray,
     return float(dx), float(dy), float(response)
 
 
+def _align_phase_mask(os_crop: np.ndarray, od_crop: np.ndarray,
+                       window: np.ndarray) -> tuple[float, float, float]:
+    """Phase-correlate two single-channel outline-mask crops.
+
+    Same FFT pipeline as :func:`_align_phase` but skips the BGR->gray
+    + high-pass steps -- the input is already a feature image
+    (filled-polygon silhouette), so all phase correlation needs is the
+    mean-subtract + Hanning window."""
+    a = os_crop.astype(np.float32)
+    b = od_crop.astype(np.float32)
+    a = (a - a.mean()) * window
+    b = (b - b.mean()) * window
+    (dx, dy), response = cv2.phaseCorrelate(a, b)
+    return float(dx), float(dy), float(response)
+
+
+def _warp_poly_ref_to_orig(poly_ref, H_to_ref: np.ndarray):
+    """Apply ``H_to_ref^-1`` (ref -> original camera coords) to every
+    point of the polygon.  Returns an int32 (N, 1, 2) array suitable
+    for ``cv2.fillPoly``, or None if the polygon is missing / a point
+    fails to project."""
+    if poly_ref is None or len(poly_ref) < 3:
+        return None
+    try:
+        H_inv = np.linalg.inv(H_to_ref.astype(np.float64))
+    except np.linalg.LinAlgError:
+        return None
+    pts = np.asarray(poly_ref, dtype=np.float64)
+    n = pts.shape[0]
+    pts_h = np.column_stack([pts, np.ones(n)]).T          # (3, n)
+    w = H_inv @ pts_h
+    z = w[2]
+    if np.any(np.abs(z) < 1e-9):
+        return None
+    xy = (w[:2] / z).T
+    if not np.all(np.isfinite(xy)):
+        return None
+    return np.rint(xy).astype(np.int32).reshape(-1, 1, 2)
+
+
+def _outline_mask_image(poly_orig, h_full: int, half_w: int) -> np.ndarray:
+    """Filled-polygon silhouette of an outline (in original camera
+    coords) rasterized to a ``(h_full, half_w)`` uint8 mask -- 255
+    inside the hand, 0 elsewhere.  Returns an all-zero mask when the
+    polygon is missing / degenerate."""
+    mask = np.zeros((h_full, half_w), dtype=np.uint8)
+    if poly_orig is not None and len(poly_orig) >= 3:
+        cv2.fillPoly(mask, [poly_orig], 255)
+    return mask
+
+
 # ── Main entry point ───────────────────────────────────────────────────────
 
 def run_stereo_align(subject_name: str, trial_idx: int,
                       progress_callback=None,
                       crop_half: int = _DEFAULT_CROP_HALF,
-                      cancel_event=None) -> str:
-    """Run image-based stereo label alignment for one trial.
+                      cancel_event=None,
+                      use_outline: bool = False) -> str:
+    """Run cross-camera stereo label alignment for one trial.
+
+    Two modes select the feature image used for phase correlation:
+
+    - **Image-based** (default): crops are taken from the raw video
+      frame, with a BGR -> gray -> high-pass pre-filter.  Output:
+      ``stereo_align.npz``.
+    - **Outline-based** (``use_outline=True``): crops are taken from
+      a filled-polygon silhouette of the preproc-baked hand outline,
+      inverse-warped from stable-frame to original camera coords via
+      ``H_to_ref^-1``.  No pixel content, no high-pass.  Output:
+      ``stereo_align_outline.npz``.  Requires ``outlines.json`` +
+      ``camera_trajectory.npz`` from the preproc pipeline.
 
     Returns the saved npz path as a string.
     """
+    import json as _json
     from ..config import get_settings
     from .video import build_trial_map
     from .mano_data import _mano_dir
@@ -140,10 +205,48 @@ def run_stereo_align(subject_name: str, trial_idx: int,
     if start_frame + n_frames > N_total:
         n_frames = max(0, N_total - start_frame)
 
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open video: {video_path}")
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    # Outline-mode prerequisites: load outlines.json + camera
+    # trajectory; probe the video for dimensions; close the cap.
+    out_frames = None
+    H_L_all = H_R_all = None
+    h_full = half_w = None
+    if use_outline:
+        from .background import _preproc_dir as _bg_preproc_dir
+        from .camera_motion import load_camera_trajectory
+        outlines_path = _bg_preproc_dir(subject_name, stem) / "outlines.json"
+        if not outlines_path.exists():
+            raise FileNotFoundError(
+                f"No outlines.json for {subject_name}/{stem} -- "
+                "run 'Compute boundary - all frames' in Pre-proc first.")
+        with open(outlines_path) as _fh:
+            outlines = _json.load(_fh)
+        out_frames = outlines.get("frames") or []
+        traj = load_camera_trajectory(subject_name, stem)
+        if traj is None:
+            raise FileNotFoundError(
+                f"No camera_trajectory.npz for {subject_name}/{stem} -- "
+                "run Compute Trajectory + Stabilize in Pre-proc first.")
+        H_L_all = traj["H_to_ref_L"]
+        H_R_all = traj["H_to_ref_R"]
+        n_frames = min(n_frames, len(out_frames),
+                        int(H_L_all.shape[0]), int(H_R_all.shape[0]))
+        # One frame read for dimensions, then close.
+        _probe = cv2.VideoCapture(video_path)
+        if not _probe.isOpened():
+            raise RuntimeError(f"Cannot open video: {video_path}")
+        _ok, _first = _probe.read()
+        _probe.release()
+        if not _ok or _first is None:
+            raise RuntimeError("Failed to read first frame for dimensions")
+        h_full, _full_w = _first.shape[:2]
+        half_w = _full_w // 2
+
+    cap = None
+    if not use_outline:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open video: {video_path}")
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
     # Pre-build the Hanning windows.  Per-joint sizes are cached by
     # half-size so duplicates (every non-wrist joint shares one) only
@@ -165,19 +268,29 @@ def run_stereo_align(subject_name: str, trial_idx: int,
 
     out_dir = _mano_dir(subject_name) / stem
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "stereo_align.npz"
+    out_path = (out_dir / "stereo_align_outline.npz" if use_outline
+                 else out_dir / "stereo_align.npz")
+    # Branch the per-frame alignment fn: raw-image vs. outline mask.
+    align_fn = _align_phase_mask if use_outline else _align_phase
 
     last_pct = -1
     for fi in range(n_frames):
         if cancel_event is not None and cancel_event.is_set():
             raise InterruptedError("Job cancelled")
-        ok, frame = cap.read()
-        if not ok:
-            break
-        h, full_w = frame.shape[:2]
-        half_w = full_w // 2
-        img_OS = frame[:, :half_w, :]
-        img_OD = frame[:, half_w:, :]
+        if use_outline:
+            of = out_frames[fi] if fi < len(out_frames) else {}
+            os_poly = _warp_poly_ref_to_orig(of.get("OS"), H_L_all[fi])
+            od_poly = _warp_poly_ref_to_orig(of.get("OD"), H_R_all[fi])
+            img_OS = _outline_mask_image(os_poly, h_full, half_w)
+            img_OD = _outline_mask_image(od_poly, h_full, half_w)
+        else:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            h_full, _fw = frame.shape[:2]
+            half_w = _fw // 2
+            img_OS = frame[:, :half_w, :]
+            img_OD = frame[:, half_w:, :]
 
         gf = start_frame + fi
         os_frame = OS_lm[gf]
@@ -194,7 +307,7 @@ def run_stereo_align(subject_name: str, trial_idx: int,
             od_big = _crop(img_OD, int(round(float(od_cent[0]))),
                                     int(round(float(od_cent[1]))), _HAND_CROP_HALF)
             try:
-                ref_dx, ref_dy, ref_r = _align_phase(os_big, od_big, hand_window)
+                ref_dx, ref_dy, ref_r = align_fn(os_big, od_big, hand_window)
             except Exception as e:
                 logger.debug(f"hand-wide phase corr failed at frame {gf}: {e}")
                 ref_dx = ref_dy = 0.0
@@ -219,7 +332,7 @@ def run_stereo_align(subject_name: str, trial_idx: int,
             os_crop = _crop(img_OS, os_cx, os_cy, jh)
             od_crop = _crop(img_OD, od_cx, od_cy, jh)
             try:
-                raw_dx, raw_dy, r = _align_phase(os_crop, od_crop, _win_for_half(jh))
+                raw_dx, raw_dy, r = align_fn(os_crop, od_crop, _win_for_half(jh))
             except Exception as e:
                 logger.debug(f"per-joint phase corr failed at frame {gf} joint {j}: {e}")
                 continue
@@ -240,7 +353,8 @@ def run_stereo_align(subject_name: str, trial_idx: int,
             try: progress_callback(pct)
             except Exception: pass
 
-    cap.release()
+    if cap is not None:
+        cap.release()
 
     np.savez_compressed(
         str(out_path),
@@ -257,21 +371,27 @@ def run_stereo_align(subject_name: str, trial_idx: int,
     )
     valid = int(np.sum(~np.isnan(shifts[:, :, 0])))
     logger.info(
-        f"stereo_align saved: {out_path}  shape={shifts.shape}  "
+        f"stereo_align{' (outline)' if use_outline else ''} saved: "
+        f"{out_path}  shape={shifts.shape}  "
         f"valid={valid}/{n_frames * N_joints}"
     )
     return str(out_path)
 
 
-def load_stereo_align(subject_name: str, trial_idx: int) -> dict | None:
-    """Load saved ``stereo_align.npz`` for a trial.  Returns None if not present."""
+def load_stereo_align(subject_name: str, trial_idx: int,
+                       use_outline: bool = False) -> dict | None:
+    """Load saved stereo-align npz for a trial.  Returns None if not
+    present.  ``use_outline`` selects between the image-based variant
+    (``stereo_align.npz``) and the outline-based variant
+    (``stereo_align_outline.npz``)."""
     from .video import build_trial_map
     from .mano_data import _mano_dir
     tmap = build_trial_map(subject_name)
     if trial_idx < 0 or trial_idx >= len(tmap):
         return None
     stem = tmap[trial_idx]["trial_name"]
-    path = _mano_dir(subject_name) / stem / "stereo_align.npz"
+    fname = "stereo_align_outline.npz" if use_outline else "stereo_align.npz"
+    path = _mano_dir(subject_name) / stem / fname
     if not path.exists():
         return None
     try:

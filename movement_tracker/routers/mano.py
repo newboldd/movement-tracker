@@ -421,6 +421,7 @@ def run_fit(subject_id: int, req: FitRequest) -> dict:
 
 class StereoAlignRequest(BaseModel):
     trial_idx: int
+    use_outline: bool = False
 
 
 @router.post("/{subject_id}/run_stereo")
@@ -474,7 +475,8 @@ def run_stereo(subject_id: int, req: StereoAlignRequest) -> dict:
                                (int(pct), job_id))
             run_stereo_align(name, req.trial_idx,
                              progress_callback=on_progress,
-                             cancel_event=cancel_event)
+                             cancel_event=cancel_event,
+                             use_outline=bool(req.use_outline))
             with get_db_ctx() as db:
                 db.execute(
                     "UPDATE jobs SET status='completed', progress_pct=100, "

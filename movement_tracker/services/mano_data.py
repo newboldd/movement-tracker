@@ -1573,6 +1573,19 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         "stereo_tracked_R": None,
         "stereo_response": None,
         "has_stereo": False,
+        # Stereo (outline-based) -- the same alignment but driven by
+        # the preproc-baked hand outlines instead of raw pixels.
+        "stereo_outline_tracked_L": None,
+        "stereo_outline_tracked_R": None,
+        "stereo_outline_response": None,
+        "has_stereo_outline": False,
+        # Per-frame hand outlines (original camera coords), one entry
+        # per trial frame: {OS: [[x,y],...], OD: [...] | None}.
+        # Populated below when outlines.json + camera_trajectory are
+        # both present in preproc.
+        "outlines_L": None,
+        "outlines_R": None,
+        "has_outlines": False,
         # Vision (Apple Vision)
         "vision_tracked_L": _points_to_list(vision_tracked_L),
         "vision_tracked_R": _points_to_list(vision_tracked_R),
@@ -1726,32 +1739,98 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
              if t.get("trial_name") == trial_stem),
             None,
         )
-        sa = (load_stereo_align(subject_name, _stereo_trial_idx)
-              if _stereo_trial_idx is not None else None)
-        if sa is not None:
+        def _emit_stereo(sa, key_L, key_R, key_resp, key_has):
+            """Translate MP labels by the per-joint shifts from ``sa``
+            and write them into ``result`` under the given keys."""
+            if sa is None:
+                return
             shifts = sa["shifts"]                 # (N_sa, 21, 2)
             resp = sa["response"]                 # (N_sa, 21)
             n_sa = min(N, shifts.shape[0])
-            stereo_R = np.full((N, 21, 2), np.nan)  # shown on R camera
-            stereo_L = np.full((N, 21, 2), np.nan)  # shown on L camera
+            stereo_R = np.full((N, 21, 2), np.nan)
+            stereo_L = np.full((N, 21, 2), np.nan)
             stereo_R[:n_sa, :, 0] = mp_tracked_R[:n_sa, :, 0] + shifts[:n_sa, :, 0]
             stereo_R[:n_sa, :, 1] = mp_tracked_R[:n_sa, :, 1] + shifts[:n_sa, :, 1]
             stereo_L[:n_sa, :, 0] = mp_tracked_L[:n_sa, :, 0] - shifts[:n_sa, :, 0]
             stereo_L[:n_sa, :, 1] = mp_tracked_L[:n_sa, :, 1] - shifts[:n_sa, :, 1]
-            result["stereo_tracked_L"] = _points_to_list(stereo_L)
-            result["stereo_tracked_R"] = _points_to_list(stereo_R)
-            result["stereo_response"] = [[_nan_to_none(round(float(resp[t, j]), 3))
-                                           for j in range(21)]
-                                          for t in range(n_sa)]
-            result["has_stereo"] = bool(np.any(~np.isnan(shifts)))
+            result[key_L] = _points_to_list(stereo_L)
+            result[key_R] = _points_to_list(stereo_R)
+            result[key_resp] = [[_nan_to_none(round(float(resp[t, j]), 3))
+                                   for j in range(21)]
+                                  for t in range(n_sa)]
+            result[key_has] = bool(np.any(~np.isnan(shifts)))
+
+        sa = (load_stereo_align(subject_name, _stereo_trial_idx)
+              if _stereo_trial_idx is not None else None)
+        if sa is not None:
+            _emit_stereo(sa, "stereo_tracked_L", "stereo_tracked_R",
+                         "stereo_response", "has_stereo")
             result["stereo_crop_half"] = int(sa.get("crop_half", _DEFAULT_CROP_HALF))
             result["stereo_hand_crop_half"] = int(sa.get("hand_crop_half", _HAND_CROP_HALF))
             result["stereo_crop_halves_per_joint"] = [
                 int(x) for x in (sa.get("crop_halves_per_joint")
                                   or _default_per_joint(21))
             ]
+        sa_out = (load_stereo_align(subject_name, _stereo_trial_idx,
+                                     use_outline=True)
+                  if _stereo_trial_idx is not None else None)
+        if sa_out is not None:
+            _emit_stereo(sa_out, "stereo_outline_tracked_L",
+                         "stereo_outline_tracked_R",
+                         "stereo_outline_response", "has_stereo_outline")
     except Exception as _e:
         logger.debug(f"stereo_align load skipped: {_e}")
+
+    # ── Per-frame outlines (ref-space -> original camera coords) ────
+    # Loaded from outlines.json baked by the preproc "Compute boundary
+    # - all frames" step, inverse-warped via the camera trajectory so
+    # they line up with the original-video MP labels the Labels page
+    # draws.
+    try:
+        import json as _json
+        from .background import _preproc_dir as _bg_preproc_dir
+        from .camera_motion import load_camera_trajectory
+        if _stereo_trial_idx is not None:
+            _opath = _bg_preproc_dir(subject_name, trial_stem) / "outlines.json"
+            if _opath.exists():
+                with open(_opath) as _fh:
+                    _ol = _json.load(_fh)
+                _traj = load_camera_trajectory(subject_name, trial_stem)
+                if _traj is not None:
+                    _HL = _traj["H_to_ref_L"]
+                    _HR = _traj["H_to_ref_R"]
+                    def _warp_back(poly_ref, H):
+                        if not poly_ref or len(poly_ref) < 3:
+                            return None
+                        try:
+                            H_inv = np.linalg.inv(H.astype(np.float64))
+                        except np.linalg.LinAlgError:
+                            return None
+                        pts = np.asarray(poly_ref, dtype=np.float64)
+                        n = pts.shape[0]
+                        ph = np.column_stack([pts, np.ones(n)]).T
+                        w = H_inv @ ph
+                        z = w[2]
+                        if np.any(np.abs(z) < 1e-9):
+                            return None
+                        xy = (w[:2] / z).T
+                        if not np.all(np.isfinite(xy)):
+                            return None
+                        return np.rint(xy).astype(int).tolist()
+                    _frames = _ol.get("frames") or []
+                    _ncap = min(N, len(_frames),
+                                 int(_HL.shape[0]), int(_HR.shape[0]))
+                    out_L = [None] * N
+                    out_R = [None] * N
+                    for _fi in range(_ncap):
+                        _of = _frames[_fi]
+                        out_L[_fi] = _warp_back(_of.get("OS"), _HL[_fi])
+                        out_R[_fi] = _warp_back(_of.get("OD"), _HR[_fi])
+                    result["outlines_L"] = out_L
+                    result["outlines_R"] = out_R
+                    result["has_outlines"] = any(p is not None for p in out_L)
+    except Exception as _e:
+        logger.debug(f"outlines load skipped: {_e}")
 
     return result
 

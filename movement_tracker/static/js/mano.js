@@ -40,6 +40,8 @@ const manoViewer = (() => {
     let showStereo2D = false;
     let stereoSelectedJoint = null;   // joint whose per-joint bbox to draw
     let stereoConfThreshold = 0;      // hide markers with response < this
+    let showStereoOutline2D = false;  // outline-driven stereo variant
+    let showOutline2D = false;        // per-frame hand boundary polygon
     let showVision2D = false;
     let showVision3D = false;
     let showVisionSkel = true;
@@ -1323,6 +1325,14 @@ const manoViewer = (() => {
             if (lbl) lbl.textContent = stereoConfThreshold.toFixed(2);
             render();
         });
+        $('showStereoOutline2D')?.addEventListener('change', e => {
+            showStereoOutline2D = e.target.checked;
+            updateLayerFlags();
+        });
+        $('showOutline2D')?.addEventListener('change', e => {
+            showOutline2D = e.target.checked;
+            updateLayerFlags();
+        });
         // Stereo button: toggle panel (Run + Close).  Mirrors HRnet Correct.
         $('runStereoBtn')?.addEventListener('click', () => {
             const open = $('stereoPanel').style.display !== 'block';
@@ -1346,11 +1356,15 @@ const manoViewer = (() => {
             } else if (st) {
                 st.textContent = 'Submitting…';
             }
+            const useOutline = !!$('useStereoOutlineChk')?.checked;
             try {
                 const res = await api(`/api/mano/${subjectId}/run_stereo`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ trial_idx: trials[currentTrialIdx].trial_idx }),
+                    body: JSON.stringify({
+                        trial_idx: trials[currentTrialIdx].trial_idx,
+                        use_outline: useOutline,
+                    }),
                 });
                 const jobId = res.job_id;
                 if (st) st.textContent = `Job ${jobId} running…`;
@@ -1369,13 +1383,24 @@ const manoViewer = (() => {
                         evt.close(); _activeEventSources.delete(evt);
                         if (st) st.textContent = 'Complete. Reloading…';
                         await loadTrial(currentTrialIdx);
-                        const cb = $('showStereo2D');
-                        if (cb && !cb.checked) {
-                            cb.checked = true;
-                            showStereo2D = true;
-                            const wrap = $('stereoConfWrap');
-                            if (wrap) wrap.style.display = 'flex';
-                            updateLayerFlags();
+                        // Auto-enable the model row that matches the
+                        // variant we just baked.
+                        if (useOutline) {
+                            const cb = $('showStereoOutline2D');
+                            if (cb && !cb.checked) {
+                                cb.checked = true;
+                                showStereoOutline2D = true;
+                                updateLayerFlags();
+                            }
+                        } else {
+                            const cb = $('showStereo2D');
+                            if (cb && !cb.checked) {
+                                cb.checked = true;
+                                showStereo2D = true;
+                                const wrap = $('stereoConfWrap');
+                                if (wrap) wrap.style.display = 'flex';
+                                updateLayerFlags();
+                            }
                         }
                         if (st) st.textContent = 'Done.';
                     } else if (data.status === 'failed') {
@@ -3590,6 +3615,51 @@ const manoViewer = (() => {
                     const size = 4 * (0.3 + 0.7 * conf);
                     drawCross(x, y, '#e91e63', size);
                 }
+            }
+        }
+
+        // Stereo (outline) -- same display as Stereo but driven by the
+        // outline-based alignment + light-purple crosses (#ce93d8).
+        if (showStereoOutline2D && trialData?.has_stereo_outline) {
+            const stereoKp = isLeft ? trialData.stereo_outline_tracked_L
+                                    : trialData.stereo_outline_tracked_R;
+            if (stereoKp && stereoKp[fn]) {
+                const respFrame = trialData.stereo_outline_response?.[fn];
+                for (let j = 0; j < 21; j++) {
+                    if (!isJointVisible(j) || !stereoKp[fn][j]) continue;
+                    const rawConf = (respFrame && respFrame[j] != null) ? respFrame[j] : 0;
+                    if (rawConf < stereoConfThreshold) continue;
+                    const x = stereoKp[fn][j][0] * pixelScale;
+                    const y = stereoKp[fn][j][1] * pixelScale;
+                    let conf = rawConf;
+                    if (conf < 0) conf = 0;
+                    if (conf > 1) conf = 1;
+                    const size = 4 * (0.3 + 0.7 * conf);
+                    drawCross(x, y, '#ce93d8', size);
+                }
+            }
+        }
+
+        // Outline -- current camera's hand boundary polygon for the
+        // current frame, from the preproc bake (inverse-warped server-
+        // side into this camera's original-frame coords).
+        if (showOutline2D && trialData?.has_outlines) {
+            const poly = isLeft ? trialData.outlines_L?.[fn]
+                                : trialData.outlines_R?.[fn];
+            if (poly && poly.length >= 3) {
+                ctx.save();
+                ctx.strokeStyle = '#ffd54f';
+                ctx.lineWidth = 1.5;
+                ctx.lineJoin = 'round';
+                ctx.lineCap = 'round';
+                ctx.beginPath();
+                ctx.moveTo(poly[0][0] * pixelScale, poly[0][1] * pixelScale);
+                for (let i = 1; i < poly.length; i++) {
+                    ctx.lineTo(poly[i][0] * pixelScale, poly[i][1] * pixelScale);
+                }
+                ctx.closePath();
+                ctx.stroke();
+                ctx.restore();
             }
         }
 
@@ -6579,6 +6649,19 @@ const manoViewer = (() => {
         stereoSelectedJoint = null;
         const _scw = $('stereoConfWrap');
         if (_scw) _scw.style.display = (showStereo2D && hasStereo) ? 'flex' : 'none';
+        // Stereo (outline) + Outline layer availability.
+        const hasStereoOutline = !!(trialData && trialData.has_stereo_outline);
+        _setLayerAvail('showStereoOutline2D', hasStereoOutline);
+        if (!hasStereoOutline && $('showStereoOutline2D')) {
+            $('showStereoOutline2D').checked = false;
+            showStereoOutline2D = false;
+        }
+        const hasOutlines = !!(trialData && trialData.has_outlines);
+        _setLayerAvail('showOutline2D', hasOutlines);
+        if (!hasOutlines && $('showOutline2D')) {
+            $('showOutline2D').checked = false;
+            showOutline2D = false;
+        }
 
         // Vision
         _setLayerAvail('showVision2D', hasVision);
