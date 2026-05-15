@@ -329,6 +329,33 @@
                                    title="Morphological-open radius.  Clips thin strands / webs jutting off the boundary.  0 = off; fingertips (much wider than the kernel) survive at sane values."
                                    style="width:100%;cursor:pointer;height:5px;">
                         </div>
+                        <div style="margin-top:8px;font-size:11px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;">
+                                <label style="color:var(--text-muted);">Red spread (segments)</label>
+                                <span id="redSpreadVal" style="color:var(--text);font-weight:bold;">0</span>
+                            </div>
+                            <input type="range" id="redSpreadSlider" min="0" max="10" step="1" value="0"
+                                   title="Dilates the red (BG-edge) classification along the outline: each pass marks any yellow segment adjacent to a red one as red too.  Larger = more generous near-an-edge treatment for the refined-boundary anchor search and alignment."
+                                   style="width:100%;cursor:pointer;height:5px;">
+                        </div>
+                        <div style="margin-top:8px;font-size:11px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;">
+                                <label style="color:var(--text-muted);">Anchor hops</label>
+                                <span id="anchorHopsVal" style="color:var(--text);font-weight:bold;">3</span>
+                            </div>
+                            <input type="range" id="anchorHopsSlider" min="0" max="10" step="1" value="3"
+                                   title="How far along the yellow outline the refined-boundary algorithm will hop (one segment at a time, stopping at another red run) to find a vertex close to the other camera's outline.  Skipped yellow vertices are absorbed into the patch."
+                                   style="width:100%;cursor:pointer;height:5px;">
+                        </div>
+                        <div style="margin-top:8px;font-size:11px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;">
+                                <label style="color:var(--text-muted);">Anchor distance (px)</label>
+                                <span id="anchorDistVal" style="color:var(--text);font-weight:bold;">6</span>
+                            </div>
+                            <input type="range" id="anchorDistSlider" min="1" max="30" step="1" value="6"
+                                   title="Max distance from a yellow vertex to the aligned other-camera outline for that vertex to count as an anchor.  Smaller = stricter (more runs bail unpatched), larger = more permissive."
+                                   style="width:100%;cursor:pointer;height:5px;">
+                        </div>
                         <div id="outlineStatus" class="pp-stat" style="margin-top:6px;"></div>
                         <button class="btn btn-sm btn-success" id="runOutlinesBtn" style="width:100%;margin-top:8px;" disabled>Compute boundary — all frames</button>
                         <div id="outlinesBakeStatus" class="pp-stat" style="margin-top:6px;"></div>
@@ -429,6 +456,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/preproc.js?v=59"></script>
+    <script src="/static/js/preproc.js?v=60"></script>
 </body>
 </html>

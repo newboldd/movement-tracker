@@ -1154,6 +1154,27 @@
         return dirN > 0 && par >= 0.5 * dirN;
     }
 
+    /** Per-segment red/yellow classification for a closed polygon,
+     *  optionally dilated by ``spread`` along the ring -- so any yellow
+     *  segment within ``spread`` segments of a red one also becomes
+     *  red (a generous interpretation of "near a BG edge"). */
+    function _classifyPolyRed(poly, side, spread) {
+        const N = poly.length;
+        let red = new Array(N);
+        for (let i = 0; i < N; i++) {
+            const a = poly[i], b = poly[(i + 1) % N];
+            red[i] = _segOnBgEdge(a[0], a[1], b[0], b[1], side);
+        }
+        for (let s = 0; s < (spread | 0); s++) {
+            const next = new Array(N);
+            for (let i = 0; i < N; i++) {
+                next[i] = red[i] || red[(i - 1 + N) % N] || red[(i + 1) % N];
+            }
+            red = next;
+        }
+        return red;
+    }
+
     /**
      * Optimal translation to align the OTHER camera's boundary onto
      * the current one.  Dense-samples both polygons (~every 3 px),
@@ -1164,17 +1185,20 @@
      * points coincide, i.e. it prefers a large portion exactly
      * aligned even if that pulls other edges apart.  Returns {dx,dy}.
      */
-    function _computeOtherAlign(curPoly, otherPoly, curSide, otherSide) {
+    function _computeOtherAlign(curPoly, otherPoly, curSide, otherSide, spread) {
         const SP = 3;            // sample spacing, px
         const R = 130;           // accumulator half-extent around the
                                  // centroid-difference seed, px
-        // Dense, red-filtered samples along a closed polygon.
+        // Dense, red-filtered samples along a closed polygon -- with
+        // the per-segment red classification dilated by ``spread`` so
+        // segments adjacent to red ones are also excluded.
         const _sample = (poly, side) => {
+            const red = _classifyPolyRed(poly, side, spread);
             const pts = [];
             const n = poly.length;
             for (let i = 0; i < n; i++) {
+                if (red[i]) continue;
                 const a = poly[i], b = poly[(i + 1) % n];
-                if (_segOnBgEdge(a[0], a[1], b[0], b[1], side)) continue;
                 const dx = b[0] - a[0], dy = b[1] - a[1];
                 const L = Math.hypot(dx, dy);
                 const steps = Math.max(1, Math.round(L / SP));
@@ -1230,12 +1254,15 @@
     }
 
     /** (Re)compute the cached other-camera alignment translation if the
-     *  outlineData / side it was computed for has changed. */
-    function _ensureOtherAlign(curPts, otherPts, curSide, otherSide) {
+     *  outlineData / side it was computed for has changed.  The
+     *  red-spread slider invalidates the cache via ``_otherAlign =
+     *  null`` in its input handler. */
+    function _ensureOtherAlign(curPts, otherPts, curSide, otherSide, spread) {
         if (_otherAlign === null
             || _otherAlignData !== outlineData
             || _otherAlignSide !== curSide) {
-            _otherAlign = _computeOtherAlign(curPts, otherPts, curSide, otherSide);
+            _otherAlign = _computeOtherAlign(
+                curPts, otherPts, curSide, otherSide, spread);
             _otherAlignData = outlineData;
             _otherAlignSide = curSide;
         }
@@ -1264,32 +1291,31 @@
      * Returns {pts: [[x,y]...], segColors: ['own'|'borrowed'|
      * 'unresolved'...]} -- a closed polygon + per-segment provenance.
      */
-    function _refineOutline(curPoly, curSide, otherPoly, otherSide, align) {
-        const THRESH = 6;          // "very close to the green line", px
-        const MAXHOP = 3;          // max yellow vertices to hop for an anchor
+    function _refineOutline(curPoly, curSide, otherPoly, otherSide, align,
+                            thresh, maxHop, spread) {
+        const THRESH = thresh;     // "very close to the green line", px
+        const MAXHOP = maxHop | 0; // max yellow vertices to hop for an anchor
         const SP = 3;              // other-outline densification, px
         const GREEN_RED_FRAC = 0.5; // bail if the borrowed arc is this red
         const N = curPoly.length;
         const own = () => ({ pts: curPoly, segColors: curPoly.map(() => 'own') });
         if (N < 3) return own();
         _bgEdgeBand(curSide); _bgEdgeBand(otherSide);
-        // Classify this camera's segments.
-        const curRed = [];
-        for (let i = 0; i < N; i++) {
-            const a = curPoly[i], b = curPoly[(i + 1) % N];
-            curRed.push(_segOnBgEdge(a[0], a[1], b[0], b[1], curSide));
-        }
+        // Classify this camera's segments (with the user's red spread).
+        const curRed = _classifyPolyRed(curPoly, curSide, spread);
         if (!curRed.some(Boolean)) return own();
         const M = otherPoly.length;
         if (M < 3 || curRed.every(Boolean)) {
             return { pts: curPoly,
                      segColors: curRed.map(r => r ? 'unresolved' : 'own') };
         }
-        // Densify the translated other outline + per-point redness.
+        // Densify the translated other outline + per-point redness
+        // (with the same red spread).
+        const otherRed = _classifyPolyRed(otherPoly, otherSide, spread);
         const dense = [], denseRed = [];
         for (let j = 0; j < M; j++) {
             const a = otherPoly[j], b = otherPoly[(j + 1) % M];
-            const red = _segOnBgEdge(a[0], a[1], b[0], b[1], otherSide);
+            const red = otherRed[j];
             const dx = b[0] - a[0], dy = b[1] - a[1];
             const steps = Math.max(1, Math.round(Math.hypot(dx, dy) / SP));
             for (let k = 0; k < steps; k++) {
@@ -1744,6 +1770,14 @@
             if (curColor !== null) ctx.stroke();
         }
 
+        // Refined-boundary tunables read from the Hand Boundary sliders.
+        const _redSpread = parseInt(
+            ($('redSpreadSlider') || {}).value || 0, 10);
+        const _anchorHops = parseInt(
+            ($('anchorHopsSlider') || {}).value || 3, 10);
+        const _anchorDist = parseInt(
+            ($('anchorDistSlider') || {}).value || 6, 10);
+
         // Live hand-boundary overlay -- draws the server-computed
         // closed polygon as a yellow stroked path (red where a side
         // runs along a background edge), tracking the current side's
@@ -1763,12 +1797,11 @@
                 // Stay 2px wide on screen regardless of zoom.  We're
                 // inside the (scale * bps) transform, so divide.
                 ctx.lineWidth = 2 / Math.max(0.01, scale * bps);
-                // Sides on a background edge are drawn red.  Make sure
-                // this side's band is computed (cached) for the test.
+                // Sides on a background edge are drawn red (with the
+                // "Red spread" dilation applied along the ring).
                 _bgEdgeBand(currentSide);
-                _strokePoly(pts, (a, b) =>
-                    _segOnBgEdge(a[0], a[1], b[0], b[1], currentSide)
-                        ? RED : YELLOW);
+                const red = _classifyPolyRed(pts, currentSide, _redSpread);
+                _strokePoly(pts, (a, b, i) => red[i] ? RED : YELLOW);
                 ctx.restore();
             }
         }
@@ -1790,7 +1823,7 @@
                 _bgEdgeBand(curSide);
                 _bgEdgeBand(otherSide);
                 const align = _ensureOtherAlign(
-                    curPts, otherPts, curSide, otherSide);
+                    curPts, otherPts, curSide, otherSide, _redSpread);
                 ctx.save();
                 ctx.lineJoin = 'round';
                 ctx.lineCap = 'round';
@@ -1799,9 +1832,9 @@
                 // along the OTHER camera's BG edges (its own coords),
                 // the whole path shifted by the alignment.
                 if (showOtherBoundary) {
-                    _strokePoly(otherPts, (a, b) =>
-                        _segOnBgEdge(a[0], a[1], b[0], b[1], otherSide)
-                            ? RED : GREEN, align.dx, align.dy);
+                    const oRed = _classifyPolyRed(otherPts, otherSide, _redSpread);
+                    _strokePoly(otherPts, (a, b, i) => oRed[i] ? RED : GREEN,
+                                align.dx, align.dy);
                 }
                 // Refined boundary -- this camera's outline with red
                 // runs patched from the other.  Provenance colours:
@@ -1811,7 +1844,8 @@
                         || _refinedOutlineData !== outlineData
                         || _refinedOutlineSide !== curSide) {
                         _refinedOutline = _refineOutline(
-                            curPts, curSide, otherPts, otherSide, align);
+                            curPts, curSide, otherPts, otherSide, align,
+                            _anchorDist, _anchorHops, _redSpread);
                         _refinedOutlineData = outlineData;
                         _refinedOutlineSide = curSide;
                     }
@@ -2471,6 +2505,25 @@
                 vl.textContent = fmt(sl.value);
                 if (flashEdge) _flashBgEdge();
                 if (showOutline || showFgFill || showOtherBoundary || showRefinedBoundary) scheduleOutlineFetch();
+            });
+        }
+        // Refined-boundary sliders -- pure client-side post-processing,
+        // so no server refetch.  Update the label, invalidate the
+        // cached alignment / refined polygon (anything they affect),
+        // and re-render.
+        const _refineSliders = [
+            ['redSpreadSlider',  'redSpreadVal',  v => v, true],
+            ['anchorHopsSlider', 'anchorHopsVal', v => v, false],
+            ['anchorDistSlider', 'anchorDistVal', v => v, false],
+        ];
+        for (const [sId, vId, fmt, invalidAlign] of _refineSliders) {
+            const sl = $(sId), vl = $(vId);
+            if (!sl || !vl) continue;
+            sl.addEventListener('input', () => {
+                vl.textContent = fmt(sl.value);
+                if (invalidAlign) _otherAlign = null;
+                _refinedOutline = null;
+                try { render(); } catch (_e) {}
             });
         }
         // Overlay radio group → mutually exclusive: live, stable.mp4.
