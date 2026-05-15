@@ -1883,7 +1883,7 @@ def _side_outline(
     _BG_EDGE_BAND_THRESH = float(bg_edge_band_thresh)
     _BG_EDGE_BAND_DILATE = max(0, int(bg_edge_band_dilate))
     _BG_EDGE_OPEN_RADIUS = max(0, int(bg_edge_open_radius))
-    empty = {"contour": [], "fg": None}
+    empty = {"contour": [], "fg": None, "gate_area": 0}
     if kpts is None or np.isnan(kpts).all():
         return empty
     H, W = stable_side.shape[:2]
@@ -1894,7 +1894,8 @@ def _side_outline(
         stamp_radius=max(2, int(dilation_px)),
         smooth_sigma=4.0)
     gate = (kpt_region > 0.5).astype(np.uint8)
-    if gate.sum() < 100:
+    gate_area = int(gate.sum())
+    if gate_area < 100:
         return empty
     # 2. Motion = max over BGR channels of |frame - BG|, with the
     # BG-edge map subtracted off so high-contrast BG seams don't
@@ -1939,7 +1940,7 @@ def _side_outline(
     # "still" (BG inside the gate).
     gated_vals = motion[gate > 0]
     if gated_vals.size < 100:
-        return {"contour": [], "fg": fg_pack}
+        return {"contour": [], "fg": fg_pack, "gate_area": gate_area}
     thresh, _ = cv2.threshold(
         gated_vals, 0, 255,
         cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -2031,18 +2032,19 @@ def _side_outline(
     # 7. Largest connected component.
     n_lbl, lbl, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
     if n_lbl <= 1:
-        return {"contour": [], "fg": fg_pack}
+        return {"contour": [], "fg": fg_pack, "gate_area": gate_area}
     largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
     # 8. Outermost contour + Douglas-Peucker smoothing.
     binary = (lbl == largest).astype(np.uint8) * 255
     contours, _hier = cv2.findContours(
         binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
-        return {"contour": [], "fg": fg_pack}
+        return {"contour": [], "fg": fg_pack, "gate_area": gate_area}
     c = max(contours, key=cv2.contourArea)
     if simplify_eps_px > 0:
         c = cv2.approxPolyDP(c, epsilon=float(simplify_eps_px), closed=True)
     return {
+        "gate_area": gate_area,
         "contour": c.reshape(-1, 2).astype(int).tolist(),
         "fg": fg_pack,
     }
@@ -2237,10 +2239,25 @@ def compute_outlines_all(
     settings and save it to ``outlines.json``.
 
     Reads stable.mp4 sequentially (no per-frame seeking) and runs the
-    same per-side pipeline as :func:`compute_outline_frame`.  The JSON
-    holds ``{n_frames, is_stereo, params, frames: [{OS, OD}, ...]}``
-    with each contour a closed polygon in reference-frame pixels.
+    same per-side pipeline as :func:`compute_outline_frame`.  Then a
+    repair pass flags grossly-bad frames -- where the outline area is
+    less than ``_REPAIR_AREA_FRAC`` of the MP-gate area (i.e. the
+    pipeline only caught a portion of the hand) -- and replaces each
+    one with the nearest *good* neighbour's outline, warped into the
+    bad frame's pose via the MP keypoints (similarity transform).
+    MP keypoints typically survive boundary failures, so they bridge
+    the time gap.
+
+    The JSON holds ``{n_frames, is_stereo, params, frames: [{OS, OD,
+    repaired:[]}, ...]}`` with each contour a closed polygon in
+    reference-frame pixels; ``repaired`` lists sides that were
+    rewritten by the repair pass.
     """
+    # Repair pass tunables.
+    _REPAIR_AREA_FRAC = 0.4    # outline_area < frac*gate_area -> bad
+    _REPAIR_MIN_GATE  = 400    # px; below, MP didn't really find the hand
+    _REPAIR_MAX_GAP   = 120    # frames; don't warp from further than this
+
     ctx = _load_outline_context(subject_name, trial_idx)
     stem = ctx["stem"]
     is_stereo = ctx["is_stereo"]
@@ -2262,6 +2279,8 @@ def compute_outlines_all(
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open stable.mp4: {ctx['stable_path']}")
     frames_out: list[dict] = []
+    gate_area_L: list[int] = []
+    gate_area_R: list[int] = []
     for i in range(n_frames):
         if cancel_event is not None and cancel_event.is_set():
             cap.release()
@@ -2286,13 +2305,110 @@ def compute_outlines_all(
         frames_out.append({
             "OS": os_out["contour"],
             "OD": od_out["contour"] if od_out else None,
+            "repaired": [],
         })
+        gate_area_L.append(int(os_out.get("gate_area", 0)))
+        gate_area_R.append(int(od_out.get("gate_area", 0)) if od_out else 0)
         if progress_callback is not None:
             try:
-                progress_callback(100.0 * (i + 1) / max(1, n_frames))
+                # Leave headroom for the repair pass below.
+                progress_callback(95.0 * (i + 1) / max(1, n_frames))
             except Exception:
                 pass
     cap.release()
+
+    # ── Repair pass ────────────────────────────────────────────────
+    # Polygon area via shoelace.  Empty / degenerate -> 0.
+    def _poly_area(poly):
+        n = len(poly) if poly else 0
+        if n < 3:
+            return 0.0
+        s = 0.0
+        for k in range(n):
+            x1, y1 = poly[k]
+            x2, y2 = poly[(k + 1) % n]
+            s += x1 * y2 - x2 * y1
+        return abs(s) * 0.5
+
+    # Warp a polygon by the similarity transform that maps
+    # kpts_src -> kpts_dst (computed from valid corresponding MP
+    # keypoints with RANSAC).  Returns the warped polygon as a list of
+    # int [x, y], or None if it can't be estimated.
+    def _warp_contour(poly, kpts_src, kpts_dst):
+        if not poly or len(poly) < 3 or kpts_src is None or kpts_dst is None:
+            return None
+        ks = np.asarray(kpts_src, dtype=np.float64)
+        kd = np.asarray(kpts_dst, dtype=np.float64)
+        if ks.shape != (21, 2) or kd.shape != (21, 2):
+            return None
+        valid = ~(np.isnan(ks).any(axis=1) | np.isnan(kd).any(axis=1))
+        if int(valid.sum()) < 3:
+            return None
+        M, _inl = cv2.estimateAffinePartial2D(
+            ks[valid].astype(np.float32),
+            kd[valid].astype(np.float32),
+            method=cv2.RANSAC)
+        if M is None:
+            return None
+        pts = np.array(poly, dtype=np.float32).reshape(-1, 1, 2)
+        w = cv2.transform(pts, M).reshape(-1, 2)
+        return np.rint(w).astype(int).tolist()
+
+    def _repair_side(key, gate_areas, kpts_ref):
+        nF = len(frames_out)
+        # 1. Flag bad frames: outline area < REPAIR_AREA_FRAC * gate
+        #    area (and the gate must be substantial -- if it's tiny,
+        #    MP didn't really find the hand, so there's nothing to
+        #    repair).
+        bad = [False] * nF
+        for i in range(nF):
+            ga = gate_areas[i]
+            if ga < _REPAIR_MIN_GATE:
+                continue
+            if _poly_area(frames_out[i][key]) < _REPAIR_AREA_FRAC * ga:
+                bad[i] = True
+        # 2. A usable neighbour is non-bad, has a real polygon, and
+        #    has valid MP keypoints (needed for the warp).
+        def _usable(i):
+            if bad[i]:
+                return False
+            poly = frames_out[i].get(key)
+            if not poly or len(poly) < 3:
+                return False
+            if kpts_ref is None or i >= kpts_ref.shape[0]:
+                return False
+            return not np.isnan(kpts_ref[i]).all()
+        # 3. For each bad frame with valid keypoints of its own, find
+        #    the nearest usable neighbour (in either direction, up to
+        #    _REPAIR_MAX_GAP frames) and warp its outline in.
+        repaired = 0
+        for i in range(nF):
+            if not bad[i]:
+                continue
+            if (kpts_ref is None or i >= kpts_ref.shape[0]
+                    or np.isnan(kpts_ref[i]).all()):
+                continue
+            g = -1
+            for d in range(1, _REPAIR_MAX_GAP + 1):
+                if i - d >= 0 and _usable(i - d): g = i - d; break
+                if i + d < nF and _usable(i + d): g = i + d; break
+            if g < 0:
+                continue
+            warped = _warp_contour(frames_out[g][key],
+                                   kpts_ref[g], kpts_ref[i])
+            if warped is None:
+                continue
+            frames_out[i][key] = warped
+            frames_out[i]["repaired"].append(key)
+            repaired += 1
+        return repaired
+
+    n_rep_L = _repair_side('OS', gate_area_L, mkL)
+    n_rep_R = _repair_side('OD', gate_area_R, mkR) if is_stereo else 0
+
+    if progress_callback is not None:
+        try: progress_callback(99.0)
+        except Exception: pass
 
     out_dir = _preproc_dir(subject_name, stem)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -2301,6 +2417,13 @@ def compute_outlines_all(
         "n_frames": len(frames_out),
         "is_stereo": is_stereo,
         "params": kw,
+        "repair": {
+            "area_frac": _REPAIR_AREA_FRAC,
+            "min_gate":  _REPAIR_MIN_GATE,
+            "max_gap":   _REPAIR_MAX_GAP,
+            "n_repaired_OS": n_rep_L,
+            "n_repaired_OD": n_rep_R,
+        },
         "frames": frames_out,
     }
     tmp = out_dir / "outlines.json.tmp"
@@ -2308,7 +2431,8 @@ def compute_outlines_all(
         json.dump(payload, fh)
     os.replace(str(tmp), str(out_path))
     logger.info(f"outlines.json saved: {out_path}  "
-                f"frames={len(frames_out)}/{n_frames}")
+                f"frames={len(frames_out)}/{n_frames}  "
+                f"repaired OS={n_rep_L} OD={n_rep_R}")
     return str(out_path)
 
 
