@@ -67,6 +67,108 @@ const manoViewer = (() => {
     function _syncErrorStages() {
         _errorStages = new Set([..._stages2D, ..._stages3D, ..._stagesErr]);
     }
+
+    // ── Checkbox-state persistence ──────────────────────────────────
+    // Snapshots every checkbox (by id), every stage row, and every
+    // heatmap-row into localStorage on change.  On page load, the
+    // saved state is restored so the user's last selection persists
+    // across reloads.  First-ever load has no saved state and falls
+    // through to the as-defined HTML defaults (all unchecked).
+    const _CHECKBOX_STATE_KEY = 'manoCheckboxState_v1';
+    let _checkboxRestoring = false;     // suppresses save during restore
+
+    function _saveCheckboxes() {
+        if (_checkboxRestoring) return;
+        try {
+            const ids = {};
+            document.querySelectorAll('input[type="checkbox"][id]').forEach(cb => {
+                ids[cb.id] = !!cb.checked;
+            });
+            const stages = {};
+            document.querySelectorAll('input.stage-row[type="checkbox"][data-stage]').forEach(cb => {
+                const col = cb.classList.contains('stage-2d') ? '2d'
+                          : cb.classList.contains('stage-3d') ? '3d'
+                          : cb.classList.contains('stage-err') ? 'err' : null;
+                if (!col) return;
+                stages[`${col}|${cb.dataset.stage}`] = !!cb.checked;
+            });
+            const hm = {};
+            document.querySelectorAll('input.hm-row[type="checkbox"][data-hm]').forEach(cb => {
+                const col = cb.classList.contains('hm-2d') ? '2d'
+                          : cb.classList.contains('hm-3d') ? '3d' : null;
+                if (!col) return;
+                hm[`${col}|${cb.dataset.hm}`] = !!cb.checked;
+            });
+            localStorage.setItem(_CHECKBOX_STATE_KEY, JSON.stringify({
+                ids, stages, hm,
+                v3Expanded: !!_v3Expanded,
+                heatmapExpanded: !!_heatmapExpanded,
+            }));
+        } catch {}
+    }
+
+    function _restoreCheckboxes() {
+        let s = null;
+        try { s = JSON.parse(localStorage.getItem(_CHECKBOX_STATE_KEY) || 'null'); }
+        catch { s = null; }
+        if (!s) return false;
+        _checkboxRestoring = true;
+        try {
+            const touched = [];
+            Object.entries(s.ids || {}).forEach(([id, val]) => {
+                const el = document.getElementById(id);
+                if (el && el.type === 'checkbox') {
+                    el.checked = !!val;
+                    touched.push(el);
+                }
+            });
+            Object.entries(s.stages || {}).forEach(([key, val]) => {
+                const [col, stage] = key.split('|');
+                if (!col || !stage) return;
+                const cb = document.querySelector(
+                    `input.stage-row.stage-${col}[data-stage="${stage}"]`);
+                if (cb) { cb.checked = !!val; touched.push(cb); }
+            });
+            Object.entries(s.hm || {}).forEach(([key, val]) => {
+                const [col, stage] = key.split('|');
+                if (!col || !stage) return;
+                const cb = document.querySelector(
+                    `input.hm-row.hm-${col}[data-hm="${stage}"]`);
+                if (cb) { cb.checked = !!val; touched.push(cb); }
+            });
+            if (typeof s.v3Expanded === 'boolean') _v3Expanded = s.v3Expanded;
+            if (typeof s.heatmapExpanded === 'boolean') _heatmapExpanded = s.heatmapExpanded;
+            // Stage Sets are reseeded from the restored DOM (the
+            // change handlers below will keep them in sync going
+            // forward).
+            _stages2D.clear(); _stages3D.clear(); _stagesErr.clear();
+            document.querySelectorAll(
+                'input.stage-row.stage-2d[type="checkbox"][data-stage]').forEach(cb => {
+                if (cb.checked) _stages2D.add(cb.dataset.stage);
+            });
+            document.querySelectorAll(
+                'input.stage-row.stage-3d[type="checkbox"][data-stage]').forEach(cb => {
+                if (cb.checked) _stages3D.add(cb.dataset.stage);
+            });
+            document.querySelectorAll(
+                'input.stage-row.stage-err[type="checkbox"][data-stage]').forEach(cb => {
+                if (cb.checked) _stagesErr.add(cb.dataset.stage);
+            });
+            _syncErrorStages();
+            // Dispatch change events so the existing per-checkbox
+            // handlers sync the JS state variables (showXxx) for us.
+            // Wrapped in try/catch because some handlers touch
+            // trialData / canvas state that may not exist yet at
+            // page-init time.
+            touched.forEach(el => {
+                try { el.dispatchEvent(new Event('change', { bubbles: true })); }
+                catch (e) { /* handler not ready -- state will sync on next user click */ }
+            });
+        } finally {
+            _checkboxRestoring = false;
+        }
+        return true;
+    }
     let showMPErrors = false;      // kept as compatibility flag (always false now)
     let showSkelErrors = false;    // true if any stage is active
     let mpErrorMatrix = null;      // unused (kept for compatibility)
@@ -1009,6 +1111,21 @@ const manoViewer = (() => {
         }
 
 
+
+        // Restore the user's previous checkbox selections (if any)
+        // before loading the trial, so updateFitStatus's availability
+        // gating runs against the restored state.  Then attach a
+        // capture-phase change listener that re-saves on every
+        // checkbox toggle going forward.
+        _restoreCheckboxes();
+        _updateStageRowVisibility();
+        _updateHeatmapRowVisibility?.();
+        document.addEventListener('change', (ev) => {
+            const t = ev.target;
+            if (t && t.tagName === 'INPUT' && t.type === 'checkbox') {
+                _saveCheckboxes();
+            }
+        }, true);
 
         // Load initial subject and restore trial/frame from nav state.
         // ``?trial=N`` URL param (used by Jobs-page deep links) takes
@@ -6842,61 +6959,16 @@ const manoViewer = (() => {
         const hasVision3D = trialData && trialData.has_vision_3d;
         const hasDLC = trialData && trialData.has_dlc;
 
-        // Single-default-model priority on trial load:
-        //   Skeleton v3 > Skeleton v2 > Skeleton v1 > MediaPipe > HRnet Peak Select > Vision
-        // Pick the highest-available model and enable only its 3D view; all
-        // other models start unchecked so the user only sees one thing at a time.
+        // Status label only -- model selection is NOT auto-picked.
+        // Initial-load defaults are "all unchecked" and any user-set
+        // state persists across reloads (see _saveCheckboxes /
+        // _restoreCheckboxes below).
         const hasLegacy = trialData && trialData.has_skel_legacy;
         const hasHRnet3D = !!(trialData && trialData.hrnet_peaks_3d);
-        let defaultPick = null;
-        if (hasV2)               defaultPick = 'v3';
-        else if (hasLegacy)      defaultPick = 'v2';
-        else if (hasFit)         defaultPick = 'v1';
-        else if (hasMP3D)        defaultPick = 'mp';
-        else if (hasHRnet3D)     defaultPick = 'heatmap';
-        else if (hasVision3D)    defaultPick = 'vision';
         statusEl.innerHTML = hasV2 ? ''
                           : hasFit ? '<span style="color:var(--green);">v1 fit available</span>'
                           : hasLegacy || hasMP3D || hasHRnet3D || hasVision3D ? ''
                           : 'No fit available';
-
-        const _setShow = (id, on, write) => {
-            const el = $(id); if (el) el.checked = !!on;
-            write(!!on);
-        };
-        // Reset every default-eligible model to OFF, then turn the chosen
-        // one ON below.  Each setter both flips the DOM checkbox and
-        // updates the JS state variable.
-        _setShow('showSkelV2_3D',  defaultPick === 'v3',     v => showSkelV2_3D = v);
-        _setShow('showLegacyV2_3D', defaultPick === 'v2',    v => showLegacyV2_3D = v);
-        _setShow('showMano3D',      defaultPick === 'v1',    v => showMano3D = v);
-        _setShow('showMP3D',        defaultPick === 'mp',    v => showMP3D = v);
-        _setShow('showVision3D',    defaultPick === 'vision', v => showVision3D = v);
-        // HRnet (raw Peaks) defaults: when no skeleton fit exists, fall
-        // back to the raw HRnet peaks model.  Peak Select removed.
-        if (defaultPick === 'heatmap') {
-            showHRnet3D = true;
-            _heatmapExpanded = true;
-            const cb3 = document.querySelector('.hm-row.hm-3d[data-hm="hrnet"]');
-            if (cb3) cb3.checked = true;
-        } else {
-            showHRnet3D = false;
-            const cb3 = document.querySelector('.hm-row.hm-3d[data-hm="hrnet"]');
-            if (cb3) cb3.checked = false;
-        }
-        showHeatmap2D = false; showHeatmap3D = false;
-        // Always ensure 2D variants of unselected models are off too.
-        for (const [id, write] of [
-            ['showSkelV2_2D',  v => showSkelV2_2D = v],
-            ['showLegacyV2_2D', v => showLegacyV2_2D = v],
-            ['showMano2D',      v => showMano2D = v],
-            ['showMP2D',        v => showMP2D = v],
-            ['showVision2D',    v => showVision2D = v],
-        ]) {
-            const el = $(id); if (el) el.checked = false;
-            write(false);
-        }
-        showMano = defaultPick === 'v1';
 
         _setLayerAvail('showSkelV2_2D', hasV2);
         _setLayerAvail('showSkelV2_3D', hasV2);
@@ -6918,21 +6990,10 @@ const manoViewer = (() => {
         mpCorrectedR = null;
         _updateMPErrorAvailability();
 
-        // Auto-activate the most-recent available stage so the user sees
-        // the latest pipeline output highlighted on trial load.  Priority:
-        //   bone_correct > z_smooth > z_correct > nothing
-        _stages2D.clear(); _stages3D.clear(); _stagesErr.clear();
-        _saved2D = null; _saved3D = null;
-        _v3SavedStages = null;
-        const autoStage = _mostRecentAvailableStage();
-        if (autoStage && showSkelV2_2D) _stages2D.add(autoStage);
-        if (autoStage && showSkelV2_3D) _stages3D.add(autoStage);
-        if (autoStage) _stagesErr.add(autoStage);
-        // Auto-expand the v3 model when an auto-stage is active so the
-        // checked stage's row is visible to the user.
-        if (autoStage) _v3Expanded = true;
-        _applyStageCheckboxes();
-        _updateStageRowVisibility();
+        // Stage checkboxes are NOT auto-picked here -- they restore
+        // from localStorage (or stay unchecked on first visit) and
+        // persist across page reloads.  Just re-sync the derived
+        // _errorStages + run the MP-error recompute if needed.
         _syncErrorStages();
         showSkelErrors = _errorStages.size > 0;
         if (_errorStages.size > 0) _scheduleMPErrorRecompute();
@@ -7759,6 +7820,7 @@ const manoViewer = (() => {
         showSkelErrors = _errorStages.size > 0;
         if (_errorStages.size > 0) _scheduleMPErrorRecompute();
         else { skelErrorMatrices = {}; }
+        _saveCheckboxes();
         render(); update3D(); renderDistanceTrace();
     }
 
@@ -7894,6 +7956,7 @@ const manoViewer = (() => {
         }
         _heatmapExpanded = !!open;
         _updateHeatmapRowVisibility();
+        _saveCheckboxes();
         render(); update3D(); renderDistanceTrace();
     }
 
