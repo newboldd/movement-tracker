@@ -1372,6 +1372,12 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     # ── Compute distances ──────────────────────────────────────
     # Intermediate pipeline stages (may be None if not saved yet)
     has_skel_v2_sc = v2_joints_3d_after_sc is not None and np.any(~np.isnan(v2_joints_3d_after_sc))
+    # When stereo-correct was skipped (Stereo-distance = 0 at bake), the
+    # snapshot is all-NaN.  Drop so STAGE_CONFIGS falls back to MP.
+    if not has_skel_v2_sc:
+        v2_mp_L_after_sc = None
+        v2_mp_R_after_sc = None
+        v2_joints_3d_after_sc = None
     has_skel_v2_y = v2_joints_3d_after_y is not None and np.any(~np.isnan(v2_joints_3d_after_y))
     has_skel_v2_z = v2_joints_3d_after_z is not None and np.any(~np.isnan(v2_joints_3d_after_z))
     has_skel_v2_zs = v2_joints_3d_after_zs is not None and np.any(~np.isnan(v2_joints_3d_after_zs))

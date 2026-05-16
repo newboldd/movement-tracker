@@ -3080,6 +3080,11 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
     stereo_L_pts = np.full((N, 21, 2), np.nan, dtype=np.float32)
     stereo_R_pts = np.full((N, 21, 2), np.nan, dtype=np.float32)
     stereo_response = np.full((N, 21), np.nan, dtype=np.float32)
+    stereo_ran = False  # False when Stereo-distance is 0 OR the align
+                        # bake failed -- triggers the after_sc snapshot
+                        # below to be left all-NaN so the data layer's
+                        # has_skel_v2_sc flag is False and the stage row
+                        # is hidden in the UI.
     if float(stereo_dist_px) > 0:
         try:
             from .stereo_align import run_stereo_align, load_stereo_align
@@ -3097,6 +3102,7 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
                 gauss_center_weight=float(stereo_gauss_center_weight))
             sa = load_stereo_align(subject_name, t_idx, mode=str(stereo_mode))
             if sa is not None:
+                stereo_ran = True
                 shifts = sa["shifts"]                # (N_sa, 21, 2)
                 resp   = sa["response"]              # (N_sa, 21)
                 n_sa   = min(N, int(shifts.shape[0]))
@@ -3203,8 +3209,17 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
     _pg(10)
 
     # Snapshot after stereo-correction (stereo_correct stage view).
-    mp_L_after_sc = mp_L_c.copy()
-    mp_R_after_sc = mp_R_c.copy()
+    # When stereo_dist_px == 0 the whole step is skipped; leave the
+    # snapshot all-NaN (mirrors the HRnet-snap behaviour) so the data
+    # layer's has_skel_v2_sc flag is False and the stage row is hidden
+    # in the UI -- nothing was actually corrected so there's no view
+    # to show.
+    if stereo_ran:
+        mp_L_after_sc = mp_L_c.copy()
+        mp_R_after_sc = mp_R_c.copy()
+    else:
+        mp_L_after_sc = np.full_like(mp_L_c, np.nan)
+        mp_R_after_sc = np.full_like(mp_R_c, np.nan)
 
     # ── Stage 1: Combined Y-disparity + Z-outlier correction ──────────
     # Errors driving the correction are the union of y_disp and z_outlier
