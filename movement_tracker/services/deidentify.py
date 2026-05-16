@@ -767,6 +767,28 @@ def render_with_blur_specs(input_path: str, output_path: str,
     half_w = full_w // 2 if is_stereo else full_w
     total = frame_count if frame_count else (reported - start_frame)
 
+    # Re-anchor any saved blur-spec frame ranges that fall entirely
+    # outside this trial's [start_frame, end_frame] window -- mirrors
+    # the frontend's selectTrial re-anchor.  Without this, if the
+    # trial got re-trimmed since the specs were last saved, every
+    # frame's ``active_specs`` filter (``frame_start <= global_frame
+    # <= frame_end``) would come back empty and the renderer would
+    # write back the ORIGINAL video unchanged.  Specs with valid
+    # overlap are clamped to the trial range; specs with no overlap
+    # get the full trial range.
+    _t_start = int(start_frame)
+    _t_end = _t_start + int(total) - 1
+    blur_specs = list(blur_specs or [])
+    for _s in blur_specs:
+        fs = _s.get("frame_start")
+        fe = _s.get("frame_end")
+        if fs is None or fe is None or fe < _t_start or fs > _t_end:
+            _s["frame_start"] = _t_start
+            _s["frame_end"] = _t_end
+        else:
+            _s["frame_start"] = max(_t_start, int(fs))
+            _s["frame_end"] = min(_t_end, int(fe))
+
     # Index face detections by frame_num for fast lookup
     face_by_frame = {}
     for fd in (face_detections or []):
