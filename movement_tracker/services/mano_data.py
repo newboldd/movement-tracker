@@ -1572,6 +1572,15 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         "fps": fps,
         "has_mano_fit": has_mano,
         "has_skel_v2": has_skel_v2,
+        # Per-stage flags so the frontend can hide stage rows that the
+        # active v3 fit didn't actually produce (e.g. HRnet-snap when
+        # the user kept "HRnet peak dist" at 0).
+        "has_skel_v2_sc": bool(has_skel_v2_sc),
+        "has_skel_v2_y":  bool(has_skel_v2_y),
+        "has_skel_v2_z":  bool(has_skel_v2_z),
+        "has_skel_v2_zs": bool(has_skel_v2_zs),
+        "has_skel_v2_hr": bool(has_skel_v2_hr),
+        "has_skel_v2_bc": bool(has_skel_v2_bc),
         "has_heatmaps": (mano_trial_dir / "hrnet_w18_heatmaps.npz").exists(),
         "has_mp": bool(np.any(~np.isnan(mp_tracked_L))),
         "has_mp_3d": bool(np.any(~np.isnan(mp_joints_3d))),

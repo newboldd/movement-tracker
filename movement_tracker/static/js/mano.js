@@ -7963,9 +7963,20 @@ const manoViewer = (() => {
 
     function _updateStageRowVisibility() {
         // v3 stages — visible only when the user has clicked-expanded the
-        // Skeleton v3 model row.
+        // Skeleton v3 model row.  Per-stage rows that the current fit
+        // didn't produce are hidden even when expanded:
+        //   - stereo_correct: only when the bake's stereo-correct step
+        //     actually ran (trialData.has_skel_v2_sc).
+        //   - hrnet_snap: only when the user set "HRnet peak dist" > 0
+        //     AND a peak file existed at bake time
+        //     (trialData.has_skel_v2_hr).
+        const _hideStages = new Set();
+        if (trialData && trialData.has_skel_v2_sc === false) _hideStages.add('stereo_correct');
+        if (trialData && trialData.has_skel_v2_hr === false) _hideStages.add('hrnet_snap');
         document.querySelectorAll('.stage-row').forEach(el => {
-            el.style.display = _v3Expanded ? '' : 'none';
+            const stage = el.getAttribute('data-stage');
+            const hide = !_v3Expanded || _hideStages.has(stage);
+            el.style.display = hide ? 'none' : '';
         });
         const ind = document.getElementById('v3Expand');
         if (ind) ind.textContent = _v3Expanded ? '▼' : '▶';
