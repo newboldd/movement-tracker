@@ -194,6 +194,18 @@
                     <span id="stereoOutlineConfVal" style="min-width:24px; text-align:right; color:var(--text);">0.00</span>
                 </span>
 
+                <!-- 1c'. Stereo (hybrid) -- Pass 1 outline-vote +
+                     Pass 2 raw-image phase-corr.  No outlines shown
+                     inside the per-joint bbox. -->
+                <span style="color:var(--text-muted);padding-left:18px;"><span class="layer-swatch" style="background:#f48fb1;"></span> Stereo (hybrid)</span>
+                <input type="checkbox" id="showStereoHybrid2D" style="margin:0;justify-self:center;">
+                <span></span><span></span>
+                <span id="stereoHybridConfWrap" style="grid-column: 1 / -1; display:none; align-items:center; gap:6px; padding:0 4px 4px 28px; font-size:10px; color:var(--text-muted); white-space:nowrap;">
+                    <span title="Hide pink X's whose phase-correlation confidence is below this value">conf ≥</span>
+                    <input type="range" id="stereoHybridConfSlider" min="0" max="1" step="0.02" value="0" style="flex:1; height:5px; cursor:pointer; min-width:0;">
+                    <span id="stereoHybridConfVal" style="min-width:24px; text-align:right; color:var(--text);">0.00</span>
+                </span>
+
                 <!-- 1d. Outline -- the current camera's hand boundary
                      polygon from the preproc bake. -->
                 <span style="color:var(--text-muted);"><span class="layer-swatch" style="background:#ffd54f;"></span> Outline</span>
@@ -371,11 +383,21 @@
                 <div style="font-size:10px;color:var(--text-muted);margin-bottom:6px;line-height:1.4;">
                     Phase-correlate cropped patches around each MP label across cameras (no label info used).  Stereo model then draws the partner-camera label translated into the current view so cross-camera disagreement is visible.
                 </div>
-                <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);margin-bottom:6px;cursor:pointer;"
-                       title="Use the preproc-baked hand outline (filled silhouette) instead of the raw image for phase correlation.  Robust to texture/lighting differences between cameras.  Requires Compute boundary - all frames to have been run in Pre-proc.  Result is saved to stereo_align_outline.npz and shown by the 'Stereo (outline)' model row.">
-                    <input type="checkbox" id="useStereoOutlineChk" style="margin:0;">
-                    Use outline
-                </label>
+                <div style="display:flex;gap:10px;align-items:center;font-size:11px;color:var(--text-muted);margin-bottom:6px;"
+                     title="Image: raw video crops for both passes.  Outline: preproc-baked hand silhouette for both passes (whole-outline vote + per-joint mask phase-corr).  Hybrid: outline vote for the global pass, raw image phase-corr for the per-joint pass.">
+                    <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
+                        <input type="radio" name="stereoMode" value="image" id="stereoModeImage" checked style="margin:0;">
+                        Image
+                    </label>
+                    <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
+                        <input type="radio" name="stereoMode" value="outline" id="stereoModeOutline" style="margin:0;">
+                        Outline
+                    </label>
+                    <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
+                        <input type="radio" name="stereoMode" value="hybrid" id="stereoModeHybrid" style="margin:0;">
+                        Hybrid
+                    </label>
+                </div>
                 <div style="display:flex;gap:4px;">
                     <button class="btn btn-sm btn-success" id="runStereoGoBtn" style="flex:1;">Run</button>
                     <button class="btn btn-sm" id="stereoCloseBtn" style="flex:0 0 30px;">×</button>
@@ -1017,7 +1039,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/mano.js?v=345" type="module"></script>
+    <script src="/static/js/mano.js?v=346" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

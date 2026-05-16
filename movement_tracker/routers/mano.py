@@ -421,7 +421,11 @@ def run_fit(subject_id: int, req: FitRequest) -> dict:
 
 class StereoAlignRequest(BaseModel):
     trial_idx: int
+    # Legacy flag (still accepted): True == mode="outline".
     use_outline: bool = False
+    # "image" | "outline" | "hybrid".  If unset, falls back to
+    # use_outline.
+    mode: str | None = None
 
 
 @router.post("/{subject_id}/run_stereo")
@@ -473,10 +477,11 @@ def run_stereo(subject_id: int, req: StereoAlignRequest) -> dict:
                 with get_db_ctx() as db:
                     db.execute("UPDATE jobs SET progress_pct=? WHERE id=?",
                                (int(pct), job_id))
+            _mode = (req.mode or ("outline" if req.use_outline else "image"))
             run_stereo_align(name, req.trial_idx,
                              progress_callback=on_progress,
                              cancel_event=cancel_event,
-                             use_outline=bool(req.use_outline))
+                             mode=_mode)
             with get_db_ctx() as db:
                 db.execute(
                     "UPDATE jobs SET status='completed', progress_pct=100, "

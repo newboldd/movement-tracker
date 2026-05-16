@@ -42,6 +42,8 @@ const manoViewer = (() => {
     let stereoConfThreshold = 0;      // hide markers with response < this
     let showStereoOutline2D = false;  // outline-driven stereo variant
     let stereoOutlineConfThreshold = 0;  // same, for outline variant
+    let showStereoHybrid2D = false;   // outline-vote Pass 1 + image Pass 2
+    let stereoHybridConfThreshold = 0;
     let showOutline2D = false;        // per-frame hand boundary polygon
     let showVision2D = false;
     let showVision3D = false;
@@ -1313,9 +1315,16 @@ const manoViewer = (() => {
             renderDistanceTrace();
         }
         $('showMP2D').addEventListener('change', e => { showMP2D = e.target.checked; updateLayerFlags(); });
+        // Helper: clear the selected-joint marker if none of the three
+        // Stereo variants is visible anymore.
+        const _maybeClearStereoSelected = () => {
+            if (!showStereo2D && !showStereoOutline2D && !showStereoHybrid2D) {
+                stereoSelectedJoint = null;
+            }
+        };
         $('showStereo2D')?.addEventListener('change', e => {
             showStereo2D = e.target.checked;
-            if (!showStereo2D && !showStereoOutline2D) stereoSelectedJoint = null;
+            _maybeClearStereoSelected();
             const wrap = $('stereoConfWrap');
             if (wrap) wrap.style.display = showStereo2D ? 'flex' : 'none';
             updateLayerFlags();
@@ -1328,7 +1337,7 @@ const manoViewer = (() => {
         });
         $('showStereoOutline2D')?.addEventListener('change', e => {
             showStereoOutline2D = e.target.checked;
-            if (!showStereoOutline2D && !showStereo2D) stereoSelectedJoint = null;
+            _maybeClearStereoSelected();
             const wrap = $('stereoOutlineConfWrap');
             if (wrap) wrap.style.display = showStereoOutline2D ? 'flex' : 'none';
             updateLayerFlags();
@@ -1337,6 +1346,19 @@ const manoViewer = (() => {
             stereoOutlineConfThreshold = parseFloat(e.target.value);
             const lbl = $('stereoOutlineConfVal');
             if (lbl) lbl.textContent = stereoOutlineConfThreshold.toFixed(2);
+            render();
+        });
+        $('showStereoHybrid2D')?.addEventListener('change', e => {
+            showStereoHybrid2D = e.target.checked;
+            _maybeClearStereoSelected();
+            const wrap = $('stereoHybridConfWrap');
+            if (wrap) wrap.style.display = showStereoHybrid2D ? 'flex' : 'none';
+            updateLayerFlags();
+        });
+        $('stereoHybridConfSlider')?.addEventListener('input', e => {
+            stereoHybridConfThreshold = parseFloat(e.target.value);
+            const lbl = $('stereoHybridConfVal');
+            if (lbl) lbl.textContent = stereoHybridConfThreshold.toFixed(2);
             render();
         });
         $('showOutline2D')?.addEventListener('change', e => {
@@ -1366,14 +1388,16 @@ const manoViewer = (() => {
             } else if (st) {
                 st.textContent = 'Submitting…';
             }
-            const useOutline = !!$('useStereoOutlineChk')?.checked;
+            // Read selected mode from the Image/Outline/Hybrid radios.
+            const _modeEl = document.querySelector('input[name="stereoMode"]:checked');
+            const stereoMode = _modeEl ? _modeEl.value : 'image';
             try {
                 const res = await api(`/api/mano/${subjectId}/run_stereo`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         trial_idx: trials[currentTrialIdx].trial_idx,
-                        use_outline: useOutline,
+                        mode: stereoMode,
                     }),
                 });
                 const jobId = res.job_id;
@@ -1395,24 +1419,26 @@ const manoViewer = (() => {
                         await loadTrial(currentTrialIdx);
                         // Auto-enable the model row that matches the
                         // variant we just baked.
-                        if (useOutline) {
-                            const cb = $('showStereoOutline2D');
+                        // Auto-enable the model row that matches the
+                        // variant we just baked.
+                        const _autoOn = (cbId, varName, wrapId) => {
+                            const cb = $(cbId);
                             if (cb && !cb.checked) {
                                 cb.checked = true;
-                                showStereoOutline2D = true;
-                                const wrap = $('stereoOutlineConfWrap');
+                                if (varName === 'showStereo2D') showStereo2D = true;
+                                else if (varName === 'showStereoOutline2D') showStereoOutline2D = true;
+                                else if (varName === 'showStereoHybrid2D') showStereoHybrid2D = true;
+                                const wrap = $(wrapId);
                                 if (wrap) wrap.style.display = 'flex';
                                 updateLayerFlags();
                             }
+                        };
+                        if (stereoMode === 'outline') {
+                            _autoOn('showStereoOutline2D', 'showStereoOutline2D', 'stereoOutlineConfWrap');
+                        } else if (stereoMode === 'hybrid') {
+                            _autoOn('showStereoHybrid2D', 'showStereoHybrid2D', 'stereoHybridConfWrap');
                         } else {
-                            const cb = $('showStereo2D');
-                            if (cb && !cb.checked) {
-                                cb.checked = true;
-                                showStereo2D = true;
-                                const wrap = $('stereoConfWrap');
-                                if (wrap) wrap.style.display = 'flex';
-                                updateLayerFlags();
-                            }
+                            _autoOn('showStereo2D', 'showStereo2D', 'stereoConfWrap');
                         }
                         if (st) st.textContent = 'Done.';
                     } else if (data.status === 'failed') {
@@ -3733,6 +3759,51 @@ const manoViewer = (() => {
             }
         }
 
+        // Stereo (hybrid) -- outline-vote Pass 1 + image-phase-corr
+        // Pass 2.  Light-pink crosses + dashed per-joint bbox (no
+        // outlines drawn inside, since the per-joint alignment uses
+        // the raw image, not the outline).
+        if (showStereoHybrid2D && trialData?.has_stereo_hybrid) {
+            const stereoKp = isLeft ? trialData.stereo_hybrid_tracked_L
+                                    : trialData.stereo_hybrid_tracked_R;
+            const mpHere = isLeft ? trialData.mp_tracked_L
+                                  : trialData.mp_tracked_R;
+            if (stereoSelectedJoint != null && mpHere && mpHere[fn]) {
+                const pt = mpHere[fn][stereoSelectedJoint];
+                if (pt) {
+                    const perJoint = trialData.stereo_crop_halves_per_joint;
+                    const ch = (Array.isArray(perJoint) && perJoint[stereoSelectedJoint] != null)
+                        ? perJoint[stereoSelectedJoint]
+                        : (trialData.stereo_crop_half != null ? trialData.stereo_crop_half : 40);
+                    const cx = pt[0] * pixelScale;
+                    const cy = pt[1] * pixelScale;
+                    const w = (2 * ch + 1) * pixelScale;
+                    ctx.save();
+                    ctx.strokeStyle = '#f48fb1';
+                    ctx.lineWidth = 1.2;
+                    ctx.setLineDash([4, 3]);
+                    ctx.strokeRect(cx - w / 2, cy - w / 2, w, w);
+                    ctx.setLineDash([]);
+                    ctx.restore();
+                }
+            }
+            if (stereoKp && stereoKp[fn]) {
+                const respFrame = trialData.stereo_hybrid_response?.[fn];
+                for (let j = 0; j < 21; j++) {
+                    if (!isJointVisible(j) || !stereoKp[fn][j]) continue;
+                    const rawConf = (respFrame && respFrame[j] != null) ? respFrame[j] : 0;
+                    if (rawConf < stereoHybridConfThreshold) continue;
+                    const x = stereoKp[fn][j][0] * pixelScale;
+                    const y = stereoKp[fn][j][1] * pixelScale;
+                    let conf = rawConf;
+                    if (conf < 0) conf = 0;
+                    if (conf > 1) conf = 1;
+                    const size = 4 * (0.3 + 0.7 * conf);
+                    drawCross(x, y, '#f48fb1', size);
+                }
+            }
+        }
+
         // Outline -- current camera's hand boundary polygon for the
         // current frame, from the preproc bake (inverse-warped server-
         // side into this camera's original-frame coords).
@@ -5403,7 +5474,8 @@ const manoViewer = (() => {
             // so we have to do the hit-test HERE rather than on the
             // videoCanvas (whose click handler the overlay blocks).
             if ((showStereo2D && trialData?.has_stereo)
-                || (showStereoOutline2D && trialData?.has_stereo_outline)) {
+                || (showStereoOutline2D && trialData?.has_stereo_outline)
+                || (showStereoHybrid2D && trialData?.has_stereo_hybrid)) {
                 const cRect = canvas.getBoundingClientRect();
                 const cmx = (e.clientX - cRect.left - offsetX) / scale;
                 const cmy = (e.clientY - cRect.top  - offsetY) / scale;
@@ -5424,6 +5496,10 @@ const manoViewer = (() => {
                 if (showStereoOutline2D && trialData?.has_stereo_outline) {
                     candidates.push(_isLeft ? trialData.stereo_outline_tracked_L
                                             : trialData.stereo_outline_tracked_R);
+                }
+                if (showStereoHybrid2D && trialData?.has_stereo_hybrid) {
+                    candidates.push(_isLeft ? trialData.stereo_hybrid_tracked_L
+                                            : trialData.stereo_hybrid_tracked_R);
                 }
                 let sBest = null;
                 for (const sArr of candidates) {
@@ -6761,6 +6837,14 @@ const manoViewer = (() => {
         }
         const _socw = $('stereoOutlineConfWrap');
         if (_socw) _socw.style.display = (showStereoOutline2D && hasStereoOutline) ? 'flex' : 'none';
+        const hasStereoHybrid = !!(trialData && trialData.has_stereo_hybrid);
+        _setLayerAvail('showStereoHybrid2D', hasStereoHybrid);
+        if (!hasStereoHybrid && $('showStereoHybrid2D')) {
+            $('showStereoHybrid2D').checked = false;
+            showStereoHybrid2D = false;
+        }
+        const _shcw = $('stereoHybridConfWrap');
+        if (_shcw) _shcw.style.display = (showStereoHybrid2D && hasStereoHybrid) ? 'flex' : 'none';
         const hasOutlines = !!(trialData && trialData.has_outlines);
         _setLayerAvail('showOutline2D', hasOutlines);
         if (!hasOutlines && $('showOutline2D')) {

@@ -1579,6 +1579,11 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         "stereo_outline_tracked_R": None,
         "stereo_outline_response": None,
         "has_stereo_outline": False,
+        # Stereo (hybrid) -- Pass 1 outline-vote, Pass 2 image phase-corr.
+        "stereo_hybrid_tracked_L": None,
+        "stereo_hybrid_tracked_R": None,
+        "stereo_hybrid_response": None,
+        "has_stereo_hybrid": False,
         # Per-frame hand outlines (original camera coords), one entry
         # per trial frame: {OS: [[x,y],...], OD: [...] | None}.
         # Populated below when outlines.json + camera_trajectory are
@@ -1760,10 +1765,11 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
                                   for t in range(n_sa)]
             result[key_has] = bool(np.any(~np.isnan(shifts)))
 
-        sa = (load_stereo_align(subject_name, _stereo_trial_idx)
+        sa = (load_stereo_align(subject_name, _stereo_trial_idx, mode="image")
               if _stereo_trial_idx is not None else None)
-        sa_out = (load_stereo_align(subject_name, _stereo_trial_idx,
-                                     use_outline=True)
+        sa_out = (load_stereo_align(subject_name, _stereo_trial_idx, mode="outline")
+                  if _stereo_trial_idx is not None else None)
+        sa_hyb = (load_stereo_align(subject_name, _stereo_trial_idx, mode="hybrid")
                   if _stereo_trial_idx is not None else None)
         if sa is not None:
             _emit_stereo(sa, "stereo_tracked_L", "stereo_tracked_R",
@@ -1772,10 +1778,14 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
             _emit_stereo(sa_out, "stereo_outline_tracked_L",
                          "stereo_outline_tracked_R",
                          "stereo_outline_response", "has_stereo_outline")
+        if sa_hyb is not None:
+            _emit_stereo(sa_hyb, "stereo_hybrid_tracked_L",
+                         "stereo_hybrid_tracked_R",
+                         "stereo_hybrid_response", "has_stereo_hybrid")
         # Per-joint + hand crop sizes (used by the frontend to draw
-        # the local-registration bbox).  Both variants share the same
-        # constants, so emit them if EITHER bake produced an npz.
-        _sa_meta = sa if sa is not None else sa_out
+        # the local-registration bbox).  All three variants share the
+        # same constants, so emit them if ANY bake produced an npz.
+        _sa_meta = sa if sa is not None else (sa_out if sa_out is not None else sa_hyb)
         if _sa_meta is not None:
             result["stereo_crop_half"] = int(_sa_meta.get("crop_half", _DEFAULT_CROP_HALF))
             result["stereo_hand_crop_half"] = int(_sa_meta.get("hand_crop_half", _HAND_CROP_HALF))
