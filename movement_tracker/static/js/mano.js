@@ -1537,10 +1537,20 @@ const manoViewer = (() => {
             const m = document.querySelector('input[name="stereoMode"]:checked');
             return !!(m && m.value === 'hybrid');
         };
+        // The Gauss (centre-weight) slider applies to BOTH image and
+        // hybrid modes -- it shows whenever the Stereo panel is open
+        // and the selected mode is one of those two.
+        const _stereoSupportsGauss = () => {
+            if ($('stereoPanel')?.style.display !== 'block') return false;
+            const m = document.querySelector('input[name="stereoMode"]:checked');
+            return !!(m && (m.value === 'image' || m.value === 'hybrid'));
+        };
         const _refreshStereoHybridUI = () => {
-            const on = _stereoIsHybridStaging();
-            const wrap = $('stereoDilateWrap');
-            if (wrap) wrap.style.display = on ? 'flex' : 'none';
+            const dilateOn = _stereoIsHybridStaging();
+            const dWrap = $('stereoDilateWrap');
+            if (dWrap) dWrap.style.display = dilateOn ? 'flex' : 'none';
+            const gWrap = $('stereoGaussWrap');
+            if (gWrap) gWrap.style.display = _stereoSupportsGauss() ? 'flex' : 'none';
             render();
         };
         // Stereo button: toggle panel (Run + Close).  Mirrors HRnet Correct.
@@ -1565,6 +1575,11 @@ const manoViewer = (() => {
             if (lbl) lbl.textContent = `${v} px`;
             render();
         });
+        $('stereoGaussSlider')?.addEventListener('input', e => {
+            const v = (parseInt(e.target.value, 10) || 0) / 100;
+            const lbl = $('stereoGaussVal');
+            if (lbl) lbl.textContent = v.toFixed(2);
+        });
         $('runStereoGoBtn')?.addEventListener('click', async () => {
             const st = $('stereoStatus');
             const goBtn = $('runStereoGoBtn');
@@ -1582,6 +1597,7 @@ const manoViewer = (() => {
             const _modeEl = document.querySelector('input[name="stereoMode"]:checked');
             const stereoMode = _modeEl ? _modeEl.value : 'image';
             const maskDilatePx = parseInt(($('stereoDilateSlider')?.value ?? '10'), 10) || 0;
+            const gaussWeight = (parseInt(($('stereoGaussSlider')?.value ?? '0'), 10) || 0) / 100;
             try {
                 const res = await api(`/api/mano/${subjectId}/run_stereo`, {
                     method: 'POST',
@@ -1590,6 +1606,7 @@ const manoViewer = (() => {
                         trial_idx: trials[currentTrialIdx].trial_idx,
                         mode: stereoMode,
                         mask_dilate_px: maskDilatePx,
+                        gauss_center_weight: gaussWeight,
                     }),
                 });
                 const jobId = res.job_id;

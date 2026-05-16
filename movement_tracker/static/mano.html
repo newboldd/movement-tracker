@@ -407,6 +407,15 @@
                     <input type="range" id="stereoDilateSlider" min="0" max="50" step="1" value="10" style="flex:1;height:5px;cursor:pointer;min-width:0;">
                     <span id="stereoDilateVal" style="min-width:30px;text-align:right;color:var(--text);">10 px</span>
                 </div>
+                <!-- Image + hybrid: 2D-Gaussian centre weight on the MP
+                     label.  0 = uniform across the per-joint bbox, max =
+                     heavily skewed toward the joint centre. -->
+                <div id="stereoGaussWrap" style="display:none;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);margin-bottom:6px;"
+                     title="Apply a 2D Gaussian centred on each MP label that weights the per-joint phase correlation toward pixels NEAR the joint.  0 = uniform (no extra weighting); higher = sharper falloff so distant pixels in the bbox count less.">
+                    <span>Center</span>
+                    <input type="range" id="stereoGaussSlider" min="0" max="100" step="1" value="0" style="flex:1;height:5px;cursor:pointer;min-width:0;">
+                    <span id="stereoGaussVal" style="min-width:30px;text-align:right;color:var(--text);">0.00</span>
+                </div>
                 <div style="display:flex;gap:4px;">
                     <button class="btn btn-sm btn-success" id="runStereoGoBtn" style="flex:1;">Run</button>
                     <button class="btn btn-sm" id="stereoCloseBtn" style="flex:0 0 30px;">×</button>
@@ -1048,7 +1057,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/mano.js?v=351" type="module"></script>
+    <script src="/static/js/mano.js?v=352" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

@@ -122,35 +122,67 @@ def _align_phase_mask(os_crop: np.ndarray, od_crop: np.ndarray,
     return float(dx), float(dy), float(response)
 
 
+def _gauss_centre_weight(shape: tuple[int, int], strength: float) -> np.ndarray | None:
+    """Build a 2D Gaussian weight image centred on the crop centre
+    (which is where each per-joint phase-corr crop is anchored on the
+    MP label).  ``strength`` in [0, 1]: 0 returns None (caller skips
+    the Gaussian multiply), 1 produces a tight Gaussian whose sigma
+    is ~0.3 * half-size.  Linearly interpolated in between."""
+    if strength <= 0.0:
+        return None
+    H, W = shape
+    cy = (H - 1) * 0.5
+    cx = (W - 1) * 0.5
+    jh = (min(H, W) - 1) * 0.5  # half-size in pixels
+    # sigma_frac (units of jh): 5.0 at strength=0+, 0.3 at strength=1.
+    sigma_frac = 5.0 - 4.7 * float(min(max(strength, 0.0), 1.0))
+    sigma = max(1e-3, jh * sigma_frac)
+    ys = np.arange(H, dtype=np.float32)[:, None]
+    xs = np.arange(W, dtype=np.float32)[None, :]
+    inv2s2 = 1.0 / (2.0 * sigma * sigma)
+    return np.exp(-((xs - cx) ** 2 + (ys - cy) ** 2) * inv2s2).astype(np.float32)
+
+
 def _align_phase_weighted(os_crop: np.ndarray, od_crop: np.ndarray,
                            window: np.ndarray,
-                           os_mask: np.ndarray,
-                           od_mask: np.ndarray) -> tuple[float, float, float]:
-    """Phase-correlate two BGR crops with a per-pixel weight mask --
-    background pixels (mask == 0) contribute LITERAL ZERO to the FFT
-    input, so the alignment is driven only by foreground content.
+                           os_mask: np.ndarray | None = None,
+                           od_mask: np.ndarray | None = None,
+                           gauss_strength: float = 0.0
+                           ) -> tuple[float, float, float]:
+    """Phase-correlate two BGR crops with optional per-pixel weighting.
 
-    Pipeline: BGR -> gray -> high-pass (Gaussian) -> subtract the
-    foreground-only mean (so the masked-out region remains exactly
-    zero, with no DC leakage) -> multiply by mask -> Hanning window.
+    Final per-pixel weight = ``window`` x (mask if provided)
+    x (Gaussian if ``gauss_strength`` > 0).
 
-    The mask is interpreted as 0/255 uint8 and scaled to 0/1 float.
-    A more graduated mask (e.g. a Gaussian-falloff at the boundary)
-    would also work and might further reduce boundary ringing -- the
-    hard 0/1 mask is fine in practice because Hanning windowing
-    suppresses the bbox edges anyway."""
+    - Background pixels (mask == 0) contribute LITERAL ZERO to the
+      FFT input -- alignment is driven only by foreground content.
+    - The Gaussian falloff (centred on the crop centre, which sits on
+      the MP label) emphasises pixels NEAR the joint over pixels at
+      the edge of the bbox.  Strength 0 disables it (uniform within
+      the mask + Hanning).
+    - The FG-only mean is subtracted so the masked-out / heavily-
+      attenuated regions stay at exactly zero (no DC leakage)."""
     a = cv2.cvtColor(os_crop, cv2.COLOR_BGR2GRAY).astype(np.float32)
     b = cv2.cvtColor(od_crop, cv2.COLOR_BGR2GRAY).astype(np.float32)
     a = a - cv2.GaussianBlur(a, (0, 0), sigmaX=_HIGHPASS_SIGMA, sigmaY=_HIGHPASS_SIGMA)
     b = b - cv2.GaussianBlur(b, (0, 0), sigmaX=_HIGHPASS_SIGMA, sigmaY=_HIGHPASS_SIGMA)
-    ma = (os_mask > 0).astype(np.float32)
-    mb = (od_mask > 0).astype(np.float32)
-    fa = ma > 0
-    fb = mb > 0
+    wa = window.astype(np.float32, copy=True)
+    wb = window.astype(np.float32, copy=True)
+    if os_mask is not None:
+        wa = wa * (os_mask > 0).astype(np.float32)
+    if od_mask is not None:
+        wb = wb * (od_mask > 0).astype(np.float32)
+    g = _gauss_centre_weight(a.shape, gauss_strength)
+    if g is not None:
+        wa = wa * g
+        wb = wb * g
+    # FG-only means (pixels with non-trivial weight).
+    fa = wa > 1e-4
+    fb = wb > 1e-4
     amean = float(a[fa].mean()) if fa.any() else 0.0
     bmean = float(b[fb].mean()) if fb.any() else 0.0
-    a = (a - amean) * ma * window
-    b = (b - bmean) * mb * window
+    a = (a - amean) * wa
+    b = (b - bmean) * wb
     (dx, dy), response = cv2.phaseCorrelate(a, b)
     return float(dx), float(dy), float(response)
 
@@ -287,7 +319,8 @@ def run_stereo_align(subject_name: str, trial_idx: int,
                       cancel_event=None,
                       use_outline: bool = False,
                       mode: str = "image",
-                      mask_dilate_px: int = 10) -> str:
+                      mask_dilate_px: int = 10,
+                      gauss_center_weight: float = 0.0) -> str:
     """Run cross-camera stereo label alignment for one trial.
 
     The ``mode`` argument selects which feature image drives each
@@ -313,9 +346,15 @@ def run_stereo_align(subject_name: str, trial_idx: int,
 
     ``mask_dilate_px`` (hybrid only): the outline mask is dilated by
     this many pixels before being applied to the Pass-2 raw-image
-    crops -- background pixels outside the dilated mask are replaced
-    by the foreground mean so phase correlation is driven only by
-    hand-region content.  Set to 0 to disable.
+    crops -- background pixels outside the dilated mask are weighted
+    to zero so phase correlation is driven only by hand-region
+    content.  Set to 0 to disable.
+
+    ``gauss_center_weight`` (image + hybrid): in [0, 1], strength of
+    a 2D Gaussian centred on each joint's MP label that further
+    weights the Pass-2 phase correlation toward pixels near the
+    joint.  0 = uniform (within the mask / Hanning); 1 = sigma ~0.3
+    of the per-joint half-size.  Ignored in outline mode.
 
     Returns the saved npz path as a string.
     """
@@ -535,25 +574,32 @@ def run_stereo_align(subject_name: str, trial_idx: int,
             # Hybrid: weight the per-joint phase corr by the dilated
             # outline mask so BG pixels contribute literal zero to the
             # FFT.  Failsafe: if either MP label falls OUTSIDE the
-            # mask, skip the weighting for THAT joint (otherwise the
-            # mask would zero out the area around the label).
-            use_weighted = False
+            # mask, skip the mask for THAT joint (the Gaussian centre-
+            # weight is still applied -- it doesn't zero anything out).
+            use_mask = False
             if mode == "hybrid" and os_mask is not None and od_mask is not None:
                 h_m, w_m = os_mask.shape
                 in_os = (0 <= os_cx < w_m and 0 <= os_cy < h_m
                          and os_mask[os_cy, os_cx] > 0)
                 in_od = (0 <= od_cx < w_m and 0 <= od_cy < h_m
                          and od_mask[od_cy, od_cx] > 0)
-                use_weighted = in_os and in_od
+                use_mask = in_os and in_od
             try:
-                if use_weighted:
-                    os_m_crop = _crop(os_mask, os_cx, os_cy, jh)
-                    od_m_crop = _crop(od_mask, od_cx, od_cy, jh)
+                if mode == "outline":
+                    # Outline-only mode keeps its bespoke mask-image
+                    # phase corr -- the inputs ARE silhouettes already.
+                    raw_dx, raw_dy, r = align_fn(os_crop, od_crop, _win_for_half(jh))
+                else:
+                    # Image + hybrid go through the unified weighted
+                    # phase corr (mask optional, Gaussian optional).
+                    os_m_crop = od_m_crop = None
+                    if use_mask:
+                        os_m_crop = _crop(os_mask, os_cx, os_cy, jh)
+                        od_m_crop = _crop(od_mask, od_cx, od_cy, jh)
                     raw_dx, raw_dy, r = _align_phase_weighted(
                         os_crop, od_crop, _win_for_half(jh),
-                        os_m_crop, od_m_crop)
-                else:
-                    raw_dx, raw_dy, r = align_fn(os_crop, od_crop, _win_for_half(jh))
+                        os_m_crop, od_m_crop,
+                        gauss_strength=float(gauss_center_weight))
             except Exception as e:
                 logger.debug(f"per-joint phase corr failed at frame {gf} joint {j}: {e}")
                 continue
@@ -591,6 +637,9 @@ def run_stereo_align(subject_name: str, trial_idx: int,
         n_frames=np.array(n_frames, dtype=np.int32),
         mask_dilate_px=np.array(int(mask_dilate_px) if mode == "hybrid" else -1,
                                  dtype=np.int32),
+        gauss_center_weight=np.array(
+            float(gauss_center_weight) if mode != "outline" else -1.0,
+            dtype=np.float32),
     )
     valid = int(np.sum(~np.isnan(shifts[:, :, 0])))
     logger.info(

@@ -429,6 +429,10 @@ class StereoAlignRequest(BaseModel):
     # Hybrid only: dilate the outline mask by N pixels before applying
     # to the per-joint image crops.  Ignored for other modes.
     mask_dilate_px: int = 10
+    # Image + hybrid: strength of a 2D Gaussian centred on each MP
+    # label that weights the Pass-2 phase correlation toward pixels
+    # near the joint.  0 = uniform, 1 = sharp.  Ignored in outline.
+    gauss_center_weight: float = 0.0
 
 
 @router.post("/{subject_id}/run_stereo")
@@ -485,7 +489,8 @@ def run_stereo(subject_id: int, req: StereoAlignRequest) -> dict:
                              progress_callback=on_progress,
                              cancel_event=cancel_event,
                              mode=_mode,
-                             mask_dilate_px=int(req.mask_dilate_px))
+                             mask_dilate_px=int(req.mask_dilate_px),
+                             gauss_center_weight=float(req.gauss_center_weight))
             with get_db_ctx() as db:
                 db.execute(
                     "UPDATE jobs SET status='completed', progress_pct=100, "
