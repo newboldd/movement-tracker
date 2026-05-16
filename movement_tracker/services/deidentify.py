@@ -1494,15 +1494,16 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
     thumb_cmc = next((lm for lm in hand_lms if lm.get("joint") == 1), None)
     hand_wrist = next((lm for lm in hand_lms if lm.get("joint") == 0), None)
 
-    # Pick the elbow closest to the hand centroid
+    # Pick the elbow closest to the hand WRIST.  Mirrors the live JS
+    # overlay (_buildHandMask in deidentify.js) -- previously this
+    # path used the hand-centroid heuristic, which could land on the
+    # OTHER arm's elbow when both elbows were visible in the camera
+    # and the hand pose biased the centroid away from the wrist.
     elbows = [lm for lm in pose_lms if lm.get("joint") in (13, 14)]
     elbow = None
     if hand_wrist and elbows:
-        hand_xs = [lm["x"] for lm in hand_lms]
-        hand_ys = [lm["y"] for lm in hand_lms]
-        cx = sum(hand_xs) / len(hand_xs)
-        cy = sum(hand_ys) / len(hand_ys)
-        elbow = min(elbows, key=lambda e: (e["x"] - cx)**2 + (e["y"] - cy)**2)
+        wx, wy = hand_wrist["x"], hand_wrist["y"]
+        elbow = min(elbows, key=lambda e: (e["x"] - wx) ** 2 + (e["y"] - wy) ** 2)
 
     if pinky_mcp and thumb_cmc and elbow and hand_wrist:
         # Apply forearm extent: interpolate elbow toward wrist

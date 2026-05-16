@@ -1340,17 +1340,43 @@ def run_pose_prelabels(subject_name: str, progress_callback=None) -> Path:
 
 
 def load_pose_prelabels(subject_name: str) -> dict | None:
-    """Load saved pose prelabels for a subject. Returns None if not available."""
+    """Load saved pose prelabels for a subject. Returns None if not available.
+
+    Applies the same per-subject pre-roll trim that
+    ``load_mediapipe_prelabels`` does -- without it, any subject built
+    on a machine whose codec exposed negative-PTS frames (the npz has
+    ``offset`` extra leading frames) would have its pose arrays
+    misaligned with the trial frame indices, so callers indexing
+    ``OS_pose[frame_num]`` would read the wrong frame's elbow.  This
+    showed up on the deidentify preview as a missing (or visibly
+    wrong) arm-triangle vertex while the live overlay -- which goes
+    through ``load_mediapipe_prelabels`` first -- looked correct.
+    """
     settings = get_settings()
     npz_path = settings.dlc_path / subject_name / "pose_prelabels.npz"
     if not npz_path.exists():
         return None
 
-    data = np.load(str(npz_path))
+    data = dict(np.load(str(npz_path)))
+    # Reuse the hand-data offset detector (it inspects the saved npz +
+    # the source mp4 to figure out how many pre-roll frames the codec
+    # exposed beyond what the browser sees).
+    frame_offset = _detect_frame_offset(subject_name, data)
+    OS_pose = data["OS_pose"]
+    OD_pose = data["OD_pose"]
+    conf_OS = data["pose_confidence_OS"]
+    conf_OD = data["pose_confidence_OD"]
+    total_frames = int(data["total_frames"])
+    if frame_offset > 0:
+        OS_pose = OS_pose[frame_offset:]
+        OD_pose = OD_pose[frame_offset:]
+        conf_OS = conf_OS[frame_offset:]
+        conf_OD = conf_OD[frame_offset:]
+        total_frames = max(0, total_frames - frame_offset)
     return {
-        "OS_pose": data["OS_pose"],
-        "OD_pose": data["OD_pose"],
-        "pose_confidence_OS": data["pose_confidence_OS"],
-        "pose_confidence_OD": data["pose_confidence_OD"],
-        "total_frames": int(data["total_frames"]),
+        "OS_pose": OS_pose,
+        "OD_pose": OD_pose,
+        "pose_confidence_OS": conf_OS,
+        "pose_confidence_OD": conf_OD,
+        "total_frames": total_frames,
     }
