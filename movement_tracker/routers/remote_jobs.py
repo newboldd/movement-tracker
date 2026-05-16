@@ -166,11 +166,15 @@ def list_pending_downloads(force: int = 0) -> dict:
         # to download.  Pre-routing single-trial MP to local CPU made the
         # local rows trigger spurious "pending download" flags for
         # whatever stale remote npz happened to still exist on the host.
+        # ``remote_host = 'localhost'`` is the queue manager's flag for
+        # local-cpu / local-gpu execution -- exclude that explicitly,
+        # otherwise the (non-empty) literal sneaks past the filter.
         rows = db.execute(
             "SELECT id, job_type, status, subject_id FROM jobs "
             "WHERE status IN ('running','completed','failed') "
             "AND job_type='mediapipe' "
             "AND remote_host IS NOT NULL AND remote_host != '' "
+            "AND remote_host != 'localhost' "
             "AND created_at >= datetime('now','-30 days') "
             "ORDER BY id DESC"
         ).fetchall()
