@@ -5247,6 +5247,7 @@ const manoViewer = (() => {
             const displayStages = new Set([..._stages2D, ..._stages3D]);
             if (displayStages.size > 0 && (showSkelV2_2D || showSkelV2_3D)) {
                 const STAGE_FALLBACK = { mediapipe: 'mp',
+                                          stereo_correct: 'mp',
                                           z_correct: 'skel_v2', z_smooth: 'skel_v2',
                                           hrnet_snap: 'skel_v2', bone_correct: 'skel_v2',
                                           bone_smooth: 'skel_v2' };

@@ -1336,6 +1336,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
 
     # ── Compute distances ──────────────────────────────────────
     # Intermediate pipeline stages (may be None if not saved yet)
+    has_skel_v2_sc = v2_joints_3d_after_sc is not None and np.any(~np.isnan(v2_joints_3d_after_sc))
     has_skel_v2_y = v2_joints_3d_after_y is not None and np.any(~np.isnan(v2_joints_3d_after_y))
     has_skel_v2_z = v2_joints_3d_after_z is not None and np.any(~np.isnan(v2_joints_3d_after_z))
     has_skel_v2_zs = v2_joints_3d_after_zs is not None and np.any(~np.isnan(v2_joints_3d_after_zs))
@@ -1344,6 +1345,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
 
     distances_mano = _compute_distances(joints_3d) if has_mano else {}
     distances_skel_v2 = _compute_distances(v2_joints_3d) if has_skel_v2 else {}
+    distances_skel_v2_sc = _compute_distances(v2_joints_3d_after_sc) if has_skel_v2_sc else {}
     distances_skel_v2_y = _compute_distances(v2_joints_3d_after_y) if has_skel_v2_y else {}
     distances_skel_v2_z = _compute_distances(v2_joints_3d_after_z) if has_skel_v2_z else {}
     distances_skel_v2_zs = _compute_distances(v2_joints_3d_after_zs) if has_skel_v2_zs else {}
@@ -1386,6 +1388,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     # MCP inter-joint distances
     if has_mano: distances_mano.update(_compute_mcp_distances(joints_3d))
     if has_skel_v2: distances_skel_v2.update(_compute_mcp_distances(v2_joints_3d))
+    if has_skel_v2_sc: distances_skel_v2_sc.update(_compute_mcp_distances(v2_joints_3d_after_sc))
     if has_skel_v2_y: distances_skel_v2_y.update(_compute_mcp_distances(v2_joints_3d_after_y))
     if has_skel_v2_z: distances_skel_v2_z.update(_compute_mcp_distances(v2_joints_3d_after_z))
     if has_skel_v2_zs: distances_skel_v2_zs.update(_compute_mcp_distances(v2_joints_3d_after_zs))
@@ -1398,6 +1401,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     # Compute joint angle traces
     angles_mano = _compute_angles(joints_3d) if has_mano else {}
     angles_skel_v2 = _compute_angles(v2_joints_3d) if has_skel_v2 else {}
+    angles_skel_v2_sc = _compute_angles(v2_joints_3d_after_sc) if has_skel_v2_sc else {}
     angles_skel_v2_y = _compute_angles(v2_joints_3d_after_y) if has_skel_v2_y else {}
     angles_skel_v2_z = _compute_angles(v2_joints_3d_after_z) if has_skel_v2_z else {}
     angles_skel_v2_zs = _compute_angles(v2_joints_3d_after_zs) if has_skel_v2_zs else {}
@@ -1414,6 +1418,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     # Knuckle angles (inter-MCP segment angles at M_MCP and R_MCP)
     if has_mano: angles_mano.update(_compute_knuckle_angles(joints_3d))
     if has_skel_v2: angles_skel_v2.update(_compute_knuckle_angles(v2_joints_3d))
+    if has_skel_v2_sc: angles_skel_v2_sc.update(_compute_knuckle_angles(v2_joints_3d_after_sc))
     if has_skel_v2_y: angles_skel_v2_y.update(_compute_knuckle_angles(v2_joints_3d_after_y))
     if has_skel_v2_z: angles_skel_v2_z.update(_compute_knuckle_angles(v2_joints_3d_after_z))
     if has_skel_v2_zs: angles_skel_v2_zs.update(_compute_knuckle_angles(v2_joints_3d_after_zs))
@@ -1432,6 +1437,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     if has_elbow:
         if has_mano:    angles_mano.update(_compute_wrist_angles(joints_3d, elbow_3d))
         if has_skel_v2: angles_skel_v2.update(_compute_wrist_angles(v2_joints_3d, elbow_3d))
+        if has_skel_v2_sc: angles_skel_v2_sc.update(_compute_wrist_angles(v2_joints_3d_after_sc, elbow_3d))
         if has_skel_v2_y: angles_skel_v2_y.update(_compute_wrist_angles(v2_joints_3d_after_y, elbow_3d))
         if has_skel_v2_z: angles_skel_v2_z.update(_compute_wrist_angles(v2_joints_3d_after_z, elbow_3d))
         if has_skel_v2_zs: angles_skel_v2_zs.update(_compute_wrist_angles(v2_joints_3d_after_zs, elbow_3d))
@@ -1448,6 +1454,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     # Compute finger spread angles
     spreads_mano = _compute_spreads(joints_3d) if has_mano else {}
     spreads_skel_v2 = _compute_spreads(v2_joints_3d) if has_skel_v2 else {}
+    spreads_skel_v2_sc = _compute_spreads(v2_joints_3d_after_sc) if has_skel_v2_sc else {}
     spreads_skel_v2_y = _compute_spreads(v2_joints_3d_after_y) if has_skel_v2_y else {}
     spreads_skel_v2_z = _compute_spreads(v2_joints_3d_after_z) if has_skel_v2_z else {}
     spreads_skel_v2_zs = _compute_spreads(v2_joints_3d_after_zs) if has_skel_v2_zs else {}
@@ -1464,6 +1471,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     # Compute wrist 3D coordinates
     wrist_coords_mano = _compute_wrist_coords(joints_3d) if has_mano else {}
     wrist_coords_skel_v2 = _compute_wrist_coords(v2_joints_3d) if has_skel_v2 else {}
+    wrist_coords_skel_v2_sc = _compute_wrist_coords(v2_joints_3d_after_sc) if has_skel_v2_sc else {}
     wrist_coords_skel_v2_y = _compute_wrist_coords(v2_joints_3d_after_y) if has_skel_v2_y else {}
     wrist_coords_skel_v2_z = _compute_wrist_coords(v2_joints_3d_after_z) if has_skel_v2_z else {}
     wrist_coords_skel_v2_zs = _compute_wrist_coords(v2_joints_3d_after_zs) if has_skel_v2_zs else {}
@@ -1480,6 +1488,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     # Compute per-joint position traces (de-meaned, +100mm)
     positions_mano = _compute_joint_positions(joints_3d) if has_mano else {}
     positions_skel_v2 = _compute_joint_positions(v2_joints_3d) if has_skel_v2 else {}
+    positions_skel_v2_sc = _compute_joint_positions(v2_joints_3d_after_sc) if has_skel_v2_sc else {}
     positions_skel_v2_y = _compute_joint_positions(v2_joints_3d_after_y) if has_skel_v2_y else {}
     positions_skel_v2_z = _compute_joint_positions(v2_joints_3d_after_z) if has_skel_v2_z else {}
     positions_skel_v2_zs = _compute_joint_positions(v2_joints_3d_after_zs) if has_skel_v2_zs else {}
@@ -1648,6 +1657,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         # Distances
         "distances_mano": distances_mano,
         "distances_skel_v2": distances_skel_v2,
+        "distances_skel_v2_sc": distances_skel_v2_sc,
         "distances_skel_v2_y": distances_skel_v2_y,
         "distances_skel_v2_z": distances_skel_v2_z,
         "distances_skel_v2_zs": distances_skel_v2_zs,
@@ -1665,6 +1675,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         # Joint angles (per-frame, degrees)
         "angles_mano": angles_mano,
         "angles_skel_v2": angles_skel_v2,
+        "angles_skel_v2_sc": angles_skel_v2_sc,
         "angles_skel_v2_y": angles_skel_v2_y,
         "angles_skel_v2_z": angles_skel_v2_z,
         "angles_skel_v2_zs": angles_skel_v2_zs,
@@ -1680,6 +1691,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         # Finger spread angles (per-frame, degrees)
         "spreads_mano": spreads_mano,
         "spreads_skel_v2": spreads_skel_v2,
+        "spreads_skel_v2_sc": spreads_skel_v2_sc,
         "spreads_skel_v2_y": spreads_skel_v2_y,
         "spreads_skel_v2_z": spreads_skel_v2_z,
         "spreads_skel_v2_zs": spreads_skel_v2_zs,
@@ -1695,6 +1707,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         # Wrist 3D coordinates (mm, per-frame)
         "wrist_coords_mano": wrist_coords_mano,
         "wrist_coords_skel_v2": wrist_coords_skel_v2,
+        "wrist_coords_skel_v2_sc": wrist_coords_skel_v2_sc,
         "wrist_coords_skel_v2_y": wrist_coords_skel_v2_y,
         "wrist_coords_skel_v2_z": wrist_coords_skel_v2_z,
         "wrist_coords_skel_v2_zs": wrist_coords_skel_v2_zs,
@@ -1710,6 +1723,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         # Per-joint position traces (de-meaned +100mm)
         "positions_mano": positions_mano,
         "positions_skel_v2": positions_skel_v2,
+        "positions_skel_v2_sc": positions_skel_v2_sc,
         "positions_skel_v2_y": positions_skel_v2_y,
         "positions_skel_v2_z": positions_skel_v2_z,
         "positions_skel_v2_zs": positions_skel_v2_zs,
