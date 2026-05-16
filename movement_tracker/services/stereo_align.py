@@ -122,6 +122,39 @@ def _align_phase_mask(os_crop: np.ndarray, od_crop: np.ndarray,
     return float(dx), float(dy), float(response)
 
 
+def _align_phase_weighted(os_crop: np.ndarray, od_crop: np.ndarray,
+                           window: np.ndarray,
+                           os_mask: np.ndarray,
+                           od_mask: np.ndarray) -> tuple[float, float, float]:
+    """Phase-correlate two BGR crops with a per-pixel weight mask --
+    background pixels (mask == 0) contribute LITERAL ZERO to the FFT
+    input, so the alignment is driven only by foreground content.
+
+    Pipeline: BGR -> gray -> high-pass (Gaussian) -> subtract the
+    foreground-only mean (so the masked-out region remains exactly
+    zero, with no DC leakage) -> multiply by mask -> Hanning window.
+
+    The mask is interpreted as 0/255 uint8 and scaled to 0/1 float.
+    A more graduated mask (e.g. a Gaussian-falloff at the boundary)
+    would also work and might further reduce boundary ringing -- the
+    hard 0/1 mask is fine in practice because Hanning windowing
+    suppresses the bbox edges anyway."""
+    a = cv2.cvtColor(os_crop, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    b = cv2.cvtColor(od_crop, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    a = a - cv2.GaussianBlur(a, (0, 0), sigmaX=_HIGHPASS_SIGMA, sigmaY=_HIGHPASS_SIGMA)
+    b = b - cv2.GaussianBlur(b, (0, 0), sigmaX=_HIGHPASS_SIGMA, sigmaY=_HIGHPASS_SIGMA)
+    ma = (os_mask > 0).astype(np.float32)
+    mb = (od_mask > 0).astype(np.float32)
+    fa = ma > 0
+    fb = mb > 0
+    amean = float(a[fa].mean()) if fa.any() else 0.0
+    bmean = float(b[fb].mean()) if fb.any() else 0.0
+    a = (a - amean) * ma * window
+    b = (b - bmean) * mb * window
+    (dx, dy), response = cv2.phaseCorrelate(a, b)
+    return float(dx), float(dy), float(response)
+
+
 def _warp_poly_ref_to_orig(poly_ref, H_to_ref: np.ndarray):
     """Apply ``H_to_ref^-1`` (ref -> original camera coords) to every
     point of the polygon.  Returns an int32 (N, 1, 2) array suitable
@@ -165,29 +198,6 @@ def _dilate_mask(mask: np.ndarray, dilate_px: int) -> np.ndarray:
     k = 2 * int(dilate_px) + 1
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
     return cv2.dilate(mask, kernel)
-
-
-def _apply_outline_mask(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """Replace background pixels (``mask == 0``) with the per-channel
-    mean of foreground pixels.  Removes background content from the
-    phase-correlation feature image without introducing a hard step at
-    the mask boundary that would otherwise dominate the FFT response.
-
-    Falls back to leaving the image unchanged when the mask is empty
-    (e.g. outline missing for this frame)."""
-    fg = mask > 0
-    if not fg.any():
-        return img
-    out = img.copy()
-    if img.ndim == 3:
-        mean_color = img[fg].mean(axis=0).astype(img.dtype)
-        bg = ~fg
-        for c in range(img.shape[2]):
-            out[..., c][bg] = mean_color[c]
-    else:
-        mean_v = img[fg].mean().astype(img.dtype)
-        out[~fg] = mean_v
-    return out
 
 
 def _densify_poly(poly, sp: float = 3.0) -> np.ndarray:
@@ -429,12 +439,10 @@ def run_stereo_align(subject_name: str, trial_idx: int,
             od_poly = _warp_poly_ref_to_orig(of.get("OD"), H_R_all[fi])
         # Pass 2 source image: raw frame (image / hybrid) or outline
         # mask (pure outline mode).
-        # Hybrid keeps BOTH a masked and a raw view so a per-joint
-        # failsafe (further down) can skip masking for joints whose
-        # MP label lands outside the dilated mask -- otherwise their
-        # alignment would be driven by the foreground-mean fill colour
-        # rather than the actual joint neighbourhood.
-        img_OS_raw = img_OD_raw = None
+        # Hybrid keeps the raw frame halves and the dilated outline
+        # masks; the per-joint loop below crops both and routes through
+        # _align_phase_weighted so background pixels contribute literal
+        # zero to the FFT -- cleaner than mean-filling the image.
         os_mask = od_mask = None
         if needs_video:
             ok, frame = cap.read()
@@ -444,20 +452,11 @@ def run_stereo_align(subject_name: str, trial_idx: int,
             half_w = _fw // 2
             img_OS = frame[:, :half_w, :]
             img_OD = frame[:, half_w:, :]
-            # Hybrid: mask out background so the per-joint phase corr
-            # is driven only by hand-region content.  Dilate the
-            # outline first to keep a small margin of skin near the
-            # hand boundary.  Fill bg with the foreground mean to
-            # avoid a step edge at the mask.
             if mode == "hybrid":
                 os_mask = _dilate_mask(_outline_mask_image(os_poly, h_full, half_w),
                                        mask_dilate_px)
                 od_mask = _dilate_mask(_outline_mask_image(od_poly, h_full, half_w),
                                        mask_dilate_px)
-                img_OS_raw = img_OS
-                img_OD_raw = img_OD
-                img_OS = _apply_outline_mask(img_OS_raw, os_mask)
-                img_OD = _apply_outline_mask(img_OD_raw, od_mask)
         else:
             img_OS = _outline_mask_image(os_poly, h_full, half_w)
             img_OD = _outline_mask_image(od_poly, h_full, half_w)
@@ -531,24 +530,30 @@ def run_stereo_align(subject_name: str, trial_idx: int,
             os_cx, os_cy = int(round(float(os_x))), int(round(float(os_y)))
             od_cx, od_cy = int(round(float(od_x))), int(round(float(od_y)))
             jh = per_joint_halves[j]
-            # Hybrid failsafe: if either camera's MP label falls
-            # OUTSIDE the dilated outline mask, the masked image would
-            # zero out the area around the label and the phase corr
-            # would just chase the foreground-mean fill colour.  Use
-            # the raw image crops for that joint instead.
-            src_OS, src_OD = img_OS, img_OD
+            os_crop = _crop(img_OS, os_cx, os_cy, jh)
+            od_crop = _crop(img_OD, od_cx, od_cy, jh)
+            # Hybrid: weight the per-joint phase corr by the dilated
+            # outline mask so BG pixels contribute literal zero to the
+            # FFT.  Failsafe: if either MP label falls OUTSIDE the
+            # mask, skip the weighting for THAT joint (otherwise the
+            # mask would zero out the area around the label).
+            use_weighted = False
             if mode == "hybrid" and os_mask is not None and od_mask is not None:
                 h_m, w_m = os_mask.shape
                 in_os = (0 <= os_cx < w_m and 0 <= os_cy < h_m
                          and os_mask[os_cy, os_cx] > 0)
                 in_od = (0 <= od_cx < w_m and 0 <= od_cy < h_m
                          and od_mask[od_cy, od_cx] > 0)
-                if not (in_os and in_od):
-                    src_OS, src_OD = img_OS_raw, img_OD_raw
-            os_crop = _crop(src_OS, os_cx, os_cy, jh)
-            od_crop = _crop(src_OD, od_cx, od_cy, jh)
+                use_weighted = in_os and in_od
             try:
-                raw_dx, raw_dy, r = align_fn(os_crop, od_crop, _win_for_half(jh))
+                if use_weighted:
+                    os_m_crop = _crop(os_mask, os_cx, os_cy, jh)
+                    od_m_crop = _crop(od_mask, od_cx, od_cy, jh)
+                    raw_dx, raw_dy, r = _align_phase_weighted(
+                        os_crop, od_crop, _win_for_half(jh),
+                        os_m_crop, od_m_crop)
+                else:
+                    raw_dx, raw_dy, r = align_fn(os_crop, od_crop, _win_for_half(jh))
             except Exception as e:
                 logger.debug(f"per-joint phase corr failed at frame {gf} joint {j}: {e}")
                 continue
