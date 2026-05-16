@@ -3484,17 +3484,15 @@ def remote_deidentify(
                        (round(global_pct, 1), job_id))
 
     def _fail(msg):
+        """Log + raise.  The queue_manager wrapper catches the exception
+        and computes the final outcome; if it's not batched, it writes
+        status='failed' itself.  Previously this only wrote the DB row
+        without raising -- which got OVERWRITTEN by the queue manager's
+        post-batch ``outcome='remote_only' -> status='completed'`` path
+        whenever the worker died before producing an output file (e.g.
+        ffmpeg pip-install fails on the remote)."""
         logger.error(f"Job {job_id} remote deidentify failed: {msg}")
-        if _is_batched:
-            # Don't mark parent failed in batch mode — queue manager owns
-            # final status; just log and let the next trial proceed.
-            return
-        with get_db_ctx() as db:
-            db.execute(
-                """UPDATE jobs SET status = 'failed', error_msg = ?,
-                   finished_at = CURRENT_TIMESTAMP WHERE id = ?""",
-                (msg, job_id),
-            )
+        raise RuntimeError(msg)
 
     def _check_cancel():
         if cancel_event.is_set():

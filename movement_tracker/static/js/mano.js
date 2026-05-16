@@ -3631,6 +3631,7 @@ const manoViewer = (() => {
         const STAGE_PTS = {
             mediapipe: () => trialData.mp_joints_3d,
             // Fall back to the final Skeleton 3D if intermediates weren't saved
+            stereo_correct: () => trialData.skel_v2_joints_sc_3d || trialData.mp_joints_3d,
             z_correct: () => trialData.skel_v2_joints_z_3d || trialData.skel_v2_joints_3d,
             z_smooth:  () => trialData.skel_v2_joints_zs_3d || trialData.skel_v2_joints_3d,
             hrnet_snap: () => trialData.skel_v2_joints_hr_3d || trialData.skel_v2_joints_3d,

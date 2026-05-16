@@ -3625,51 +3625,66 @@ def compute_errors_for_trial(subject_name: str, trial_stem: str,
                               winner_take_all=wta)
 
     # Overlay stereo_dist (drives the mediapipe-stage error overlay
-    # after the v3 step-0 stereo-correction).  Recomputed live from
-    # whatever stereo_align_<mode>.npz exists (priority hybrid >
-    # outline > image), so the user sees the overlay update as they
-    # move the stereo confidence / distance sliders -- not just after
-    # a fit re-run.
+    # after the v3 step-0 stereo-correction).  Prefer the BAKED
+    # ``stereo_blame`` mask written into mano_fit_v2.npz by the v3
+    # fit -- that way the overlay always matches what the
+    # Stereo-Correct stage view is actually showing (same MP labels
+    # replaced for the same joints / cameras).  Fall back to a live
+    # recompute from stereo_align_<mode>.npz only when no fit row
+    # exists yet, so the user gets a useful preview before their
+    # first bake.
     sd_w = float(det_weights.get("stereo_dist", 0.0))
     sc_w = float(det_weights.get("stereo_conf", 0.0))
     if sd_w > 0:
-        try:
-            from .stereo_align import load_stereo_align
-            t_idx = next((i for i, t in enumerate(
-                build_trial_map(subject_name))
-                if t["trial_name"] == trial_stem), None)
-            sa = None
-            if t_idx is not None:
-                for _m in ("hybrid", "outline", "image"):
-                    sa = load_stereo_align(subject_name, t_idx, mode=_m)
-                    if sa is not None:
-                        break
-            if sa is not None:
-                shifts = sa["shifts"]                # (N_sa, 21, 2)
-                resp   = sa["response"]              # (N_sa, 21)
-                n_sa = min(N, int(shifts.shape[0]))
-                dist = np.linalg.norm(shifts[:n_sa], axis=-1)  # (n_sa, 21)
-                conf_ok = resp[:n_sa] >= sc_w
-                err_mask = conf_ok & (dist > sd_w)             # (n_sa, 21)
-                # Attribute per-camera blame using current attr scores.
-                attr_per_cam = _combined_attr_per_cam(attr, attr_weights)
-                stereo_overlay = np.zeros((N, 21, 2), dtype=bool)
-                for fi in range(n_sa):
-                    for j in range(21):
-                        if not err_mask[fi, j]:
-                            continue
-                        if attr_per_cam is not None:
-                            a0 = float(attr_per_cam[fi, j, 0])
-                            a1 = float(attr_per_cam[fi, j, 1])
-                            blame_left = a0 >= a1
-                        else:
-                            cL = float(conf_L[fi, j]) if conf_L is not None else 0.0
-                            cR = float(conf_R[fi, j]) if conf_R is not None else 0.0
-                            blame_left = (cL <= cR)
-                        stereo_overlay[fi, j, 0 if blame_left else 1] = True
-                errors = errors | stereo_overlay
-        except Exception as e:
-            logger.warning(f"stereo-dist error overlay skipped: {e}")
+        v2_path = _mano_dir(subject_name) / trial_stem / "mano_fit_v2.npz"
+        used_baked = False
+        if v2_path.exists():
+            try:
+                with np.load(str(v2_path), allow_pickle=True) as z:
+                    if "stereo_blame" in z.files:
+                        sb = z["stereo_blame"].astype(bool)
+                        n_sb = min(N, int(sb.shape[0]))
+                        errors[:n_sb] = errors[:n_sb] | sb[:n_sb]
+                        used_baked = True
+            except Exception as e:
+                logger.warning(f"stereo_blame overlay load failed: {e}")
+        if not used_baked:
+            try:
+                from .stereo_align import load_stereo_align
+                t_idx = next((i for i, t in enumerate(
+                    build_trial_map(subject_name))
+                    if t["trial_name"] == trial_stem), None)
+                sa = None
+                if t_idx is not None:
+                    for _m in ("hybrid", "outline", "image"):
+                        sa = load_stereo_align(subject_name, t_idx, mode=_m)
+                        if sa is not None:
+                            break
+                if sa is not None:
+                    shifts = sa["shifts"]                # (N_sa, 21, 2)
+                    resp   = sa["response"]              # (N_sa, 21)
+                    n_sa = min(N, int(shifts.shape[0]))
+                    dist = np.linalg.norm(shifts[:n_sa], axis=-1)
+                    conf_ok = resp[:n_sa] >= sc_w
+                    err_mask = conf_ok & (dist > sd_w)
+                    attr_per_cam = _combined_attr_per_cam(attr, attr_weights)
+                    stereo_overlay = np.zeros((N, 21, 2), dtype=bool)
+                    for fi in range(n_sa):
+                        for j in range(21):
+                            if not err_mask[fi, j]:
+                                continue
+                            if attr_per_cam is not None:
+                                a0 = float(attr_per_cam[fi, j, 0])
+                                a1 = float(attr_per_cam[fi, j, 1])
+                                blame_left = a0 >= a1
+                            else:
+                                cL = float(conf_L[fi, j]) if conf_L is not None else 0.0
+                                cR = float(conf_R[fi, j]) if conf_R is not None else 0.0
+                                blame_left = (cL <= cR)
+                            stereo_overlay[fi, j, 0 if blame_left else 1] = True
+                    errors = errors | stereo_overlay
+            except Exception as e:
+                logger.warning(f"stereo-dist error overlay skipped: {e}")
 
     # Overlay hrnet_mismatch (drives the z_smooth stage's error overlay).
     # The slider is an absolute pixel-distance threshold compared against

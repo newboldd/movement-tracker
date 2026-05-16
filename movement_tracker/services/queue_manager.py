@@ -1074,7 +1074,17 @@ class QueueManager:
                     n_fail = sum(1 for _t in trials_batch if _t.get("outcome") == "failed")
                     if n_fail > 0:
                         _final_status = "failed"
-                        _final_err = f"Ran {n_ok + n_rem}/{n_total} trials"
+                        # Surface the first per-trial error so the UI
+                        # shows the actual cause (e.g. "ffmpeg not
+                        # found on remote") instead of just a count.
+                        _first_err = next(
+                            (str(_t.get("outcome_error") or "").strip()
+                             for _t in trials_batch
+                             if _t.get("outcome") == "failed"
+                                and _t.get("outcome_error")),
+                            "")
+                        _msg = f"{n_ok + n_rem}/{n_total} trial(s) succeeded"
+                        _final_err = f"{_msg}: {_first_err}" if _first_err else _msg
                     elif n_rem > 0:
                         _final_status = "completed"
                         _final_err = f"Download incomplete: {n_ok}/{n_total} downloaded"
@@ -1230,7 +1240,17 @@ class QueueManager:
                     n_fail = sum(1 for _t in trials_batch if _t.get("outcome") == "failed")
                     if n_fail > 0:
                         _final_status = "failed"
-                        _final_err = f"Ran {n_ok + n_rem}/{n_total} trials"
+                        # Surface the first per-trial error so the UI
+                        # shows the actual cause (e.g. "ffmpeg not
+                        # found on remote") instead of just a count.
+                        _first_err = next(
+                            (str(_t.get("outcome_error") or "").strip()
+                             for _t in trials_batch
+                             if _t.get("outcome") == "failed"
+                                and _t.get("outcome_error")),
+                            "")
+                        _msg = f"{n_ok + n_rem}/{n_total} trial(s) succeeded"
+                        _final_err = f"{_msg}: {_first_err}" if _first_err else _msg
                     elif n_rem > 0:
                         _final_status = "completed"
                         _final_err = f"Download incomplete: {n_ok}/{n_total} downloaded"
