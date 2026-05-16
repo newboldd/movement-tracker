@@ -927,6 +927,54 @@ const deid = (() => {
     }
 
     // ── Build smoothed hand protection mask ──
+    // Threshold (image-pixel units) for the DLC-vs-MP tip-disagreement
+    // check.  When DLC's thumb or index tip is more than this far from
+    // the matching MP tip, the chain "MCP/CMC -> DLC tip" gets seeded
+    // with extra circles in the mask so coverage extends to wherever
+    // DLC says the fingertip is -- WITHOUT removing the MP-derived
+    // circles (a more generous mask is preferable to a wrong one).
+    const _DLC_TIP_DISAGREE_PX = 20;
+
+    function _appendDlcCorrectedFingerPoints(allPoints, byJoint, rawLandmarks) {
+        // Find DLC-derived joints in the unfiltered landmark list.
+        const dlcByJoint = {};
+        for (const lm of rawLandmarks) {
+            if (lm.type === 'dlc' && lm.joint != null) {
+                dlcByJoint[lm.joint] = lm;
+            }
+        }
+        // ── Index finger: MCP=5, MP tip=8, DLC tip=8 ──
+        const ixMcp    = byJoint[5];
+        const ixTipMp  = byJoint[8];
+        const ixTipDlc = dlcByJoint[8];
+        if (ixMcp && ixTipMp && ixTipDlc) {
+            const d = Math.hypot(ixTipMp.x - ixTipDlc.x, ixTipMp.y - ixTipDlc.y);
+            if (d > _DLC_TIP_DISAGREE_PX) {
+                const dx = ixTipDlc.x - ixMcp.x;
+                const dy = ixTipDlc.y - ixMcp.y;
+                // Seed along MCP -> DLC tip every 1/6 of the way --
+                // produces overlapping circles even with small radii.
+                for (const f of [1/6, 1/3, 1/2, 2/3, 5/6, 1.0]) {
+                    allPoints.push({ x: ixMcp.x + f * dx, y: ixMcp.y + f * dy, type: 'dlc_interp' });
+                }
+            }
+        }
+        // ── Thumb: CMC=1, MP tip=4, DLC tip=4 ──
+        const thCmc    = byJoint[1];
+        const thTipMp  = byJoint[4];
+        const thTipDlc = dlcByJoint[4];
+        if (thCmc && thTipMp && thTipDlc) {
+            const d = Math.hypot(thTipMp.x - thTipDlc.x, thTipMp.y - thTipDlc.y);
+            if (d > _DLC_TIP_DISAGREE_PX) {
+                const dx = thTipDlc.x - thCmc.x;
+                const dy = thTipDlc.y - thCmc.y;
+                for (const f of [1/6, 1/3, 1/2, 2/3, 5/6, 1.0]) {
+                    allPoints.push({ x: thCmc.x + f * dx, y: thCmc.y + f * dy, type: 'dlc_interp' });
+                }
+            }
+        }
+    }
+
     function _buildHandMask(landmarks, radiusPx, forearmPx, smoothPx, smooth2Px, w, h,
                               armDorsalPx, armVentralPx) {
         // Hand landmarks (MediaPipe) + DLC fallback ONLY for joints MP
@@ -1000,6 +1048,11 @@ const deid = (() => {
         if (thumbMCP && indexMCP) {
             allPoints.push({ x: (thumbMCP.x + indexMCP.x) / 2, y: (thumbMCP.y + indexMCP.y) / 2, type: 'interp' });
         }
+
+        // DLC tip-disagreement: when DLC's tip is > 20 px from MP's
+        // tip, seed extra circles along MCP / CMC -> DLC tip.  Keeps
+        // the MP-derived circles too (more generous coverage).
+        _appendDlcCorrectedFingerPoints(allPoints, byJoint, landmarks);
 
         // Draw circles for all hand keypoints + interpolated midpoints
         // (hand-only, no arm).  Smoothing below dilates this layer only.
@@ -1136,6 +1189,7 @@ const deid = (() => {
             allPoints.push({ x: (thumbMCP.x + indexMCP.x) / 2,
                               y: (thumbMCP.y + indexMCP.y) / 2 });
         }
+        _appendDlcCorrectedFingerPoints(allPoints, byJoint, landmarks);
         for (const lm of allPoints) {
             ctx1.beginPath();
             ctx1.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, radiusPx, 0, Math.PI * 2);

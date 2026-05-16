@@ -1393,6 +1393,33 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
             "type": "interp",
         })
 
+    # DLC tip-disagreement: when DLC's thumb or index tip is more
+    # than 20 px from the MP tip, seed extra circles along the
+    # MCP/CMC -> DLC-tip line so the mask covers both possibilities.
+    # MP circles are kept too (a generous mask is safer than a wrong
+    # one).  Joint numbers: thumb 1=CMC, 4=tip; index 5=MCP, 8=tip.
+    _DLC_TIP_DISAGREE_PX = 20.0
+    _dlc_by_joint = {lm.get("joint"): lm for lm in dlc_lms
+                      if lm.get("joint") is not None}
+    for (mcp_id, tip_id) in ((5, 8), (1, 4)):
+        mcp_lm = by_joint.get(mcp_id)
+        mp_tip = by_joint.get(tip_id)
+        dlc_tip = _dlc_by_joint.get(tip_id)
+        if not (mcp_lm and mp_tip and dlc_tip):
+            continue
+        dx_t = float(mp_tip["x"]) - float(dlc_tip["x"])
+        dy_t = float(mp_tip["y"]) - float(dlc_tip["y"])
+        if (dx_t * dx_t + dy_t * dy_t) ** 0.5 <= _DLC_TIP_DISAGREE_PX:
+            continue
+        dx = float(dlc_tip["x"]) - float(mcp_lm["x"])
+        dy = float(dlc_tip["y"]) - float(mcp_lm["y"])
+        for f in (1/6, 1/3, 1/2, 2/3, 5/6, 1.0):
+            all_points.append({
+                "x": float(mcp_lm["x"]) + f * dx,
+                "y": float(mcp_lm["y"]) + f * dy,
+                "type": "dlc_interp",
+            })
+
     # Extrapolate any missing fingertip (joints 4, 8, 12, 16, 20) when
     # the two joints below it (DIP + PIP / IP + MCP for the thumb) are
     # present.  Without this, MP drops on the very tip leave the
