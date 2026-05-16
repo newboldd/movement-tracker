@@ -3735,7 +3735,19 @@ const manoViewer = (() => {
         const manoProj = isLeft ? trialData.mano_proj_L : trialData.mano_proj_R;
         const v2Proj = isLeft ? trialData.skel_v2_proj_L : trialData.skel_v2_proj_R;
         const legacyProj = isLeft ? trialData.skel_legacy_proj_L : trialData.skel_legacy_proj_R;
-        const prevProj = prevFitData ? (isLeft ? prevFitData.proj_L : prevFitData.proj_R) : null;
+        // Historical-fit 2D projection -- pick the active stage's arrays.
+        // 'final' is the bone-smooth output (proj_L / proj_R); other tags
+        // map to proj_<tag>_L / proj_<tag>_R written by the fit-history
+        // loader.  Falls back to 'final' if the selected stage is missing.
+        const _prevProj2DFor = (tag) => {
+            if (!prevFitData) return null;
+            if (tag === 'final') return isLeft ? prevFitData.proj_L : prevFitData.proj_R;
+            return isLeft ? prevFitData[`proj_${tag}_L`] : prevFitData[`proj_${tag}_R`];
+        };
+        let prevProj = _prevProj2DFor(_prevStage2D);
+        if (prevProj == null && prevFitData) {
+            prevProj = isLeft ? prevFitData.proj_L : prevFitData.proj_R;
+        }
         // Use corrected MP positions when available (after a correction pass
         // has been applied server-side).  Falls back to original otherwise.
         const mpKp = isLeft
@@ -6609,8 +6621,14 @@ const manoViewer = (() => {
             }
         }
 
-        // Previous fit 3D (purple)
-        const prev3d = prevFitData?.joints_3d?.[fn];
+        // Previous fit 3D (purple) -- pick the active stage's array.
+        const _prev3DArr = (() => {
+            if (!prevFitData) return null;
+            if (_prevStage3D === 'final') return prevFitData.joints_3d;
+            return prevFitData[`joints_3d_${_prevStage3D}`]
+                   || prevFitData.joints_3d;
+        })();
+        const prev3d = _prev3DArr?.[fn];
         if (showPrev3D && prev3d) {
             const prevMat = new THREE.MeshPhongMaterial({ color: 0xb35b00, emissive: 0x502800 });
             const prevBoneMat = new THREE.MeshPhongMaterial({ color: 0xb35b00, emissive: 0x4a2500 });
@@ -8036,46 +8054,99 @@ const manoViewer = (() => {
         }
     }
 
+    // Per-stage display state for the historical fit's stage rows.
+    // ``_prevStage2D`` / ``_prevStage3D`` are tag strings naming which
+    // intermediate snapshot to show; ``showPrev2D`` / ``showPrev3D``
+    // remain the master visibility flags (a stage is only drawn when
+    // its dimension's flag is true AND its tag matches).  Single-stage-
+    // active model (one stage per dimension) keeps the rendering path
+    // simple -- the existing prevProj / prev3d lookups just read the
+    // selected stage's arrays from prevFitData.
+    let _prevStage2D = 'final';
+    let _prevStage3D = 'final';
+    // Stages exposed by the historical-fit endpoint (the live fit's v3
+    // stages, minus 'mediapipe' which is the raw MP source and doesn't
+    // belong to any specific saved fit).
+    const _PREV_STAGE_DEFS = [
+        { tag: 'sc',     label: 'Stereo-correct', color: '#f48fb1' },
+        { tag: 'z',      label: 'Y/Z-correct',    color: '#ffa726' },
+        { tag: 'zs',     label: 'Z-smooth',       color: '#ff9800' },
+        { tag: 'hr',     label: 'HRnet-snap',     color: '#ab47bc' },
+        { tag: 'bc',     label: 'Bone-correct',   color: '#66bb6a' },
+        { tag: 'final',  label: 'Bone-smooth',    color: '#26c6da' },
+    ];
+
     function _renderPrevStageRows() {
-        // For now, only the final v3 stage's data is exposed by the historical
-        // fit endpoint — render a single "Final" row driving the existing
-        // showPrev2D / showPrev3D state.  When per-stage backend support is
-        // added later, this function can grow into a full 7-stage list.
         const grid = document.getElementById('prevExpand')?.closest('div')?.parentElement;
         if (!grid) return;
-        // Insert one row right after the dropdown row.  Class `prev-stage-row`
-        // tags it for removal when the selection changes.
         const insertAfter = $('prevCtrlSlotErr');
+        if (!insertAfter) return;
         const _mk = (tag, attrs = {}, txt = '') => {
             const el = document.createElement(tag);
             for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
             if (txt) el.textContent = txt;
             return el;
         };
-        const lbl = _mk('span', { class: 'prev-stage-row',
-            style: 'color:var(--text-muted);padding-left:18px;display:' +
-                   (_prevExpanded ? '' : 'none') + ';' }, ' Final');
-        const cb2 = _mk('input', { type: 'checkbox', class: 'prev-stage-row',
-            style: 'margin:0;justify-self:center;display:' +
-                   (_prevExpanded ? '' : 'none') + ';' });
-        cb2.checked = !!showPrev2D;
-        cb2.addEventListener('change', ev => {
-            showPrev2D = ev.target.checked;
-            render(); renderDistanceTrace();
-        });
-        const cb3 = _mk('input', { type: 'checkbox', class: 'prev-stage-row',
-            style: 'margin:0;justify-self:center;display:' +
-                   (_prevExpanded ? '' : 'none') + ';' });
-        cb3.checked = !!showPrev3D;
-        cb3.addEventListener('change', ev => {
-            showPrev3D = ev.target.checked;
-            update3D(); renderDistanceTrace();
-        });
-        const filler = _mk('span', { class: 'prev-stage-row',
-            style: 'display:' + (_prevExpanded ? '' : 'none') + ';' });
-        const ref = insertAfter.nextSibling;
-        for (const el of [lbl, cb2, cb3, filler]) {
-            grid.insertBefore(el, ref);
+        // Drop the joints_3d_<tag> for stages that aren't actually
+        // populated in this fit (e.g. older v3 fits saved before the
+        // stereo-correct step existed).  Always include 'final'.
+        const has = (t) => t === 'final'
+            ? (prevFitData?.joints_3d != null)
+            : (prevFitData?.[`joints_3d_${t}`] != null);
+        const rows = _PREV_STAGE_DEFS.filter(d => has(d.tag));
+        const fragRefs = [];
+        let ref = insertAfter.nextSibling;
+        for (const def of rows) {
+            const swatch = `<span class="layer-swatch" style="background:${def.color};"></span>`;
+            const lbl = _mk('span', {
+                class: 'prev-stage-row',
+                style: 'color:var(--text-muted);padding-left:18px;display:'
+                       + (_prevExpanded ? '' : 'none') + ';',
+            });
+            lbl.innerHTML = `${swatch} ${def.label}`;
+            const cb2 = _mk('input', {
+                type: 'checkbox', class: 'prev-stage-row',
+                style: 'margin:0;justify-self:center;display:'
+                       + (_prevExpanded ? '' : 'none') + ';',
+            });
+            cb2.checked = !!showPrev2D && _prevStage2D === def.tag;
+            cb2.addEventListener('change', (ev) => {
+                if (ev.target.checked) {
+                    _prevStage2D = def.tag;
+                    showPrev2D = true;
+                } else if (_prevStage2D === def.tag) {
+                    showPrev2D = false;
+                }
+                // Single-active: re-render rows to update siblings.
+                document.querySelectorAll('.prev-stage-row').forEach(el => el.remove());
+                _renderPrevStageRows();
+                render(); renderDistanceTrace();
+            });
+            const cb3 = _mk('input', {
+                type: 'checkbox', class: 'prev-stage-row',
+                style: 'margin:0;justify-self:center;display:'
+                       + (_prevExpanded ? '' : 'none') + ';',
+            });
+            cb3.checked = !!showPrev3D && _prevStage3D === def.tag;
+            cb3.addEventListener('change', (ev) => {
+                if (ev.target.checked) {
+                    _prevStage3D = def.tag;
+                    showPrev3D = true;
+                } else if (_prevStage3D === def.tag) {
+                    showPrev3D = false;
+                }
+                document.querySelectorAll('.prev-stage-row').forEach(el => el.remove());
+                _renderPrevStageRows();
+                update3D(); renderDistanceTrace();
+            });
+            const filler = _mk('span', {
+                class: 'prev-stage-row',
+                style: 'display:' + (_prevExpanded ? '' : 'none') + ';',
+            });
+            for (const el of [lbl, cb2, cb3, filler]) {
+                grid.insertBefore(el, ref);
+            }
+            fragRefs.push(lbl, cb2, cb3, filler);
         }
     }
 

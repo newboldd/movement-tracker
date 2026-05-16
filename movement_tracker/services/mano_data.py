@@ -631,19 +631,25 @@ def load_v2_fit_history_slot(subject_name: str, trial_stem: str, slot: int, cali
     fit_error_L = v2.get("fit_error_L", np.full(N, np.nan))
     fit_error_R = v2.get("fit_error_R", np.full(N, np.nan))
 
-    # Project to 2D if calibration available
-    proj_L = np.full((N, 21, 2), np.nan)
-    proj_R = np.full((N, 21, 2), np.nan)
+    # Set up projection helpers (used per stage below too).
+    K1 = K2 = dist1 = dist2 = R = T = None
     if calib:
         K1, K2 = calib["K1"], calib["K2"]
         dist1, dist2 = calib["dist1"], calib["dist2"]
         R, T = calib["R"], calib["T"]
-        R_eye = np.eye(3, dtype=np.float64)
-        T_zero = np.zeros((3, 1), dtype=np.float64)
-        proj_L = _project_to_2d(joints_3d, K1, dist1, R_eye, T_zero)
-        proj_R = _project_to_2d(joints_3d, K2, dist2, R, T)
+    R_eye = np.eye(3, dtype=np.float64)
+    T_zero = np.zeros((3, 1), dtype=np.float64)
 
-    # Compute derived metrics
+    def _proj_to_2d(joints):
+        if joints is None or not calib:
+            return np.full((N, 21, 2), np.nan), np.full((N, 21, 2), np.nan)
+        return (_project_to_2d(joints, K1, dist1, R_eye, T_zero),
+                _project_to_2d(joints, K2, dist2, R, T))
+
+    # Final-stage 2D projections.
+    proj_L, proj_R = _proj_to_2d(joints_3d)
+
+    # Compute derived metrics for the final stage.
     distances = _compute_distances(joints_3d)
     distances.update(_compute_mcp_distances(joints_3d))
     angles = _compute_angles(joints_3d)
@@ -659,6 +665,34 @@ def load_v2_fit_history_slot(subject_name: str, trial_stem: str, slot: int, cali
         except Exception:
             pass
 
+    # ── Per-stage snapshots (so the historical fit's stage rows can
+    # show the same intermediate views as the live v3 fit). ──
+    # Each tag matches the live-fit key suffix (sc, y, z, zs, hr, bc).
+    # When the snapshot is missing or all-NaN (e.g. HRnet-snap step
+    # was skipped, or this is a legacy fit pre-stereo-correct), the
+    # corresponding fields are emitted as None and the frontend
+    # falls back to the final-stage projection / 3D.
+    stage_outputs: dict[str, object] = {}
+    for tag, key in (
+        ("sc", "joints_3d_after_sc"),
+        ("y",  "joints_3d_after_y"),
+        ("z",  "joints_3d_after_z"),
+        ("zs", "joints_3d_after_zs"),
+        ("hr", "joints_3d_after_hr"),
+        ("bc", "joints_3d_after_bc"),
+    ):
+        arr = v2.get(key)
+        has = arr is not None and np.any(~np.isnan(arr))
+        if not has:
+            stage_outputs[f"joints_3d_{tag}"] = None
+            stage_outputs[f"proj_{tag}_L"] = None
+            stage_outputs[f"proj_{tag}_R"] = None
+            continue
+        pL, pR = _proj_to_2d(arr)
+        stage_outputs[f"joints_3d_{tag}"] = _points_to_list(arr)
+        stage_outputs[f"proj_{tag}_L"] = _points_to_list(pL)
+        stage_outputs[f"proj_{tag}_R"] = _points_to_list(pR)
+
     return {
         "proj_L": _points_to_list(proj_L),
         "proj_R": _points_to_list(proj_R),
@@ -671,6 +705,7 @@ def load_v2_fit_history_slot(subject_name: str, trial_stem: str, slot: int, cali
         "positions": positions,
         "fit_params": fit_params.get("params") if fit_params else None,
         "fit_constraints": fit_params.get("angle_constraints") if fit_params else None,
+        **stage_outputs,
     }
 
 
