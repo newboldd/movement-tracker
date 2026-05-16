@@ -186,6 +186,13 @@
                 <span style="color:var(--text-muted);padding-left:18px;"><span class="layer-swatch" style="background:#ce93d8;"></span> Stereo (outline)</span>
                 <input type="checkbox" id="showStereoOutline2D" style="margin:0;justify-self:center;">
                 <span></span><span></span>
+                <!-- Stereo (outline) confidence threshold -- same as the
+                     Stereo slider but for the outline-driven variant. -->
+                <span id="stereoOutlineConfWrap" style="grid-column: 1 / -1; display:none; align-items:center; gap:6px; padding:0 4px 4px 28px; font-size:10px; color:var(--text-muted); white-space:nowrap;">
+                    <span title="Hide light-purple X's whose phase-correlation confidence is below this value">conf ≥</span>
+                    <input type="range" id="stereoOutlineConfSlider" min="0" max="1" step="0.02" value="0" style="flex:1; height:5px; cursor:pointer; min-width:0;">
+                    <span id="stereoOutlineConfVal" style="min-width:24px; text-align:right; color:var(--text);">0.00</span>
+                </span>
 
                 <!-- 1d. Outline -- the current camera's hand boundary
                      polygon from the preproc bake. -->
@@ -1010,7 +1017,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/mano.js?v=344" type="module"></script>
+    <script src="/static/js/mano.js?v=345" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

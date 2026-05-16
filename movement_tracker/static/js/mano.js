@@ -41,6 +41,7 @@ const manoViewer = (() => {
     let stereoSelectedJoint = null;   // joint whose per-joint bbox to draw
     let stereoConfThreshold = 0;      // hide markers with response < this
     let showStereoOutline2D = false;  // outline-driven stereo variant
+    let stereoOutlineConfThreshold = 0;  // same, for outline variant
     let showOutline2D = false;        // per-frame hand boundary polygon
     let showVision2D = false;
     let showVision3D = false;
@@ -1328,7 +1329,15 @@ const manoViewer = (() => {
         $('showStereoOutline2D')?.addEventListener('change', e => {
             showStereoOutline2D = e.target.checked;
             if (!showStereoOutline2D && !showStereo2D) stereoSelectedJoint = null;
+            const wrap = $('stereoOutlineConfWrap');
+            if (wrap) wrap.style.display = showStereoOutline2D ? 'flex' : 'none';
             updateLayerFlags();
+        });
+        $('stereoOutlineConfSlider')?.addEventListener('input', e => {
+            stereoOutlineConfThreshold = parseFloat(e.target.value);
+            const lbl = $('stereoOutlineConfVal');
+            if (lbl) lbl.textContent = stereoOutlineConfThreshold.toFixed(2);
+            render();
         });
         $('showOutline2D')?.addEventListener('change', e => {
             showOutline2D = e.target.checked;
@@ -1391,6 +1400,8 @@ const manoViewer = (() => {
                             if (cb && !cb.checked) {
                                 cb.checked = true;
                                 showStereoOutline2D = true;
+                                const wrap = $('stereoOutlineConfWrap');
+                                if (wrap) wrap.style.display = 'flex';
                                 updateLayerFlags();
                             }
                         } else {
@@ -3629,7 +3640,13 @@ const manoViewer = (() => {
                                     : trialData.stereo_outline_tracked_R;
             const mpHere = isLeft ? trialData.mp_tracked_L
                                   : trialData.mp_tracked_R;
-            // Per-joint bbox for selected joint (dashed).
+            const mpOther = isLeft ? trialData.mp_tracked_R
+                                   : trialData.mp_tracked_L;
+            // Per-joint bbox for selected joint (dashed) + the outlines
+            // INSIDE it that were consumed by the per-joint alignment
+            // (yellow = current camera, green = opposite camera shifted
+            // so its MP joint sits on the current joint -- the same
+            // MP-centering the phase-corr aligns on).
             if (stereoSelectedJoint != null && mpHere && mpHere[fn]) {
                 const pt = mpHere[fn][stereoSelectedJoint];
                 if (pt) {
@@ -3640,11 +3657,61 @@ const manoViewer = (() => {
                     const cx = pt[0] * pixelScale;
                     const cy = pt[1] * pixelScale;
                     const w = (2 * ch + 1) * pixelScale;
+                    const bx = cx - w / 2, by = cy - w / 2;
+                    // Outlines clipped to the bbox.
+                    if (trialData.has_outlines) {
+                        const curOut = isLeft ? trialData.outlines_L?.[fn]
+                                              : trialData.outlines_R?.[fn];
+                        const oppOut = isLeft ? trialData.outlines_R?.[fn]
+                                              : trialData.outlines_L?.[fn];
+                        const mpOpp = (mpOther && mpOther[fn])
+                            ? mpOther[fn][stereoSelectedJoint] : null;
+                        ctx.save();
+                        ctx.beginPath();
+                        ctx.rect(bx, by, w, w);
+                        ctx.clip();
+                        // Yellow current outline at native position.
+                        if (curOut && curOut.length >= 3) {
+                            ctx.strokeStyle = '#ffd54f';
+                            ctx.lineWidth = 1.5;
+                            ctx.lineJoin = 'round';
+                            ctx.lineCap = 'round';
+                            ctx.beginPath();
+                            ctx.moveTo(curOut[0][0] * pixelScale, curOut[0][1] * pixelScale);
+                            for (let i = 1; i < curOut.length; i++) {
+                                ctx.lineTo(curOut[i][0] * pixelScale, curOut[i][1] * pixelScale);
+                            }
+                            ctx.closePath();
+                            ctx.stroke();
+                        }
+                        // Green opposite outline translated by
+                        // (mp_current - mp_opposite) so joint centres
+                        // line up.
+                        if (oppOut && oppOut.length >= 3 && mpOpp) {
+                            const tx = (pt[0] - mpOpp[0]) * pixelScale;
+                            const ty = (pt[1] - mpOpp[1]) * pixelScale;
+                            ctx.strokeStyle = '#66bb6a';
+                            ctx.lineWidth = 1.5;
+                            ctx.lineJoin = 'round';
+                            ctx.lineCap = 'round';
+                            ctx.beginPath();
+                            ctx.moveTo(oppOut[0][0] * pixelScale + tx,
+                                       oppOut[0][1] * pixelScale + ty);
+                            for (let i = 1; i < oppOut.length; i++) {
+                                ctx.lineTo(oppOut[i][0] * pixelScale + tx,
+                                           oppOut[i][1] * pixelScale + ty);
+                            }
+                            ctx.closePath();
+                            ctx.stroke();
+                        }
+                        ctx.restore();
+                    }
+                    // Dashed bbox over the clipped outlines.
                     ctx.save();
                     ctx.strokeStyle = '#ce93d8';
                     ctx.lineWidth = 1.2;
                     ctx.setLineDash([4, 3]);
-                    ctx.strokeRect(cx - w / 2, cy - w / 2, w, w);
+                    ctx.strokeRect(bx, by, w, w);
                     ctx.setLineDash([]);
                     ctx.restore();
                 }
@@ -3654,7 +3721,7 @@ const manoViewer = (() => {
                 for (let j = 0; j < 21; j++) {
                     if (!isJointVisible(j) || !stereoKp[fn][j]) continue;
                     const rawConf = (respFrame && respFrame[j] != null) ? respFrame[j] : 0;
-                    if (rawConf < stereoConfThreshold) continue;
+                    if (rawConf < stereoOutlineConfThreshold) continue;
                     const x = stereoKp[fn][j][0] * pixelScale;
                     const y = stereoKp[fn][j][1] * pixelScale;
                     let conf = rawConf;
@@ -6692,6 +6759,8 @@ const manoViewer = (() => {
             $('showStereoOutline2D').checked = false;
             showStereoOutline2D = false;
         }
+        const _socw = $('stereoOutlineConfWrap');
+        if (_socw) _socw.style.display = (showStereoOutline2D && hasStereoOutline) ? 'flex' : 'none';
         const hasOutlines = !!(trialData && trialData.has_outlines);
         _setLayerAvail('showOutline2D', hasOutlines);
         if (!hasOutlines && $('showOutline2D')) {
