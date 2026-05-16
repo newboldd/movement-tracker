@@ -269,7 +269,7 @@ const manoViewer = (() => {
         },
     };
     let _mpErrorWeights = {
-        detection: { z_jump: 0, z_outlier: 0, y_disp: 0, bone_length: 0, bone_agreement: 0, angle: 0, reproj: 0, confidence: 0, hrnet_mismatch: 0, stereo_dist: 0, stereo_conf: 0 },
+        detection: { z_jump: 0, z_outlier: 0, y_disp: 0, bone_length: 0, bone_agreement: 0, angle: 0, reproj: 0, confidence: 0, hrnet_mismatch: 0, stereo_dist: 0, stereo_conf: 0, stereo_occlusion: 0 },
         attribution: { jump_2d: 0, confidence: 0 },
         corrections: { y_disp: 0 },
         // Stereo-correction (v3 step 0) bake-only settings.
@@ -1763,6 +1763,7 @@ const manoViewer = (() => {
             ['edSliderHR',     'edWHR',     'detection',   'hrnet_mismatch', 0],
             ['edSliderStereoConf', 'edWStereoConf', 'detection', 'stereo_conf', 2],
             ['edSliderStereoDist', 'edWStereoDist', 'detection', 'stereo_dist', 0],
+            ['edSliderStereoOcc',  'edWStereoOcc',  'detection', 'stereo_occlusion', 1],
             ['eaSliderJump',   'eaWJump',   'attribution', 'jump_2d'],
             ['eaSliderConf',   'eaWConf',   'attribution', 'confidence'],
             ['eaSliderHRnet',  'eaWHRnet',  'attribution', 'hrnet'],
@@ -3893,6 +3894,32 @@ const manoViewer = (() => {
                 const x = (mpKp[fn][j][0] + mpXOff) * pixelScale;
                 const y = mpKp[fn][j][1] * pixelScale;
                 drawCross(x, y, '#00cccc', 4);
+            }
+            // Stereo-correct OCCLUSION radius preview: when the v3 fit
+            // panel is open and the Occlusion-radius slider is > 0,
+            // draw a thin dashed circle of that radius (in image px)
+            // around every visible MP joint so the user can see the
+            // overlap region the post-pass will use to decide which
+            // stereo-corrected joints to revert.
+            const _occPx = parseFloat(
+                _mpErrorWeights?.detection?.stereo_occlusion || 0);
+            const _v3PanelOpen = $('fitV2Panel')?.style.display === 'block';
+            if (_occPx > 0 && _v3PanelOpen) {
+                ctx.save();
+                ctx.strokeStyle = 'rgba(0, 204, 204, 0.45)';
+                ctx.lineWidth = 0.8;
+                ctx.setLineDash([3, 3]);
+                const rPx = _occPx * pixelScale;
+                for (let j = 0; j < 21; j++) {
+                    if (!isJointVisible(j) || !mpKp[fn][j]) continue;
+                    const x = (mpKp[fn][j][0] + mpXOff) * pixelScale;
+                    const y = mpKp[fn][j][1] * pixelScale;
+                    ctx.beginPath();
+                    ctx.arc(x, y, rPx, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+                ctx.setLineDash([]);
+                ctx.restore();
             }
             // When the MP-stage Err column is on, overlay pink X's at
             // the per-joint stereo-correct position for joints whose
@@ -7560,11 +7587,13 @@ const manoViewer = (() => {
         }
         if (typeof stSaved.conf === 'number') _setSlider('edSliderStereoConf', stSaved.conf);
         if (typeof stSaved.dist_px === 'number') _setSlider('edSliderStereoDist', stSaved.dist_px);
+        if (typeof stSaved.occlusion_px === 'number') _setSlider('edSliderStereoOcc', stSaved.occlusion_px);
         // Newer param files also carry these under ``detection`` -- prefer
         // those if present (the slider is the source of truth for the
         // live error-recompute pipeline).
         if (typeof detSaved.stereo_conf === 'number') _setSlider('edSliderStereoConf', detSaved.stereo_conf);
         if (typeof detSaved.stereo_dist === 'number') _setSlider('edSliderStereoDist', detSaved.stereo_dist);
+        if (typeof detSaved.stereo_occlusion === 'number') _setSlider('edSliderStereoOcc', detSaved.stereo_occlusion);
     }
 
     function resetFitDefaults() {
@@ -7711,6 +7740,7 @@ const manoViewer = (() => {
                     gauss_center_weight: _mpErrorWeights.stereo?.gauss_center_weight ?? 0.0,
                     stereo_conf:         _mpErrorWeights.detection?.stereo_conf ?? 0.0,
                     stereo_dist_px:      _mpErrorWeights.detection?.stereo_dist ?? 0.0,
+                    stereo_occlusion_px: _mpErrorWeights.detection?.stereo_occlusion ?? 0.0,
                 }),
             });
             mpCorrectedL = null;

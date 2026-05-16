@@ -924,6 +924,11 @@ class MPErrorRequest(BaseModel):
     gauss_center_weight: float = 0.0   # image + hybrid
     stereo_conf: float = 0.0           # min confidence to consider a stereo label
     stereo_dist_px: float = 0.0        # 0 disables stereo-correction step
+    # 2D radius (px) for the occlusion-revert post-pass.  When > 0,
+    # any stereo-corrected joint whose Z drops toward an "overlying"
+    # joint (within this radius in either camera AND closer to the
+    # camera) is rolled back to its MP label.
+    stereo_occlusion_px: float = 0.0
 
 
 def _encode_errors(errors) -> list[list[list[int]]]:
@@ -1040,7 +1045,8 @@ def run_corrections(subject_id: int, req: MPErrorRequest) -> dict:
                                     stereo_mask_dilate_px=int(req.mask_dilate_px),
                                     stereo_gauss_center_weight=float(req.gauss_center_weight),
                                     stereo_conf=float(req.stereo_conf),
-                                    stereo_dist_px=float(req.stereo_dist_px))
+                                    stereo_dist_px=float(req.stereo_dist_px),
+                                    stereo_occlusion_px=float(req.stereo_occlusion_px))
             if cancel_event.is_set():
                 raise _JobCancelled()
             save_errors(name, trial_stem, det, attr)

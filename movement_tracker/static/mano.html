@@ -735,12 +735,19 @@
                     </div>
                     <input type="range" id="edSliderStereoConf" min="0" max="1" step="0.01" value="0" style="width:100%;cursor:pointer;height:5px;">
                 </div>
-                <div style="font-size:11px;margin-bottom:8px;">
+                <div style="font-size:11px;margin-bottom:4px;">
                     <div style="display:flex;justify-content:space-between;align-items:center;">
                         <label style="color:var(--text-muted);" title="Flag a joint as an error when ||MP - Stereo|| (px) exceeds this distance.  Errors get camera-attributed and the blamed camera's MP label is replaced by the stereo label.">Stereo distance (px)</label>
                         <span id="edWStereoDist" style="color:var(--text-muted);font-weight:bold;">0</span>
                     </div>
                     <input type="range" id="edSliderStereoDist" min="0" max="80" step="0.5" value="0" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:8px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);" title="Revert stereo-corrected joints to MP when their Z drops toward an OVERLYING joint -- one with a lower Z that sits within this 2D pixel radius in either camera.  While the panel is open and this slider is > 0, dashed circles of this radius are drawn around every MP joint so the user can see the overlap region.">Occlusion radius (px)</label>
+                        <span id="edWStereoOcc" style="color:var(--text-muted);font-weight:bold;">0</span>
+                    </div>
+                    <input type="range" id="edSliderStereoOcc" min="0" max="100" step="0.5" value="0" style="width:100%;cursor:pointer;height:5px;">
                 </div>
 
                 <!-- ── Error Detection ───────────────────────────────── -->
@@ -1105,7 +1112,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/mano.js?v=355" type="module"></script>
+    <script src="/static/js/mano.js?v=356" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

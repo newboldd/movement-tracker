@@ -3012,7 +3012,8 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
                              stereo_mask_dilate_px: int = 10,
                              stereo_gauss_center_weight: float = 0.0,
                              stereo_conf: float = 0.0,
-                             stereo_dist_px: float = 0.0) -> dict:
+                             stereo_dist_px: float = 0.0,
+                             stereo_occlusion_px: float = 0.0) -> dict:
     """Run the full correction pipeline, save result as ``mano_fit_v2.npz``.
 
     Step 0: Stereo-correction.  Runs ``run_stereo_align`` with the chosen
@@ -3137,6 +3138,68 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
                         n_corrected += 1
         except Exception as e:
             logger.warning(f"Stereo-correct step skipped (non-fatal): {e}")
+
+    # ── Step 0b: Occlusion-revert ─────────────────────────────────────
+    # The stereo per-joint phase corr will sometimes lock onto a
+    # nearby joint that's CLOSER to the camera (e.g. an MCP that
+    # disappears behind a PIP/DIP).  The "corrected" 2D label snaps
+    # onto the occluder, the triangulated Z drops toward the
+    # occluder's Z, and the joint visually pops forward.  Detect this
+    # and revert: for every stereo-blamed joint, if there's any OTHER
+    # joint K within ``stereo_occlusion_px`` (2D) in either camera
+    # that has a smaller Z than this joint's raw-MP Z, AND the
+    # stereo-corrected Z is closer to K's Z than the raw-MP Z was,
+    # roll the label back to MP.
+    if float(stereo_occlusion_px) > 0 and n_corrected > 0:
+        try:
+            mp_3d_pre = np.full((N, 21, 3), np.nan, dtype=np.float32)
+            mp_3d_sc  = np.full((N, 21, 3), np.nan, dtype=np.float32)
+            for j in range(21):
+                mp_3d_pre[:, j, :] = triangulate_points(
+                    mp_L[:, j], mp_R[:, j], calib).astype(np.float32)
+                mp_3d_sc[:, j, :] = triangulate_points(
+                    mp_L_c[:, j], mp_R_c[:, j], calib).astype(np.float32)
+            occ_r2 = float(stereo_occlusion_px) ** 2
+            n_reverted = 0
+            for fi in range(N):
+                for j in range(21):
+                    if not stereo_blame[fi, j].any():
+                        continue
+                    z_mp = float(mp_3d_pre[fi, j, 2])
+                    z_sc = float(mp_3d_sc[fi, j, 2])
+                    if not (np.isfinite(z_mp) and np.isfinite(z_sc)):
+                        continue
+                    # Look for any overlying joint K: 2D-close in
+                    # either camera AND closer-to-camera Z.
+                    pL = mp_L[fi, j]; pR = mp_R[fi, j]
+                    for k in range(21):
+                        if k == j:
+                            continue
+                        z_k = float(mp_3d_pre[fi, k, 2])
+                        if not np.isfinite(z_k) or z_k >= z_mp:
+                            continue
+                        qL = mp_L[fi, k]; qR = mp_R[fi, k]
+                        dL2 = (float(pL[0]) - float(qL[0])) ** 2 + \
+                              (float(pL[1]) - float(qL[1])) ** 2 \
+                              if np.isfinite(pL[0]) and np.isfinite(qL[0]) else float('inf')
+                        dR2 = (float(pR[0]) - float(qR[0])) ** 2 + \
+                              (float(pR[1]) - float(qR[1])) ** 2 \
+                              if np.isfinite(pR[0]) and np.isfinite(qR[0]) else float('inf')
+                        if dL2 > occ_r2 and dR2 > occ_r2:
+                            continue
+                        # SC pulled Z toward K's Z?
+                        if abs(z_sc - z_k) < abs(z_mp - z_k):
+                            mp_L_c[fi, j] = mp_L[fi, j]
+                            mp_R_c[fi, j] = mp_R[fi, j]
+                            stereo_blame[fi, j, 0] = False
+                            stereo_blame[fi, j, 1] = False
+                            n_reverted += 1
+                            break
+            if n_reverted > 0:
+                logger.info(f"Stereo-correct occlusion-revert: {n_reverted} joints rolled back to MP")
+                n_corrected = max(0, n_corrected - n_reverted)
+        except Exception as e:
+            logger.warning(f"Stereo-correct occlusion-revert skipped (non-fatal): {e}")
     _pg(10)
 
     # Snapshot after stereo-correction (stereo_correct stage view).
@@ -3342,6 +3405,7 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
         stereo_mode=str(stereo_mode),
         stereo_conf=np.float32(stereo_conf),
         stereo_dist_px=np.float32(stereo_dist_px),
+        stereo_occlusion_px=np.float32(stereo_occlusion_px),
         joints_3d_after_y=joints_3d_after_y,    # after Y only
         mp_L_after_y=mp_L_after_y,
         mp_R_after_y=mp_R_after_y,
@@ -3385,6 +3449,7 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
                 "gauss_center_weight": float(stereo_gauss_center_weight),
                 "conf": float(stereo_conf),
                 "dist_px": float(stereo_dist_px),
+                "occlusion_px": float(stereo_occlusion_px),
             },
         },
         "timestamp": datetime.now().isoformat(),
