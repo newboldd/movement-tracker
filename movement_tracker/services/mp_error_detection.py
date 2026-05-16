@@ -3213,6 +3213,30 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
     # the world-Z target plane, and projects back into the bad camera.
     y_errors = _errors_for_factor(det, attr, det_weights, attr_weights, "y_disp")
     z_errors = _errors_for_factor(det, attr, det_weights, attr_weights, "z_outlier")
+    # Stereo-correct fallback: for joints that step-0 stereo-corrected,
+    # first try substituting the raw MP label.  If raw MP isn't flagged
+    # by y_disp / z_outlier, revert to MP (and clear the stereo_blame
+    # flag) -- the SC adjustment wasn't necessary and shouldn't be
+    # carried into Y/Z.  Joints where MP is also flagged keep their SC
+    # label and let the usual Y/Z procedure act on them.
+    if np.any(stereo_blame) and (y_errors is not None or z_errors is not None):
+        n_yz_revert = 0
+        for fi in range(N):
+            for j in range(21):
+                if not stereo_blame[fi, j].any():
+                    continue
+                yf = (y_errors is not None) and bool(y_errors[fi, j].any())
+                zf = (z_errors is not None) and bool(z_errors[fi, j].any())
+                if yf or zf:
+                    continue  # MP is also an error -- keep SC
+                mp_L_c[fi, j] = mp_L[fi, j]
+                mp_R_c[fi, j] = mp_R[fi, j]
+                stereo_blame[fi, j, 0] = False
+                stereo_blame[fi, j, 1] = False
+                n_yz_revert += 1
+        if n_yz_revert > 0:
+            logger.info(f"Y/Z-stage SC-fallback: {n_yz_revert} joints reverted to MP")
+            n_corrected = max(0, n_corrected - n_yz_revert)
     if y_errors is not None or z_errors is not None:
         attr_per_cam = _combined_attr_per_cam(attr, attr_weights)
         mp_L_c, mp_R_c, n = correct_yz_from_errors(
@@ -3234,6 +3258,28 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
     # ── Stage 3: Z-jump correction (same algorithm, z_jump-flagged frames) ──
     zj_det, zj_attr = compute_scores(mp_L_c, mp_R_c, conf_L, conf_R, calib, priors, subject_name=subject_name, trial_stem=trial_stem)
     zj_errors = _errors_for_factor(zj_det, zj_attr, det_weights, attr_weights, "z_jump")
+    # Stereo-correct fallback at Z-smooth: same passthrough logic as
+    # Y/Z above, gated on the z_jump factor of the RAW MP labels.  Any
+    # remaining stereo-blamed joint whose raw-MP version isn't z_jump-
+    # flagged is reverted to MP (and stereo_blame cleared) so Z-smooth
+    # doesn't operate on an SC label that wasn't even needed.
+    zj_errors_raw = _errors_for_factor(det, attr, det_weights, attr_weights, "z_jump")
+    if np.any(stereo_blame) and zj_errors_raw is not None:
+        n_zs_revert = 0
+        for fi in range(N):
+            for j in range(21):
+                if not stereo_blame[fi, j].any():
+                    continue
+                if bool(zj_errors_raw[fi, j].any()):
+                    continue  # MP is also a z_jump error -- keep SC
+                mp_L_c[fi, j] = mp_L[fi, j]
+                mp_R_c[fi, j] = mp_R[fi, j]
+                stereo_blame[fi, j, 0] = False
+                stereo_blame[fi, j, 1] = False
+                n_zs_revert += 1
+        if n_zs_revert > 0:
+            logger.info(f"Z-smooth-stage SC-fallback: {n_zs_revert} joints reverted to MP")
+            n_corrected = max(0, n_corrected - n_zs_revert)
     if zj_errors is not None:
         mp_L_c, mp_R_c, n = correct_z_from_errors(
             mp_L_c, mp_R_c, zj_errors, calib, zj_attr.get("jump_2d"))
