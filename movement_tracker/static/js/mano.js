@@ -839,10 +839,12 @@ const manoViewer = (() => {
                 $('fitSkeletonBtn').classList.remove('active');
                 _restoreV2Params();
             }
+            render();  // refresh the Occlusion-radius circle overlay
         });
         $('fitV2CancelBtn').addEventListener('click', () => {
             $('fitV2Panel').style.display = 'none';
             $('fitSkeletonV2Btn').classList.remove('active');
+            render();  // hide the Occlusion-radius circles
         });
 
         // HRnet Fit panel — same toggle pattern as Skeleton Fit (v3).
@@ -1786,6 +1788,12 @@ const manoViewer = (() => {
             s.addEventListener('input', update);
             update();
         }
+        // The Occlusion-radius slider drives a live canvas overlay
+        // (dashed circles around every MP joint).  The generic update
+        // above only schedules an error recompute; we also need an
+        // immediate render() so the circles follow the slider as the
+        // user drags.
+        $('edSliderStereoOcc')?.addEventListener('input', () => render());
         // Stereo mode radios + dilate/center sliders -- visibility wired
         // to the radio choice (dilate only for Hybrid; center for image+
         // hybrid).
@@ -3886,27 +3894,18 @@ const manoViewer = (() => {
             }
         }
 
-        // MediaPipe joints (always cyan; errors are displayed on the
-        // Skeleton layer via the stage-picker buttons instead)
-        if (showMP2D && mpKp[fn]) {
-            for (let j = 0; j < 21; j++) {
-                if (!isJointVisible(j) || !mpKp[fn][j]) continue;
-                const x = (mpKp[fn][j][0] + mpXOff) * pixelScale;
-                const y = mpKp[fn][j][1] * pixelScale;
-                drawCross(x, y, '#00cccc', 4);
-            }
-            // Stereo-correct OCCLUSION radius preview: when the v3 fit
-            // panel is open and the Occlusion-radius slider is > 0,
-            // draw a thin dashed circle of that radius (in image px)
-            // around every visible MP joint so the user can see the
-            // overlap region the post-pass will use to decide which
-            // stereo-corrected joints to revert.
+        // Stereo-correct OCCLUSION radius preview: whenever the v3 fit
+        // panel is open and the Occlusion-radius slider is > 0, draw a
+        // thin dashed circle of that radius (image-pixel units) around
+        // every MP joint so the user can preview the overlap region.
+        // Shown regardless of the MP-2D checkbox.
+        {
             const _occPx = parseFloat(
                 _mpErrorWeights?.detection?.stereo_occlusion || 0);
             const _v3PanelOpen = $('fitV2Panel')?.style.display === 'block';
-            if (_occPx > 0 && _v3PanelOpen) {
+            if (_occPx > 0 && _v3PanelOpen && mpKp && mpKp[fn]) {
                 ctx.save();
-                ctx.strokeStyle = 'rgba(0, 204, 204, 0.45)';
+                ctx.strokeStyle = 'rgba(0, 204, 204, 0.55)';
                 ctx.lineWidth = 0.8;
                 ctx.setLineDash([3, 3]);
                 const rPx = _occPx * pixelScale;
@@ -3920,6 +3919,17 @@ const manoViewer = (() => {
                 }
                 ctx.setLineDash([]);
                 ctx.restore();
+            }
+        }
+
+        // MediaPipe joints (always cyan; errors are displayed on the
+        // Skeleton layer via the stage-picker buttons instead)
+        if (showMP2D && mpKp[fn]) {
+            for (let j = 0; j < 21; j++) {
+                if (!isJointVisible(j) || !mpKp[fn][j]) continue;
+                const x = (mpKp[fn][j][0] + mpXOff) * pixelScale;
+                const y = mpKp[fn][j][1] * pixelScale;
+                drawCross(x, y, '#00cccc', 4);
             }
             // When the MP-stage Err column is on, overlay pink X's at
             // the per-joint stereo-correct position for joints whose
