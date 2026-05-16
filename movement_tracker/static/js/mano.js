@@ -1365,15 +1365,41 @@ const manoViewer = (() => {
             showOutline2D = e.target.checked;
             updateLayerFlags();
         });
+        // Helper: outline is shown on the canvas when the Stereo panel
+        // is OPEN and the Hybrid radio is selected (the user is staging
+        // a hybrid bake and wants to see what's being masked).  Also
+        // gates the Dilate slider visibility.
+        const _stereoIsHybridStaging = () => {
+            if ($('stereoPanel')?.style.display !== 'block') return false;
+            const m = document.querySelector('input[name="stereoMode"]:checked');
+            return !!(m && m.value === 'hybrid');
+        };
+        const _refreshStereoHybridUI = () => {
+            const on = _stereoIsHybridStaging();
+            const wrap = $('stereoDilateWrap');
+            if (wrap) wrap.style.display = on ? 'flex' : 'none';
+            render();
+        };
         // Stereo button: toggle panel (Run + Close).  Mirrors HRnet Correct.
         $('runStereoBtn')?.addEventListener('click', () => {
             const open = $('stereoPanel').style.display !== 'block';
             $('stereoPanel').style.display = open ? 'block' : 'none';
             $('runStereoBtn').classList.toggle('active', open);
+            _refreshStereoHybridUI();
         });
         $('stereoCloseBtn')?.addEventListener('click', () => {
             $('stereoPanel').style.display = 'none';
             $('runStereoBtn').classList.remove('active');
+            _refreshStereoHybridUI();
+        });
+        // Radio + dilate slider events.
+        document.querySelectorAll('input[name="stereoMode"]').forEach(el => {
+            el.addEventListener('change', _refreshStereoHybridUI);
+        });
+        $('stereoDilateSlider')?.addEventListener('input', e => {
+            const v = parseInt(e.target.value, 10) || 0;
+            const lbl = $('stereoDilateVal');
+            if (lbl) lbl.textContent = `${v} px`;
         });
         $('runStereoGoBtn')?.addEventListener('click', async () => {
             const st = $('stereoStatus');
@@ -1391,6 +1417,7 @@ const manoViewer = (() => {
             // Read selected mode from the Image/Outline/Hybrid radios.
             const _modeEl = document.querySelector('input[name="stereoMode"]:checked');
             const stereoMode = _modeEl ? _modeEl.value : 'image';
+            const maskDilatePx = parseInt(($('stereoDilateSlider')?.value ?? '10'), 10) || 0;
             try {
                 const res = await api(`/api/mano/${subjectId}/run_stereo`, {
                     method: 'POST',
@@ -1398,6 +1425,7 @@ const manoViewer = (() => {
                     body: JSON.stringify({
                         trial_idx: trials[currentTrialIdx].trial_idx,
                         mode: stereoMode,
+                        mask_dilate_px: maskDilatePx,
                     }),
                 });
                 const jobId = res.job_id;
@@ -3806,8 +3834,16 @@ const manoViewer = (() => {
 
         // Outline -- current camera's hand boundary polygon for the
         // current frame, from the preproc bake (inverse-warped server-
-        // side into this camera's original-frame coords).
-        if (showOutline2D && trialData?.has_outlines) {
+        // side into this camera's original-frame coords).  Drawn when
+        // the Outline model is on OR when the Stereo panel is open
+        // with Hybrid selected (so the user can see what's being
+        // masked).
+        const _showOutlineForHybridStaging = (() => {
+            if ($('stereoPanel')?.style.display !== 'block') return false;
+            const m = document.querySelector('input[name="stereoMode"]:checked');
+            return !!(m && m.value === 'hybrid');
+        })();
+        if ((showOutline2D || _showOutlineForHybridStaging) && trialData?.has_outlines) {
             const poly = isLeft ? trialData.outlines_L?.[fn]
                                 : trialData.outlines_R?.[fn];
             if (poly && poly.length >= 3) {

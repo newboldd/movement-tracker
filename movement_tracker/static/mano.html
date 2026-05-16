@@ -398,6 +398,15 @@
                         Hybrid
                     </label>
                 </div>
+                <!-- Hybrid only: outline-mask dilation for the per-joint
+                     image-phase-corr stage.  Larger values keep more of
+                     the skin / hand boundary in the masked crop. -->
+                <div id="stereoDilateWrap" style="display:none;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);margin-bottom:6px;"
+                     title="Dilate the hand outline by this many pixels before masking background out of the per-joint image crops.  0 = strict (outline only), larger = include more pixels just outside the outline.">
+                    <span>Dilate</span>
+                    <input type="range" id="stereoDilateSlider" min="0" max="50" step="1" value="10" style="flex:1;height:5px;cursor:pointer;min-width:0;">
+                    <span id="stereoDilateVal" style="min-width:30px;text-align:right;color:var(--text);">10 px</span>
+                </div>
                 <div style="display:flex;gap:4px;">
                     <button class="btn btn-sm btn-success" id="runStereoGoBtn" style="flex:1;">Run</button>
                     <button class="btn btn-sm" id="stereoCloseBtn" style="flex:0 0 30px;">×</button>
@@ -1039,7 +1048,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/mano.js?v=347" type="module"></script>
+    <script src="/static/js/mano.js?v=348" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

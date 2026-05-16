@@ -426,6 +426,9 @@ class StereoAlignRequest(BaseModel):
     # "image" | "outline" | "hybrid".  If unset, falls back to
     # use_outline.
     mode: str | None = None
+    # Hybrid only: dilate the outline mask by N pixels before applying
+    # to the per-joint image crops.  Ignored for other modes.
+    mask_dilate_px: int = 10
 
 
 @router.post("/{subject_id}/run_stereo")
@@ -481,7 +484,8 @@ def run_stereo(subject_id: int, req: StereoAlignRequest) -> dict:
             run_stereo_align(name, req.trial_idx,
                              progress_callback=on_progress,
                              cancel_event=cancel_event,
-                             mode=_mode)
+                             mode=_mode,
+                             mask_dilate_px=int(req.mask_dilate_px))
             with get_db_ctx() as db:
                 db.execute(
                     "UPDATE jobs SET status='completed', progress_pct=100, "

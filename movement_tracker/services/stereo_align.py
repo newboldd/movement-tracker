@@ -157,6 +157,39 @@ def _outline_mask_image(poly_orig, h_full: int, half_w: int) -> np.ndarray:
     return mask
 
 
+def _dilate_mask(mask: np.ndarray, dilate_px: int) -> np.ndarray:
+    """Dilate a uint8 mask by ``dilate_px`` using an elliptical kernel.
+    No-op if ``dilate_px <= 0``."""
+    if dilate_px <= 0:
+        return mask
+    k = 2 * int(dilate_px) + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    return cv2.dilate(mask, kernel)
+
+
+def _apply_outline_mask(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Replace background pixels (``mask == 0``) with the per-channel
+    mean of foreground pixels.  Removes background content from the
+    phase-correlation feature image without introducing a hard step at
+    the mask boundary that would otherwise dominate the FFT response.
+
+    Falls back to leaving the image unchanged when the mask is empty
+    (e.g. outline missing for this frame)."""
+    fg = mask > 0
+    if not fg.any():
+        return img
+    out = img.copy()
+    if img.ndim == 3:
+        mean_color = img[fg].mean(axis=0).astype(img.dtype)
+        bg = ~fg
+        for c in range(img.shape[2]):
+            out[..., c][bg] = mean_color[c]
+    else:
+        mean_v = img[fg].mean().astype(img.dtype)
+        out[~fg] = mean_v
+    return out
+
+
 def _densify_poly(poly, sp: float = 3.0) -> np.ndarray:
     """Resample a closed polygon (Nx1x2 int32 or Nx2 array-like) at
     ~``sp`` px spacing.  Returns an (M, 2) float32 array.  Empty if
@@ -243,7 +276,8 @@ def run_stereo_align(subject_name: str, trial_idx: int,
                       crop_half: int = _DEFAULT_CROP_HALF,
                       cancel_event=None,
                       use_outline: bool = False,
-                      mode: str = "image") -> str:
+                      mode: str = "image",
+                      mask_dilate_px: int = 10) -> str:
     """Run cross-camera stereo label alignment for one trial.
 
     The ``mode`` argument selects which feature image drives each
@@ -266,6 +300,12 @@ def run_stereo_align(subject_name: str, trial_idx: int,
 
     The legacy ``use_outline=True`` flag is equivalent to
     ``mode="outline"``.
+
+    ``mask_dilate_px`` (hybrid only): the outline mask is dilated by
+    this many pixels before being applied to the Pass-2 raw-image
+    crops -- background pixels outside the dilated mask are replaced
+    by the foreground mean so phase correlation is driven only by
+    hand-region content.  Set to 0 to disable.
 
     Returns the saved npz path as a string.
     """
@@ -397,6 +437,18 @@ def run_stereo_align(subject_name: str, trial_idx: int,
             half_w = _fw // 2
             img_OS = frame[:, :half_w, :]
             img_OD = frame[:, half_w:, :]
+            # Hybrid: mask out background so the per-joint phase corr
+            # is driven only by hand-region content.  Dilate the
+            # outline first to keep a small margin of skin near the
+            # hand boundary.  Fill bg with the foreground mean to
+            # avoid a step edge at the mask.
+            if mode == "hybrid":
+                os_m = _dilate_mask(_outline_mask_image(os_poly, h_full, half_w),
+                                    mask_dilate_px)
+                od_m = _dilate_mask(_outline_mask_image(od_poly, h_full, half_w),
+                                    mask_dilate_px)
+                img_OS = _apply_outline_mask(img_OS, os_m)
+                img_OD = _apply_outline_mask(img_OD, od_m)
         else:
             img_OS = _outline_mask_image(os_poly, h_full, half_w)
             img_OD = _outline_mask_image(od_poly, h_full, half_w)
@@ -509,6 +561,8 @@ def run_stereo_align(subject_name: str, trial_idx: int,
         refine_clamp_px=np.array(_REFINE_CLAMP_PX, dtype=np.int32),
         start_frame=np.array(start_frame, dtype=np.int32),
         n_frames=np.array(n_frames, dtype=np.int32),
+        mask_dilate_px=np.array(int(mask_dilate_px) if mode == "hybrid" else -1,
+                                 dtype=np.int32),
     )
     valid = int(np.sum(~np.isnan(shifts[:, :, 0])))
     logger.info(
