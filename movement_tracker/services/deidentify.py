@@ -784,12 +784,8 @@ def render_with_blur_specs(input_path: str, output_path: str,
     forearm_extent = 0.4
     hand_smooth2 = 5
     dlc_radius_val = 15
-    # HRnet-mask alternative source (when ``mask_source == "hrnet"`` the
-    # renderer thresholds the HRnet MIP for each frame instead of stamping
-    # circles around MediaPipe keypoints).
-    mask_source = "mediapipe"
-    hrnet_mask_thresh = 0.30
-    hrnet_mask_smooth = 7
+    arm_dorsal_dilate = 0
+    arm_ventral_dilate = 0
     if hand_settings:
         import json as _json
         hand_mask_radius = hand_settings.get("hand_mask_radius") or hand_settings.get("mask_radius") or 10
@@ -798,17 +794,8 @@ def render_with_blur_specs(input_path: str, output_path: str,
         forearm_extent = hand_settings.get("forearm_extent", 0.7)
         hand_smooth2 = hand_settings.get("hand_smooth2", 0)
         dlc_radius_val = hand_settings.get("dlc_radius", 15)
-        mask_source = hand_settings.get("mask_source") or "mediapipe"
-        if mask_source not in ("mediapipe", "hrnet"):
-            mask_source = "mediapipe"
-        try:
-            hrnet_mask_thresh = float(hand_settings.get("hrnet_mask_thresh", 0.30))
-        except (TypeError, ValueError):
-            hrnet_mask_thresh = 0.30
-        try:
-            hrnet_mask_smooth = int(hand_settings.get("hrnet_mask_smooth", 7))
-        except (TypeError, ValueError):
-            hrnet_mask_smooth = 7
+        arm_dorsal_dilate = int(hand_settings.get("arm_dorsal_dilate", 0) or 0)
+        arm_ventral_dilate = int(hand_settings.get("arm_ventral_dilate", 0) or 0)
         seg_json = hand_settings.get("segments_json", "[]")
         try:
             hand_segments = _json.loads(seg_json) if isinstance(seg_json, str) else (seg_json or [])
@@ -1005,11 +992,14 @@ def render_with_blur_specs(input_path: str, output_path: str,
     def _get_hand_mask_cached(side_label, lms, w_side, h_side, r, sm, fa_r, fa_e, sm2, dlc_rad=0):
         key = side_label
         new_hash = _lm_hash(lms)
-        params = (r, sm, fa_r, fa_e, sm2, dlc_rad)
+        params = (r, sm, fa_r, fa_e, sm2, dlc_rad,
+                  arm_dorsal_dilate, arm_ventral_dilate)
         cached = _hand_cache.get(key)
         if cached and cached["params"] == params and not _lm_moved(cached["lm_hash"], new_hash):
             return cached["mask"]
         mask = _build_hand_mask_from_landmarks(lms, w_side, h_side, r, sm, fa_r, fa_e, sm2,
+                                               arm_dorsal_dilate=arm_dorsal_dilate,
+                                               arm_ventral_dilate=arm_ventral_dilate,
                                                dlc_radius=dlc_rad)
         _hand_cache[key] = {"lm_hash": new_hash, "mask": mask, "params": params}
         return mask
@@ -1315,16 +1305,18 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
                                      forearm_radius: int = 10,
                                      forearm_extent: float = 0.7,
                                      smooth2: int = 0,
+                                     arm_dorsal_dilate: int = 0,
+                                     arm_ventral_dilate: int = 0,
                                      **kwargs) -> np.ndarray:
     """Build hand protection mask from stored landmarks (matching frontend behavior).
 
-    Draws circles at hand keypoints, applies morphological close (smooth),
-    then adds a forearm triangle (pinky MCP → elbow → thumb CMC) and
-    applies a second smooth step.
-
-    The frontend renders at screen pixel scale (typically ~700px viewport for
-    a 1920px half-frame). To match the visual effect, we scale radius and smooth
-    parameters proportionally to image resolution vs a reference display size.
+    Builds a HAND mask (circles at every keypoint, dilated by ``smooth``)
+    and a separate ARM-triangle mask (filled pinky-MCP → elbow → thumb-CMC
+    polygon, plus per-edge dilation: ``arm_dorsal_dilate`` thickens the
+    dorsal line elbow→pinky-MCP, ``arm_ventral_dilate`` thickens the
+    ventral line elbow→thumb-CMC).  The two are unioned at the very end
+    so the Hand-dilate slider grows the hand region WITHOUT also growing
+    the arm.
     """
     mask = np.zeros((h, w), dtype=np.uint8)
 
@@ -1450,13 +1442,11 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
                 "type": "interp",
             })
 
-    # Draw circles at each hand landmark + interpolated / extrapolated
-    # points.  cv2.circle clips out-of-frame centres on its own, so we
-    # DON'T gate on a bounds check -- doing so silently dropped any
-    # landmark MP placed slightly off-frame (common at the edge of the
-    # FOV), leaving the fingertip uncovered.  NaN-safety: skip any
-    # landmark whose coords are None / NaN after interpolation, since
-    # ``int(nan)`` would raise ValueError.
+    # ── Hand-only mask: circles at each landmark + interpolated /
+    # extrapolated points, optionally smoothed (the Hand-dilate slider).
+    # The arm triangle is built INDEPENDENTLY below so Hand-dilate
+    # doesn't also grow the arm.
+    hand_mask = np.zeros((h, w), dtype=np.uint8)
     import math
     for lm in all_points:
         xv, yv = lm.get("x"), lm.get("y")
@@ -1468,10 +1458,16 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
             continue
         if math.isnan(xf) or math.isnan(yf):
             continue
-        cv2.circle(mask, (int(xf), int(yf)), radius, 255, -1)
+        cv2.circle(hand_mask, (int(xf), int(yf)), radius, 255, -1)
+    if smooth > 0 and hand_mask.any():
+        blurred = cv2.GaussianBlur(hand_mask.astype(np.float32), (0, 0), smooth)
+        hand_mask = (blurred > 5).astype(np.uint8) * 255
 
-    # Add forearm triangle BEFORE smoothing (unified smooth)
-    # Forearm: pinky MCP (joint 17) → elbow → thumb CMC (joint 1)
+    # ── Arm-triangle mask (independent of Hand-dilate).
+    # Triangle: pinky MCP (17) → elbow → thumb CMC (1).  Dorsal edge =
+    # elbow→pinky-MCP (line thickness = arm_dorsal_dilate * 2), ventral
+    # edge = elbow→thumb-CMC (line thickness = arm_ventral_dilate * 2).
+    arm_mask = np.zeros((h, w), dtype=np.uint8)
     pinky_mcp = next((lm for lm in hand_lms if lm.get("joint") == 17), None)
     thumb_cmc = next((lm for lm in hand_lms if lm.get("joint") == 1), None)
     hand_wrist = next((lm for lm in hand_lms if lm.get("joint") == 0), None)
@@ -1480,7 +1476,6 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
     elbows = [lm for lm in pose_lms if lm.get("joint") in (13, 14)]
     elbow = None
     if hand_wrist and elbows:
-        # Use centroid of hand landmarks to pick the right arm's elbow
         hand_xs = [lm["x"] for lm in hand_lms]
         hand_ys = [lm["y"] for lm in hand_lms]
         cx = sum(hand_xs) / len(hand_xs)
@@ -1493,32 +1488,27 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
         ex, ey = elbow["x"], elbow["y"]
         ext_x = wx + forearm_extent * (ex - wx)
         ext_y = wy + forearm_extent * (ey - wy)
-
         pts = np.array([
             [int(pinky_mcp["x"]), int(pinky_mcp["y"])],
             [int(ext_x), int(ext_y)],
             [int(thumb_cmc["x"]), int(thumb_cmc["y"])],
         ], dtype=np.int32)
+        cv2.fillPoly(arm_mask, [pts], 255)
+        # Dorsal edge dilation: elbow → pinky MCP.
+        if int(arm_dorsal_dilate) > 0:
+            cv2.line(arm_mask,
+                     (int(ext_x), int(ext_y)),
+                     (int(pinky_mcp["x"]), int(pinky_mcp["y"])),
+                     255, int(arm_dorsal_dilate) * 2)
+        # Ventral edge dilation: elbow → thumb CMC.
+        if int(arm_ventral_dilate) > 0:
+            cv2.line(arm_mask,
+                     (int(ext_x), int(ext_y)),
+                     (int(thumb_cmc["x"]), int(thumb_cmc["y"])),
+                     255, int(arm_ventral_dilate) * 2)
 
-        # Filled triangle
-        cv2.fillPoly(mask, [pts], 255)
-
-        # Dilate palmar edge (thumb CMC → elbow) by radius
-        cv2.line(mask, (int(thumb_cmc["x"]), int(thumb_cmc["y"])),
-                 (int(ext_x), int(ext_y)), 255, radius * 2)
-        # Dilate dorsal edge (pinky MCP → elbow) by forearm_radius
-        cv2.line(mask, (int(pinky_mcp["x"]), int(pinky_mcp["y"])),
-                 (int(ext_x), int(ext_y)), 255, forearm_radius * 2)
-
-    # Unified smooth: apply blur + threshold on combined hand circles + forearm.
-    # Use sigma=smooth directly (matching frontend CSS blur(smooth px)).
-    # Threshold=5 approximates the frontend's 8-draw amplification which lowers
-    # the effective threshold from 30/255 to ~4/255, spreading the mask to
-    # ~2.16 * sigma pixels beyond painted areas (vs 2.26 * sigma at threshold=5).
-    if smooth > 0 and mask.any():
-        blurred = cv2.GaussianBlur(mask.astype(np.float32), (0, 0), smooth)
-        mask = (blurred > 5).astype(np.uint8) * 255
-
+    # Union hand + arm.
+    mask = cv2.bitwise_or(hand_mask, arm_mask)
     return mask > 0
 
 

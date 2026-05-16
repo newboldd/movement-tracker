@@ -76,6 +76,7 @@ const deid = (() => {
     let nextSpotId = 1;
     let selectedSpotId = null;
     let addingCustom = false;
+    let _pendingCustomShape = 'oval';   // shape of the next custom spot
 
     // View mode: 'original' (with overlays), 'preview' (blur mask only), 'deidentified' (rendered video)
     let viewMode = 'original';
@@ -84,20 +85,19 @@ const deid = (() => {
     let handOverlayEnabled = true;
     let handLandmarks = [];   // [{x, y, side}] for current frame (after smoothing)
     let handLandmarksBulk = {}; // {frameNum: [{x, y, side}]} all frames
-    let handTemporalSmooth = 0; // temporal smoothing window (frames each direction)
+    let handTemporalSmooth = 0; // deprecated -- kept for back-compat with saved settings
     let handMaskRadius = 5;
     let forearmRadius = 10;  // dilation around forearm triangle (separate from circle radius)
     let forearmExtent = 0.4; // 0=wrist, 1=elbow, >1=past elbow
-    let handSmooth = 7;  // morphological close on hand circles
-    let handSmooth2 = 0;  // unified: set to 0, only smooth (pre-forearm) is used
+    let handSmooth = 7;       // hand-region dilation (no longer applies to arm triangle)
+    let handSmooth2 = 0;      // deprecated
+    let armDorsalDilate = 0;   // extra dilation of dorsal arm edge (elbow→pinky MCP)
+    let armVentralDilate = 0;  // extra dilation of ventral arm edge (elbow→thumb CMC)
     let handMaskEnabled = true;
-    // Hand-mask source: 'mediapipe' (default — current circle-based mask
-    // built from MP keypoints) or 'hrnet' (threshold the per-frame
-    // max-over-21-joints heatmap, then smooth).  Sliders specific to the
-    // HRnet path live in #hrnetHandControls.
+    // Hand-mask source is always MediaPipe -- HRnet hand-mask path removed.
     let handMaskSource = 'mediapipe';
-    let hrnetMaskThresh = 0.30;
-    let hrnetMaskSmooth = 7;
+    let hrnetMaskThresh = 0.30;  // unused (kept for back-compat in saved settings)
+    let hrnetMaskSmooth = 7;     // unused
     // dlcRadius removed — all hand keypoints use the same marker size
     let hasDlcLabels = false;
 
@@ -415,7 +415,31 @@ const deid = (() => {
 
             faceDetections = fdResp.faces || [];
             _rebuildFaceDetMap();
-            blurSpots = (bsResp.specs || []).map(s => ({ ...s, id: nextSpotId++ }));
+            // Load saved specs and re-anchor their frame range to the
+            // current trial.  Saved frame_start / frame_end are global
+            // frame numbers from whenever the spec was last saved -- if
+            // the trial got re-trimmed in between, the saved range may
+            // fall entirely outside the current trial (which is what
+            // causes the "spots show in the sidebar but never draw on
+            // the canvas" bug: the per-frame range check excludes them).
+            const _tStart = trialMeta.start_frame || 0;
+            const _tEnd = trialMeta.end_frame != null
+                ? trialMeta.end_frame
+                : (_tStart + (trialMeta.frame_count || 0) - 1);
+            blurSpots = (bsResp.specs || []).map(s => {
+                let fs = (s.frame_start != null) ? s.frame_start : _tStart;
+                let fe = (s.frame_end   != null) ? s.frame_end   : _tEnd;
+                // Re-anchor when the saved range doesn't overlap the
+                // current trial at all.
+                if (fe < _tStart || fs > _tEnd) {
+                    fs = _tStart;
+                    fe = _tEnd;
+                } else {
+                    fs = Math.max(_tStart, fs);
+                    fe = Math.min(_tEnd,   fe);
+                }
+                return { ...s, id: nextSpotId++, frame_start: fs, frame_end: fe };
+            });
 
             // Warn about legacy face spots without proper side assignment
             if (cameraMode === 'stereo') {
@@ -459,14 +483,12 @@ const deid = (() => {
             handSmooth = hs.hand_smooth || 10;
             forearmRadius = hs.forearm_radius || 10;
             forearmExtent = hs.forearm_extent != null ? hs.forearm_extent : 0.5;
-            handSmooth2 = hs.hand_smooth2 || 0;
-            handTemporalSmooth = hs.hand_temporal || 0;
+            handSmooth2 = 0;  // deprecated, always 0
+            handTemporalSmooth = 0;  // deprecated, always 0
+            armDorsalDilate = hs.arm_dorsal_dilate || 0;
+            armVentralDilate = hs.arm_ventral_dilate || 0;
             handOverlayEnabled = hs.show_landmarks || false;
-            // Hand-mask source + HRnet sliders (added later — use defaults
-            // if absent for back-compat with older saved rows).
-            handMaskSource = hs.mask_source === 'hrnet' ? 'hrnet' : 'mediapipe';
-            hrnetMaskThresh = hs.hrnet_mask_thresh != null ? hs.hrnet_mask_thresh : 0.30;
-            hrnetMaskSmooth = hs.hrnet_mask_smooth != null ? hs.hrnet_mask_smooth : 7;
+            handMaskSource = 'mediapipe';
             document.getElementById('handRadiusSlider').value = handMaskRadius;
             document.getElementById('handRadiusVal').textContent = handMaskRadius;
             document.getElementById('handSmoothSlider').value = handSmooth;
@@ -474,33 +496,18 @@ const deid = (() => {
             forearmRadius = 10; // hardcoded
             document.getElementById('handExtentSlider').value = forearmExtent;
             document.getElementById('handExtentVal').textContent = forearmExtent.toFixed(1);
-            document.getElementById('handSmooth2Slider').value = handSmooth2;
-            document.getElementById('handSmooth2Val').textContent = handSmooth2;
-            const temporalSlider = document.getElementById('handTemporalSlider');
-            if (temporalSlider) { temporalSlider.value = handTemporalSmooth; }
-            const temporalVal = document.getElementById('handTemporalVal');
-            if (temporalVal) { temporalVal.textContent = handTemporalSmooth; }
+            const dorsalSlider = document.getElementById('handDorsalSlider');
+            if (dorsalSlider) {
+                dorsalSlider.value = armDorsalDilate;
+                document.getElementById('handDorsalVal').textContent = armDorsalDilate;
+            }
+            const ventralSlider = document.getElementById('handVentralSlider');
+            if (ventralSlider) {
+                ventralSlider.value = armVentralDilate;
+                document.getElementById('handVentralVal').textContent = armVentralDilate;
+            }
             const overlayToggle = document.getElementById('handOverlayToggle');
             if (overlayToggle) { overlayToggle.checked = handOverlayEnabled; }
-            // Restore hand-mask source radio + HRnet slider DOM values.
-            const _srcRadio = document.querySelector(
-                `input[name="handMaskSource"][value="${handMaskSource}"]`
-            );
-            if (_srcRadio) _srcRadio.checked = true;
-            const _mpBox = document.getElementById('mpHandControls');
-            const _hrBox = document.getElementById('hrnetHandControls');
-            if (_mpBox) _mpBox.style.display = handMaskSource === 'mediapipe' ? '' : 'none';
-            if (_hrBox) _hrBox.style.display = handMaskSource === 'hrnet' ? '' : 'none';
-            const _ovLbl = document.getElementById('handOverlayLabel');
-            if (_ovLbl) _ovLbl.style.display = handMaskSource === 'mediapipe' ? '' : 'none';
-            const _hrThS = document.getElementById('hrnetMaskThreshSlider');
-            const _hrThV = document.getElementById('hrnetMaskThreshVal');
-            if (_hrThS) _hrThS.value = hrnetMaskThresh;
-            if (_hrThV) _hrThV.textContent = hrnetMaskThresh.toFixed(2);
-            const _hrSmS = document.getElementById('hrnetMaskSmoothSlider');
-            const _hrSmV = document.getElementById('hrnetMaskSmoothVal');
-            if (_hrSmS) _hrSmS.value = hrnetMaskSmooth;
-            if (_hrSmV) _hrSmV.textContent = hrnetMaskSmooth;
             if (hs.segments && hs.segments.length > 0) {
                 handProtectSegments = hs.segments.map(s => ({
                     id: nextHandSegId++,
@@ -1486,13 +1493,23 @@ const deid = (() => {
         // Check if clicking on a face detection → create face spot (if none exists for this face)
         const localFrame = currentFrame - (trialMeta ? trialMeta.start_frame : 0);
         {
-            const _faceList = faceDetByLocalFrame.get(localFrame) || [];
+            // Filter to faces actually visible in the current camera --
+            // unfiltered faces from the other side can overlap in
+            // per-half pixel coords and steal the click.
+            const _faceList = _facesForCurrentSide({
+                faces: faceDetByLocalFrame.get(localFrame) || []
+            });
             if (_faceList.length > 0) {
+                const curSide = _sideLabel();
                 for (const f of _faceList) {
                     if (ix >= f.x1 && ix <= f.x2 && iy >= f.y1 && iy <= f.y2) {
                         const fcx = (f.x1 + f.x2) / 2;
                         const fcy = (f.y1 + f.y2) / 2;
-                        const fSide = f.side || 'full';
+                        // Use the face's own side when available, falling
+                        // back to the current camera (so clicks always
+                        // create a spot tied to the camera the user is
+                        // looking at).
+                        const fSide = f.side || curSide;
 
                         // Check if a blur spot already covers this face
                         const existing = blurSpots.find(s => {
@@ -1506,6 +1523,7 @@ const deid = (() => {
                             // Select the existing spot instead
                             selectedSpotId = existing.id;
                             renderSpotList();
+                            _updateShapeToggle();
                             render();
                             return;
                         }
@@ -1529,6 +1547,7 @@ const deid = (() => {
                         blurSpots.push(spot);
                         selectedSpotId = spot.id;
                         renderSpotList();
+                        _updateShapeToggle();
                         updateSpotControls();
                         scheduleSave();
                         render();
@@ -1550,6 +1569,7 @@ const deid = (() => {
             if (Math.sqrt(dx * dx + dy * dy) <= hitR) {
                 selectedSpotId = spot.id;
                 renderSpotList();
+                _updateShapeToggle();
                 updateSpotControls();
                 render();
                 renderTimeline();
@@ -1562,7 +1582,7 @@ const deid = (() => {
             const spot = {
                 id: nextSpotId++,
                 spot_type: 'custom',
-                shape: 'oval',
+                shape: _pendingCustomShape || 'oval',
                 x: Math.round(ix),
                 y: Math.round(iy),
                 radius: 40,
@@ -1580,6 +1600,7 @@ const deid = (() => {
             const customBtn = document.getElementById('addCustomBtn');
             if (customBtn) { customBtn.style.background = ''; customBtn.style.color = ''; }
             renderSpotList();
+            _updateShapeToggle();
             updateSpotControls();
             scheduleSave();
             render();
@@ -1590,6 +1611,7 @@ const deid = (() => {
         // Click on nothing → deselect
         selectedSpotId = null;
         renderSpotList();
+        _updateShapeToggle();
         updateSpotControls();
         render();
         renderTimeline();
@@ -2165,7 +2187,7 @@ const deid = (() => {
         });
 
         if (visible.length === 0) {
-            list.innerHTML = '<div style="font-size:11px;color:var(--text-muted);">No blur spots for this camera. Use + Custom Spot.</div>';
+            list.innerHTML = '';
             return;
         }
 
@@ -2192,7 +2214,14 @@ const deid = (() => {
         const btn = document.getElementById('shapeBtn');
         if (!toggle || !btn) return;
         const spot = blurSpots.find(s => s.id === selectedSpotId);
-        if (spot && spot.spot_type === 'custom') {
+        // Show the toggle whenever we're actively building / editing a
+        // custom spot: either staging mode (+Custom Spot pressed) or an
+        // existing custom spot is selected.  Hide otherwise (no spot
+        // selected, or a face spot selected).
+        if (addingCustom) {
+            toggle.style.display = 'block';
+            btn.textContent = `Shape: ${_pendingCustomShape === 'rect' ? 'Rectangle' : 'Oval'}`;
+        } else if (spot && spot.spot_type === 'custom') {
             toggle.style.display = 'block';
             const shape = spot.shape || 'oval';
             btn.textContent = `Shape: ${shape === 'rect' ? 'Rectangle' : 'Oval'}`;
@@ -2202,6 +2231,13 @@ const deid = (() => {
     }
 
     function toggleSpotShape() {
+        // Staging mode -- flip the shape used for the next-created spot.
+        if (addingCustom) {
+            _pendingCustomShape = _pendingCustomShape === 'oval' ? 'rect' : 'oval';
+            _updateShapeToggle();
+            render();
+            return;
+        }
         const spot = blurSpots.find(s => s.id === selectedSpotId);
         if (!spot || spot.spot_type !== 'custom') return;
         spot.shape = (spot.shape || 'oval') === 'oval' ? 'rect' : 'oval';
@@ -2265,10 +2301,11 @@ const deid = (() => {
         const btn = document.getElementById('addCustomBtn');
         btn.style.background = addingCustom ? 'var(--blue)' : '';
         btn.style.color = addingCustom ? '#fff' : '';
+        _updateShapeToggle();
         render();
     }
 
-    // ── Copy custom spots from other camera ──
+    // ── Copy custom + face spots from other camera ──
     function copyFromOtherCamera() {
         if (cameraMode === 'single' || cameraNames.length < 2) return;
         _pushUndo();
@@ -2276,15 +2313,10 @@ const deid = (() => {
         const curSide = _sideLabel();
         const otherSide = curSide === 'left' ? 'right' : 'left';
 
+        // ── Custom spots (copy absolute coords) ──
         const otherCustom = blurSpots.filter(s =>
             s.spot_type === 'custom' && s.side === otherSide
         );
-
-        if (otherCustom.length === 0) {
-            document.getElementById('renderStatus').textContent = 'No custom spots on the other camera.';
-            return;
-        }
-
         let copied = 0;
         for (const s of otherCustom) {
             // Check if a similar spot already exists on this side
@@ -2312,14 +2344,84 @@ const deid = (() => {
             copied++;
         }
 
-        if (copied > 0) {
+        // ── Face spots (relative to the per-camera face detection) ──
+        // Only meaningful when there's exactly ONE face detected per
+        // camera -- otherwise we can't unambiguously pair them up.
+        const otherFace = blurSpots.filter(s =>
+            s.spot_type === 'face' && s.side === otherSide
+        );
+        let copiedFaces = 0;
+        if (otherFace.length > 0) {
+            // Find a representative face-detection centroid for each
+            // camera (use the first frame that has a face in each).
+            let curCentroid = null, otherCentroid = null;
+            let curW = 0, curH = 0, otherW = 0, otherH = 0;
+            for (const entry of faceDetections) {
+                for (const f of (entry.faces || [])) {
+                    const sideOf = f.side || 'full';
+                    if (sideOf === curSide && !curCentroid) {
+                        curCentroid = { x: (f.x1 + f.x2) / 2, y: (f.y1 + f.y2) / 2 };
+                        curW = f.x2 - f.x1; curH = f.y2 - f.y1;
+                    } else if (sideOf === otherSide && !otherCentroid) {
+                        otherCentroid = { x: (f.x1 + f.x2) / 2, y: (f.y1 + f.y2) / 2 };
+                        otherW = f.x2 - f.x1; otherH = f.y2 - f.y1;
+                    }
+                    if (curCentroid && otherCentroid) break;
+                }
+                if (curCentroid && otherCentroid) break;
+            }
+            if (curCentroid && otherCentroid && curW > 0 && otherW > 0) {
+                const sx = curW / otherW;
+                const sy = curH / otherH;
+                for (const s of otherFace) {
+                    // Skip if a face spot already exists on this side
+                    // near the current-camera face centroid.
+                    const exists = blurSpots.find(b =>
+                        b.spot_type === 'face' && b.side === curSide &&
+                        Math.abs(b.x - curCentroid.x) < Math.max(20, curW * 0.25) &&
+                        Math.abs(b.y - curCentroid.y) < Math.max(20, curH * 0.25)
+                    );
+                    if (exists) continue;
+                    // Convert other-camera spot to relative coords on its
+                    // face detection, then re-apply on current camera's.
+                    const relDx = s.x - otherCentroid.x;
+                    const relDy = s.y - otherCentroid.y;
+                    const newX = curCentroid.x + relDx * sx;
+                    const newY = curCentroid.y + relDy * sy;
+                    blurSpots.push({
+                        id: nextSpotId++,
+                        spot_type: 'face',
+                        shape: s.shape || 'oval',
+                        x: Math.round(newX),
+                        y: Math.round(newY),
+                        radius: Math.round((s.radius || 0) * Math.max(sx, sy)),
+                        width:  Math.round((s.width  || s.radius * 2) * sx),
+                        height: Math.round((s.height || s.radius * 2) * sy),
+                        offset_x: Math.round((s.offset_x || 0) * sx),
+                        offset_y: Math.round((s.offset_y || 0) * sy),
+                        frame_start: s.frame_start,
+                        frame_end: s.frame_end,
+                        side: curSide,
+                    });
+                    copiedFaces++;
+                }
+            }
+        }
+
+        const totalCopied = copied + copiedFaces;
+        if (totalCopied > 0) {
             renderSpotList();
             scheduleSave();
             render();
             renderTimeline();
-            document.getElementById('renderStatus').textContent = `Copied ${copied} custom spot(s) from ${otherSide} camera.`;
+            const parts = [];
+            if (copied > 0)      parts.push(`${copied} custom`);
+            if (copiedFaces > 0) parts.push(`${copiedFaces} face`);
+            document.getElementById('renderStatus').textContent =
+                `Copied ${parts.join(' + ')} spot(s) from ${otherSide} camera.`;
         } else {
-            document.getElementById('renderStatus').textContent = 'All spots already exist on this camera.';
+            document.getElementById('renderStatus').textContent =
+                'Nothing new to copy from the other camera.';
         }
     }
 
@@ -2450,13 +2552,6 @@ const deid = (() => {
         handLandmarks = result;
     }
 
-    function updateHandTemporalSmooth(val) {
-        handTemporalSmooth = parseInt(val);
-        document.getElementById('handTemporalVal').textContent = handTemporalSmooth;
-        _applyTemporalSmoothing();
-        render();
-    }
-
     function updateHandRadius(val) {
         handMaskRadius = parseInt(val);
         document.getElementById('handRadiusVal').textContent = handMaskRadius;
@@ -2502,8 +2597,22 @@ const deid = (() => {
     }
 
     function updateHandSmooth2(val) {
-        handSmooth2 = parseInt(val);
-        document.getElementById('handSmooth2Val').textContent = handSmooth2;
+        // Deprecated -- kept as a no-op for back-compat with any code
+        // path that still references it.
+        handSmooth2 = parseInt(val) || 0;
+    }
+
+    function updateDorsalDilate(val) {
+        armDorsalDilate = parseInt(val) || 0;
+        const lbl = document.getElementById('handDorsalVal');
+        if (lbl) lbl.textContent = armDorsalDilate;
+        _scheduleHandSaveRender();
+    }
+
+    function updateVentralDilate(val) {
+        armVentralDilate = parseInt(val) || 0;
+        const lbl = document.getElementById('handVentralVal');
+        if (lbl) lbl.textContent = armVentralDilate;
         _scheduleHandSaveRender();
     }
 
@@ -2517,14 +2626,12 @@ const deid = (() => {
                 hand_smooth: handSmooth,
                 forearm_radius: forearmRadius,
                 forearm_extent: forearmExtent,
-                hand_smooth2: handSmooth2,
-                // dlc_radius removed — unified marker size
-                hand_temporal: handTemporalSmooth,
+                hand_smooth2: 0,
+                hand_temporal: 0,
                 show_landmarks: handOverlayEnabled,
-                // New: hand-mask source + HRnet sliders.
-                mask_source: handMaskSource,
-                hrnet_mask_thresh: hrnetMaskThresh,
-                hrnet_mask_smooth: hrnetMaskSmooth,
+                mask_source: 'mediapipe',
+                arm_dorsal_dilate: armDorsalDilate,
+                arm_ventral_dilate: armVentralDilate,
                 segments: handProtectSegments.map(s => ({
                     start: s.start, end: s.end, radius: s.radius,
                     smooth: s.smooth != null ? s.smooth : handSmooth,
@@ -2706,6 +2813,7 @@ const deid = (() => {
         tlCanvas.addEventListener('mouseup', onTlMouseUp);
         tlCanvas.addEventListener('mouseleave', onTlMouseUp);
         tlCanvas.addEventListener('click', onTlClick);
+        tlCanvas.addEventListener('dblclick', onTlDblClick);
     }
 
     function _tlLayout() {
@@ -3171,6 +3279,31 @@ const deid = (() => {
         }
     }
 
+    function onTlDblClick(e) {
+        // Double-click on the current-camera's hand row when no segment
+        // exists there → create a full-trial hand-mask segment.  Lets
+        // the user "protect the whole trial" with a single gesture.
+        const hit = _tlHitTest(e);
+        if (!hit || hit.type !== 'hand_empty') return;
+        if (!trialMeta) return;
+        const sf = trialMeta.start_frame || 0;
+        const ef = trialMeta.end_frame != null
+            ? trialMeta.end_frame
+            : (sf + (trialMeta.frame_count || 1) - 1);
+        _pushUndo();
+        const side = hit.side || _sideLabel();
+        const newSeg = {
+            id: nextHandSegId++,
+            start: sf, end: ef,
+            radius: handMaskRadius, smooth: handSmooth, side,
+        };
+        handProtectSegments.push(newSeg);
+        selectedHandSegId = newSeg.id;
+        saveHandSettings();
+        renderTimeline();
+        render();
+    }
+
     function onTlClick(e) {
         if (tlDragSpot) return; // was a drag, not click
         const { x: mx } = _tlMouseToCanvas(e);
@@ -3194,43 +3327,6 @@ const deid = (() => {
     // ── Public API ──
     document.addEventListener('DOMContentLoaded', init);
 
-    // ── Hand-mask source: MediaPipe (current) vs HRnet (MIP threshold) ──
-    function setHandMaskSource(src) {
-        if (src !== 'mediapipe' && src !== 'hrnet') return;
-        handMaskSource = src;
-        const mp = document.getElementById('mpHandControls');
-        const hr = document.getElementById('hrnetHandControls');
-        if (mp) mp.style.display = src === 'mediapipe' ? '' : 'none';
-        if (hr) hr.style.display = src === 'hrnet' ? '' : 'none';
-        // "Show hand landmarks" only paints MP keypoints — irrelevant when
-        // the HRnet MIP path is the source.  Hide it accordingly.
-        const overlayLbl = document.getElementById('handOverlayLabel');
-        if (overlayLbl) overlayLbl.style.display = src === 'mediapipe' ? '' : 'none';
-        // Persist + render via the standard debounced helper used by
-        // every other hand-mask slider (also handles preview-mode
-        // server-frame reload).
-        if (src === 'hrnet') {
-            // Fetch the MIP arrays now so the green outline can be built
-            // immediately (the next render() picks it up).
-            _ensureHrnetMaskData().then(() => render());
-        }
-        _scheduleHandSaveRender();
-    }
-
-    function updateHrnetMaskThresh(val) {
-        hrnetMaskThresh = parseFloat(val);
-        const el = document.getElementById('hrnetMaskThreshVal');
-        if (el) el.textContent = hrnetMaskThresh.toFixed(2);
-        _scheduleHandSaveRender();
-    }
-
-    function updateHrnetMaskSmooth(val) {
-        hrnetMaskSmooth = parseInt(val, 10);
-        const el = document.getElementById('hrnetMaskSmoothVal');
-        if (el) el.textContent = hrnetMaskSmooth;
-        _scheduleHandSaveRender();
-    }
-
     return {
         detectFaces,
         togglePlay,
@@ -3252,11 +3348,8 @@ const deid = (() => {
         updateForearmRadius,
         updateForearmExtent,
         updateHandSmooth,
-        updateHandSmooth2,
-        updateHandTemporalSmooth,
-        setHandMaskSource,
-        updateHrnetMaskThresh,
-        updateHrnetMaskSmooth,
+        updateDorsalDilate,
+        updateVentralDilate,
         goToAnalyze,
         renderTrial,
         toggleHasFaces,

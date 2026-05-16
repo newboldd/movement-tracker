@@ -222,6 +222,8 @@ def get_frame(
         mask_source = "mediapipe"
         hrnet_mask_thresh = 0.30
         hrnet_mask_smooth = 7
+        arm_dorsal_dilate_val = 0
+        arm_ventral_dilate_val = 0
         if hs_row:
             hand_mask_radius = hs_row.get("hand_mask_radius", 10) or 10
             hand_smooth = hs_row.get("hand_smooth", 10) or 10
@@ -229,6 +231,8 @@ def get_frame(
             forearm_extent_val = hs_row.get("forearm_extent", 0.5) or 0.5
             hand_smooth2_val = hs_row.get("hand_smooth2", 0) or 0
             dlc_radius_val = hs_row.get("dlc_radius", 15) or 15
+            arm_dorsal_dilate_val = hs_row.get("arm_dorsal_dilate", 0) or 0
+            arm_ventral_dilate_val = hs_row.get("arm_ventral_dilate", 0) or 0
             seg_json = hs_row.get("segments_json", "[]")
             try:
                 hand_segments = _json.loads(seg_json) if isinstance(seg_json, str) else (seg_json or [])
@@ -430,9 +434,13 @@ def get_frame(
                         lms_r = [lm for lm in hand_lm_data[frame_num] if lm["side"] == "right"]
                         hand_mask_l = _build_hand_mask_from_landmarks(lms_l, half_w, fh, active_radius, active_smooth,
                                                                       forearm_radius_val, forearm_extent_val, hand_smooth2_val,
+                                                                      arm_dorsal_dilate=arm_dorsal_dilate_val,
+                                                                      arm_ventral_dilate=arm_ventral_dilate_val,
                                                                       dlc_radius=dlc_radius_val)
                         hand_mask_r = _build_hand_mask_from_landmarks(lms_r, fw - half_w, fh, active_radius, active_smooth,
                                                                       forearm_radius_val, forearm_extent_val, hand_smooth2_val,
+                                                                      arm_dorsal_dilate=arm_dorsal_dilate_val,
+                                                                      arm_ventral_dilate=arm_ventral_dilate_val,
                                                                       dlc_radius=dlc_radius_val)
                 left = _apply_blur_roi(left, left_mask, hand_mask_l)
                 right = _apply_blur_roi(right, right_mask, hand_mask_r)
@@ -452,6 +460,8 @@ def get_frame(
                         hand_mask = _build_hand_mask_from_landmarks(
                             hand_lm_data[frame_num], fw, fh, active_radius, active_smooth,
                             forearm_radius_val, forearm_extent_val, hand_smooth2_val,
+                            arm_dorsal_dilate=arm_dorsal_dilate_val,
+                            arm_ventral_dilate=arm_ventral_dilate_val,
                             dlc_radius=dlc_radius_val)
                 frame = _apply_blur_roi(frame, blur_mask, hand_mask)
 
@@ -1001,16 +1011,16 @@ def get_hand_settings(subject_id: int, trial_idx: int = Query(0)) -> dict:
             "dlc_radius": row.get("dlc_radius", 15),
             "hand_temporal": row.get("hand_temporal", 0),
             "show_landmarks": bool(row.get("show_landmarks", 0)),
-            "mask_source": row.get("mask_source") or "mediapipe",
-            "hrnet_mask_thresh": row.get("hrnet_mask_thresh") if row.get("hrnet_mask_thresh") is not None else 0.30,
-            "hrnet_mask_smooth": row.get("hrnet_mask_smooth") if row.get("hrnet_mask_smooth") is not None else 7,
+            "mask_source": "mediapipe",
+            "arm_dorsal_dilate": row.get("arm_dorsal_dilate", 0) or 0,
+            "arm_ventral_dilate": row.get("arm_ventral_dilate", 0) or 0,
             "segments": segments,
         }
     # No DB row — trial has never been configured
     return {"has_row": False, "enabled": True, "mask_radius": 10, "hand_smooth": 10,
             "forearm_radius": 10, "forearm_extent": 0.5, "hand_smooth2": 0,
             "dlc_radius": 15, "hand_temporal": 0, "show_landmarks": False,
-            "mask_source": "mediapipe", "hrnet_mask_thresh": 0.30, "hrnet_mask_smooth": 7,
+            "mask_source": "mediapipe", "arm_dorsal_dilate": 0, "arm_ventral_dilate": 0,
             "segments": []}
 
 
@@ -1033,17 +1043,15 @@ def save_hand_settings(subject_id: int, body: dict = Body(...)) -> dict:
     show_landmarks = 1 if body.get("show_landmarks", False) else 0
     segments = body.get("segments", [])
     segments_json = _json.dumps(segments) if segments else None
-    mask_source = body.get("mask_source") or "mediapipe"
-    if mask_source not in ("mediapipe", "hrnet"):
-        mask_source = "mediapipe"
+    mask_source = "mediapipe"
     try:
-        hrnet_mask_thresh = float(body.get("hrnet_mask_thresh", 0.30))
+        arm_dorsal_dilate = int(body.get("arm_dorsal_dilate", 0) or 0)
     except (TypeError, ValueError):
-        hrnet_mask_thresh = 0.30
+        arm_dorsal_dilate = 0
     try:
-        hrnet_mask_smooth = int(body.get("hrnet_mask_smooth", 7))
+        arm_ventral_dilate = int(body.get("arm_ventral_dilate", 0) or 0)
     except (TypeError, ValueError):
-        hrnet_mask_smooth = 7
+        arm_ventral_dilate = 0
 
     with get_db_ctx() as db:
         # Lazily add the new columns when this is the first save under
@@ -1051,15 +1059,16 @@ def save_hand_settings(subject_id: int, body: dict = Body(...)) -> dict:
         cols = {r["name"] for r in db.execute("PRAGMA table_info(blur_hand_settings)").fetchall()}
         if "mask_source" not in cols:
             db.execute("ALTER TABLE blur_hand_settings ADD COLUMN mask_source TEXT")
-        if "hrnet_mask_thresh" not in cols:
-            db.execute("ALTER TABLE blur_hand_settings ADD COLUMN hrnet_mask_thresh REAL")
-        if "hrnet_mask_smooth" not in cols:
-            db.execute("ALTER TABLE blur_hand_settings ADD COLUMN hrnet_mask_smooth INTEGER")
+        if "arm_dorsal_dilate" not in cols:
+            db.execute("ALTER TABLE blur_hand_settings ADD COLUMN arm_dorsal_dilate INTEGER DEFAULT 0")
+        if "arm_ventral_dilate" not in cols:
+            db.execute("ALTER TABLE blur_hand_settings ADD COLUMN arm_ventral_dilate INTEGER DEFAULT 0")
         db.execute(
             """INSERT INTO blur_hand_settings
                (subject_id, trial_idx, hand_mask_enabled, hand_mask_radius, hand_smooth,
                 forearm_radius, forearm_extent, hand_smooth2, dlc_radius, hand_temporal,
-                show_landmarks, segments_json, mask_source, hrnet_mask_thresh, hrnet_mask_smooth)
+                show_landmarks, segments_json, mask_source,
+                arm_dorsal_dilate, arm_ventral_dilate)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(subject_id, trial_idx)
                DO UPDATE SET hand_mask_enabled=excluded.hand_mask_enabled,
@@ -1073,12 +1082,12 @@ def save_hand_settings(subject_id: int, body: dict = Body(...)) -> dict:
                              show_landmarks=excluded.show_landmarks,
                              segments_json=excluded.segments_json,
                              mask_source=excluded.mask_source,
-                             hrnet_mask_thresh=excluded.hrnet_mask_thresh,
-                             hrnet_mask_smooth=excluded.hrnet_mask_smooth""",
+                             arm_dorsal_dilate=excluded.arm_dorsal_dilate,
+                             arm_ventral_dilate=excluded.arm_ventral_dilate""",
             (subject_id, trial_idx, enabled, mask_radius, hand_smooth,
              forearm_radius, forearm_extent, hand_smooth2, dlc_radius_val,
              hand_temporal, show_landmarks, segments_json,
-             mask_source, hrnet_mask_thresh, hrnet_mask_smooth),
+             mask_source, arm_dorsal_dilate, arm_ventral_dilate),
         )
     return {"status": "ok"}
 
