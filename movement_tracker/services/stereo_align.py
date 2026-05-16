@@ -429,6 +429,13 @@ def run_stereo_align(subject_name: str, trial_idx: int,
             od_poly = _warp_poly_ref_to_orig(of.get("OD"), H_R_all[fi])
         # Pass 2 source image: raw frame (image / hybrid) or outline
         # mask (pure outline mode).
+        # Hybrid keeps BOTH a masked and a raw view so a per-joint
+        # failsafe (further down) can skip masking for joints whose
+        # MP label lands outside the dilated mask -- otherwise their
+        # alignment would be driven by the foreground-mean fill colour
+        # rather than the actual joint neighbourhood.
+        img_OS_raw = img_OD_raw = None
+        os_mask = od_mask = None
         if needs_video:
             ok, frame = cap.read()
             if not ok:
@@ -443,12 +450,14 @@ def run_stereo_align(subject_name: str, trial_idx: int,
             # hand boundary.  Fill bg with the foreground mean to
             # avoid a step edge at the mask.
             if mode == "hybrid":
-                os_m = _dilate_mask(_outline_mask_image(os_poly, h_full, half_w),
-                                    mask_dilate_px)
-                od_m = _dilate_mask(_outline_mask_image(od_poly, h_full, half_w),
-                                    mask_dilate_px)
-                img_OS = _apply_outline_mask(img_OS, os_m)
-                img_OD = _apply_outline_mask(img_OD, od_m)
+                os_mask = _dilate_mask(_outline_mask_image(os_poly, h_full, half_w),
+                                       mask_dilate_px)
+                od_mask = _dilate_mask(_outline_mask_image(od_poly, h_full, half_w),
+                                       mask_dilate_px)
+                img_OS_raw = img_OS
+                img_OD_raw = img_OD
+                img_OS = _apply_outline_mask(img_OS_raw, os_mask)
+                img_OD = _apply_outline_mask(img_OD_raw, od_mask)
         else:
             img_OS = _outline_mask_image(os_poly, h_full, half_w)
             img_OD = _outline_mask_image(od_poly, h_full, half_w)
@@ -522,8 +531,22 @@ def run_stereo_align(subject_name: str, trial_idx: int,
             os_cx, os_cy = int(round(float(os_x))), int(round(float(os_y)))
             od_cx, od_cy = int(round(float(od_x))), int(round(float(od_y)))
             jh = per_joint_halves[j]
-            os_crop = _crop(img_OS, os_cx, os_cy, jh)
-            od_crop = _crop(img_OD, od_cx, od_cy, jh)
+            # Hybrid failsafe: if either camera's MP label falls
+            # OUTSIDE the dilated outline mask, the masked image would
+            # zero out the area around the label and the phase corr
+            # would just chase the foreground-mean fill colour.  Use
+            # the raw image crops for that joint instead.
+            src_OS, src_OD = img_OS, img_OD
+            if mode == "hybrid" and os_mask is not None and od_mask is not None:
+                h_m, w_m = os_mask.shape
+                in_os = (0 <= os_cx < w_m and 0 <= os_cy < h_m
+                         and os_mask[os_cy, os_cx] > 0)
+                in_od = (0 <= od_cx < w_m and 0 <= od_cy < h_m
+                         and od_mask[od_cy, od_cx] > 0)
+                if not (in_os and in_od):
+                    src_OS, src_OD = img_OS_raw, img_OD_raw
+            os_crop = _crop(src_OS, os_cx, os_cy, jh)
+            od_crop = _crop(src_OD, od_cx, od_cy, jh)
             try:
                 raw_dx, raw_dy, r = align_fn(os_crop, od_crop, _win_for_half(jh))
             except Exception as e:
