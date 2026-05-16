@@ -3295,7 +3295,15 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
     # corrected HRnet peaks, then re-run the Y / Z-outlier / Z-jump passes
     # so any epipolar / outlier / jump introduced by the snap gets cleaned
     # up in place.
-    mp_L_after_hr = mp_L_c.copy(); mp_R_after_hr = mp_R_c.copy()
+    #
+    # When the user hasn't set the HRnet-mismatch threshold or no peak
+    # assignments exist for this trial, leave the after_hr snapshot all
+    # NaN -- the data layer's ``has_skel_v2_hr`` flag then evaluates to
+    # False and the UI stops showing the HRnet-snap stage as identical
+    # to Z-smooth (which is what you saw when the step didn't actually
+    # fire).
+    mp_L_after_hr = np.full_like(mp_L_c, np.nan)
+    mp_R_after_hr = np.full_like(mp_R_c, np.nan)
     hrnet_offsets = None
     hr_threshold_px = float(det_weights.get("hrnet_mismatch", 0.0))
     # Only run HRnet snap when the user has set a non-zero threshold AND

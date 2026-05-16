@@ -1341,6 +1341,16 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     has_skel_v2_z = v2_joints_3d_after_z is not None and np.any(~np.isnan(v2_joints_3d_after_z))
     has_skel_v2_zs = v2_joints_3d_after_zs is not None and np.any(~np.isnan(v2_joints_3d_after_zs))
     has_skel_v2_hr = v2_joints_3d_after_hr is not None and np.any(~np.isnan(v2_joints_3d_after_hr))
+    # When the HRnet snap step was skipped in run_correction_pipeline
+    # (no peaks / threshold = 0), the snapshot arrays were written as
+    # all-NaN.  Drop them entirely so the frontend's STAGE_CONFIGS
+    # ``||`` fallback kicks in -- the HRnet-snap stage view then
+    # falls back to the final Skeleton output instead of looking
+    # identical to Z-smooth.
+    if not has_skel_v2_hr:
+        v2_mp_L_after_hr = None
+        v2_mp_R_after_hr = None
+        v2_joints_3d_after_hr = None
     has_skel_v2_bc = v2_joints_3d_after_bc is not None and np.any(~np.isnan(v2_joints_3d_after_bc))
 
     distances_mano = _compute_distances(joints_3d) if has_mano else {}
