@@ -359,6 +359,52 @@ const manoViewer = (() => {
         }
     }
 
+    // Visual approximation of cv2.dilate on a closed outline polygon:
+    // push each vertex along its bisector by ``dilatePx`` so the result
+    // is roughly the offset polygon.  Used to mirror the backend's
+    // hybrid-mode mask dilation in the canvas overlay.  Winding-order
+    // independent (sign-adjusted via the signed area).
+    function _dilatePolygon(poly, dilatePx) {
+        if (!poly || poly.length < 3 || dilatePx <= 0) return poly;
+        const n = poly.length;
+        // Signed area in canvas coords (y-down): positive = CCW visually.
+        // Outward normal of edge (e.x, e.y) is then (+e.y, -e.x); flip
+        // for CW.
+        let area2 = 0;
+        for (let i = 0; i < n; i++) {
+            const a = poly[i], b = poly[(i + 1) % n];
+            area2 += a[0] * b[1] - b[0] * a[1];
+        }
+        const sign = area2 > 0 ? 1 : -1;
+        const out = new Array(n);
+        for (let i = 0; i < n; i++) {
+            const prev = poly[(i - 1 + n) % n];
+            const cur  = poly[i];
+            const next = poly[(i + 1) % n];
+            const e1x = cur[0] - prev[0], e1y = cur[1] - prev[1];
+            const e2x = next[0] - cur[0], e2y = next[1] - cur[1];
+            const l1 = Math.hypot(e1x, e1y) || 1;
+            const l2 = Math.hypot(e2x, e2y) || 1;
+            // Outward unit normals.
+            const n1x =  sign * e1y / l1, n1y = -sign * e1x / l1;
+            const n2x =  sign * e2y / l2, n2y = -sign * e2x / l2;
+            const sx = n1x + n2x, sy = n1y + n2y;
+            const sLen = Math.hypot(sx, sy);
+            if (sLen < 1e-6) {
+                out[i] = [cur[0] + dilatePx * n1x, cur[1] + dilatePx * n1y];
+                continue;
+            }
+            // Bisector offset = dilatePx / cos(theta/2) where
+            // cos(theta/2) = |n1 + n2| / 2.  Cap at 4*dilatePx to avoid
+            // huge spikes at very sharp convex corners.
+            const cosHalf = sLen / 2;
+            const offDist = dilatePx / Math.max(cosHalf, 0.25);
+            out[i] = [cur[0] + offDist * sx / sLen,
+                      cur[1] + offDist * sy / sLen];
+        }
+        return out;
+    }
+
     // When neither 2D nor 3D is checked for a model, force Skel checked + inactive
     function _syncSkelCheckbox(id2D, id3D, idSkel, skelVar) {
         const e2D = $(id2D), e3D = $(id3D), eSkel = $(idSkel);
@@ -1400,6 +1446,7 @@ const manoViewer = (() => {
             const v = parseInt(e.target.value, 10) || 0;
             const lbl = $('stereoDilateVal');
             if (lbl) lbl.textContent = `${v} px`;
+            render();
         });
         $('runStereoGoBtn')?.addEventListener('click', async () => {
             const st = $('stereoStatus');
@@ -3844,8 +3891,14 @@ const manoViewer = (() => {
             return !!(m && m.value === 'hybrid');
         })();
         if ((showOutline2D || _showOutlineForHybridStaging) && trialData?.has_outlines) {
-            const poly = isLeft ? trialData.outlines_L?.[fn]
-                                : trialData.outlines_R?.[fn];
+            let poly = isLeft ? trialData.outlines_L?.[fn]
+                              : trialData.outlines_R?.[fn];
+            // Hybrid staging: draw the DILATED outline (mirrors the
+            // backend mask the bake will use).
+            if (_showOutlineForHybridStaging && poly && poly.length >= 3) {
+                const dPx = parseInt($('stereoDilateSlider')?.value ?? '0', 10) || 0;
+                if (dPx > 0) poly = _dilatePolygon(poly, dPx);
+            }
             if (poly && poly.length >= 3) {
                 ctx.save();
                 ctx.strokeStyle = '#ffd54f';
