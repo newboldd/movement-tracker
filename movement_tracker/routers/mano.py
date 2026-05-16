@@ -917,6 +917,13 @@ class MPErrorRequest(BaseModel):
     # "auto" (default), "hungarian", "centroid", "refined", "raw".
     hrnet_source: str = "auto"
     stage: str | None = None
+    # Step 0: Stereo-correction config (v3 fit only).  Defaults are a
+    # no-op when stereo_dist_px == 0.
+    stereo_mode: str = "image"        # image / outline / hybrid
+    mask_dilate_px: int = 10           # hybrid only
+    gauss_center_weight: float = 0.0   # image + hybrid
+    stereo_conf: float = 0.0           # min confidence to consider a stereo label
+    stereo_dist_px: float = 0.0        # 0 disables stereo-correction step
 
 
 def _encode_errors(errors) -> list[list[list[int]]]:
@@ -1028,7 +1035,12 @@ def run_corrections(subject_id: int, req: MPErrorRequest) -> dict:
             run_correction_pipeline(name, trial_stem, det, attr,
                                     progress_callback=on_progress,
                                     cancel_event=cancel_event,
-                                    hrnet_source=req.hrnet_source)
+                                    hrnet_source=req.hrnet_source,
+                                    stereo_mode=req.stereo_mode,
+                                    stereo_mask_dilate_px=int(req.mask_dilate_px),
+                                    stereo_gauss_center_weight=float(req.gauss_center_weight),
+                                    stereo_conf=float(req.stereo_conf),
+                                    stereo_dist_px=float(req.stereo_dist_px))
             if cancel_event.is_set():
                 raise _JobCancelled()
             save_errors(name, trial_stem, det, attr)

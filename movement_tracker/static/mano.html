@@ -277,6 +277,10 @@
                 <input type="checkbox" class="stage-row stage-2d" data-stage="mediapipe" style="margin:0;justify-self:center;">
                 <input type="checkbox" class="stage-row stage-3d" data-stage="mediapipe" style="margin:0;justify-self:center;">
                 <input type="checkbox" class="stage-row stage-err" data-stage="mediapipe" style="margin:0;justify-self:center;">
+                <span class="stage-row" data-stage="stereo_correct" style="color:var(--text-muted);padding-left:18px;"><span class="layer-swatch" style="background:#f48fb1;"></span> Stereo-correct</span>
+                <input type="checkbox" class="stage-row stage-2d" data-stage="stereo_correct" style="margin:0;justify-self:center;">
+                <input type="checkbox" class="stage-row stage-3d" data-stage="stereo_correct" style="margin:0;justify-self:center;">
+                <input type="checkbox" class="stage-row stage-err" data-stage="stereo_correct" style="margin:0;justify-self:center;">
 <span class="stage-row" data-stage="z_correct" style="color:var(--text-muted);padding-left:18px;"><span class="layer-swatch" style="background:#ffa726;"></span> Y/Z-correct</span>
                 <input type="checkbox" class="stage-row stage-2d" data-stage="z_correct" style="margin:0;justify-self:center;">
                 <input type="checkbox" class="stage-row stage-3d" data-stage="z_correct" style="margin:0;justify-self:center;">
@@ -695,6 +699,50 @@
                     Skeleton v3 (error-detection + correction): detect MP errors, attribute per-camera blame, then fit.
                 </div>
 
+                <!-- ── Stereo Correction (Step 0) ────────────────────── -->
+                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;">Stereo Correction</div>
+                <div style="display:flex;gap:10px;align-items:center;font-size:11px;color:var(--text-muted);margin-bottom:6px;"
+                     title="Cross-camera alignment mode for the stereo-correct first step of the v3 fit.">
+                    <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
+                        <input type="radio" name="v3StereoMode" value="image" id="v3StereoModeImage" checked style="margin:0;">
+                        Image
+                    </label>
+                    <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
+                        <input type="radio" name="v3StereoMode" value="outline" id="v3StereoModeOutline" style="margin:0;">
+                        Outline
+                    </label>
+                    <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
+                        <input type="radio" name="v3StereoMode" value="hybrid" id="v3StereoModeHybrid" style="margin:0;">
+                        Hybrid
+                    </label>
+                </div>
+                <div id="v3StereoDilateWrap" style="display:none;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);margin-bottom:6px;"
+                     title="Dilate the hand outline mask before applying it to the per-joint image phase corr (hybrid only).">
+                    <span>Dilate</span>
+                    <input type="range" id="v3StereoDilateSlider" min="0" max="50" step="1" value="10" style="flex:1;height:5px;cursor:pointer;min-width:0;">
+                    <span id="v3StereoDilateVal" style="min-width:30px;text-align:right;color:var(--text);">10 px</span>
+                </div>
+                <div id="v3StereoGaussWrap" style="display:none;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);margin-bottom:6px;"
+                     title="2D Gaussian centred on each MP label that weights the per-joint phase correlation toward pixels near the joint (image + hybrid).">
+                    <span>Center</span>
+                    <input type="range" id="v3StereoGaussSlider" min="0" max="100" step="1" value="0" style="flex:1;height:5px;cursor:pointer;min-width:0;">
+                    <span id="v3StereoGaussVal" style="min-width:30px;text-align:right;color:var(--text);">0.00</span>
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);" title="Minimum stereo-corr confidence to consider a joint's stereo label for error detection.">Stereo confidence</label>
+                        <span id="edWStereoConf" style="color:var(--text-muted);font-weight:bold;">0.00</span>
+                    </div>
+                    <input type="range" id="edSliderStereoConf" min="0" max="1" step="0.01" value="0" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:8px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);" title="Flag a joint as an error when ||MP - Stereo|| (px) exceeds this distance.  Errors get camera-attributed and the blamed camera's MP label is replaced by the stereo label.">Stereo distance (px)</label>
+                        <span id="edWStereoDist" style="color:var(--text-muted);font-weight:bold;">0</span>
+                    </div>
+                    <input type="range" id="edSliderStereoDist" min="0" max="80" step="0.5" value="0" style="width:100%;cursor:pointer;height:5px;">
+                </div>
+
                 <!-- ── Error Detection ───────────────────────────────── -->
                 <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;">Error Detection</div>
                 <div style="font-size:11px;margin-bottom:4px;">
@@ -1057,7 +1105,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/mano.js?v=352" type="module"></script>
+    <script src="/static/js/mano.js?v=353" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

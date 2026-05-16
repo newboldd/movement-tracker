@@ -42,7 +42,7 @@ BONES = HAND_SKELETON  # 20 (parent, child) tuples
 
 DETECTION_FACTORS = ("z_jump", "z_outlier", "y_disp", "bone_length",
                      "bone_agreement", "angle", "reproj", "confidence",
-                     "hrnet_mismatch")
+                     "hrnet_mismatch", "stereo_dist")
 ATTRIBUTION_FACTORS = ("jump_2d", "confidence", "hrnet")
 
 # Distal descendants for each joint along the finger chains.  A joint-angle
@@ -3007,11 +3007,22 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
                              det_weights: dict, attr_weights: dict,
                              progress_callback=None,
                              cancel_event=None,
-                             hrnet_source: str = "auto") -> dict:
+                             hrnet_source: str = "auto",
+                             stereo_mode: str = "image",
+                             stereo_mask_dilate_px: int = 10,
+                             stereo_gauss_center_weight: float = 0.0,
+                             stereo_conf: float = 0.0,
+                             stereo_dist_px: float = 0.0) -> dict:
     """Run the full correction pipeline, save result as ``mano_fit_v2.npz``.
 
-    Stage 1: Y-disparity correction (winner-take-all, driven by the current
-    detection + attribution slider settings).
+    Step 0: Stereo-correction.  Runs ``run_stereo_align`` with the chosen
+    mode + params, then for every (frame, joint) whose stereo confidence
+    >= ``stereo_conf`` and whose MP↔stereo pixel distance > ``stereo_dist_px``,
+    attributes the bad camera via the existing attribution score and
+    replaces that camera's MP label with its stereo label.  Skipped when
+    ``stereo_dist_px == 0``.
+
+    Stage 1: Combined Y-disparity + Z-outlier correction.
 
     Returns ``{n_corrected, out_path, n_frames}``.
     """
@@ -3054,6 +3065,83 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
 
     mp_L_c, mp_R_c = mp_L.copy(), mp_R.copy()
     n_corrected = 0
+
+    # ── Step 0: Stereo-correction ─────────────────────────────────────
+    # Run the stand-alone stereo-alignment first (saved as
+    # stereo_align_<mode>.npz alongside the trial), then for every
+    # joint whose stereo confidence clears the threshold AND whose
+    # MP↔stereo distance exceeds the user's distance threshold, decide
+    # which camera to blame using the existing per-camera attribution
+    # score and replace that camera's MP label with its stereo label.
+    # The downstream Y/Z passes then start from the stereo-corrected
+    # MP labels rather than the raw ones.
+    stereo_blame = np.zeros((N, 21, 2), dtype=bool)
+    stereo_L_pts = np.full((N, 21, 2), np.nan, dtype=np.float32)
+    stereo_R_pts = np.full((N, 21, 2), np.nan, dtype=np.float32)
+    stereo_response = np.full((N, 21), np.nan, dtype=np.float32)
+    if float(stereo_dist_px) > 0:
+        try:
+            from .stereo_align import run_stereo_align, load_stereo_align
+            # Resolve trial_idx from trial_stem (run_stereo_align needs it).
+            t_idx = next((i for i, t in enumerate(trials)
+                          if t["trial_name"] == trial_stem), None)
+            if t_idx is None:
+                raise RuntimeError(f"Couldn't resolve trial_idx for {trial_stem}")
+            run_stereo_align(
+                subject_name, t_idx,
+                progress_callback=lambda p: _pg(int(p * 0.10)),
+                cancel_event=cancel_event,
+                mode=str(stereo_mode),
+                mask_dilate_px=int(stereo_mask_dilate_px),
+                gauss_center_weight=float(stereo_gauss_center_weight))
+            sa = load_stereo_align(subject_name, t_idx, mode=str(stereo_mode))
+            if sa is not None:
+                shifts = sa["shifts"]                # (N_sa, 21, 2)
+                resp   = sa["response"]              # (N_sa, 21)
+                n_sa   = min(N, int(shifts.shape[0]))
+                # Per-camera stereo positions.
+                stereo_L_pts[:n_sa] = mp_L[:n_sa] - shifts[:n_sa]
+                stereo_R_pts[:n_sa] = mp_R[:n_sa] + shifts[:n_sa]
+                stereo_response[:n_sa] = resp[:n_sa]
+                # Per-joint MP↔Stereo distance == ||shifts|| (symmetric
+                # by construction).
+                dist = np.linalg.norm(shifts[:n_sa], axis=-1)  # (n_sa, 21)
+                conf_ok = resp[:n_sa] >= float(stereo_conf)
+                err_mask = conf_ok & (dist > float(stereo_dist_px))  # (n_sa, 21)
+                # Per-camera attribution: use existing attr factors.
+                attr_per_cam = _combined_attr_per_cam(attr, attr_weights)
+                # Build per-(f, j) blame: True on the blamed camera.
+                for fi in range(n_sa):
+                    for j in range(21):
+                        if not err_mask[fi, j]:
+                            continue
+                        sL, sR = stereo_L_pts[fi, j], stereo_R_pts[fi, j]
+                        if np.any(np.isnan(sL)) or np.any(np.isnan(sR)):
+                            continue
+                        if attr_per_cam is not None:
+                            a0 = float(attr_per_cam[fi, j, 0])
+                            a1 = float(attr_per_cam[fi, j, 1])
+                            blame_left = a0 >= a1
+                        else:
+                            # No attribution weights -- fall back to
+                            # MP confidence (lower confidence = bad cam).
+                            cL = float(conf_L[fi, j]) if conf_L is not None else 0.0
+                            cR = float(conf_R[fi, j]) if conf_R is not None else 0.0
+                            blame_left = (cL <= cR)
+                        if blame_left:
+                            mp_L_c[fi, j] = sL
+                            stereo_blame[fi, j, 0] = True
+                        else:
+                            mp_R_c[fi, j] = sR
+                            stereo_blame[fi, j, 1] = True
+                        n_corrected += 1
+        except Exception as e:
+            logger.warning(f"Stereo-correct step skipped (non-fatal): {e}")
+    _pg(10)
+
+    # Snapshot after stereo-correction (stereo_correct stage view).
+    mp_L_after_sc = mp_L_c.copy()
+    mp_R_after_sc = mp_R_c.copy()
 
     # ── Stage 1: Combined Y-disparity + Z-outlier correction ──────────
     # Errors driving the correction are the union of y_disp and z_outlier
@@ -3192,6 +3280,7 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
     _pg(92)
 
     # Triangulate each pipeline checkpoint
+    joints_3d_after_sc = np.full((N, 21, 3), np.nan, dtype=np.float32)
     joints_3d_after_y = np.full((N, 21, 3), np.nan, dtype=np.float32)
     joints_3d_after_z = np.full((N, 21, 3), np.nan, dtype=np.float32)
     joints_3d_after_zs = np.full((N, 21, 3), np.nan, dtype=np.float32)
@@ -3199,6 +3288,8 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
     joints_3d_after_bc = np.full((N, 21, 3), np.nan, dtype=np.float32)
     joints_3d = np.full((N, 21, 3), np.nan, dtype=np.float32)
     for j in range(21):
+        joints_3d_after_sc[:, j, :] = triangulate_points(
+            mp_L_after_sc[:, j], mp_R_after_sc[:, j], calib).astype(np.float32)
         joints_3d_after_y[:, j, :] = triangulate_points(
             mp_L_after_y[:, j], mp_R_after_y[:, j], calib).astype(np.float32)
         joints_3d_after_z[:, j, :] = triangulate_points(
@@ -3240,6 +3331,17 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
         joints_3d=joints_3d,                    # final (after Y+Z-out+Z-jump+BL)
         mp_L_corrected=mp_L_c,                  # final
         mp_R_corrected=mp_R_c,
+        # Step 0 -- after stereo-correction.
+        joints_3d_after_sc=joints_3d_after_sc,
+        mp_L_after_sc=mp_L_after_sc,
+        mp_R_after_sc=mp_R_after_sc,
+        stereo_blame=stereo_blame.astype(np.bool_),
+        stereo_L_pts=stereo_L_pts,
+        stereo_R_pts=stereo_R_pts,
+        stereo_response=stereo_response,
+        stereo_mode=str(stereo_mode),
+        stereo_conf=np.float32(stereo_conf),
+        stereo_dist_px=np.float32(stereo_dist_px),
         joints_3d_after_y=joints_3d_after_y,    # after Y only
         mp_L_after_y=mp_L_after_y,
         mp_R_after_y=mp_R_after_y,
@@ -3277,6 +3379,13 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
         "params": {
             "detection": det_weights,
             "attribution": attr_weights,
+            "stereo": {
+                "mode": str(stereo_mode),
+                "mask_dilate_px": int(stereo_mask_dilate_px),
+                "gauss_center_weight": float(stereo_gauss_center_weight),
+                "conf": float(stereo_conf),
+                "dist_px": float(stereo_dist_px),
+            },
         },
         "timestamp": datetime.now().isoformat(),
     }, indent=2))
@@ -3322,7 +3431,7 @@ def prefill_error_caches_for_all_subjects(progress_callback=None,
     from .mano_data import _mano_dir, list_mano_trials
     from ..db import get_db_ctx
 
-    ALL_STAGES_LOCAL = ["mediapipe", "z_correct", "z_smooth",
+    ALL_STAGES_LOCAL = ["mediapipe", "stereo_correct", "z_correct", "z_smooth",
                         "hrnet_snap", "bone_correct", "bone_smooth"]
     summary = {"subjects": 0, "trials": 0, "stages_computed": 0,
                "stages_skipped": 0, "errors": []}
@@ -3369,7 +3478,8 @@ def prefill_error_caches_for_all_subjects(progress_callback=None,
                 # mediapipe stage now reflects the union of y_disp and
                 # z_outlier (those are what the combined yz corrector flags).
                 stage_factor_map = {
-                    "mediapipe": ("y_disp", "z_outlier"),
+                    "mediapipe": "stereo_dist",
+                    "stereo_correct": ("y_disp", "z_outlier"),
                     "z_correct": "z_jump", "z_smooth": "hrnet_mismatch",
                     "hrnet_snap": "bone_length", "bone_correct": "bone_agreement",
                     "bone_smooth": "angle",
@@ -3473,7 +3583,11 @@ def compute_errors_for_trial(subject_name: str, trial_stem: str,
         if v2_path.exists():
             try:
                 with np.load(str(v2_path), allow_pickle=True) as z:
-                    if stage == "z_correct" and "mp_L_after_z" in z.files:
+                    if stage == "stereo_correct" and "mp_L_after_sc" in z.files:
+                        mp_L = z["mp_L_after_sc"].astype(np.float32)
+                        mp_R = z["mp_R_after_sc"].astype(np.float32)
+                        stage_tag = "sc"
+                    elif stage == "z_correct" and "mp_L_after_z" in z.files:
                         mp_L = z["mp_L_after_z"].astype(np.float32)
                         mp_R = z["mp_R_after_z"].astype(np.float32)
                         stage_tag = "z"
@@ -3509,6 +3623,53 @@ def compute_errors_for_trial(subject_name: str, trial_stem: str,
     wta = (stage in (None, "mediapipe"))
     errors = apply_thresholds(det, attr, det_weights, attr_weights,
                               winner_take_all=wta)
+
+    # Overlay stereo_dist (drives the mediapipe-stage error overlay
+    # after the v3 step-0 stereo-correction).  Recomputed live from
+    # whatever stereo_align_<mode>.npz exists (priority hybrid >
+    # outline > image), so the user sees the overlay update as they
+    # move the stereo confidence / distance sliders -- not just after
+    # a fit re-run.
+    sd_w = float(det_weights.get("stereo_dist", 0.0))
+    sc_w = float(det_weights.get("stereo_conf", 0.0))
+    if sd_w > 0:
+        try:
+            from .stereo_align import load_stereo_align
+            t_idx = next((i for i, t in enumerate(
+                build_trial_map(subject_name))
+                if t["trial_name"] == trial_stem), None)
+            sa = None
+            if t_idx is not None:
+                for _m in ("hybrid", "outline", "image"):
+                    sa = load_stereo_align(subject_name, t_idx, mode=_m)
+                    if sa is not None:
+                        break
+            if sa is not None:
+                shifts = sa["shifts"]                # (N_sa, 21, 2)
+                resp   = sa["response"]              # (N_sa, 21)
+                n_sa = min(N, int(shifts.shape[0]))
+                dist = np.linalg.norm(shifts[:n_sa], axis=-1)  # (n_sa, 21)
+                conf_ok = resp[:n_sa] >= sc_w
+                err_mask = conf_ok & (dist > sd_w)             # (n_sa, 21)
+                # Attribute per-camera blame using current attr scores.
+                attr_per_cam = _combined_attr_per_cam(attr, attr_weights)
+                stereo_overlay = np.zeros((N, 21, 2), dtype=bool)
+                for fi in range(n_sa):
+                    for j in range(21):
+                        if not err_mask[fi, j]:
+                            continue
+                        if attr_per_cam is not None:
+                            a0 = float(attr_per_cam[fi, j, 0])
+                            a1 = float(attr_per_cam[fi, j, 1])
+                            blame_left = a0 >= a1
+                        else:
+                            cL = float(conf_L[fi, j]) if conf_L is not None else 0.0
+                            cR = float(conf_R[fi, j]) if conf_R is not None else 0.0
+                            blame_left = (cL <= cR)
+                        stereo_overlay[fi, j, 0 if blame_left else 1] = True
+                errors = errors | stereo_overlay
+        except Exception as e:
+            logger.warning(f"stereo-dist error overlay skipped: {e}")
 
     # Overlay hrnet_mismatch (drives the z_smooth stage's error overlay).
     # The slider is an absolute pixel-distance threshold compared against

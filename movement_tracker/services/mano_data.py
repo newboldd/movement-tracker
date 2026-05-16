@@ -956,6 +956,13 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
 
     v2_mp_L_corrected = None   # per-camera 2D from corrections-stage output
     v2_mp_R_corrected = None
+    v2_mp_L_after_sc = None     # after stereo-correction (Step 0)
+    v2_mp_R_after_sc = None
+    v2_joints_3d_after_sc = None
+    v2_stereo_blame = None      # (N, 21, 2) bool: which camera got its MP replaced
+    v2_stereo_L_pts = None
+    v2_stereo_R_pts = None
+    v2_stereo_response = None
     v2_mp_L_after_y = None      # after Y-correction only (intermediate)
     v2_mp_R_after_y = None
     v2_joints_3d_after_y = None
@@ -990,6 +997,14 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         # one camera per joint.
         v2_mp_L_corrected = v2.get("mp_L_corrected")
         v2_mp_R_corrected = v2.get("mp_R_corrected")
+        # After stereo-correction (Step 0 of v3 pipeline)
+        v2_mp_L_after_sc = v2.get("mp_L_after_sc")
+        v2_mp_R_after_sc = v2.get("mp_R_after_sc")
+        v2_joints_3d_after_sc = v2.get("joints_3d_after_sc")
+        v2_stereo_blame = v2.get("stereo_blame")
+        v2_stereo_L_pts = v2.get("stereo_L_pts")
+        v2_stereo_R_pts = v2.get("stereo_R_pts")
+        v2_stereo_response = v2.get("stereo_response")
         # Legacy "after_y" snapshot — now equals the combined Y/Z output (kept for back-compat)
         v2_mp_L_after_y = v2.get("mp_L_after_y")
         v2_mp_R_after_y = v2.get("mp_R_after_y")
@@ -1531,6 +1546,23 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         "skel_v2_proj_L": _points_to_list(v2_proj_L),
         "skel_v2_proj_R": _points_to_list(v2_proj_R),
         "skel_v2_joints_3d": _points_to_list(v2_joints_3d),
+        # Intermediate view after Stereo-correction (Step 0)
+        "skel_v2_proj_sc_L": _points_to_list(v2_mp_L_after_sc) if v2_mp_L_after_sc is not None else None,
+        "skel_v2_proj_sc_R": _points_to_list(v2_mp_R_after_sc) if v2_mp_R_after_sc is not None else None,
+        "skel_v2_joints_sc_3d": _points_to_list(v2_joints_3d_after_sc) if v2_joints_3d_after_sc is not None else None,
+        # (N, 21, 2) bool -- True on the camera whose MP was replaced
+        # by its stereo label at Step 0.  Drives the pink-X overlay
+        # on the MP-error display.
+        "stereo_blame": (v2_stereo_blame.astype(bool).tolist()
+                          if v2_stereo_blame is not None else None),
+        # (N, 21, 2) float -- per-frame stereo-corrected position in each
+        # camera's pixel space (== mp ± shifts).  None if not baked.
+        "stereo_L_pts": (_points_to_list(v2_stereo_L_pts)
+                          if v2_stereo_L_pts is not None else None),
+        "stereo_R_pts": (_points_to_list(v2_stereo_R_pts)
+                          if v2_stereo_R_pts is not None else None),
+        "stereo_response_v3": (v2_stereo_response.tolist()
+                                if v2_stereo_response is not None else None),
         # Intermediate view after Y-disparity correction only
         "skel_v2_proj_y_L": _points_to_list(v2_mp_L_after_y) if v2_mp_L_after_y is not None else None,
         "skel_v2_proj_y_R": _points_to_list(v2_mp_R_after_y) if v2_mp_R_after_y is not None else None,

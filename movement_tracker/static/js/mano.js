@@ -63,7 +63,7 @@ const manoViewer = (() => {
     let _stages2D = new Set();      // stages whose 2D overlay is shown
     let _stages3D = new Set();      // stages whose 3D model is shown
     let _stagesErr = new Set();     // stages whose error markers are shown
-    const ALL_STAGES = ['mediapipe', 'z_correct', 'z_smooth', 'hrnet_snap', 'bone_correct', 'bone_smooth'];
+    const ALL_STAGES = ['mediapipe', 'stereo_correct', 'z_correct', 'z_smooth', 'hrnet_snap', 'bone_correct', 'bone_smooth'];
     function _syncErrorStages() {
         _errorStages = new Set([..._stages2D, ..._stages3D, ..._stagesErr]);
     }
@@ -178,13 +178,32 @@ const manoViewer = (() => {
         // Y-disparity and Z-outlier errors (the things stage 1 fixes).
         // Distance plots use MP data.
         mediapipe: {
-            factor: ['y_disp', 'z_outlier'],
+            // MP-stage errors now come from the stereo-correction
+            // distance (joints where MP and Stereo differ by more than
+            // the user's Stereo distance slider, gated by confidence).
+            // The y_disp / z_outlier factors move to the stereo_correct
+            // stage below.
+            factor: 'stereo_dist',
             color: '#00cccc',
             color3d: 0x00cccc,
             emissive3d: 0x008888,
             metricSrc: 'mp',
             proj2D: (isLeft, td) => isLeft ? td.mp_tracked_L : td.mp_tracked_R,
             proj3D: (td, fn) => td.mp_joints_3d?.[fn],
+        },
+        // Stage 0b: after stereo-correction (MP labels replaced with
+        // the stereo label on the camera attributed as bad).  Shows
+        // the union of Y-disparity and Z-outlier errors -- the things
+        // the next pass (Y/Z-correct) fixes.
+        stereo_correct: {
+            factor: ['y_disp', 'z_outlier'],
+            color: '#f48fb1',
+            color3d: 0xf48fb1,
+            emissive3d: 0x7a4858,
+            metricSrc: 'skel_v2_sc',
+            proj2D: (isLeft, td) => isLeft ? (td.skel_v2_proj_sc_L || td.mp_tracked_L)
+                                            : (td.skel_v2_proj_sc_R || td.mp_tracked_R),
+            proj3D: (td, fn) => (td.skel_v2_joints_sc_3d || td.mp_joints_3d)?.[fn],
         },
         // Stage 1: after combined Y-disparity + Z-outlier correction.
         // Shows z_jump errors (frames still jumpy after Y+Z lateral fix —
@@ -250,9 +269,11 @@ const manoViewer = (() => {
         },
     };
     let _mpErrorWeights = {
-        detection: { z_jump: 0, z_outlier: 0, y_disp: 0, bone_length: 0, bone_agreement: 0, angle: 0, reproj: 0, confidence: 0, hrnet_mismatch: 0 },
+        detection: { z_jump: 0, z_outlier: 0, y_disp: 0, bone_length: 0, bone_agreement: 0, angle: 0, reproj: 0, confidence: 0, hrnet_mismatch: 0, stereo_dist: 0, stereo_conf: 0 },
         attribution: { jump_2d: 0, confidence: 0 },
         corrections: { y_disp: 0 },
+        // Stereo-correction (v3 step 0) bake-only settings.
+        stereo: { mode: 'image', mask_dilate_px: 10, gauss_center_weight: 0.0 },
     };
     let mpCorrectedL = null;  // (N, 21, 2) or null — used in place of mp_tracked_L when present
     let mpCorrectedR = null;
@@ -1739,19 +1760,24 @@ const manoViewer = (() => {
             ['edSliderBL',     'edWBL',     'detection',   'bone_length'],
             ['edSliderBA',     'edWBA',     'detection',   'bone_agreement'],
             ['edSliderAng',    'edWAng',    'detection',   'angle'],
-            ['edSliderHR',     'edWHR',     'detection',   'hrnet_mismatch'],
+            ['edSliderHR',     'edWHR',     'detection',   'hrnet_mismatch', 0],
+            ['edSliderStereoConf', 'edWStereoConf', 'detection', 'stereo_conf', 2],
+            ['edSliderStereoDist', 'edWStereoDist', 'detection', 'stereo_dist', 0],
             ['eaSliderJump',   'eaWJump',   'attribution', 'jump_2d'],
             ['eaSliderConf',   'eaWConf',   'attribution', 'confidence'],
             ['eaSliderHRnet',  'eaWHRnet',  'attribution', 'hrnet'],
             ['ecSliderYDisp',  'ecWYDisp',  'corrections', 'y_disp'],
         ];
-        for (const [sid, lid, group, key] of _edSliders) {
+        for (const row of _edSliders) {
+            const [sid, lid, group, key, decOverride] = row;
             const s = $(sid), lbl = $(lid);
             if (!s) continue;
             // Attribution sliders use finer step (0.001) → 3 decimals; others 2.
-            const decimals = (group === 'attribution') ? 3 : 2;
+            const decimals = (decOverride != null) ? decOverride
+                          : (group === 'attribution') ? 3 : 2;
             const update = () => {
                 const v = parseFloat(s.value);
+                if (!_mpErrorWeights[group]) _mpErrorWeights[group] = {};
                 _mpErrorWeights[group][key] = v;
                 if (lbl) lbl.textContent = v.toFixed(decimals);
                 _scheduleMPErrorRecompute();
@@ -1759,6 +1785,37 @@ const manoViewer = (() => {
             s.addEventListener('input', update);
             update();
         }
+        // Stereo mode radios + dilate/center sliders -- visibility wired
+        // to the radio choice (dilate only for Hybrid; center for image+
+        // hybrid).
+        const _v3StereoMode = () => {
+            const m = document.querySelector('input[name="v3StereoMode"]:checked');
+            return m ? m.value : 'image';
+        };
+        const _refreshV3StereoUI = () => {
+            const mode = _v3StereoMode();
+            _mpErrorWeights.stereo.mode = mode;
+            const dWrap = $('v3StereoDilateWrap');
+            if (dWrap) dWrap.style.display = (mode === 'hybrid') ? 'flex' : 'none';
+            const gWrap = $('v3StereoGaussWrap');
+            if (gWrap) gWrap.style.display = (mode === 'image' || mode === 'hybrid') ? 'flex' : 'none';
+        };
+        document.querySelectorAll('input[name="v3StereoMode"]').forEach(el => {
+            el.addEventListener('change', () => { _refreshV3StereoUI(); _scheduleMPErrorRecompute(); });
+        });
+        _refreshV3StereoUI();
+        $('v3StereoDilateSlider')?.addEventListener('input', e => {
+            const v = parseInt(e.target.value, 10) || 0;
+            _mpErrorWeights.stereo.mask_dilate_px = v;
+            const lbl = $('v3StereoDilateVal');
+            if (lbl) lbl.textContent = `${v} px`;
+        });
+        $('v3StereoGaussSlider')?.addEventListener('input', e => {
+            const v = (parseInt(e.target.value, 10) || 0) / 100;
+            _mpErrorWeights.stereo.gauss_center_weight = v;
+            const lbl = $('v3StereoGaussVal');
+            if (lbl) lbl.textContent = v.toFixed(2);
+        });
         // Constraint lines are shown when a plotted angle line is clicked
         $('showDLC').addEventListener('change', e => { showDLC = e.target.checked; render(); update3D(); renderDistanceTrace(); });
         $('showDLC3D').addEventListener('change', e => { showDLC3D = e.target.checked; update3D(); renderDistanceTrace(); });
@@ -3835,6 +3892,29 @@ const manoViewer = (() => {
                 const x = (mpKp[fn][j][0] + mpXOff) * pixelScale;
                 const y = mpKp[fn][j][1] * pixelScale;
                 drawCross(x, y, '#00cccc', 4);
+            }
+            // When the MP-stage Err column is on, overlay pink X's at
+            // the per-joint stereo-correct position for joints whose
+            // BLAMED camera is the current view.  Joint set comes
+            // from the live MP-stage error matrix (responds to the
+            // Stereo conf / Stereo distance sliders); positions come
+            // from the baked stereo_L_pts / stereo_R_pts.
+            if (_stagesErr.has('mediapipe')) {
+                const camIdx = isLeft ? 0 : 1;
+                const stereoPts = isLeft ? trialData.stereo_L_pts
+                                         : trialData.stereo_R_pts;
+                const liveErr = skelErrorMatrices?.mediapipe;
+                if (stereoPts && liveErr && liveErr[fn]) {
+                    for (let j = 0; j < 21; j++) {
+                        if (!isJointVisible(j)) continue;
+                        const eRow = liveErr[fn][j];
+                        if (!eRow || !eRow[camIdx]) continue;
+                        const sp = stereoPts[fn]?.[j];
+                        if (!sp) continue;
+                        drawCross(sp[0] * pixelScale, sp[1] * pixelScale,
+                                   '#f48fb1', 5);
+                    }
+                }
             }
         }
 
@@ -7462,6 +7542,27 @@ const manoViewer = (() => {
         for (const [key, id] of Object.entries(attrMap)) {
             if (key in attrSaved) _setSlider(id, attrSaved[key]);
         }
+        // Restore Step 0 (stereo-correction) settings.
+        const stSaved = p.stereo || {};
+        if (typeof stSaved.mode === 'string') {
+            const r = document.querySelector(`input[name="v3StereoMode"][value="${stSaved.mode}"]`);
+            if (r) { r.checked = true; r.dispatchEvent(new Event('change')); }
+        }
+        if (typeof stSaved.mask_dilate_px === 'number') {
+            const el = $('v3StereoDilateSlider');
+            if (el) { el.value = stSaved.mask_dilate_px; el.dispatchEvent(new Event('input')); }
+        }
+        if (typeof stSaved.gauss_center_weight === 'number') {
+            const el = $('v3StereoGaussSlider');
+            if (el) { el.value = Math.round(100 * stSaved.gauss_center_weight); el.dispatchEvent(new Event('input')); }
+        }
+        if (typeof stSaved.conf === 'number') _setSlider('edSliderStereoConf', stSaved.conf);
+        if (typeof stSaved.dist_px === 'number') _setSlider('edSliderStereoDist', stSaved.dist_px);
+        // Newer param files also carry these under ``detection`` -- prefer
+        // those if present (the slider is the source of truth for the
+        // live error-recompute pipeline).
+        if (typeof detSaved.stereo_conf === 'number') _setSlider('edSliderStereoConf', detSaved.stereo_conf);
+        if (typeof detSaved.stereo_dist === 'number') _setSlider('edSliderStereoDist', detSaved.stereo_dist);
     }
 
     function resetFitDefaults() {
@@ -7602,6 +7703,12 @@ const manoViewer = (() => {
                     attribution: _mpErrorWeights.attribution,
                     corrections: _mpErrorWeights.corrections || {},
                     hrnet_source: $('v2HRnetSource')?.value || 'auto',
+                    // Step 0: stereo-correction config.
+                    stereo_mode:         _mpErrorWeights.stereo?.mode || 'image',
+                    mask_dilate_px:      _mpErrorWeights.stereo?.mask_dilate_px ?? 10,
+                    gauss_center_weight: _mpErrorWeights.stereo?.gauss_center_weight ?? 0.0,
+                    stereo_conf:         _mpErrorWeights.detection?.stereo_conf ?? 0.0,
+                    stereo_dist_px:      _mpErrorWeights.detection?.stereo_dist ?? 0.0,
                 }),
             });
             mpCorrectedL = null;
