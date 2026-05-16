@@ -2312,7 +2312,30 @@ const manoViewer = (() => {
         const fn = currentFrame;
         const oldIsLeft = currentSide === cameraNames[0];
         const oldBps = canvas.width / (oldIsLeft ? midline : vidW - midline);
-        const oldPts = _gatherLandmark2D(fn, oldIsLeft);
+
+        // If a Stereo-model joint is selected, align the NEW camera's
+        // MP label of that joint with the OLD camera's stereo label
+        // (priority: Hybrid > Outline > Image).  This lets the user
+        // visually compare partner-camera MP vs. stereo prediction at
+        // the same screen position.
+        const stereoTarget = _stereoTargetForSwitch(fn, oldIsLeft);
+        let oldAnchorCX, oldAnchorCY;
+        let oldPts = null;
+        if (stereoTarget) {
+            oldAnchorCX = offsetX + scale * stereoTarget.pt[0] * oldBps;
+            oldAnchorCY = offsetY + scale * stereoTarget.pt[1] * oldBps;
+        } else {
+            oldPts = _gatherLandmark2D(fn, oldIsLeft);
+            if (oldPts.length) {
+                let mx = 0, my = 0;
+                for (const [px, py] of oldPts) {
+                    mx += offsetX + scale * px * oldBps;
+                    my += offsetY + scale * py * oldBps;
+                }
+                oldAnchorCX = mx / oldPts.length;
+                oldAnchorCY = my / oldPts.length;
+            }
+        }
 
         // ── Switch camera ──
         currentSide = currentSide === cameraNames[0] ? cameraNames[1] : cameraNames[0];
@@ -2320,32 +2343,29 @@ const manoViewer = (() => {
 
         const newIsLeft = currentSide === cameraNames[0];
         const newBps = canvas.width / (newIsLeft ? midline : vidW - midline);
-        const newPts = _gatherLandmark2D(fn, newIsLeft);
 
-        // ── Match zoom and compute offset to minimize landmark movement ──
-        // Keep the same scale (zoom level). Compute offsetX/Y so the mean
-        // landmark position in the new camera maps to the same canvas position.
-        if (oldPts.length && newPts.length) {
-            // Mean canvas position of landmarks in old camera
-            let oldCX = 0, oldCY = 0;
-            for (const [px, py] of oldPts) {
-                oldCX += offsetX + scale * px * oldBps;
-                oldCY += offsetY + scale * py * oldBps;
+        // ── Match zoom and compute offset to land the anchor ──
+        let anchored = false;
+        if (stereoTarget) {
+            const newMP = (newIsLeft ? trialData.mp_tracked_L
+                                     : trialData.mp_tracked_R)?.[fn]?.[stereoTarget.joint];
+            if (newMP) {
+                offsetX = oldAnchorCX - scale * newMP[0] * newBps;
+                offsetY = oldAnchorCY - scale * newMP[1] * newBps;
+                anchored = true;
             }
-            oldCX /= oldPts.length;
-            oldCY /= oldPts.length;
-
-            // Mean pixel position of landmarks in new camera
-            let newPX = 0, newPY = 0;
-            for (const [px, py] of newPts) { newPX += px; newPY += py; }
-            newPX /= newPts.length;
-            newPY /= newPts.length;
-
-            // Solve: oldCX = newOffsetX + scale * newPX * newBps
-            offsetX = oldCX - scale * newPX * newBps;
-            offsetY = oldCY - scale * newPY * newBps;
-        } else {
-            computeAutoCrop();
+        }
+        if (!anchored) {
+            const newPts = _gatherLandmark2D(fn, newIsLeft);
+            if ((oldPts && oldPts.length) && newPts.length && oldAnchorCX != null) {
+                let newPX = 0, newPY = 0;
+                for (const [px, py] of newPts) { newPX += px; newPY += py; }
+                newPX /= newPts.length; newPY /= newPts.length;
+                offsetX = oldAnchorCX - scale * newPX * newBps;
+                offsetY = oldAnchorCY - scale * newPY * newBps;
+            } else {
+                computeAutoCrop();
+            }
         }
 
         _planTrackingPath(); // replan for new camera
@@ -2356,6 +2376,30 @@ const manoViewer = (() => {
         render();
         update3D();          // per-camera error coloring depends on active side
         snapToCamera();      // re-snap with new camera params
+    }
+
+    /** When a Stereo-model joint is selected and at least one of the
+     *  three Stereo variants is visible, return the OLD-camera stereo
+     *  label position for that joint and the joint index.  Priority:
+     *  Hybrid > Outline > Image.  Returns null if no selection / no
+     *  visible variant / no data this frame. */
+    function _stereoTargetForSwitch(fn, oldIsLeft) {
+        if (stereoSelectedJoint == null || !trialData) return null;
+        const j = stereoSelectedJoint;
+        const trySrc = (vis, hasFlag, arrL, arrR) => {
+            if (!vis || !trialData[hasFlag]) return null;
+            const arr = oldIsLeft ? trialData[arrL] : trialData[arrR];
+            const pt = arr?.[fn]?.[j];
+            return pt ? { joint: j, pt } : null;
+        };
+        return (
+            trySrc(showStereoHybrid2D,  'has_stereo_hybrid',
+                   'stereo_hybrid_tracked_L',  'stereo_hybrid_tracked_R')
+            || trySrc(showStereoOutline2D, 'has_stereo_outline',
+                      'stereo_outline_tracked_L', 'stereo_outline_tracked_R')
+            || trySrc(showStereo2D,        'has_stereo',
+                      'stereo_tracked_L',         'stereo_tracked_R')
+        );
     }
 
     /** Gather 2D landmark pixel positions for the current frame on the given camera side. */
