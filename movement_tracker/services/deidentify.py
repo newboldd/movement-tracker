@@ -1095,13 +1095,9 @@ def render_with_blur_specs(input_path: str, output_path: str,
         return out > 0
 
     # Per-frame hand-mask dispatch — used by the per-side render code below.
+    # The HRnet hand-mask source was removed; MediaPipe is the only path.
     def _get_hand_mask_for_render(side_label, lms, w_side, h_side, r, sm, fa_r, fa_e, sm2,
                                    dlc_rad=0, global_frame=0):
-        if mask_source == "hrnet":
-            return _build_hand_mask_from_hrnet(
-                side_label, w_side, h_side, global_frame,
-                hrnet_mask_thresh, int(round(hrnet_mask_smooth * 2)),
-            )
         return _get_hand_mask_cached(side_label, lms, w_side, h_side, r, sm, fa_r, fa_e, sm2, dlc_rad=dlc_rad)
 
     # Always pipe raw frames into ffmpeg → H.264 yuv420p.  Browsers refuse
@@ -1173,8 +1169,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
                         if hand_active_l:
                             lms_l = ([lm for lm in hand_lm_data[global_frame] if lm["side"] == "left"]
                                      if hand_lm_data and global_frame in hand_lm_data else [])
-                            # MP path needs landmarks; HRnet path doesn't (uses MIP).
-                            if mask_source == "hrnet" or lms_l:
+                            if lms_l:
                                 hand_mask_l = _get_hand_mask_for_render(
                                     "left", lms_l, half_w, fh, active_radius_l, active_smooth_l,
                                     forearm_radius, forearm_extent, hand_smooth2,
@@ -1188,7 +1183,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
                         if hand_active_r:
                             lms_r = ([lm for lm in hand_lm_data[global_frame] if lm["side"] == "right"]
                                      if hand_lm_data and global_frame in hand_lm_data else [])
-                            if mask_source == "hrnet" or lms_r:
+                            if lms_r:
                                 hand_mask_r = _get_hand_mask_for_render(
                                     "right", lms_r, full_w - half_w, fh, active_radius_r, active_smooth_r,
                                     forearm_radius, forearm_extent, hand_smooth2,
@@ -1203,7 +1198,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
                     if hand_active_f:
                         lms_f = (hand_lm_data[global_frame]
                                  if hand_lm_data and global_frame in hand_lm_data else [])
-                        if mask_source == "hrnet" or lms_f:
+                        if lms_f:
                             hand_mask = _get_hand_mask_for_render(
                                 "full", lms_f, full_w, fh, active_radius_f, active_smooth_f,
                                 forearm_radius, forearm_extent, hand_smooth2,
