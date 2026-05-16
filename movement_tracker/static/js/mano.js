@@ -3699,7 +3699,7 @@ const manoViewer = (() => {
                         // Yellow current outline at native position.
                         if (curOut && curOut.length >= 3) {
                             ctx.strokeStyle = '#ffd54f';
-                            ctx.lineWidth = 1.5;
+                            ctx.lineWidth = 0.6;
                             ctx.lineJoin = 'round';
                             ctx.lineCap = 'round';
                             ctx.beginPath();
@@ -3717,7 +3717,7 @@ const manoViewer = (() => {
                             const tx = (pt[0] - mpOpp[0]) * pixelScale;
                             const ty = (pt[1] - mpOpp[1]) * pixelScale;
                             ctx.strokeStyle = '#66bb6a';
-                            ctx.lineWidth = 1.5;
+                            ctx.lineWidth = 0.6;
                             ctx.lineJoin = 'round';
                             ctx.lineCap = 'round';
                             ctx.beginPath();
