@@ -180,38 +180,40 @@ def _densify_poly(poly, sp: float = 3.0) -> np.ndarray:
     return np.asarray(out, dtype=np.float32)
 
 
-def _voting_align(os_poly, od_poly, sample_sp: float = 3.0,
+def _voting_align(os_poly, od_poly,
+                   os_mp_cent: np.ndarray, od_mp_cent: np.ndarray,
+                   sample_sp: float = 3.0,
                    max_radius: int = 130) -> tuple[float, float, float]:
     """Vote pairwise offsets between two dense polygon samples into a
-    2D accumulator centred on the centroid difference; the peak (of
-    the 3x3-summed accumulator) is the translation that aligns the
-    MOST sampled points.  Returns ``(dx, dy, response)`` where the
-    response is ``peak_votes / max(1, len(os_samples))`` -- roughly
-    the fraction of OS points that found a match.
+    2D accumulator; the peak (of the 3x3-summed accumulator) is the
+    translation that aligns the MOST sampled points.
 
-    Mirrors the preproc page's _computeOtherAlign so the whole-hand
-    alignment for outline-driven stereo uses the entire silhouette,
-    not a cropped patch.
+    Both polygons are first re-centred on their camera's MP-keypoint
+    centroid so the returned ``(dx, dy)`` is the **residual** offset
+    after MP-centering -- the same convention the image-based
+    phase-correlation path produces, which downstream consumers
+    (mp_label + shift) depend on.  Mirrors the preproc page's
+    _computeOtherAlign algorithm but the seed / output convention is
+    swapped from "polygon-centroid-relative" to "MP-centroid-relative".
+
+    Response = ``peak_votes / max(1, len(os_samples))`` -- roughly the
+    fraction of OS points that found an OD match within +/- 1 px.
     """
     os_pts = _densify_poly(os_poly, sample_sp)
     od_pts = _densify_poly(od_poly, sample_sp)
     if os_pts.shape[0] < 8 or od_pts.shape[0] < 8:
-        # Not enough to vote; fall back to a pure centroid match.
-        if os_pts.size and od_pts.size:
-            c1 = od_pts.mean(axis=0); c2 = os_pts.mean(axis=0)
-            return float(c1[0] - c2[0]), float(c1[1] - c2[1]), float('nan')
         return 0.0, 0.0, float('nan')
-    cc = od_pts.mean(axis=0); oc = os_pts.mean(axis=0)
-    t0x = int(round(float(cc[0] - oc[0])))
-    t0y = int(round(float(cc[1] - oc[1])))
+    # Centre each polygon on its own MP centroid; the voting result is
+    # then the residual after MP-centering -- same as phase_corr.
+    os_c = os_pts - np.asarray(os_mp_cent, dtype=np.float32).reshape(1, 2)
+    od_c = od_pts - np.asarray(od_mp_cent, dtype=np.float32).reshape(1, 2)
     R = int(max_radius)
     W = 2 * R + 1
     acc = np.zeros(W * W, dtype=np.uint32)
-    for i in range(os_pts.shape[0]):
-        px = os_pts[i, 0]; py = os_pts[i, 1]
-        # ix = round(q.x - px - t0x) + R; vectorise over q.
-        ix = np.rint(od_pts[:, 0] - px - t0x).astype(np.int64) + R
-        iy = np.rint(od_pts[:, 1] - py - t0y).astype(np.int64) + R
+    for i in range(os_c.shape[0]):
+        # ix = round(od_c.x - os_c[i].x) + R; vectorise over od.
+        ix = np.rint(od_c[:, 0] - os_c[i, 0]).astype(np.int64) + R
+        iy = np.rint(od_c[:, 1] - os_c[i, 1]).astype(np.int64) + R
         ok = (ix >= 0) & (ix < W) & (iy >= 0) & (iy < W)
         if not ok.any():
             continue
@@ -228,8 +230,8 @@ def _voting_align(os_poly, od_poly, sample_sp: float = 3.0,
     by, bx = divmod(by_x, W - 2)
     by += 1; bx += 1   # shift back into the un-sliced grid
     peak = int(s.flat[by_x])
-    dx = (bx - R) + t0x
-    dy = (by - R) + t0y
+    dx = bx - R
+    dy = by - R
     resp = peak / float(max(1, os_pts.shape[0]))
     return float(dx), float(dy), float(min(1.0, resp))
 
@@ -381,20 +383,33 @@ def run_stereo_align(subject_name: str, trial_idx: int,
         os_valid = ~np.isnan(os_frame[:, 0])
         od_valid = ~np.isnan(od_frame[:, 0])
         if use_outline:
-            try:
-                ref_dx, ref_dy, ref_r = _voting_align(os_poly, od_poly)
-            except Exception as e:
-                logger.debug(f"voting align failed at frame {gf}: {e}")
-                ref_dx = ref_dy = 0.0
-                ref_r = float('nan')
-            hand_shifts[fi, 0] = ref_dx
-            hand_shifts[fi, 1] = ref_dy
-            hand_response[fi] = ref_r
-            # Even if MP is missing this frame, the outline-vote shift
-            # is still a valid base for per-joint clamping (assuming
-            # MP is at least present where joints will be processed).
-            base_dx = float(ref_dx) if np.isfinite(ref_dx) else None
-            base_dy = float(ref_dy) if np.isfinite(ref_dy) else None
+            # Vote needs MP centroids so the returned (dx,dy) is the
+            # residual after MP-centering -- same convention as the
+            # image-mode phase-corr it replaces (which crops are taken
+            # around the MP centroid in each camera).  Without this,
+            # the vote would return the absolute OS->OD translation
+            # which the downstream ``stereo_R = mp_R + shifts`` math
+            # is not expecting.
+            if os_valid.any() and od_valid.any():
+                os_mp_cent = os_frame[os_valid].mean(axis=0)
+                od_mp_cent = od_frame[od_valid].mean(axis=0)
+                try:
+                    ref_dx, ref_dy, ref_r = _voting_align(
+                        os_poly, od_poly, os_mp_cent, od_mp_cent)
+                except Exception as e:
+                    logger.debug(f"voting align failed at frame {gf}: {e}")
+                    ref_dx = ref_dy = 0.0
+                    ref_r = float('nan')
+                hand_shifts[fi, 0] = ref_dx
+                hand_shifts[fi, 1] = ref_dy
+                hand_response[fi] = ref_r
+                base_dx = float(ref_dx) if np.isfinite(ref_dx) else None
+                base_dy = float(ref_dy) if np.isfinite(ref_dy) else None
+            else:
+                # No MP keypoints this frame -- can't define the
+                # MP-centered residual, so leave the per-joint loop to
+                # skip this frame's joints anyway.
+                base_dx = base_dy = None
         elif os_valid.any() and od_valid.any():
             os_cent = os_frame[os_valid].mean(axis=0)
             od_cent = od_frame[od_valid].mean(axis=0)
