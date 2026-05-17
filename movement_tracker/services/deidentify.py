@@ -826,14 +826,18 @@ def render_with_blur_specs(input_path: str, output_path: str,
         if not hand_segments:
             hand_segments = []
 
-    # No ``blur_hand_settings`` row at all — mirror the preview's
-    # default-synthesis behaviour (see routers/deidentify.py preview path):
-    # cover the whole trial with a per-camera segment so hand protection
-    # is on by default.  Without this, the renderer skipped hand
-    # protection entirely while the preview overlay showed the
-    # auto-generated default mask, making remote-render output diverge
-    # from what the user saw in the preview.
-    if hand_settings is None:
+    # Mirror the preview's default-synthesis behaviour (see
+    # routers/deidentify.py preview path): when no hand-protection
+    # segments are present, cover the whole trial with a per-camera
+    # segment so hand protection is on by default.  Previously gated
+    # only on ``hand_settings is None``, which let the LOCAL worker
+    # (which always builds a hand_settings dict) and the REMOTE worker
+    # (whose DB-row bundle has ``segments_json`` but possibly empty)
+    # both fall through with hand_segments == [].  Result: live
+    # preview showed the auto-generated default mask but the
+    # rendered video had no hand protection at all.  Now we fall
+    # back to the default whenever hand_segments is empty.
+    if not hand_segments:
         _t_start = int(start_frame or 0)
         _t_end = _t_start + (int(frame_count) if frame_count else 0) - 1
         if _t_end >= _t_start:

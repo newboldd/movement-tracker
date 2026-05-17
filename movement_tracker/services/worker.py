@@ -133,6 +133,8 @@ def run_deidentify(subject_name: str, job_id: int, trial_idx: int | None = None)
         hand_smooth2 = 0
         dlc_radius = 10
         hand_temporal = 0
+        arm_dorsal_dilate = 0
+        arm_ventral_dilate = 0
         hand_segments = []
 
         if hs_row:
@@ -143,6 +145,8 @@ def run_deidentify(subject_name: str, job_id: int, trial_idx: int | None = None)
             hand_smooth2 = hs_row.get("hand_smooth2") or 0
             dlc_radius = hs_row.get("dlc_radius") or 10
             hand_temporal = hs_row.get("hand_temporal") or 0
+            arm_dorsal_dilate = int(hs_row.get("arm_dorsal_dilate") or 0)
+            arm_ventral_dilate = int(hs_row.get("arm_ventral_dilate") or 0)
             seg_json = hs_row.get("segments_json", "[]")
             try:
                 hand_segments = json.loads(seg_json) if isinstance(seg_json, str) else (seg_json or [])
@@ -172,6 +176,8 @@ def run_deidentify(subject_name: str, job_id: int, trial_idx: int | None = None)
             "hand_smooth2": hand_smooth2,
             "dlc_radius": dlc_radius,
             "hand_temporal": hand_temporal,
+            "arm_dorsal_dilate": arm_dorsal_dilate,
+            "arm_ventral_dilate": arm_ventral_dilate,
             "segments_json": json.dumps(hand_segments),
         }
 

@@ -757,6 +757,44 @@ const deid = (() => {
     }
 
     // ── Blur+threshold helper (morphological close approximation) ──
+    // Boundary-pixel extraction: returns a new canvas whose only opaque
+    // pixels are the 8-neighbour edge of the source canvas's alpha mask,
+    // thickened by drawing the same edge mask at ±1 px offsets.  Used
+    // to draw the green hand-protection outline so it traces the exact
+    // contour of the blur-cutout mask (which is what the render path
+    // actually uses to protect the hand).
+    function _alphaEdgeRing(srcCanvas, cr, cg, cb, alpha) {
+        const w = srcCanvas.width, h = srcCanvas.height;
+        const src = srcCanvas.getContext('2d').getImageData(0, 0, w, h).data;
+        const out = document.createElement('canvas');
+        out.width = w; out.height = h;
+        const octx = out.getContext('2d');
+        const edgeImg = octx.createImageData(w, h);
+        const ed = edgeImg.data;
+        const aByte = Math.round(255 * Math.max(0, Math.min(1, alpha)));
+        const inside = (x, y) => x >= 0 && x < w && y >= 0 && y < h
+                                  && src[(y * w + x) * 4 + 3] > 128;
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const i = (y * w + x) * 4;
+                if (!(src[i + 3] > 128)) continue;
+                // Edge if any 4-neighbour is outside the mask.
+                if (inside(x - 1, y) && inside(x + 1, y)
+                    && inside(x, y - 1) && inside(x, y + 1)) continue;
+                ed[i] = cr; ed[i + 1] = cg; ed[i + 2] = cb; ed[i + 3] = aByte;
+            }
+        }
+        octx.putImageData(edgeImg, 0, 0);
+        // Thicken the 1-px ring to ~3 px by re-drawing at small offsets.
+        const thick = document.createElement('canvas');
+        thick.width = w; thick.height = h;
+        const tctx = thick.getContext('2d');
+        for (const [dx, dy] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            tctx.drawImage(out, dx, dy);
+        }
+        return thick;
+    }
+
     function _morphClose(srcCanvas, blurPx) {
         if (blurPx <= 0) return srcCanvas;
         const w = srcCanvas.width, h = srcCanvas.height;
@@ -1138,115 +1176,6 @@ const deid = (() => {
         return out;
     }
 
-    // Unified hand+arm mask (smooth applied to BOTH hand circles and the
-    // arm triangle).  Used ONLY for the green-outline visualization --
-    // not for the deid blur compositing (which uses _buildHandMask above
-    // with hand-only smoothing so Hand-dilate doesn't grow the arm).
-    // Outer-minus-inner of THIS mask gives a usable ring around the
-    // whole protected region (hand + arm), even when dorsal/ventral=0.
-    function _buildHandMaskUnified(landmarks, radiusPx, forearmPx, smoothPx, w, h,
-                                     armDorsalPx, armVentralPx) {
-        const dlcLms = landmarks.filter(l => l.type === 'dlc');
-        let mergedLandmarks = landmarks.filter(l => l.type !== 'dlc');
-        if (dlcLms.length > 0) {
-            const mpJoints = new Set(
-                mergedLandmarks
-                    .filter(l => l.type === 'hand' && l.joint != null)
-                    .map(l => l.joint)
-            );
-            for (const dlc of dlcLms) {
-                if (!mpJoints.has(dlc.joint)) {
-                    mergedLandmarks.push({ ...dlc, type: 'hand' });
-                }
-            }
-        }
-        const c1 = document.createElement('canvas');
-        c1.width = w; c1.height = h;
-        const ctx1 = c1.getContext('2d');
-        ctx1.fillStyle = '#fff';
-
-        const fingerChains = [
-            [0, 1, 2, 3, 4], [0, 5, 6, 7, 8], [0, 9, 10, 11, 12],
-            [0, 13, 14, 15, 16], [0, 17, 18, 19, 20],
-        ];
-        const handLms = mergedLandmarks.filter(l => l.type !== 'pose');
-        const byJoint = {};
-        for (const lm of handLms) byJoint[lm.joint] = lm;
-        const allPoints = [...handLms];
-        for (const chain of fingerChains) {
-            for (let ci = 0; ci < chain.length - 1; ci++) {
-                const a = byJoint[chain[ci]];
-                const b = byJoint[chain[ci + 1]];
-                if (!a || !b) continue;
-                const fracs = ci === 0 ? [0.25, 0.5, 0.75] : [0.5];
-                for (const f of fracs) {
-                    allPoints.push({ x: a.x + f * (b.x - a.x), y: a.y + f * (b.y - a.y) });
-                }
-            }
-        }
-        const thumbMCP = byJoint[2], indexMCP = byJoint[5];
-        if (thumbMCP && indexMCP) {
-            allPoints.push({ x: (thumbMCP.x + indexMCP.x) / 2,
-                              y: (thumbMCP.y + indexMCP.y) / 2 });
-        }
-        _appendDlcCorrectedFingerPoints(allPoints, byJoint, landmarks);
-        for (const lm of allPoints) {
-            ctx1.beginPath();
-            ctx1.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, radiusPx, 0, Math.PI * 2);
-            ctx1.fill();
-        }
-        // Arm triangle drawn on the SAME canvas so smoothing dilates
-        // hand AND arm together (only for outline display).
-        const pinkyMCP = landmarks.find(l => l.type === 'hand' && l.joint === 17);
-        const thumbCMC = landmarks.find(l => l.type === 'hand' && l.joint === 1);
-        const handWrist = landmarks.find(l => l.type === 'hand' && l.joint === 0);
-        const elbows = landmarks.filter(l => l.type === 'pose' && (l.joint === 13 || l.joint === 14));
-        let elbow = null;
-        if (handWrist && elbows.length >= 2) {
-            const d0 = Math.hypot(elbows[0].x - handWrist.x, elbows[0].y - handWrist.y);
-            const d1 = Math.hypot(elbows[1].x - handWrist.x, elbows[1].y - handWrist.y);
-            elbow = d0 < d1 ? elbows[0] : elbows[1];
-        } else if (elbows.length === 1) {
-            elbow = elbows[0];
-        }
-        if (pinkyMCP && thumbCMC && elbow && handWrist) {
-            const t = forearmExtent;
-            const interpElbow = {
-                x: handWrist.x + t * (elbow.x - handWrist.x),
-                y: handWrist.y + t * (elbow.y - handWrist.y),
-            };
-            const pts = [pinkyMCP, interpElbow, thumbCMC].map(p => ({
-                sx: offsetX + p.x * scale, sy: offsetY + p.y * scale,
-            }));
-            ctx1.lineCap = 'round';
-            ctx1.beginPath();
-            ctx1.moveTo(pts[0].sx, pts[0].sy);
-            ctx1.lineTo(pts[1].sx, pts[1].sy);
-            ctx1.lineTo(pts[2].sx, pts[2].sy);
-            ctx1.closePath();
-            ctx1.fill();
-            const ventral = (armVentralPx != null ? armVentralPx : 0);
-            if (ventral > 0) {
-                ctx1.strokeStyle = '#fff';
-                ctx1.lineWidth = ventral * 2;
-                ctx1.beginPath();
-                ctx1.moveTo(pts[1].sx, pts[1].sy);
-                ctx1.lineTo(pts[2].sx, pts[2].sy);
-                ctx1.stroke();
-            }
-            const dorsal = (armDorsalPx != null ? armDorsalPx : forearmPx);
-            if (dorsal > 0) {
-                ctx1.strokeStyle = '#fff';
-                ctx1.lineWidth = dorsal * 2;
-                ctx1.beginPath();
-                ctx1.moveTo(pts[1].sx, pts[1].sy);
-                ctx1.lineTo(pts[0].sx, pts[0].sy);
-                ctx1.stroke();
-            }
-        }
-        return _morphClose(c1, smoothPx);
-    }
-
     // ── Preview blur mask (shows exactly what will be blurred) ──
     function _renderPreviewMask(cw, ch) {
         const curSideLabel = _sideLabel();
@@ -1571,89 +1500,22 @@ const deid = (() => {
             }
         }
 
-        // Draw hand protection outline from the smoothed mask
+        // Draw hand protection outline from the smoothed mask.
+        // Strategy: extract the BOUNDARY pixels of the same
+        // ``handMaskCanvas`` that's already being used to cut hands
+        // out of the blur fills (see _renderPreviewMask too).  This
+        // guarantees the green outline traces the exact contour of
+        // the actual protected region -- previously the outline used
+        // a separately-built "unified" mask whose smoothing was
+        // applied to BOTH hand and arm, so the green ring sat ~4-8 px
+        // outside the actual blur-cutout edge.  Now both ride the
+        // same mask and the local + remote render's
+        // ``_build_hand_mask_from_landmarks`` (hand-only smoothing +
+        // arm triangle with optional dorsal/ventral edge dilation)
+        // is what the user sees previewed in the canvas overlay.
         if (handMaskCanvas) {
-            // Extract outline: erode the mask inward by 2px
-            const hOff = document.createElement('canvas');
-            hOff.width = cw;
-            hOff.height = ch;
-            const hCtx = hOff.getContext('2d');
-
-            // For the GREEN OUTLINE only, build a UNIFIED mask where
-            // smoothing is applied to hand + arm together.  The actual
-            // deid blur uses ``handMaskCanvas`` (hand-only smoothing)
-            // so Hand-dilate doesn't grow the arm -- but using that
-            // mask here would leave the arm-triangle region pixel-
-            // identical between outer and inner, so the destination-
-            // out subtraction would erase the whole arm portion of
-            // the outline.  The unified version closes that gap.
-            const outerUnified = _buildHandMaskUnified(
-                visibleLandmarks, activeProtectRadius * scale, forearmRadius * scale,
-                activeSmooth * scale, cw, ch,
-                armDorsalDilate * scale, armVentralDilate * scale,
-            );
-            hCtx.drawImage(outerUnified, 0, 0);
-
-            // Build the eroded "inner" shape used to cut out the centre
-            // so only an outline remains.  Source-aware:
-            //   * MediaPipe — rebuild from landmarks with a smaller
-            //     circle radius (and slightly smaller forearm + smooth).
-            //   * HRnet — rebuild from the same MIP threshold with a
-            //     smaller dilation (smoothPx - 4).  Using the MP builder
-            //     here produced a green hand region with the MP shape
-            //     punched out of it whenever the user picked HRnet.
-            const innerCanvas = document.createElement('canvas');
-            innerCanvas.width = cw;
-            innerCanvas.height = ch;
-            const ic = innerCanvas.getContext('2d');
-
-            let drewInner = false;
-            if (handMaskSource === 'hrnet' && _hrnetMaskData && _hrnetMaskTrialIdx === currentTrialIdx) {
-                const _curSide = _sideLabel();
-                const frameInTrial = currentFrame - (_hrnetMaskData.start_frame || 0);
-                const innerSmoothPx = Math.max(1, (hrnetMaskSmooth * scale) - 4);
-                const innerMask = _buildHandMaskHrnet(
-                    frameInTrial, _curSide === 'left' ? 'OS' : 'OD',
-                    innerSmoothPx, cw, ch,
-                );
-                if (innerMask) {
-                    ic.drawImage(innerMask, 0, 0);
-                    drewInner = true;
-                }
-            } else {
-                const shrinkR = activeProtectRadius * scale - 2;
-                if (shrinkR > 0) {
-                    if (activeSmooth > 0) {
-                        const shrinkForearm = Math.max(0, forearmRadius * scale - 2);
-                        ic.drawImage(_buildHandMaskUnified(
-                            visibleLandmarks, shrinkR, shrinkForearm,
-                            activeSmooth * scale, cw, ch,
-                            Math.max(0, armDorsalDilate * scale - 2),
-                            Math.max(0, armVentralDilate * scale - 2),
-                        ), 0, 0);
-                    } else {
-                        ic.fillStyle = '#fff';
-                        for (const lm of visibleLandmarks) {
-                            ic.beginPath();
-                            ic.arc(offsetX + lm.x * scale, offsetY + lm.y * scale, shrinkR, 0, Math.PI * 2);
-                            ic.fill();
-                        }
-                    }
-                    drewInner = true;
-                }
-            }
-            if (drewInner) {
-                hCtx.globalCompositeOperation = 'destination-out';
-                hCtx.drawImage(innerCanvas, 0, 0);
-                hCtx.globalCompositeOperation = 'source-over';
-            }
-
-            // Tint green
-            hCtx.globalCompositeOperation = 'source-in';
-            hCtx.fillStyle = 'rgba(76,175,80,0.8)';
-            hCtx.fillRect(0, 0, cw, ch);
-
-            ctx.drawImage(hOff, 0, 0);
+            const ring = _alphaEdgeRing(handMaskCanvas, 76, 175, 80, 0.85);
+            ctx.drawImage(ring, 0, 0);
         }
 
         // "Adding custom" cursor indicator
