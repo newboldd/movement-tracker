@@ -4174,48 +4174,73 @@ def _patch_deidentify_imports(work_dir):
                   flush=True)
             return None
 
-    def get_ffmpeg_path():
-        p = shutil.which("ffmpeg")
-        if p:
-            return p
+    def _imageio_ffmpeg_exe():
+        """Return ``imageio_ffmpeg.get_ffmpeg_exe()`` only if the binary
+        actually exists on disk.  Catches broader exceptions than
+        ``(ImportError, RuntimeError)`` -- imageio_ffmpeg can raise
+        ``OSError`` / ``PermissionError`` on concurrent first-use
+        extraction, or return a path whose file was since deleted /
+        AV-quarantined.  Returns ``None`` on any failure and prints a
+        one-line diagnostic so intermittent failures are debuggable
+        from the job log."""
         try:
             import imageio_ffmpeg
-            return imageio_ffmpeg.get_ffmpeg_exe()
-        except (ImportError, RuntimeError):
-            pass
-        mod = _try_pip_install_imageio_ffmpeg()
-        if mod is not None:
-            try:
-                return mod.get_ffmpeg_exe()
-            except Exception:
-                pass
+        except Exception as _e:
+            print(f"[worker] imageio_ffmpeg import failed: "
+                  f"{type(_e).__name__}: {_e}", flush=True)
+            return None
+        try:
+            exe = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception as _e:
+            print(f"[worker] imageio_ffmpeg.get_ffmpeg_exe() raised: "
+                  f"{type(_e).__name__}: {_e}", flush=True)
+            return None
+        if not exe or not os.path.exists(exe):
+            print(f"[worker] imageio_ffmpeg returned {exe!r} but the "
+                  f"path doesn't exist on disk", flush=True)
+            return None
+        return exe
+
+    def get_ffmpeg_path():
+        # Try 1: ffmpeg on PATH (most reliable when installed).
+        p = shutil.which("ffmpeg")
+        if p and os.path.exists(p):
+            return p
+        # Try 2: imageio_ffmpeg's bundled binary.
+        exe = _imageio_ffmpeg_exe()
+        if exe:
+            return exe
+        # Try 3: pip-install imageio_ffmpeg + retry.
+        if _try_pip_install_imageio_ffmpeg() is not None:
+            exe = _imageio_ffmpeg_exe()
+            if exe:
+                return exe
         raise FileNotFoundError(
             "ffmpeg not found on remote.  Put ffmpeg on PATH or run "
             f"'{sys.executable}' -m pip install imageio-ffmpeg"
         )
 
     def get_ffprobe_path():
+        # Try 1: ffprobe on PATH.
         p = shutil.which("ffprobe")
-        if p:
+        if p and os.path.exists(p):
             return p
-        from pathlib import Path
-        try:
-            import imageio_ffmpeg
-            fp = Path(imageio_ffmpeg.get_ffmpeg_exe())
+        # Try 2: derive ffprobe from imageio_ffmpeg's ffmpeg path.
+        from pathlib import Path as _Path
+        exe = _imageio_ffmpeg_exe()
+        if exe:
+            fp = _Path(exe)
             probe = fp.parent / fp.name.replace("ffmpeg", "ffprobe")
             if probe.exists():
                 return str(probe)
-        except (ImportError, RuntimeError):
-            pass
-        mod = _try_pip_install_imageio_ffmpeg()
-        if mod is not None:
-            try:
-                fp = Path(mod.get_ffmpeg_exe())
+        # Try 3: pip-install + retry.
+        if _try_pip_install_imageio_ffmpeg() is not None:
+            exe = _imageio_ffmpeg_exe()
+            if exe:
+                fp = _Path(exe)
                 probe = fp.parent / fp.name.replace("ffmpeg", "ffprobe")
                 if probe.exists():
                     return str(probe)
-            except Exception:
-                pass
         raise FileNotFoundError(
             "ffprobe not found on remote.  Put ffprobe on PATH or run "
             f"'{sys.executable}' -m pip install imageio-ffmpeg"
