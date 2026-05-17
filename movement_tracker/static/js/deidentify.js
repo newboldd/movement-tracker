@@ -2503,16 +2503,26 @@ const deid = (() => {
             );
             handLandmarksBulk = res.landmarks || {};
             hasDlcLabels = res.has_dlc || false;
-            // Disable wrist extent slider if no pose data (no elbow available)
+            // Disable arm-extension sliders (Length, Dorsal, Ventral)
+            // when there's no pose data -- without an elbow joint the
+            // arm triangle can't be built, so none of those sliders
+            // have any effect.  Dim the whole row group together.
             const hasPose = res.has_pose || false;
-            const extentSlider = document.getElementById('handExtentSlider');
-            const extentLabel = document.getElementById('handExtentVal');
-            if (extentSlider) {
-                extentSlider.disabled = !hasPose;
-                extentSlider.style.opacity = hasPose ? '' : '0.4';
+            const extentSlider  = document.getElementById('handExtentSlider');
+            const extentLabel   = document.getElementById('handExtentVal');
+            const dorsalSlider  = document.getElementById('handDorsalSlider');
+            const dorsalLabel   = document.getElementById('handDorsalVal');
+            const ventralSlider = document.getElementById('handVentralSlider');
+            const ventralLabel  = document.getElementById('handVentralVal');
+            for (const el of [extentSlider, dorsalSlider, ventralSlider]) {
+                if (!el) continue;
+                el.disabled = !hasPose;
+                el.style.opacity = hasPose ? '' : '0.4';
             }
-            if (extentLabel && !hasPose) {
-                extentLabel.textContent = 'n/a';
+            if (!hasPose) {
+                if (extentLabel)  extentLabel.textContent  = 'n/a';
+                if (dorsalLabel)  dorsalLabel.textContent  = 'n/a';
+                if (ventralLabel) ventralLabel.textContent = 'n/a';
             }
         } catch (e) {
             handLandmarksBulk = {};
