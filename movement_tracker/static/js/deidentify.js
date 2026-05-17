@@ -2483,13 +2483,22 @@ const deid = (() => {
     }
 
     // ── Hand overlay ──
+    // The "Show hand landmarks" checkbox ONLY toggles the per-keypoint
+    // dot rendering (the ``if (handOverlayEnabled && ...)`` gate in
+    // _drawOverlays).  It must NOT touch the landmarks data: doing so
+    // also wiped the green outline, since the outline builder reads
+    // the same handLandmarks array.  loadFrame already handles
+    // (re)loading the landmarks based on whether the current frame
+    // falls inside any hand-protection segment, so we don't need to
+    // wipe-and-reload here.
     async function toggleHandOverlay(enabled) {
         handOverlayEnabled = enabled;
         if (enabled && subjectId && hasMediapipe) {
+            // First time the box is checked we may not have the bulk
+            // cache yet (e.g. trial had no protect segments) -- fetch
+            // it so the dots appear without waiting for a frame seek.
             await _loadBulkLandmarks();
             _applyTemporalSmoothing();
-        } else {
-            handLandmarks = [];
         }
         await saveHandSettings();
         render();
