@@ -3483,7 +3483,6 @@ const deid = (() => {
         toggleHandOverlay,
         updateHandRadius,
         deleteSelectedHandSeg,
-        updateForearmRadius,
         updateForearmExtent,
         updateHandSmooth,
         updateDorsalDilate,
