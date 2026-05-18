@@ -60,6 +60,11 @@
                 <select id="subjectSelect" class="subject-select"></select>
                 <button class="btn btn-sm" id="prevSubjectBtn" title="Previous subject">&larr;</button>
                 <button class="btn btn-sm" id="nextSubjectBtn" title="Next subject">&rarr;</button>
+                <!-- Per-trial buttons.  Same coverage-coloring pattern as
+                     the Deidentify page: green when the trial has at
+                     least one open + one peak + one close saved,
+                     otherwise red. -->
+                <div id="headerTrialBtns" style="display:flex;gap:4px;flex-wrap:wrap;"></div>
             </div>
         </div>
         <nav>
@@ -96,16 +101,8 @@
     <div class="labeling-layout">
         <!-- Sidebar -->
         <div class="labeling-sidebar">
-            <div id="trialBtns" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px;"></div>
-
             <!-- Events section -->
             <div class="sidebar-section">Events</div>
-
-            <!-- Current trial indicator -->
-            <div id="trialIndicator" style="margin-bottom:8px;">
-                <span style="font-size:12px;color:var(--text-muted);">Trial:</span>
-                <span id="trialSelectorLabel" style="font-size:13px;font-weight:600;margin-left:4px;">--</span>
-            </div>
 
             <!-- Auto-detect -->
             <button class="btn btn-sm" id="detectEventsBtn" style="width:100%;margin-bottom:8px;">Auto-detect...</button>
@@ -166,12 +163,34 @@
                        style="width:90px;cursor:pointer;height:5px;">
                 <span id="speedDisplay" style="font-size:10px;color:var(--accent);font-weight:bold;width:28px;text-align:left;flex-shrink:0;">1x</span>
                 <button class="btn btn-sm" id="sideToggle" title="Toggle camera (E)" style="padding:2px 6px;">OS</button>
+                <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text-muted);">
+                    X
+                    <input type="range" id="xScaleSlider" min="1" max="10" step="0.1" value="1"
+                           title="Distance plot X scale (1 = fit current trial, >1 zooms in)"
+                           style="width:80px;cursor:pointer;height:5px;">
+                </label>
                 <span>Frame: <strong id="frameDisplay">0</strong> / <span id="totalFrames">0</span></span>
                 <span>Trial: <strong id="trialName">-</strong></span>
                 <span id="statusInfo" style="font-size:11px;color:var(--text-muted);"></span>
                 <span style="flex:1;"></span>
             </div>
-            <canvas id="distanceCanvas"></canvas>
+            <div style="display:flex;height:140px;flex-shrink:0;margin-top:4px;">
+                <!-- Y-range mini-sliders: min / max constrain the visible
+                     y-axis range of the distance trace.  Mirrors the
+                     Labels-page pattern (two vertical inputs stacked
+                     in a small column). -->
+                <div id="yRangeWrap" style="display:flex;flex-direction:column;align-items:center;
+                                             gap:2px;width:28px;height:100%;padding:2px 0;
+                                             flex-shrink:0;font-size:9px;color:var(--text-muted);">
+                    <span title="Max Y (mm)">max</span>
+                    <input type="range" id="distYMaxSlider" min="-200" max="200" value="200"
+                           orient="vertical" style="writing-mode:vertical-lr;direction:rtl;flex:1;width:14px;cursor:pointer;">
+                    <input type="range" id="distYMinSlider" min="0" max="200" value="0"
+                           orient="vertical" style="writing-mode:vertical-lr;direction:rtl;flex:1;width:14px;cursor:pointer;">
+                    <span title="Min Y (mm)">min</span>
+                </div>
+                <canvas id="distanceCanvas" style="flex:1;height:100%;"></canvas>
+            </div>
         </div>
     </div>
 
@@ -292,6 +311,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js?v=10"></script>
-    <script src="/static/js/events.js?v=2"></script>
+    <script src="/static/js/events.js?v=3"></script>
 </body>
 </html>

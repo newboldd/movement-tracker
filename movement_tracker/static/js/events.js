@@ -55,6 +55,16 @@ const eventsPage = (() => {
     let distViewFrames = 0;
     let distAutoScroll = true;
     let stableDistRange = null;
+    // X-scale and Y-range slider state.  X scales the trial's frame
+    // width (1 = fit full trial, >1 = zoom in).  Y overrides the
+    // auto-detected stable distance range.
+    let _xScaleEvents = 1.0;
+    let _yMinSliderVal = null;  // null = derive from stableDistRange
+    let _yMaxSliderVal = null;
+    // Per-trial natural Y range, recomputed when the user switches
+    // trials so a trial with very different distances doesn't open
+    // with the slider clamped to the previous trial's bounds.
+    let _trialYNatural = { min: 0, max: 200 };
 
     // Event state
     let EVENT_TYPES = ['open', 'peak', 'close', 'pause'];
@@ -183,6 +193,29 @@ const eventsPage = (() => {
                     sel.appendChild(opt);
                 });
                 sel.addEventListener('change', () => switchSubject(parseInt(sel.value)));
+                // Prev / next subject buttons in the header navigate to
+                // the adjacent subject in ``allSubjects`` order.  They
+                // were previously rendered without handlers and silently
+                // did nothing on click.
+                const _prevBtn = $('prevSubjectBtn');
+                const _nextBtn = $('nextSubjectBtn');
+                const _idxOf = id => allSubjects.findIndex(x => x.id === id);
+                if (_prevBtn) {
+                    _prevBtn.addEventListener('click', () => {
+                        const i = _idxOf(currentSubjectId);
+                        if (i > 0) switchSubject(allSubjects[i - 1].id);
+                    });
+                    _prevBtn.disabled = _idxOf(currentSubjectId) <= 0;
+                }
+                if (_nextBtn) {
+                    _nextBtn.addEventListener('click', () => {
+                        const i = _idxOf(currentSubjectId);
+                        if (i >= 0 && i < allSubjects.length - 1) {
+                            switchSubject(allSubjects[i + 1].id);
+                        }
+                    });
+                    _nextBtn.disabled = _idxOf(currentSubjectId) >= allSubjects.length - 1;
+                }
             } catch (e) {
                 console.log('Could not load subjects list');
             }
@@ -203,8 +236,24 @@ const eventsPage = (() => {
             // Load saved events
             await loadEvents();
 
-            // Go to frame 0 (or restored)
-            let startFrame = 0;
+            // Initial trial: pick from nav state if it matches this
+            // subject, otherwise start on trial 0.  setEventTrial
+            // anchors the per-trial X view + Y sliders and fires
+            // auto-detect-peaks when the trial has no saved events.
+            let initialTrial = 0;
+            if (typeof getNavState === 'function') {
+                const _nav0 = getNavState();
+                if (_nav0.subjectId === currentSubjectId
+                    && typeof _nav0.trialIdx === 'number'
+                    && _nav0.trialIdx >= 0
+                    && _nav0.trialIdx < trials.length) {
+                    initialTrial = _nav0.trialIdx;
+                }
+            }
+            await setEventTrial(initialTrial);
+
+            // Go to frame 0 (or restored) within the active trial.
+            let startFrame = trials[initialTrial]?.start_frame ?? 0;
             if (typeof getNavState === 'function') {
                 const nav = getNavState();
                 if (nav.subjectId === currentSubjectId && nav.frame != null
@@ -393,6 +442,16 @@ const eventsPage = (() => {
     // ── Frame Navigation ─────────────────────────────────
     async function goToFrame(frame) {
         if (frame < 0 || frame >= totalFrames) return;
+        // Per-trial view: clamp the frame to the current trial's
+        // [start, end] range so the user can only navigate within
+        // the active trial.  Switching trials happens explicitly
+        // via the header trial buttons.  Matches the per-page UX
+        // on Labels / Deidentify.
+        if (currentEventTrialIdx >= 0 && currentEventTrialIdx < trials.length) {
+            const _r = getTrialFrameRange(currentEventTrialIdx);
+            if (frame < _r.start) frame = _r.start;
+            else if (frame > _r.end) frame = _r.end;
+        }
         currentFrame = frame;
         if (typeof setNavState === 'function') {
             setNavState({ frame: currentFrame, trialIdx: getTrialForFrame(currentFrame) });
@@ -661,33 +720,50 @@ const eventsPage = (() => {
     }
 
     // ── Trial Buttons ────────────────────────────────────
+    // Header trial buttons mirror the Deidentify-page UX: one button
+    // per trial alongside the prev/next-subject controls.  Coloured
+    // green when the trial has ALL THREE of: >=1 open, >=1 peak, >=1
+    // close saved.  Otherwise red (incomplete coverage).  Sidebar
+    // ``trialBtns`` / ``trialSelectorLabel`` is gone.
     function buildTrialButtons() {
-        const container = $('trialBtns');
+        const container = $('headerTrialBtns');
+        if (!container) return;
         container.innerHTML = '';
         trials.forEach((t, i) => {
             const btn = document.createElement('button');
             btn.className = 'trial-btn';
+            btn.dataset.trialIdx = String(i);
             btn.textContent = _shortTrialName(t.trial_name);
-            btn.addEventListener('click', () => {
-                setEventTrial(i);
-            });
+            btn.addEventListener('click', () => setEventTrial(i));
             container.appendChild(btn);
         });
         updateTrialButtons();
     }
 
+    function _trialHasFullCoverage(trialIdx) {
+        const range = getTrialFrameRange(trialIdx);
+        const hasIn = etype => (eventMarkers[etype] || []).some(
+            f => f >= range.start && f <= range.end);
+        return hasIn('open') && hasIn('peak') && hasIn('close');
+    }
+
     function updateTrialButtons() {
-        const btns = $('trialBtns').querySelectorAll('.trial-btn');
+        const container = $('headerTrialBtns');
+        if (!container) return;
+        const btns = container.querySelectorAll('.trial-btn');
         btns.forEach((btn, i) => {
             btn.classList.toggle('active', i === currentEventTrialIdx);
+            const ok = _trialHasFullCoverage(i);
+            btn.style.borderColor = ok ? 'var(--green)' : '#e53935';
+            btn.style.color = (i === currentEventTrialIdx)
+                ? '#fff' : (ok ? 'var(--green)' : '#e53935');
         });
     }
 
     function updateTrialLabel() {
-        const label = $('trialSelectorLabel');
-        if (label && trials[currentEventTrialIdx]) {
-            label.textContent = _shortTrialName(trials[currentEventTrialIdx].trial_name);
-        }
+        // Sidebar trialSelectorLabel was removed; updates to the
+        // header trial-button coloring happen via updateTrialButtons.
+        updateTrialButtons();
     }
 
     // ── Events Panel ─────────────────────────────────────
@@ -738,6 +814,7 @@ const eventsPage = (() => {
             });
             currentEventTrialIdx = getTrialForFrame(currentFrame);
             updateTrialLabel();
+            updateTrialButtons();
             updateEventCounts();
             renderDistanceTrace();
             metricsCache = {};
@@ -755,6 +832,7 @@ const eventsPage = (() => {
             EVENT_TYPES.forEach(t => {
                 if (eventVisibility[t]) savedEventFrames[t] = new Set(eventMarkers[t]);
             });
+            updateTrialButtons();
             renderDistanceTrace();
             const counts = EVENT_TYPES.filter(t => eventVisibility[t])
                 .map(t => `${t}: ${eventMarkers[t].length}`).join(', ');
@@ -816,12 +894,98 @@ const eventsPage = (() => {
         goToFrame(newFrame);
     }
 
-    function setEventTrial(trialIdx) {
+    // ── X scale / Y range slider helpers ─────────────────
+    // The X slider scales the visible window of the distance trace
+    // within the current trial: 1.0 = fit the whole trial, 10.0 =
+    // 10x zoom (1/10 of the trial visible).  Y sliders override the
+    // distance trace's min/max so the user can dial in tighter or
+    // wider y bounds when peaks are clipping.
+    function _applyDistViewFromScale() {
+        if (currentEventTrialIdx < 0 || currentEventTrialIdx >= trials.length) return;
+        const r = getTrialFrameRange(currentEventTrialIdx);
+        const trialFrames = r.end - r.start + 1;
+        distViewFrames = Math.max(10, Math.round(trialFrames / Math.max(1, _xScaleEvents)));
+        // When zoomed in, keep the current frame visible.
+        if (currentFrame >= 0) {
+            distViewStart = Math.max(r.start,
+                Math.min(r.end - distViewFrames + 1,
+                         currentFrame - Math.floor(distViewFrames / 2)));
+        } else {
+            distViewStart = r.start;
+        }
+    }
+
+    function _resetYRangeSlidersForCurrentTrial() {
+        if (!distances || currentEventTrialIdx < 0) return;
+        const r = getTrialFrameRange(currentEventTrialIdx);
+        const slice = [];
+        for (let f = r.start; f <= r.end && f < distances.length; f++) {
+            const d = distances[f];
+            if (d !== null && d !== undefined && isFinite(d)) slice.push(d);
+        }
+        if (slice.length === 0) {
+            _trialYNatural = { min: 0, max: 200 };
+        } else {
+            slice.sort((a, b) => a - b);
+            const lo = Math.max(0, slice[Math.floor(slice.length * 0.02)] - 5);
+            const hi = (slice[Math.floor(slice.length * 0.98)] || slice[slice.length - 1]) + 10;
+            _trialYNatural = { min: Math.floor(lo), max: Math.ceil(hi) };
+        }
+        // Adjust slider bounds + reset values so the sliders open at
+        // the trial's natural range.  Setting to null hands rendering
+        // back to stableDistRange / percentile fallback.
+        const mn = $('distYMinSlider'), mx = $('distYMaxSlider');
+        if (mn) {
+            mn.min = String(_trialYNatural.min);
+            mn.max = String(_trialYNatural.max);
+            mn.value = String(_trialYNatural.min);
+        }
+        if (mx) {
+            mx.min = String(_trialYNatural.min);
+            mx.max = String(Math.max(_trialYNatural.max + 50, _trialYNatural.max));
+            mx.value = String(_trialYNatural.max);
+        }
+        _yMinSliderVal = _trialYNatural.min;
+        _yMaxSliderVal = _trialYNatural.max;
+    }
+
+    function _maybeAutoDetectPeaks() {
+        // Called after a trial switch (incl. initial load).  When
+        // the active trial has zero saved events of any tracked
+        // type, run the peak-detection phase with current default
+        // parameters so the user opens a usable starting state.
+        if (currentEventTrialIdx < 0) return;
+        const range = getTrialFrameRange(currentEventTrialIdx);
+        const anyEvents = EVENT_TYPES.some(t =>
+            (eventMarkers[t] || []).some(f => f >= range.start && f <= range.end));
+        if (anyEvents) return;
+        if (typeof runDetection !== 'function') return;
+        // Fire-and-forget; runDetection handles button state + UI.
+        Promise.resolve().then(() => runDetection('peaks')).catch(() => {});
+    }
+
+    async function setEventTrial(trialIdx) {
         if (trialIdx < 0 || trialIdx >= trials.length) return;
         currentEventTrialIdx = trialIdx;
-        goToFrame(trials[trialIdx].start_frame);
+        const _r = getTrialFrameRange(trialIdx);
+        // Re-anchor the per-trial X view: the distance trace only
+        // shows the active trial; X-scale slider zooms within it.
+        distViewStart = _r.start;
+        distViewFrames = (_r.end - _r.start + 1);
+        _applyDistViewFromScale();
+        // Reset Y-range sliders to the trial's natural bounds so a
+        // trial with a very different distance scale doesn't look
+        // empty.
+        _resetYRangeSlidersForCurrentTrial();
+        await goToFrame(trials[trialIdx].start_frame);
         updateTrialLabel();
         updateTrialButtons();
+        updateEventCounts();
+        renderDistanceTrace();
+        // Auto-detect peaks when this trial has no saved events at
+        // all -- matches the user's request to bootstrap empty
+        // trials on page load and on every fresh trial switch.
+        _maybeAutoDetectPeaks();
     }
 
     function eventsInTrial(trialIdx) {
@@ -912,7 +1076,13 @@ const eventsPage = (() => {
     function renderDistanceTrace() {
         if (!distCanvas || !distCtx || !distances) return;
 
-        const w = distCanvas.parentElement ? distCanvas.parentElement.clientWidth : distCanvas.clientWidth;
+        // The Y-slider column shares the parent flex row, so use the
+        // canvas's own clientWidth (the flex:1 cell width) instead
+        // of the parent's full width.  Falls back to offsetWidth then
+        // 800 if neither is laid out yet.
+        const w = distCanvas.clientWidth
+                  || distCanvas.offsetWidth
+                  || 800;
         const h = 140;
         distCanvas.width = w;
         distCanvas.height = h;
@@ -933,7 +1103,14 @@ const eventsPage = (() => {
         const fToX = (f) => padL + ((f - vStart) / effectiveViewFrames) * plotW;
 
         let minD, maxD;
-        if (stableDistRange) {
+        // Y-range slider takes priority when the user has set it.
+        // Otherwise fall back to the auto-detected stable range
+        // (subject-wide), then a per-frame 2-98 percentile fallback.
+        if (_yMinSliderVal !== null && _yMaxSliderVal !== null
+                && _yMaxSliderVal > _yMinSliderVal) {
+            minD = _yMinSliderVal;
+            maxD = _yMaxSliderVal;
+        } else if (stableDistRange) {
             minD = stableDistRange.min;
             maxD = stableDistRange.max;
         } else {
@@ -1493,6 +1670,7 @@ const eventsPage = (() => {
 
             pushEventUndo(snapshot);
             updateEventCounts();
+            updateTrialButtons();   // refresh coverage colors
             renderDistanceTrace();
             if (cached) showMetricPlotsForCurrentTrial();
 
@@ -1559,6 +1737,41 @@ const eventsPage = (() => {
             }
         });
         speedDisplay.textContent = '1x';
+
+        // X scale slider: zoom the distance trace within the current
+        // trial.  1.0 fits the whole trial; values > 1 show a
+        // smaller window centred on the current frame.
+        const _xSlider = $('xScaleSlider');
+        if (_xSlider) {
+            _xSlider.addEventListener('input', e => {
+                _xScaleEvents = parseFloat(e.target.value) || 1.0;
+                _applyDistViewFromScale();
+                renderDistanceTrace();
+            });
+        }
+        // Y range sliders: override the auto-derived min/max bounds
+        // of the distance trace.  Mirror the Labels-page pattern of
+        // two stacked vertical inputs.
+        const _ymn = $('distYMinSlider');
+        const _ymx = $('distYMaxSlider');
+        function _onYSlider(movedMin) {
+            if (!_ymn || !_ymx) return;
+            let mn = parseFloat(_ymn.value);
+            let mx = parseFloat(_ymx.value);
+            // Keep min < max by 1 mm at minimum so the renderer
+            // doesn't divide by zero.  Whichever slider the user
+            // just moved wins; the other slider snaps to keep the
+            // 1 mm gap.
+            if (mn >= mx) {
+                if (movedMin) { mx = mn + 1; _ymx.value = String(mx); }
+                else          { mn = mx - 1; _ymn.value = String(mn); }
+            }
+            _yMinSliderVal = mn;
+            _yMaxSliderVal = mx;
+            renderDistanceTrace();
+        }
+        if (_ymn) _ymn.addEventListener('input', () => _onYSlider(true));
+        if (_ymx) _ymx.addEventListener('input', () => _onYSlider(false));
 
         // Sidebar buttons
         $('deleteEventBtn').addEventListener('click', deleteEvent);
