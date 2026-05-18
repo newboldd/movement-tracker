@@ -818,6 +818,40 @@ def load_mediapipe_prelabels(subject_name: str,
         }
 
 
+def build_combined_mp_npz_tempfile(subject_name: str,
+                                     reverse: bool = False) -> str | None:
+    """Aggregate the per-trial MP files for a subject into a single
+    temp ``.npz`` and return its path.
+
+    Used by the remote-dispatch paths (HRnet inference, etc.) that
+    still expect a combined ``mediapipe_prelabels.npz`` on the remote.
+    Callers are responsible for unlinking the returned tempfile.
+    Returns ``None`` when no MP data exists.
+    """
+    import tempfile
+    data = load_mediapipe_prelabels(
+        subject_name,
+        filename=("mediapipe_reverse_prelabels.npz" if reverse
+                  else "mediapipe_prelabels.npz"),
+    )
+    if data is None:
+        return None
+    fd, tmp = tempfile.mkstemp(prefix=f"mp_combined_{subject_name}_",
+                                suffix=".npz")
+    import os as _os
+    _os.close(fd)
+    payload: dict = {}
+    for k in ("OS_landmarks", "OD_landmarks", "OS_all_tracks",
+              "OD_all_tracks", "confidence_OS", "confidence_OD",
+              "distances"):
+        v = data.get(k)
+        if v is not None:
+            payload[k] = v
+    payload["total_frames"] = data.get("total_frames", 0)
+    np.savez(tmp, **payload)
+    return tmp
+
+
 def has_mediapipe_data(subject_name: str, reverse: bool = False) -> bool:
     """Return True if any trial has saved MediaPipe data on disk.
 

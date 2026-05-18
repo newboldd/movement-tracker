@@ -51,15 +51,51 @@ class OutputSpec:
 
 def output_specs(job_type: str, subject_name: str,
                  remote_output_dir: str) -> list[OutputSpec]:
-    """Return the list of expected outputs for a (job_type, subject) pair."""
+    """Return the list of expected outputs for a (job_type, subject) pair.
+
+    MediaPipe outputs are now per-trial: one
+    ``<remote>/<subject>/<trial_stem>/mediapipe.npz`` (and
+    ``mediapipe_reverse.npz`` when the reverse pass ran).  We enumerate
+    every trial in the local trial map; the SSH probe layer skips
+    files that don't exist remotely, so listing both passes here is
+    harmless even when only one ran.
+
+    Legacy combined-file pull is still listed as a fallback spec so an
+    older remote install that hasn't been migrated yet remains
+    downloadable (the local startup migration then splits the combined
+    file into per-trial files).
+    """
     settings = get_settings()
     if job_type == "mediapipe":
-        return [OutputSpec(
+        # Enumerate this subject's trials.  build_trial_map may fail
+        # if the subject's videos aren't on this machine -- in that
+        # case fall back to the legacy combined spec so the pull
+        # still works.
+        try:
+            from .video import build_trial_map
+            trials = build_trial_map(subject_name)
+        except Exception:
+            trials = []
+        specs: list[OutputSpec] = []
+        for t in trials:
+            stem = t["trial_name"]
+            for fname in ("mediapipe.npz", "mediapipe_reverse.npz"):
+                specs.append(OutputSpec(
+                    job_type="mediapipe",
+                    label=f"MediaPipe npz ({stem}{' reverse' if 'reverse' in fname else ''})",
+                    remote_path=f"{remote_output_dir}/{subject_name}/{stem}/{fname}",
+                    local_path=settings.dlc_path / subject_name / stem / fname,
+                ))
+        # Legacy combined-file fallback (only useful for older remote
+        # installs that wrote the combined npz).  Keeps backward
+        # compatibility until every remote host has been re-run.
+        specs.append(OutputSpec(
             job_type="mediapipe",
-            label="MediaPipe npz",
+            label="MediaPipe npz (legacy combined)",
             remote_path=f"{remote_output_dir}/{subject_name}/mediapipe_prelabels.npz",
             local_path=settings.dlc_path / subject_name / "mediapipe_prelabels.npz",
-        )]
+        ))
+        return specs
     # Vision / pose / hrnet / deidentify will be added here.
     return []
 
@@ -329,7 +365,69 @@ def download_one(spec: OutputSpec, cfg: RemoteConfig,
     ok = _scp_pull(cfg, spec.remote_path, spec.local_path)
     if ok:
         record_download(spec, subject_id, job_id, remote_size)
+        # If we just pulled a legacy combined MediaPipe npz, split it
+        # into per-trial files immediately so downstream code sees the
+        # new layout without waiting for the next app startup.
+        if spec.job_type == "mediapipe" and spec.local_path.name in (
+            "mediapipe_prelabels.npz", "mediapipe_reverse_prelabels.npz"
+        ):
+            try:
+                _split_combined_mp_after_download(spec.local_path)
+            except Exception as e:
+                logger.warning(
+                    f"Post-download MP split failed for {spec.local_path}: {e}"
+                )
     return ok
+
+
+def _split_combined_mp_after_download(combined_path: Path) -> None:
+    """Split a freshly-downloaded combined MP npz into per-trial files.
+
+    Mirrors the startup migration in ``app._migrate_combined_mediapipe_npz``
+    but scoped to one subject's one file.  Deletes the combined file on
+    full success (matches the migration's contract)."""
+    import numpy as np
+    from .video import build_trial_map
+    subject_dir = combined_path.parent
+    subject_name = subject_dir.name
+    per_trial_name = ("mediapipe_reverse.npz"
+                      if "reverse" in combined_path.name
+                      else "mediapipe.npz")
+    data = np.load(str(combined_path))
+    trials = build_trial_map(subject_name)
+    if not trials:
+        return
+    all_written = True
+    for trial in trials:
+        stem = trial["trial_name"]
+        out_dir = subject_dir / stem
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / per_trial_name
+        if out_path.exists():
+            continue
+        sf = int(trial["start_frame"])
+        slice_n = int(trial["frame_count"])
+        ef = sf + slice_n - 1
+        arrays: dict = {}
+        for key in ("OS_landmarks", "OD_landmarks",
+                    "OS_all_tracks", "OD_all_tracks",
+                    "confidence_OS", "confidence_OD", "distances"):
+            if key in data.files:
+                src = data[key]
+                end = min(sf + slice_n, src.shape[0])
+                if end <= sf:
+                    continue
+                arrays[key] = src[sf:end]
+        if not arrays:
+            continue
+        arrays["start_frame"] = sf
+        arrays["total_frames"] = slice_n
+        np.savez(str(out_path), **arrays)
+    if all_written:
+        try:
+            combined_path.unlink()
+        except OSError:
+            pass
 
 
 def pending_for_job(job_id: int, cfg: RemoteConfig,

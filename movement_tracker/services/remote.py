@@ -1588,20 +1588,32 @@ def remote_preprocess_batch(
             for i, subj_name in enumerate(requested_subjects):
                 _check_cancel()
 
-                # Download mediapipe_prelabels.npz (only if this subject
-                # was actually in the mp run — not for blur-only subjects).
+                # Download MediaPipe outputs (only if this subject was
+                # actually in the mp run — not for blur-only subjects).
+                # Uses output_specs so the per-trial layout is honored;
+                # legacy combined falls back automatically and is split
+                # into per-trial files post-download.
                 if do_mp and subj_name in mp_set:
-                    remote_npz = f"{cfg.host}:{remote_output_dir}/{subj_name}/mediapipe_prelabels.npz"
-                    local_dlc_dir = settings.dlc_path / subj_name
-                    local_dlc_dir.mkdir(parents=True, exist_ok=True)
-                    local_npz = str(local_dlc_dir / "mediapipe_prelabels.npz")
-
-                    dl_cmd = _scp_base_args(cfg) + [remote_npz, local_npz]
-                    proc = _run_remote_proc(dl_cmd, logfile, f"Download npz {subj_name}")
-                    if proc.returncode == 0:
-                        logfile.write(f"  Downloaded {subj_name}/mediapipe_prelabels.npz\n")
+                    from .remote_results import (
+                        output_specs as _outputs,
+                        download_one as _dl_one,
+                    )
+                    with get_db_ctx() as _db:
+                        srow = _db.execute(
+                            "SELECT id FROM subjects WHERE name = ?",
+                            (subj_name,),
+                        ).fetchone()
+                    if srow:
+                        any_ok = False
+                        for spec in _outputs("mediapipe", subj_name, remote_output_dir):
+                            if _dl_one(spec, cfg, srow["id"], job_id):
+                                any_ok = True
+                        if any_ok:
+                            logfile.write(f"  Downloaded MediaPipe outputs for {subj_name}\n")
+                        else:
+                            logfile.write(f"  Warning: npz download failed for {subj_name}\n")
                     else:
-                        logfile.write(f"  Warning: npz download failed for {subj_name}\n")
+                        logfile.write(f"  Warning: subject {subj_name} not in DB\n")
 
                 # Download deidentified videos (only for subjects in the
                 # blur run — not for mp-only subjects).
@@ -1716,12 +1728,29 @@ def remote_hrnet_job(
     if row and row["camera_mode"]:
         camera_mode = row["camera_mode"]
 
-    # Find mediapipe npz for bbox defaults
-    mp_npz_local = settings.dlc_path / subject_name / "mediapipe_prelabels.npz"
-    if not mp_npz_local.exists():
+    # Find / build a combined MediaPipe npz to upload to the remote
+    # HRnet runner.  The remote script consumes one ``mediapipe_prelabels
+    # .npz`` per subject; locally we now store per-trial files, so we
+    # aggregate them into a temp npz on the fly.  Falls back to the
+    # legacy combined file if it happens to still exist.
+    from .mediapipe_prelabel import (
+        build_combined_mp_npz_tempfile, has_mediapipe_data,
+    )
+    if not has_mediapipe_data(subject_name):
         with get_db_ctx() as db:
             db.execute("UPDATE jobs SET status='failed', error_msg='MediaPipe data not found (run MediaPipe first)', finished_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,))
         return {"remote_done": False, "downloaded": False, "error": "MediaPipe data not found"}
+    legacy_combined = settings.dlc_path / subject_name / "mediapipe_prelabels.npz"
+    if legacy_combined.exists():
+        mp_npz_local = legacy_combined
+        _mp_tempfile_to_unlink: str | None = None
+    else:
+        _mp_tempfile_to_unlink = build_combined_mp_npz_tempfile(subject_name)
+        if not _mp_tempfile_to_unlink:
+            with get_db_ctx() as db:
+                db.execute("UPDATE jobs SET status='failed', error_msg='Could not assemble combined MediaPipe npz for HRnet upload', finished_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,))
+            return {"remote_done": False, "downloaded": False, "error": "MP aggregate failed"}
+        mp_npz_local = Path(_mp_tempfile_to_unlink)
 
     remote_work = f"{cfg.work_dir}/hrnet_jobs/{subject_name}_{trial_name}"
     remote_video = f"{remote_work}/video.mp4"
@@ -2049,6 +2078,11 @@ def remote_hrnet_job(
         return _outcome
     finally:
         logfile.close()
+        if _mp_tempfile_to_unlink:
+            try:
+                os.unlink(_mp_tempfile_to_unlink)
+            except OSError:
+                pass
         registry._processes.pop(job_id, None)
         registry._threads.pop(job_id, None)
         registry.unregister_cancel_event(job_id)
@@ -2408,6 +2442,15 @@ def dispatch_remote_batch(
         )
         per_trial = []  # list of {t, sub, stem, outer, trial_remote, video_local, mp_npz_local, spec}
         _mp_uploaded_subjects: set[str] = set()
+        # Per-subject MP combined npz to upload — uses legacy combined file
+        # if present, otherwise builds an aggregated temp npz from the
+        # per-trial layout.  Tracked here so we can clean up the tempfiles
+        # in the finally block.
+        from .mediapipe_prelabel import (
+            build_combined_mp_npz_tempfile, has_mediapipe_data,
+        )
+        _mp_local_paths: dict[str, str] = {}
+        _mp_tempfiles_to_unlink: list[str] = []
         for t in trials_in:
             if cancel_event.is_set():
                 return _fail("Cancelled during upload")
@@ -2423,14 +2466,24 @@ def dispatch_remote_batch(
             stem = tdef["trial_name"]                 # "Con04_L1"
             outer = f"{sub}_{stem}"                    # "Con04_Con04_L1"
             trial_remote = f"{work_root}/{outer}"
-            mp_npz_local = settings.dlc_path / sub / "mediapipe_prelabels.npz"
-            if not mp_npz_local.exists():
-                return _fail(f"MediaPipe data missing for {sub}")
+            if sub not in _mp_local_paths:
+                legacy = settings.dlc_path / sub / "mediapipe_prelabels.npz"
+                if legacy.exists():
+                    _mp_local_paths[sub] = str(legacy)
+                elif has_mediapipe_data(sub):
+                    tmp = build_combined_mp_npz_tempfile(sub)
+                    if not tmp:
+                        return _fail(f"Could not assemble combined MediaPipe npz for {sub}")
+                    _mp_local_paths[sub] = tmp
+                    _mp_tempfiles_to_unlink.append(tmp)
+                else:
+                    return _fail(f"MediaPipe data missing for {sub}")
+            mp_npz_local = _mp_local_paths[sub]
             per_trial.append(dict(
                 t=t, sub=sub, stem=stem, outer=outer,
                 trial_remote=trial_remote,
                 video_local=tdef["video_path"],
-                mp_npz_local=str(mp_npz_local),
+                mp_npz_local=mp_npz_local,
                 spec={
                     "stem":        stem,
                     "subject":     sub,
@@ -2694,7 +2747,8 @@ def dispatch_remote_batch(
         if len(per_trial) > 1:
             import threading as _th
             def _upload_tail(per_trial=per_trial, cancel_event=cancel_event,
-                             log_path=log_path):
+                             log_path=log_path,
+                             _tempfiles=_mp_tempfiles_to_unlink):
                 tail_log = None
                 try:
                     tail_log = open(log_path, "a", buffering=1)
@@ -2724,6 +2778,11 @@ def dispatch_remote_batch(
                             tail_log.close()
                     except Exception:
                         pass
+                    for _tmp in _tempfiles:
+                        try:
+                            os.unlink(_tmp)
+                        except OSError:
+                            pass
             _th.Thread(target=_upload_tail, daemon=True).start()
 
         return {"batch_id": batch_id, "remote_pid": remote_pid, "state_dir": state_dir}
@@ -2732,6 +2791,18 @@ def dispatch_remote_batch(
         return _fail(str(e))
     finally:
         logfile.close()
+        # If the background upload-tail thread was started, it owns
+        # tempfile cleanup so the files survive until later trials are
+        # uploaded.  Only clean up here when no tail thread will run.
+        try:
+            if len(per_trial) <= 1:
+                for _tmp in _mp_tempfiles_to_unlink:
+                    try:
+                        os.unlink(_tmp)
+                    except OSError:
+                        pass
+        except NameError:
+            pass
 
 
 def poll_remote_batch(
@@ -3128,18 +3199,27 @@ def remote_preprocess_download(
                 _check_cancel()
 
                 if do_mp:
-                    remote_npz = f"{cfg.host}:{remote_output_dir}/{subj_name}/mediapipe_prelabels.npz"
-                    local_dlc_dir = settings.dlc_path / subj_name
-                    local_dlc_dir.mkdir(parents=True, exist_ok=True)
-                    local_npz = str(local_dlc_dir / "mediapipe_prelabels.npz")
-
-                    dl_cmd = _scp_base_args(cfg) + [remote_npz, local_npz]
-                    proc = _run_scp(dl_cmd, logfile, f"Download npz {subj_name}")
-                    if proc.returncode == 0:
-                        logfile.write(f"  Downloaded {subj_name}/mediapipe_prelabels.npz\n")
-                        total_downloaded += 1
+                    from .remote_results import (
+                        output_specs as _outputs,
+                        download_one as _dl_one,
+                    )
+                    with get_db_ctx() as _db:
+                        srow = _db.execute(
+                            "SELECT id FROM subjects WHERE name = ?",
+                            (subj_name,),
+                        ).fetchone()
+                    if srow:
+                        any_ok = False
+                        for spec in _outputs("mediapipe", subj_name, remote_output_dir):
+                            if _dl_one(spec, cfg, srow["id"], job_id):
+                                any_ok = True
+                        if any_ok:
+                            logfile.write(f"  Downloaded MediaPipe outputs for {subj_name}\n")
+                            total_downloaded += 1
+                        else:
+                            logfile.write(f"  Warning: npz not found for {subj_name}\n")
                     else:
-                        logfile.write(f"  Warning: npz not found for {subj_name}\n")
+                        logfile.write(f"  Warning: subject {subj_name} not in DB\n")
 
                 if do_blur:
                     # List deidentified video files on remote
@@ -3368,17 +3448,21 @@ def resume_preprocess_monitor(
             for i, subj_name in enumerate(remote_subjects):
                 _check_cancel()
 
-                # Download mediapipe_prelabels.npz
-                remote_npz = f"{cfg.host}:{remote_output_dir}/{subj_name}/mediapipe_prelabels.npz"
-                local_dlc_dir = settings.dlc_path / subj_name
-                local_dlc_dir.mkdir(parents=True, exist_ok=True)
-                local_npz = str(local_dlc_dir / "mediapipe_prelabels.npz")
-
-                dl_cmd = _scp_base_args(cfg) + [remote_npz, local_npz]
-                proc = _run_remote_proc(dl_cmd, logfile, f"Download npz {subj_name}")
-                if proc.returncode == 0:
-                    logfile.write(f"  Downloaded {subj_name}/mediapipe_prelabels.npz\n")
-                # (scp failure is OK — subject might not have MP results)
+                # Download MediaPipe outputs (per-trial + legacy fallback)
+                from .remote_results import (
+                    output_specs as _outputs,
+                    download_one as _dl_one,
+                )
+                with get_db_ctx() as _db:
+                    srow = _db.execute(
+                        "SELECT id FROM subjects WHERE name = ?",
+                        (subj_name,),
+                    ).fetchone()
+                if srow:
+                    for spec in _outputs("mediapipe", subj_name, remote_output_dir):
+                        if _dl_one(spec, cfg, srow["id"], job_id):
+                            logfile.write(f"  Downloaded {spec.label} for {subj_name}\n")
+                # (download failures are OK — subject might not have MP results)
 
                 # Download deidentified videos
                 remote_deident = f"{cfg.host}:{remote_output_dir}/{subj_name}/deidentified"
