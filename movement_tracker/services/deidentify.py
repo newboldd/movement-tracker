@@ -53,20 +53,37 @@ def _pick_h264_encoder(ffmpeg: str) -> str:
         output = (proc.stdout or "") + (proc.stderr or "")
     except (OSError, subprocess.TimeoutExpired) as e:
         raise RuntimeError(f"Could not probe ffmpeg encoders: {e}")
+    # Parse ``ffmpeg -encoders`` output.  Each encoder line begins
+    # with " V....." / " A....." (lots of dots-padding for the flags
+    # column), then the encoder name, then a description.  Splitting
+    # on whitespace and picking the name token avoids the brittle
+    # "look for ' libx264 '" check that missed multi-space padding
+    # in some builds.
+    available: set[str] = set()
+    for line in output.splitlines():
+        parts = line.split()
+        # Encoder lines look like ['V.....', 'libx264', 'H.264', ...]
+        # (or 'V..S..' etc.).  Take the second token as the name when
+        # the first looks like a flags column.
+        if len(parts) >= 2 and parts[0] and parts[0][0] in ("V", "A", "S"):
+            available.add(parts[1])
     candidates = ("libx264", "libopenh264", "h264_mf")
     for name in candidates:
-        # ``ffmpeg -encoders`` lines look like ``V..... libx264   ...``
-        # so a simple substring check on the name suffices.
-        if f" {name} " in output or output.endswith(f" {name}") \
-                or f" {name}\n" in output:
+        if name in available:
             _H264_ENCODER_CACHE[ffmpeg] = name
             logger.info(f"Using H.264 encoder: {name}")
             return name
+    # Diagnostic: log the first ~30 video-encoder lines so the user
+    # / dev can see what THIS ffmpeg actually supports.
+    v_lines = [l for l in output.splitlines()
+               if l.lstrip().startswith("V")][:30]
+    sample = "\n".join(v_lines)
     raise RuntimeError(
         "No H.264 encoder available in this ffmpeg build "
         f"({ffmpeg}).  Tried: {', '.join(candidates)}.  Fix on a "
         "conda env: 'conda install -c conda-forge -y ffmpeg' (the "
-        "conda-forge build ships libx264)."
+        "conda-forge build ships libx264).\n"
+        f"Detected video encoders in this build:\n{sample}"
     )
 
 # ── Configuration ────────────────────────────────────────────────────────
