@@ -1050,16 +1050,41 @@ def render_with_blur_specs(input_path: str, output_path: str,
                 hand_lm_data = _build_pose_data(pose_os, pose_od, hand_lm_data)
         else:
             from ..config import get_settings
-            from .mediapipe_prelabel import _detect_frame_offset
+            from .mediapipe_prelabel import (
+                _detect_frame_offset, load_mediapipe_prelabels,
+            )
             settings = get_settings()
-            npz_path = settings.dlc_path / subject_name / "mediapipe_prelabels.npz"
-            if npz_path.exists():
-                npz = np2.load(str(npz_path))
-                os_lm = npz.get("OS_landmarks")
-                od_lm = npz.get("OD_landmarks")
-                # Trim pre-roll frames if NPZ was built on a machine with different
-                # codec frame-counting behaviour (e.g. OpenCV exposing negative-PTS frames).
-                _mp_offset = _detect_frame_offset(subject_name, npz)
+            # Use the per-trial-aware loader.  It aggregates the
+            # subject's per-trial mediapipe.npz files into the
+            # subject-wide OS_landmarks / OD_landmarks arrays the
+            # renderer expects, falling back to the legacy combined
+            # mediapipe_prelabels.npz when present.  Previously the
+            # renderer probed the legacy combined path directly --
+            # after the per-trial migration deleted that file the
+            # renderer silently ran with no MP data and the rendered
+            # video had no hand mask (preview still worked because
+            # the preview endpoint already used this loader).
+            mp_dict = load_mediapipe_prelabels(subject_name)
+            if mp_dict is not None:
+                os_lm = mp_dict.get("OS_landmarks")
+                od_lm = mp_dict.get("OD_landmarks")
+                # Pre-roll offset compensation: only relevant for the
+                # legacy combined npz on machines with codec quirks.
+                # The aggregator returns slices already anchored to
+                # the subject's global frame indices via per-trial
+                # start_frame, so no offset trim is needed in that
+                # path.  We still apply it when the loader returned
+                # the legacy combined file (recognised by having an
+                # ``OS_landmarks`` shape that's the full subject
+                # length and no per-trial markers).
+                _mp_offset = 0
+                try:
+                    legacy_npz_path = settings.dlc_path / subject_name / "mediapipe_prelabels.npz"
+                    if legacy_npz_path.exists():
+                        legacy_npz = np2.load(str(legacy_npz_path))
+                        _mp_offset = _detect_frame_offset(subject_name, legacy_npz)
+                except Exception:
+                    _mp_offset = 0
                 if _mp_offset > 0 and os_lm is not None:
                     os_lm = os_lm[_mp_offset:]
                 if _mp_offset > 0 and od_lm is not None:
