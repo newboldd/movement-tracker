@@ -3690,20 +3690,62 @@ def remote_deidentify(
                 pct = 5 + (i + 1) / max(len(to_upload), 1) * 15
                 _update_progress(pct)
 
-            # Upload mediapipe + pose prelabels if they exist (skip if already uploaded)
+            # Upload mediapipe + pose prelabels.  Always force-upload
+            # so a freshly re-run npz locally is what the remote uses
+            # -- the previous behaviour skipped when the file was
+            # already on the remote, which silently let stale
+            # landmarks drive the hand mask after a Labels-page MP
+            # rerun.  These are small (low single-digit MB) so the
+            # bandwidth cost of always uploading is negligible.
+            #
+            # MP locally is per-trial now (<dlc>/<subj>/<stem>/
+            # mediapipe.npz), but the deidentify worker still reads
+            # the legacy combined ``mediapipe_prelabels.npz`` -- so
+            # aggregate the per-trial slices into a temp combined
+            # file and upload that.  Pose stays subject-wide so
+            # uploads from its on-disk path directly.
             dlc_dir = settings.dlc_path / subject_name
-            for npz_name in ("mediapipe_prelabels.npz", "pose_prelabels.npz"):
-                npz_path = dlc_dir / npz_name
-                if npz_path.exists():
-                    if npz_name in remote_existing:
-                        logfile.write(f"  Skipping {npz_name} (already on remote)\n")
-                    else:
-                        subprocess.run(
-                            _scp_base_args(cfg) + [str(npz_path), f"{cfg.host}:{remote_work}/"],
-                            capture_output=True, timeout=120,
-                        )
-                        logfile.write(f"  Uploaded {npz_name}\n")
-                    logfile.flush()
+            from .mediapipe_prelabel import (
+                build_combined_mp_npz_tempfile, has_mediapipe_data,
+            )
+            # 1) MediaPipe combined npz (built fresh from per-trial files
+            #    when no legacy combined file exists locally).
+            _mp_tempfile_to_unlink: str | None = None
+            mp_local: str | None = None
+            legacy_mp = dlc_dir / "mediapipe_prelabels.npz"
+            if legacy_mp.exists():
+                mp_local = str(legacy_mp)
+            elif has_mediapipe_data(subject_name):
+                _mp_tempfile_to_unlink = build_combined_mp_npz_tempfile(subject_name)
+                mp_local = _mp_tempfile_to_unlink
+            if mp_local:
+                proc = subprocess.run(
+                    _scp_base_args(cfg) + [mp_local,
+                        f"{cfg.host}:{remote_work}/mediapipe_prelabels.npz"],
+                    capture_output=True, timeout=120,
+                )
+                if proc.returncode == 0:
+                    logfile.write("  Uploaded mediapipe_prelabels.npz (force-fresh)\n")
+                else:
+                    logfile.write("  Warning: mediapipe_prelabels.npz upload failed\n")
+            if _mp_tempfile_to_unlink:
+                try:
+                    os.unlink(_mp_tempfile_to_unlink)
+                except OSError:
+                    pass
+            # 2) Pose npz (still subject-wide on disk).
+            pose_path = dlc_dir / "pose_prelabels.npz"
+            if pose_path.exists():
+                proc = subprocess.run(
+                    _scp_base_args(cfg) + [str(pose_path),
+                        f"{cfg.host}:{remote_work}/pose_prelabels.npz"],
+                    capture_output=True, timeout=120,
+                )
+                if proc.returncode == 0:
+                    logfile.write("  Uploaded pose_prelabels.npz (force-fresh)\n")
+                else:
+                    logfile.write("  Warning: pose_prelabels.npz upload failed\n")
+            logfile.flush()
 
             _update_progress(25)
             _check_cancel()
