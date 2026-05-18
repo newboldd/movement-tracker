@@ -871,10 +871,63 @@ async function submitBatch() {
     }
 
     if (selectedStep === 'mediapipe') {
-        // Per-trial fan-out: one job per checked trial chip.  Falls back
-        // to the legacy whole-subject submission only when the trial grid
-        // is empty (no subjects checked) -- but that's caught below.
-        await submitJob();
+        // Single-row submission: one parent MP job for every selected
+        // subject (derived from the checked trial chips).  Matches
+        // HRnet's Submit-Batch UX -- one queue row, one log, one
+        // progress bar.  The queue manager's MP branch then hands the
+        // multi-subject set to ``remote_preprocess_batch`` which
+        // processes them sequentially on the remote.
+        const trialChecks = Array.from(
+            document.querySelectorAll('#trialGrid input[type=checkbox]:checked:not([disabled])')
+        );
+        if (trialChecks.length === 0) {
+            alert('Select at least one trial.');
+            return;
+        }
+        const subjectIdSet = new Set();
+        const subjectIdToName = new Map();
+        for (const cb of trialChecks) {
+            const sid = parseInt(cb.dataset.subjectId);
+            subjectIdSet.add(sid);
+            const subjName = cb.closest('.trial-item')?.parentElement
+                ?.parentElement?.querySelector('.trial-group-label')?.textContent
+                || (cb.dataset.subjectName);
+            if (subjName) subjectIdToName.set(sid, subjName);
+        }
+        // Fill in missing names from the master subjects list.
+        for (const sid of subjectIdSet) {
+            if (!subjectIdToName.has(sid)) {
+                const s = subjects.find(x => x.id === sid);
+                if (s) subjectIdToName.set(sid, s.name);
+            }
+        }
+        const subjIds = [...subjectIdSet];
+        const subjNames = subjIds.map(id => subjectIdToName.get(id)).filter(Boolean);
+        if (!subjIds.length) {
+            alert('No subjects resolved from trial selection.');
+            return;
+        }
+        const revCb = document.getElementById('mpReverseCb');
+        const ubCb  = document.getElementById('mpUseBboxCb');
+        const reverse = !!(revCb && revCb.checked);
+        const useBbox = !(ubCb && !ubCb.checked);
+        const extra = { _use_batch_runner: true };
+        if (reverse) extra.reverse = true;
+        if (!useBbox) extra.use_bbox = false;
+        try {
+            await API.post('/api/remote/launch', {
+                job_type: 'mediapipe',
+                subject_ids: subjIds,
+                subjects: subjNames,
+                execution_target: getExecutionTarget(),
+                extra_params: extra,
+            });
+            for (const id of subjIds) delete cachedHrnetStatus[id];
+            clearSubjects();
+            refreshQueue();
+        } catch (e) {
+            alert('Error: ' + e.message);
+        }
         return;
     }
 
