@@ -45,14 +45,34 @@ def _pick_h264_encoder(ffmpeg: str) -> str:
     cached = _H264_ENCODER_CACHE.get(ffmpeg)
     if cached:
         return cached
+    # First: sanity-check the binary runs at all by asking for the
+    # version.  Capture in bytes (text=False) so a Windows codepage
+    # mismatch can't silently produce empty output.
+    try:
+        ver_proc = subprocess.run(
+            [ffmpeg, "-version"], capture_output=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"Could not run '{ffmpeg} -version': {e}")
+    ver_text = (ver_proc.stdout + ver_proc.stderr).decode(
+        "utf-8", errors="replace")
+    if ver_proc.returncode != 0 or "ffmpeg version" not in ver_text.lower():
+        raise RuntimeError(
+            f"ffmpeg -version returned rc={ver_proc.returncode}. "
+            f"Output (first 500 chars): {ver_text[:500]}"
+        )
     try:
         proc = subprocess.run(
             [ffmpeg, "-hide_banner", "-encoders"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, timeout=10,
         )
-        output = (proc.stdout or "") + (proc.stderr or "")
     except (OSError, subprocess.TimeoutExpired) as e:
         raise RuntimeError(f"Could not probe ffmpeg encoders: {e}")
+    output = (proc.stdout + proc.stderr).decode("utf-8", errors="replace")
+    logger.info(
+        f"ffmpeg -encoders rc={proc.returncode}, "
+        f"stdout={len(proc.stdout)} bytes, stderr={len(proc.stderr)} bytes"
+    )
     # Parse ``ffmpeg -encoders`` output.  Each encoder line begins
     # with " V....." / " A....." (lots of dots-padding for the flags
     # column), then the encoder name, then a description.  Splitting
@@ -73,17 +93,16 @@ def _pick_h264_encoder(ffmpeg: str) -> str:
             _H264_ENCODER_CACHE[ffmpeg] = name
             logger.info(f"Using H.264 encoder: {name}")
             return name
-    # Diagnostic: log the first ~30 video-encoder lines so the user
-    # / dev can see what THIS ffmpeg actually supports.
-    v_lines = [l for l in output.splitlines()
-               if l.lstrip().startswith("V")][:30]
-    sample = "\n".join(v_lines)
+    # Diagnostic: dump the full output (first ~2000 chars) so we can
+    # tell whether parsing failed or the probe got nothing back.
     raise RuntimeError(
         "No H.264 encoder available in this ffmpeg build "
         f"({ffmpeg}).  Tried: {', '.join(candidates)}.  Fix on a "
         "conda env: 'conda install -c conda-forge -y ffmpeg' (the "
         "conda-forge build ships libx264).\n"
-        f"Detected video encoders in this build:\n{sample}"
+        f"ffmpeg -encoders raw output (first 2000 chars, rc={proc.returncode}):\n"
+        f"{'-' * 40}\n{output[:2000]}\n{'-' * 40}\n"
+        f"Detected encoder names: {sorted(available)[:50]}"
     )
 
 # ── Configuration ────────────────────────────────────────────────────────
