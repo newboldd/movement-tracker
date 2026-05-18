@@ -9,6 +9,7 @@ triangulated thumb-index distances using stereo calibration.
 
 import logging
 import os
+from pathlib import Path
 
 import cv2
 import numpy as np
