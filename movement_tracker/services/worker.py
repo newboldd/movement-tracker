@@ -131,13 +131,13 @@ def run_deidentify(subject_name: str, job_id: int, trial_idx: int | None = None)
                 face_by_frame[fn] = []
             face_by_frame[fn].append(dict(fd))
 
-        # Hand settings
+        # Hand settings -- only the 5 user-controllable params are
+        # passed through.  forearm_radius / hand_smooth2 / dlc_radius
+        # were removed (never in the UI; DLC tips draw at the MP
+        # hand_mask_radius now).
         hand_mask_radius = 10
         hand_smooth = 10
-        forearm_radius = 10
         forearm_extent = 0.7
-        hand_smooth2 = 0
-        dlc_radius = 10
         hand_temporal = 0
         arm_dorsal_dilate = 0
         arm_ventral_dilate = 0
@@ -146,10 +146,7 @@ def run_deidentify(subject_name: str, job_id: int, trial_idx: int | None = None)
         if hs_row:
             hand_mask_radius = hs_row.get("hand_mask_radius") or 10
             hand_smooth = hs_row.get("hand_smooth") or 10
-            forearm_radius = hs_row.get("forearm_radius") or 10
             forearm_extent = hs_row.get("forearm_extent") or 0.7
-            hand_smooth2 = hs_row.get("hand_smooth2") or 0
-            dlc_radius = hs_row.get("dlc_radius") or 10
             hand_temporal = hs_row.get("hand_temporal") or 0
             arm_dorsal_dilate = int(hs_row.get("arm_dorsal_dilate") or 0)
             arm_ventral_dilate = int(hs_row.get("arm_ventral_dilate") or 0)
@@ -173,14 +170,12 @@ def run_deidentify(subject_name: str, job_id: int, trial_idx: int | None = None)
             overall = _base + (pct / 100.0) * _span
             print(f"PROGRESS:{overall:.1f}", flush=True)
 
-        # Build hand_settings dict matching function signature
+        # Build hand_settings dict matching render_with_blur_specs's
+        # expected keys.  Only the 5 user-controllable knobs go in.
         hand_settings_dict = {
             "hand_mask_radius": hand_mask_radius,
             "hand_smooth": hand_smooth,
-            "forearm_radius": forearm_radius,
             "forearm_extent": forearm_extent,
-            "hand_smooth2": hand_smooth2,
-            "dlc_radius": dlc_radius,
             "hand_temporal": hand_temporal,
             "arm_dorsal_dilate": arm_dorsal_dilate,
             "arm_ventral_dilate": arm_ventral_dilate,

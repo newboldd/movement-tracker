@@ -896,22 +896,20 @@ def render_with_blur_specs(input_path: str, output_path: str,
     # Load hand landmarks from npz for hand protection
     hand_lm_data = None  # {frame: [{x, y, side}]}
     hand_segments = []
+    # Hand-mask + arm geometry params -- only the 5 user-exposed
+    # sliders.  hand_smooth2 / forearm_radius / dlc_radius were
+    # removed (never reachable from the UI; dlc_radius now uses
+    # the same radius as the MP hand circles).
     hand_mask_radius = 5
     hand_smooth = 7
-    forearm_radius = 10
     forearm_extent = 0.4
-    hand_smooth2 = 5
-    dlc_radius_val = 15
     arm_dorsal_dilate = 0
     arm_ventral_dilate = 0
     if hand_settings:
         import json as _json
         hand_mask_radius = hand_settings.get("hand_mask_radius") or hand_settings.get("mask_radius") or 10
         hand_smooth = hand_settings.get("hand_smooth", 10)
-        forearm_radius = hand_settings.get("forearm_radius", 10)
         forearm_extent = hand_settings.get("forearm_extent", 0.7)
-        hand_smooth2 = hand_settings.get("hand_smooth2", 0)
-        dlc_radius_val = hand_settings.get("dlc_radius", 15)
         arm_dorsal_dilate = int(hand_settings.get("arm_dorsal_dilate", 0) or 0)
         arm_ventral_dilate = int(hand_settings.get("arm_ventral_dilate", 0) or 0)
         seg_json = hand_settings.get("segments_json", "[]")
@@ -1168,18 +1166,19 @@ def render_with_blur_specs(input_path: str, output_path: str,
         return max(max(abs(a[0]-b[0]), abs(a[1]-b[1]))
                    for a, b in zip(old_hash, new_hash)) > HAND_CACHE_THRESHOLD
 
-    def _get_hand_mask_cached(side_label, lms, w_side, h_side, r, sm, fa_r, fa_e, sm2, dlc_rad=0):
+    def _get_hand_mask_cached(side_label, lms, w_side, h_side, r, sm, fa_e):
         key = side_label
         new_hash = _lm_hash(lms)
-        params = (r, sm, fa_r, fa_e, sm2, dlc_rad,
-                  arm_dorsal_dilate, arm_ventral_dilate)
+        params = (r, sm, fa_e, arm_dorsal_dilate, arm_ventral_dilate)
         cached = _hand_cache.get(key)
         if cached and cached["params"] == params and not _lm_moved(cached["lm_hash"], new_hash):
             return cached["mask"]
-        mask = _build_hand_mask_from_landmarks(lms, w_side, h_side, r, sm, fa_r, fa_e, sm2,
-                                               arm_dorsal_dilate=arm_dorsal_dilate,
-                                               arm_ventral_dilate=arm_ventral_dilate,
-                                               dlc_radius=dlc_rad)
+        mask = _build_hand_mask_from_landmarks(
+            lms, w_side, h_side, r, sm,
+            forearm_extent=fa_e,
+            arm_dorsal_dilate=arm_dorsal_dilate,
+            arm_ventral_dilate=arm_ventral_dilate,
+        )
         _hand_cache[key] = {"lm_hash": new_hash, "mask": mask, "params": params}
         return mask
 
@@ -1275,9 +1274,9 @@ def render_with_blur_specs(input_path: str, output_path: str,
 
     # Per-frame hand-mask dispatch — used by the per-side render code below.
     # The HRnet hand-mask source was removed; MediaPipe is the only path.
-    def _get_hand_mask_for_render(side_label, lms, w_side, h_side, r, sm, fa_r, fa_e, sm2,
-                                   dlc_rad=0, global_frame=0):
-        return _get_hand_mask_cached(side_label, lms, w_side, h_side, r, sm, fa_r, fa_e, sm2, dlc_rad=dlc_rad)
+    def _get_hand_mask_for_render(side_label, lms, w_side, h_side, r, sm, fa_e,
+                                   global_frame=0):
+        return _get_hand_mask_cached(side_label, lms, w_side, h_side, r, sm, fa_e)
 
     # Always pipe raw frames into ffmpeg → H.264 yuv420p.  Browsers refuse
     # to decode the MPEG-4 ASP files cv2.VideoWriter('mp4v') produces on
@@ -1420,9 +1419,9 @@ def render_with_blur_specs(input_path: str, output_path: str,
                                      if hand_lm_data and global_frame in hand_lm_data else [])
                             if lms_l:
                                 hand_mask_l = _get_hand_mask_for_render(
-                                    "left", lms_l, half_w, fh, active_radius_l, active_smooth_l,
-                                    forearm_radius, forearm_extent, hand_smooth2,
-                                    dlc_rad=dlc_radius_val, global_frame=global_frame)
+                                    "left", lms_l, half_w, fh,
+                                    active_radius_l, active_smooth_l,
+                                    forearm_extent, global_frame=global_frame)
                         left = _apply_blur_roi(left, left_mask, hand_mask_l)
 
                     if right_specs:
@@ -1434,9 +1433,9 @@ def render_with_blur_specs(input_path: str, output_path: str,
                                      if hand_lm_data and global_frame in hand_lm_data else [])
                             if lms_r:
                                 hand_mask_r = _get_hand_mask_for_render(
-                                    "right", lms_r, full_w - half_w, fh, active_radius_r, active_smooth_r,
-                                    forearm_radius, forearm_extent, hand_smooth2,
-                                    dlc_rad=dlc_radius_val, global_frame=global_frame)
+                                    "right", lms_r, full_w - half_w, fh,
+                                    active_radius_r, active_smooth_r,
+                                    forearm_extent, global_frame=global_frame)
                         right = _apply_blur_roi(right, right_mask, hand_mask_r)
 
                     frame = np.concatenate([left, right], axis=1)
@@ -1449,9 +1448,9 @@ def render_with_blur_specs(input_path: str, output_path: str,
                                  if hand_lm_data and global_frame in hand_lm_data else [])
                         if lms_f:
                             hand_mask = _get_hand_mask_for_render(
-                                "full", lms_f, full_w, fh, active_radius_f, active_smooth_f,
-                                forearm_radius, forearm_extent, hand_smooth2,
-                                dlc_rad=dlc_radius_val, global_frame=global_frame)
+                                "full", lms_f, full_w, fh,
+                                active_radius_f, active_smooth_f,
+                                forearm_extent, global_frame=global_frame)
                     frame = _apply_blur_roi(frame, blur_mask, hand_mask)
 
             # Write frame to ffmpeg's stdin (raw bgr24 bytes).
@@ -1516,16 +1515,18 @@ def render_with_blur_specs(input_path: str, output_path: str,
     # slider values diverge from what produced the existing render.
     import json as _json
     from datetime import datetime as _dt
+    # Only the user-controllable params are recorded.  forearm_radius
+    # / hand_smooth2 / dlc_radius used to ride along here but the UI
+    # never exposed them and the renderer no longer reads them, so
+    # they're dropped to keep the sidecar honest about "what the user
+    # actually dialed in".
     _params = {
         "job_type": "deidentify",
         "hand_mask_radius": int(hand_mask_radius),
         "hand_smooth": int(hand_smooth),
-        "hand_smooth2": int(hand_smooth2),
-        "forearm_radius": int(forearm_radius),
         "forearm_extent": float(forearm_extent),
         "arm_dorsal_dilate": int(arm_dorsal_dilate),
         "arm_ventral_dilate": int(arm_ventral_dilate),
-        "dlc_radius": int(dlc_radius_val),
         "ran_at": _dt.utcnow().isoformat(timespec="seconds") + "Z",
     }
     _sidecar = os.path.splitext(output_path)[0] + ".params.json"
@@ -1604,12 +1605,10 @@ def _build_blur_mask(specs: list[dict], w: int, h: int,
 
 def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
                                      radius: int, smooth: int = 0,
-                                     forearm_radius: int = 10,
+                                     *,
                                      forearm_extent: float = 0.7,
-                                     smooth2: int = 0,
                                      arm_dorsal_dilate: int = 0,
-                                     arm_ventral_dilate: int = 0,
-                                     **kwargs) -> np.ndarray:
+                                     arm_ventral_dilate: int = 0) -> np.ndarray:
     """Build hand protection mask from stored landmarks (matching frontend behavior).
 
     Builds a HAND mask (circles at every keypoint, dilated by ``smooth``)
@@ -1619,6 +1618,11 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
     ventral line elbow→thumb-CMC).  The two are unioned at the very end
     so the Hand-dilate slider grows the hand region WITHOUT also growing
     the arm.
+
+    DLC fingertip circles (when MP missed or interpolated the tip) are
+    drawn at the SAME ``radius`` as the MP circles -- they used to have
+    a dedicated ``dlc_radius`` parameter that the UI never exposed; the
+    visual effect was identical with one knob fewer.
     """
     mask = np.zeros((h, w), dtype=np.uint8)
 

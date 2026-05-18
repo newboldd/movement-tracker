@@ -210,14 +210,14 @@ def get_frame(
                 face_by_frame[fn] = []
             face_by_frame[fn].append(dict(fd))
 
-        # Load hand settings
+        # Load hand settings.  Only the 5 user-exposed sliders are
+        # honoured -- forearm_radius / hand_smooth2 / dlc_radius were
+        # removed (never reachable from the UI; dlc-tip circles now
+        # share the MP hand_mask_radius).
         import json as _json
         hand_mask_radius = 5
         hand_smooth = 7
-        forearm_radius_val = 10
         forearm_extent_val = 0.4
-        hand_smooth2_val = 5
-        dlc_radius_val = 15
         hand_segments = []
         mask_source = "mediapipe"
         hrnet_mask_thresh = 0.30
@@ -227,10 +227,7 @@ def get_frame(
         if hs_row:
             hand_mask_radius = hs_row.get("hand_mask_radius", 10) or 10
             hand_smooth = hs_row.get("hand_smooth", 10) or 10
-            forearm_radius_val = hs_row.get("forearm_radius", 10) or 10
             forearm_extent_val = hs_row.get("forearm_extent", 0.5) or 0.5
-            hand_smooth2_val = hs_row.get("hand_smooth2", 0) or 0
-            dlc_radius_val = hs_row.get("dlc_radius", 15) or 15
             arm_dorsal_dilate_val = hs_row.get("arm_dorsal_dilate", 0) or 0
             arm_ventral_dilate_val = hs_row.get("arm_ventral_dilate", 0) or 0
             seg_json = hs_row.get("segments_json", "[]")
@@ -443,16 +440,16 @@ def get_frame(
                     elif frame_num in hand_lm_data:
                         lms_l = [lm for lm in hand_lm_data[frame_num] if lm["side"] == "left"]
                         lms_r = [lm for lm in hand_lm_data[frame_num] if lm["side"] == "right"]
-                        hand_mask_l = _build_hand_mask_from_landmarks(lms_l, half_w, fh, active_radius, active_smooth,
-                                                                      forearm_radius_val, forearm_extent_val, hand_smooth2_val,
-                                                                      arm_dorsal_dilate=arm_dorsal_dilate_val,
-                                                                      arm_ventral_dilate=arm_ventral_dilate_val,
-                                                                      dlc_radius=dlc_radius_val)
-                        hand_mask_r = _build_hand_mask_from_landmarks(lms_r, fw - half_w, fh, active_radius, active_smooth,
-                                                                      forearm_radius_val, forearm_extent_val, hand_smooth2_val,
-                                                                      arm_dorsal_dilate=arm_dorsal_dilate_val,
-                                                                      arm_ventral_dilate=arm_ventral_dilate_val,
-                                                                      dlc_radius=dlc_radius_val)
+                        hand_mask_l = _build_hand_mask_from_landmarks(
+                            lms_l, half_w, fh, active_radius, active_smooth,
+                            forearm_extent=forearm_extent_val,
+                            arm_dorsal_dilate=arm_dorsal_dilate_val,
+                            arm_ventral_dilate=arm_ventral_dilate_val)
+                        hand_mask_r = _build_hand_mask_from_landmarks(
+                            lms_r, fw - half_w, fh, active_radius, active_smooth,
+                            forearm_extent=forearm_extent_val,
+                            arm_dorsal_dilate=arm_dorsal_dilate_val,
+                            arm_ventral_dilate=arm_ventral_dilate_val)
                 left = _apply_blur_roi(left, left_mask, hand_mask_l)
                 right = _apply_blur_roi(right, right_mask, hand_mask_r)
                 frame = np.concatenate([left, right], axis=1)
@@ -470,10 +467,9 @@ def get_frame(
                     elif frame_num in hand_lm_data:
                         hand_mask = _build_hand_mask_from_landmarks(
                             hand_lm_data[frame_num], fw, fh, active_radius, active_smooth,
-                            forearm_radius_val, forearm_extent_val, hand_smooth2_val,
+                            forearm_extent=forearm_extent_val,
                             arm_dorsal_dilate=arm_dorsal_dilate_val,
-                            arm_ventral_dilate=arm_ventral_dilate_val,
-                            dlc_radius=dlc_radius_val)
+                            arm_ventral_dilate=arm_ventral_dilate_val)
                 frame = _apply_blur_roi(frame, blur_mask, hand_mask)
 
     # Stereo: crop to left or right half based on camera name
@@ -1016,10 +1012,7 @@ def get_hand_settings(subject_id: int, trial_idx: int = Query(0)) -> dict:
             "enabled": bool(row["hand_mask_enabled"]),
             "mask_radius": row["hand_mask_radius"],
             "hand_smooth": row.get("hand_smooth", 10),
-            "forearm_radius": row.get("forearm_radius", 10),
             "forearm_extent": row.get("forearm_extent", 0.5),
-            "hand_smooth2": row.get("hand_smooth2", 0),
-            "dlc_radius": row.get("dlc_radius", 15),
             "hand_temporal": row.get("hand_temporal", 0),
             "show_landmarks": bool(row.get("show_landmarks", 0)),
             "mask_source": "mediapipe",
@@ -1029,8 +1022,8 @@ def get_hand_settings(subject_id: int, trial_idx: int = Query(0)) -> dict:
         }
     # No DB row — trial has never been configured
     return {"has_row": False, "enabled": True, "mask_radius": 10, "hand_smooth": 10,
-            "forearm_radius": 10, "forearm_extent": 0.5, "hand_smooth2": 0,
-            "dlc_radius": 15, "hand_temporal": 0, "show_landmarks": False,
+            "forearm_extent": 0.5,
+            "hand_temporal": 0, "show_landmarks": False,
             "mask_source": "mediapipe", "arm_dorsal_dilate": 0, "arm_ventral_dilate": 0,
             "segments": []}
 
@@ -1088,10 +1081,17 @@ def save_hand_settings(subject_id: int, body: dict = Body(...)) -> dict:
     enabled = 1 if body.get("enabled", True) else 0
     mask_radius = body.get("mask_radius", 30)
     hand_smooth = body.get("hand_smooth", 10)
-    forearm_radius = body.get("forearm_radius", 10)
     forearm_extent = body.get("forearm_extent", 0.5)
-    hand_smooth2 = body.get("hand_smooth2", 0)
-    dlc_radius_val = body.get("dlc_radius", 15)
+    # forearm_radius / hand_smooth2 / dlc_radius are no longer
+    # user-controlled.  Keep the columns in the INSERT for back-compat
+    # but hardcode constants -- they don't influence the renderer
+    # anymore (DLC tips draw at the MP hand_mask_radius now, the
+    # 8-stacked threshold replaced any need for a separate smooth2,
+    # and the arm-edge dorsal/ventral sliders superseded
+    # forearm_radius).
+    _forearm_radius_legacy = 10
+    _hand_smooth2_legacy = 0
+    _dlc_radius_legacy = 0
     hand_temporal = body.get("hand_temporal", 0)
     show_landmarks = 1 if body.get("show_landmarks", False) else 0
     segments = body.get("segments", [])
@@ -1138,7 +1138,8 @@ def save_hand_settings(subject_id: int, body: dict = Body(...)) -> dict:
                              arm_dorsal_dilate=excluded.arm_dorsal_dilate,
                              arm_ventral_dilate=excluded.arm_ventral_dilate""",
             (subject_id, trial_idx, enabled, mask_radius, hand_smooth,
-             forearm_radius, forearm_extent, hand_smooth2, dlc_radius_val,
+             _forearm_radius_legacy, forearm_extent, _hand_smooth2_legacy,
+             _dlc_radius_legacy,
              hand_temporal, show_landmarks, segments_json,
              mask_source, arm_dorsal_dilate, arm_ventral_dilate),
         )

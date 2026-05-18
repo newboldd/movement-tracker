@@ -87,10 +87,8 @@ const deid = (() => {
     let handLandmarksBulk = {}; // {frameNum: [{x, y, side}]} all frames
     let handTemporalSmooth = 0; // deprecated -- kept for back-compat with saved settings
     let handMaskRadius = 5;
-    let forearmRadius = 10;  // dilation around forearm triangle (separate from circle radius)
     let forearmExtent = 0.4; // 0=wrist, 1=elbow, >1=past elbow
     let handSmooth = 7;       // hand-region dilation (no longer applies to arm triangle)
-    let handSmooth2 = 0;      // deprecated
     let armDorsalDilate = 0;   // extra dilation of dorsal arm edge (elbow→pinky MCP)
     let armVentralDilate = 0;  // extra dilation of ventral arm edge (elbow→thumb CMC)
     let handMaskEnabled = true;
@@ -555,9 +553,7 @@ const deid = (() => {
             const hs = await API.get(`/api/deidentify/${subjectId}/hand-settings?trial_idx=${idx}`);
             handMaskRadius = hs.mask_radius || 10;
             handSmooth = hs.hand_smooth || 10;
-            forearmRadius = hs.forearm_radius || 10;
             forearmExtent = hs.forearm_extent != null ? hs.forearm_extent : 0.5;
-            handSmooth2 = 0;  // deprecated, always 0
             handTemporalSmooth = 0;  // deprecated, always 0
             armDorsalDilate = hs.arm_dorsal_dilate || 0;
             armVentralDilate = hs.arm_ventral_dilate || 0;
@@ -567,7 +563,6 @@ const deid = (() => {
             document.getElementById('handRadiusVal').textContent = handMaskRadius;
             document.getElementById('handSmoothSlider').value = handSmooth;
             document.getElementById('handSmoothVal').textContent = handSmooth;
-            forearmRadius = 10; // hardcoded
             document.getElementById('handExtentSlider').value = forearmExtent;
             document.getElementById('handExtentVal').textContent = forearmExtent.toFixed(1);
             const dorsalSlider = document.getElementById('handDorsalSlider');
@@ -1094,7 +1089,7 @@ const deid = (() => {
         }
     }
 
-    function _buildHandMask(landmarks, radiusPx, forearmPx, smoothPx, smooth2Px, w, h,
+    function _buildHandMask(landmarks, radiusPx, smoothPx, w, h,
                               armDorsalPx, armVentralPx) {
         // Hand landmarks (MediaPipe) + DLC fallback ONLY for joints MP
         // missed on this frame.  Two earlier strategies both regressed:
@@ -1235,8 +1230,10 @@ const deid = (() => {
                 ctx2.lineTo(pts[2].sx, pts[2].sy);
                 ctx2.stroke();
             }
-            // Dorsal edge (elbow → pinky MCP).
-            const dorsal = (armDorsalPx != null ? armDorsalPx : forearmPx);
+            // Dorsal edge (elbow → pinky MCP).  Defaults to 0 when no
+            // dorsal-dilate value was provided (forearm_radius used to
+            // be the fallback; removed as a dead param).
+            const dorsal = (armDorsalPx != null ? armDorsalPx : 0);
             if (dorsal > 0) {
                 ctx2.strokeStyle = '#fff';
                 ctx2.lineWidth = dorsal * 2;
@@ -1308,10 +1305,8 @@ const deid = (() => {
                 }
             } else if (landmarks.length > 0) {
                 const radiusPx = (activeSegment.radius || handMaskRadius) * scale;
-                const faPx = forearmRadius * scale;
                 const smPx = (activeSegment.smooth != null ? activeSegment.smooth : handSmooth) * scale;
-                const sm2Px = handSmooth2 * scale;
-                handMask = _buildHandMask(landmarks, radiusPx, faPx, smPx, sm2Px, cw, ch,
+                handMask = _buildHandMask(landmarks, radiusPx, smPx, cw, ch,
                                             armDorsalDilate * scale, armVentralDilate * scale);
             }
             if (handMask) {
@@ -1446,8 +1441,8 @@ const deid = (() => {
                 }
             } else {
                 handMaskCanvas = _buildHandMask(
-                    visibleLandmarks, activeProtectRadius * scale, forearmRadius * scale,
-                    activeSmooth * scale, handSmooth2 * scale, cw, ch,
+                    visibleLandmarks, activeProtectRadius * scale,
+                    activeSmooth * scale, cw, ch,
                     armDorsalDilate * scale, armVentralDilate * scale
                 );
             }
@@ -2726,12 +2721,6 @@ const deid = (() => {
         renderTimeline();
     }
 
-    function updateForearmRadius(val) {
-        forearmRadius = parseInt(val);
-        document.getElementById('handForearmVal').textContent = forearmRadius;
-        _scheduleHandSaveRender();
-    }
-
     function updateForearmExtent(val) {
         forearmExtent = parseFloat(val);
         document.getElementById('handExtentVal').textContent = forearmExtent.toFixed(1);
@@ -2751,12 +2740,6 @@ const deid = (() => {
             }
         }
         _scheduleHandSaveRender();
-    }
-
-    function updateHandSmooth2(val) {
-        // Deprecated -- kept as a no-op for back-compat with any code
-        // path that still references it.
-        handSmooth2 = parseInt(val) || 0;
     }
 
     function updateDorsalDilate(val) {
@@ -2781,9 +2764,7 @@ const deid = (() => {
                 enabled: true,
                 mask_radius: handMaskRadius,
                 hand_smooth: handSmooth,
-                forearm_radius: forearmRadius,
                 forearm_extent: forearmExtent,
-                hand_smooth2: 0,
                 hand_temporal: 0,
                 show_landmarks: handOverlayEnabled,
                 mask_source: 'mediapipe',
