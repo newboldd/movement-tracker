@@ -556,7 +556,11 @@ def get_stage_data(
     subject_name = subj["name"]
 
     if stage == "mp":
-        data = get_mediapipe_for_session(subject_name)
+        # Prefer the Combined (forward+reverse fusion) layer when
+        # available so the Events page distance plot benefits from
+        # the better per-camera tip selection.  Falls back to the
+        # original forward MediaPipe when no Combined npz exists.
+        data = get_mediapipe_for_session(subject_name, prefer_combined=True)
         return data if data else {}
 
     if stage == "labels":

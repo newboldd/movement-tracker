@@ -1275,24 +1275,48 @@ def load_mediapipe_reverse_prelabels(subject_name: str) -> dict | None:
     )
 
 
-def get_mediapipe_for_session(subject_name: str) -> dict | None:
+def get_mediapipe_for_session(subject_name: str,
+                                prefer_combined: bool = False) -> dict | None:
     """Get MediaPipe predictions formatted for the labeler API response.
 
     Returns dict with per-camera thumb/index arrays as lists (JSON-serializable),
     plus distances array. Returns None if no prelabels exist.
 
+    When ``prefer_combined`` is True, prefers the Combined (forward+
+    reverse fusion) per-trial output; falls back to the original
+    forward MediaPipe when no combined npz exists for any trial.
+    Used by the Events page so the distance plot benefits from the
+    Combined layer's better tip selection -- forward only is used
+    when Combined is unavailable.  Other callers keep the original
+    forward-only behaviour by leaving the flag False.
+
     If stored distances are all NaN but calibration is now available,
     recomputes them from the MP coordinates and updates the npz file.
     """
-    data = load_mediapipe_prelabels(subject_name)
+    data = None
+    used_combined = False
+    if prefer_combined:
+        data = load_mediapipe_combined_prelabels(subject_name)
+        if data is not None:
+            used_combined = True
+    if data is None:
+        data = load_mediapipe_prelabels(subject_name)
     if data is None:
         return None
 
     OS_lm = data["OS_landmarks"]
     OD_lm = data["OD_landmarks"]
 
-    # Recompute distances if they're all NaN
-    if np.all(np.isnan(data["distances"])):
+    # Recompute distances if they're all NaN.  Note: the loader
+    # itself recomputes distances on the fly now (see
+    # _attach_fresh_distances), so this block almost never fires
+    # anymore -- but we keep it as a safety net for stale callers
+    # that build a ``data`` dict directly without going through the
+    # loader.  Skip the npz write-back when the data came from the
+    # combined layer: the persistent rewrite path is hard-coded to
+    # the forward filename and would clobber the forward file with
+    # combined values.
+    if np.all(np.isnan(data["distances"])) and not used_combined:
         calib = get_calibration_for_subject(subject_name)
         if calib is not None:
             logger.info(f"Recomputing 3D distances for {subject_name} (calibration now available)")
