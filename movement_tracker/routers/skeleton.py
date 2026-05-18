@@ -203,7 +203,7 @@ def get_mediapipe_hints(subject_id: int) -> list[dict]:
     hints = []
     for i, t in enumerate(trials):
         try:
-            prelabels = load_mediapipe_prelabels(name, t["trial_stem"])
+            prelabels = load_mediapipe_prelabels(name)
         except Exception:
             continue
 

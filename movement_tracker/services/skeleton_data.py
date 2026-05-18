@@ -1218,6 +1218,35 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
             pts_R = mp_tracked_R[:, j, :]  # (N, 2)
             mp_joints_3d[:, j, :] = triangulate_points(pts_L, pts_R, calib)
 
+    # ── Load reverse-pass MediaPipe (separate npz, optional) ───
+    # Run MP with frames fed in reverse temporal order: tracker
+    # enters cold-start frames already locked on.  Loaded as a
+    # sibling layer to the forward MP labels so the Labels page
+    # can show both side-by-side.
+    reverse_tracked_L = np.full((N, 21, 2), np.nan)
+    reverse_tracked_R = np.full((N, 21, 2), np.nan)
+    from .mediapipe_prelabel import load_mediapipe_reverse_prelabels
+    rev = load_mediapipe_reverse_prelabels(subject_name)
+    if rev is not None:
+        os_lm_r = rev.get("OS_landmarks")
+        od_lm_r = rev.get("OD_landmarks")
+        if os_lm_r is not None:
+            end_r = min(start_frame + N, os_lm_r.shape[0])
+            if end_r > start_frame:
+                n = end_r - start_frame
+                reverse_tracked_L[:n] = os_lm_r[start_frame:end_r]
+        if od_lm_r is not None:
+            end_r = min(start_frame + N, od_lm_r.shape[0])
+            if end_r > start_frame:
+                n = end_r - start_frame
+                reverse_tracked_R[:n] = od_lm_r[start_frame:end_r]
+
+    reverse_joints_3d = np.full((N, 21, 3), np.nan)
+    if has_calib:
+        for j in range(21):
+            reverse_joints_3d[:, j, :] = triangulate_points(
+                reverse_tracked_L[:, j, :], reverse_tracked_R[:, j, :], calib)
+
     # ── Load Vision (Apple Vision) landmarks ───────────────────
     vision_tracked_L = np.full((N, 21, 2), np.nan)
     vision_tracked_R = np.full((N, 21, 2), np.nan)
@@ -1668,6 +1697,14 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
         "mp_tracked_L": _points_to_list(mp_tracked_L),
         "mp_tracked_R": _points_to_list(mp_tracked_R),
         "mp_joints_3d": _points_to_list(mp_joints_3d),
+        # Reverse-pass MediaPipe (sibling layer; same schema as MP).
+        # ``has_reverse_mp`` lets the Labels page hide the row when no
+        # reverse npz exists for this subject yet.
+        "reverse_tracked_L": _points_to_list(reverse_tracked_L),
+        "reverse_tracked_R": _points_to_list(reverse_tracked_R),
+        "reverse_joints_3d": _points_to_list(reverse_joints_3d),
+        "has_reverse_mp": bool(np.any(~np.isnan(reverse_tracked_L))
+                                or np.any(~np.isnan(reverse_tracked_R))),
         # Stereo (image-based cross-camera alignment) — populated below
         # if a saved ``stereo_align.npz`` exists for this trial.
         "stereo_tracked_L": None,

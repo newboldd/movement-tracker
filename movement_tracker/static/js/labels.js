@@ -32,6 +32,12 @@ const manoViewer = (() => {
     let showManoSkel = true;
     let showMP2D = false;
     let showMP3D = false;
+    // Reverse-pass MediaPipe layer (mediapipe_reverse_prelabels.npz).
+    // Same schema and skeleton as MP; drawn in magenta so the user
+    // can compare forward vs reverse runs frame-by-frame.
+    let showReverse2D = false;
+    let showReverse3D = false;
+    let showReverseSkel = true;
     // Stereo (cross-camera image-alignment) overlay.  Only 2D —
     // there's no 3D representation; the partner-camera MP label is
     // translated into the current view by the per-frame per-joint
@@ -574,7 +580,7 @@ const manoViewer = (() => {
 
     // Three.js
     let scene, camera3d, renderer;
-    let manoGroup, skelV2Group, legacyGroup, mpGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup;
+    let manoGroup, skelV2Group, legacyGroup, mpGroup, reverseGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup;
     let camera3dInit = false;
 
     // Scene-space orbit: rotate content around hand center while camera stays fixed
@@ -1501,6 +1507,7 @@ const manoViewer = (() => {
             renderDistanceTrace();
         }
         $('showMP2D').addEventListener('change', e => { showMP2D = e.target.checked; updateLayerFlags(); });
+        $('showReverse2D').addEventListener('change', e => { showReverse2D = e.target.checked; updateLayerFlags(); });
         // Helper: clear the selected-joint marker if none of the three
         // Stereo variants is visible anymore.
         const _maybeClearStereoSelected = () => {
@@ -1686,6 +1693,7 @@ const manoViewer = (() => {
             }
         });
         $('showMP3D').addEventListener('change', e => { showMP3D = e.target.checked; updateLayerFlags(); });
+        $('showReverse3D').addEventListener('change', e => { showReverse3D = e.target.checked; updateLayerFlags(); });
         $('showMano2D').addEventListener('change', e => { showMano2D = e.target.checked; updateLayerFlags(); _updateHandDiagramColor(); });
         $('showMano3D').addEventListener('change', e => { showMano3D = e.target.checked; updateLayerFlags(); _updateHandDiagramColor(); });
         $('showSkelV2_2D').addEventListener('change', e => {
@@ -3754,6 +3762,12 @@ const manoViewer = (() => {
             ? (mpCorrectedL || trialData.mp_tracked_L)
             : (mpCorrectedR || trialData.mp_tracked_R);
         const visionKp = isLeft ? trialData.vision_tracked_L : trialData.vision_tracked_R;
+        // Reverse-pass MediaPipe layer — same schema as MP but loaded
+        // from mediapipe_reverse_prelabels.npz.  Empty arrays when no
+        // reverse run exists for this subject yet.
+        const reverseKp = isLeft
+            ? trialData.reverse_tracked_L
+            : trialData.reverse_tracked_R;
 
         // All 2D data is in camera-half coords — no offset needed
         const manoXOff = 0;
@@ -3823,6 +3837,20 @@ const manoViewer = (() => {
                         (mpKp[fn][j][0] + mpXOff) * pixelScale,
                         mpKp[fn][j][1] * pixelScale,
                         '#00cccc', 1.5, 0.5
+                    );
+                }
+
+                // Reverse (magenta) — same bone connections as MP,
+                // gated independently so the user can compare the two
+                // skeletons side-by-side.
+                if (showReverseSkel && showReverse2D
+                    && reverseKp?.[fn]?.[i] && reverseKp[fn][j]) {
+                    drawLine(
+                        reverseKp[fn][i][0] * pixelScale,
+                        reverseKp[fn][i][1] * pixelScale,
+                        reverseKp[fn][j][0] * pixelScale,
+                        reverseKp[fn][j][1] * pixelScale,
+                        '#e040fb', 1.5, 0.5
                     );
                 }
 
@@ -3965,6 +3993,20 @@ const manoViewer = (() => {
                                    '#f48fb1', 5);
                     }
                 }
+            }
+        }
+
+        // Reverse-pass MediaPipe joint markers (magenta).  Skeleton
+        // lines are drawn alongside MP's in the bone loop above so the
+        // user can compare the two skeletons; this block handles the
+        // per-joint dots.  Values come from
+        // mediapipe_reverse_prelabels.npz.
+        if (showReverse2D && reverseKp && reverseKp[fn]) {
+            for (let j = 0; j < 21; j++) {
+                if (!isJointVisible(j) || !reverseKp[fn][j]) continue;
+                const x = reverseKp[fn][j][0] * pixelScale;
+                const y = reverseKp[fn][j][1] * pixelScale;
+                drawCross(x, y, '#e040fb', 4);
             }
         }
 
@@ -5774,12 +5816,13 @@ const manoViewer = (() => {
         skelV2Group = new THREE.Group();
         legacyGroup = new THREE.Group();
         mpGroup = new THREE.Group();
+        reverseGroup = new THREE.Group();
         visionGroup = new THREE.Group();
         dlcGroup = new THREE.Group();
         poseGroup = new THREE.Group();
         heatmapGroup = new THREE.Group();
         angleArcGroup = new THREE.Group();
-        scene.add(manoGroup, skelV2Group, legacyGroup, mpGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup);
+        scene.add(manoGroup, skelV2Group, legacyGroup, mpGroup, reverseGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup);
 
         renderer.render(scene, camera3d);
 
@@ -6084,7 +6127,7 @@ const manoViewer = (() => {
         let arcSrcKey = null;
 
         // Clear groups
-        [manoGroup, skelV2Group, legacyGroup, mpGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup].forEach(g => {
+        [manoGroup, skelV2Group, legacyGroup, mpGroup, reverseGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup].forEach(g => {
             while (g.children.length) {
                 const child = g.children[0];
                 g.remove(child);
@@ -6097,6 +6140,7 @@ const manoViewer = (() => {
         const v2_3d = trialData.skel_v2_joints_3d?.[fn];
         const legacy_3d = trialData.skel_legacy_joints_3d?.[fn];
         const mp3d = trialData.mp_joints_3d?.[fn];
+        const reverse3d = trialData.reverse_joints_3d?.[fn];
         const vision3d = trialData.vision_joints_3d?.[fn];
 
         const sphereGeom = new THREE.SphereGeometry(2.5, 12, 8);
@@ -6598,6 +6642,29 @@ const manoViewer = (() => {
             }
         }
 
+        // Reverse-pass MediaPipe joints (magenta).
+        if (showReverse3D && reverse3d) {
+            const revMat = new THREE.MeshPhongMaterial({ color: 0xe040fb, emissive: 0x6a1b9a });
+            const revBoneMat = new THREE.MeshPhongMaterial({ color: 0xe040fb, emissive: 0x4a148c });
+            for (let j = 0; j < 21; j++) {
+                if (!isJointVisible(j) || !reverse3d[j]) continue;
+                const sphere = new THREE.Mesh(sphereGeom, revMat);
+                sphere.position.copy(orbitPt(getScenePos(reverse3d, j)));
+                reverseGroup.add(sphere);
+            }
+            if (showReverseSkel && trialData.skeleton) {
+                trialData.skeleton.forEach(([i, j]) => {
+                    if (!isBoneVisible(i, j) || !reverse3d[i] || !reverse3d[j]) return;
+                    const bone = makeBone(
+                        orbitPt(getScenePos(reverse3d, i)),
+                        orbitPt(getScenePos(reverse3d, j)),
+                        1.0, revBoneMat
+                    );
+                    if (bone) reverseGroup.add(bone);
+                });
+            }
+        }
+
         // Vision joints (light blue)
         if (showVision3D && vision3d) {
             const vMat = new THREE.MeshPhongMaterial({ color: 0x2196f3, emissive: 0x0d47a1 });
@@ -6929,6 +6996,7 @@ const manoViewer = (() => {
 
         manoGroup.visible = showMano3D;
         mpGroup.visible = showMP3D;
+        reverseGroup.visible = showReverse3D;
         visionGroup.visible = showVision3D;
         dlcGroup.visible = showDLC3D;
 
@@ -6936,6 +7004,7 @@ const manoViewer = (() => {
         manoGroup.position.copy(modelTranslations.skeleton);
         skelV2Group.position.copy(modelTranslations.skel_v2);
         mpGroup.position.copy(modelTranslations.mp);
+        reverseGroup.position.copy(modelTranslations.reverse || modelTranslations.mp);
         visionGroup.position.copy(modelTranslations.vision);
         dlcGroup.position.copy(modelTranslations.dlc);
         // Arcs follow the source model's translation
@@ -7302,6 +7371,8 @@ const manoViewer = (() => {
         // hide it.
         const _simRow = document.getElementById('mpStaticImageRow');
         if (_simRow) _simRow.style.display = (endpoint === 'run-mediapipe') ? 'flex' : 'none';
+        const _revRow = document.getElementById('mpReverseRow');
+        if (_revRow) _revRow.style.display = (endpoint === 'run-mediapipe') ? 'flex' : 'none';
 
         // Disable pointer-events on the Three.js overlay so the video canvas
         // receives mouse events directly (needed for bbox drag handles).
@@ -7350,6 +7421,8 @@ const manoViewer = (() => {
         // Hide MP-specific Static-image-mode row whenever no model is active.
         const _simRow = document.getElementById('mpStaticImageRow');
         if (_simRow) _simRow.style.display = 'none';
+        const _revRow = document.getElementById('mpReverseRow');
+        if (_revRow) _revRow.style.display = 'none';
         render();
     }
 
@@ -7401,6 +7474,13 @@ const manoViewer = (() => {
             if (model === 'run-mediapipe') {
                 const cb = document.getElementById('mpStaticImageMode');
                 if (cb && cb.checked) body.static_image_mode = true;
+                // Reverse-pass option: feed frames to MediaPipe in
+                // descending temporal order so the tracker enters
+                // cold-start frames already locked on.  Saved to
+                // mediapipe_reverse_prelabels.npz, displayed as the
+                // Reverse model row.
+                const rev = document.getElementById('mpReverse');
+                if (rev && rev.checked) body.reverse = true;
             }
 
             const DETECT_JOB_TYPE = {

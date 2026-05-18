@@ -198,7 +198,8 @@ def _pick_tapping_track(tracks, video_name="", trial_name=""):
 def run_mediapipe(subject_name: str, progress_callback=None,
                   crop_boxes: dict | None = None,
                   static_image_mode: bool = False,
-                  trial_idx: int | None = None) -> str:
+                  trial_idx: int | None = None,
+                  reverse: bool = False) -> str:
     """Run MediaPipe on all stereo videos for a subject.
 
     Extracts all 21 hand joint positions from both camera halves.
@@ -223,6 +224,12 @@ def run_mediapipe(subject_name: str, progress_callback=None,
             (or left NaN if no prior file exists).  Used by the per-trial
             "Run MediaPipe" button on the skeleton page so adjusting one
             trial's bbox doesn't silently re-process the others.
+        reverse: When True, feed frames to MediaPipe in reverse temporal
+            order so the tracker enters cold-start frames already locked
+            on.  Saved to ``mediapipe_reverse_prelabels.npz`` so the
+            forward pass output is not overwritten.  Slower than the
+            forward pass because it seeks each frame instead of reading
+            sequentially.
 
     Returns:
         Path to the saved npz file.
@@ -252,8 +259,14 @@ def run_mediapipe(subject_name: str, progress_callback=None,
     # to process are preserved.  Without this, run-MP-for-trial-K would
     # blow away every other trial's landmarks because the npz is rewritten
     # whole each time.
+    # Output filename: forward vs reverse pass stored separately so the
+    # forward labels (the v1 "ground-truth" source) are never clobbered
+    # by a reverse experiment.
+    output_filename = "mediapipe_reverse_prelabels.npz" if reverse \
+        else "mediapipe_prelabels.npz"
+
     if trial_idx is not None:
-        existing_npz = settings.dlc_path / subject_name / "mediapipe_prelabels.npz"
+        existing_npz = settings.dlc_path / subject_name / output_filename
         if existing_npz.exists():
             try:
                 _prev = np.load(str(existing_npz))
@@ -352,10 +365,25 @@ def run_mediapipe(subject_name: str, progress_callback=None,
 
         right_w = full_w - midline
 
-        for local_frame in range(actual_frame_count):
+        # Reverse pass: process frames in descending temporal order so
+        # the MediaPipe tracker enters a cold-start frame already locked
+        # on from a later well-labeled frame.  Sequential cap.read() only
+        # walks forward, so we explicitly seek each frame.  This is
+        # slower than the forward sequential read but avoids buffering
+        # the whole video in memory.
+        if reverse:
+            frame_indices = range(actual_frame_count - 1, -1, -1)
+        else:
+            frame_indices = range(actual_frame_count)
+
+        for local_frame in frame_indices:
+            if reverse:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, local_frame)
             ret, frame = cap.read()
             if not ret:
-                logger.warning(f"{video_name}: unexpected end of video at frame {local_frame}")
+                logger.warning(f"{video_name}: unexpected read fail at frame {local_frame}")
+                if reverse:
+                    continue  # try next frame, don't abort the whole trial
                 break
 
             frame = np.ascontiguousarray(frame, dtype=np.uint8)
@@ -446,10 +474,10 @@ def run_mediapipe(subject_name: str, progress_callback=None,
         valid_dist = np.sum(~np.isnan(distances))
         logger.info(f"Computed 2D pixel distances for {valid_dist}/{total_frames} frames (no calibration)")
 
-    # Save to npz
+    # Save to npz (forward + reverse passes have separate filenames)
     dlc_path = settings.dlc_path / subject_name
     dlc_path.mkdir(parents=True, exist_ok=True)
-    npz_path = str(dlc_path / "mediapipe_prelabels.npz")
+    npz_path = str(dlc_path / output_filename)
 
     np.savez(
         npz_path,
@@ -632,7 +660,8 @@ def _detect_frame_offset(subject_name: str, npz_data: dict) -> int:
         return 0
 
 
-def load_mediapipe_prelabels(subject_name: str) -> dict | None:
+def load_mediapipe_prelabels(subject_name: str,
+                              filename: str = "mediapipe_prelabels.npz") -> dict | None:
     """Load saved MediaPipe prelabels for a subject.
 
     Handles both new format (OS_landmarks/OD_landmarks with all 21 joints)
@@ -641,12 +670,16 @@ def load_mediapipe_prelabels(subject_name: str) -> dict | None:
     Automatically detects and compensates for frame misalignments from older
     processing where frame offset logic wasn't applied.
 
+    ``filename`` defaults to the forward-pass output; pass
+    ``"mediapipe_reverse_prelabels.npz"`` (or use
+    :func:`load_mediapipe_reverse_prelabels`) to read the reverse pass.
+
     Returns dict with keys: OS_landmarks, OD_landmarks (N, 21, 2),
     confidence_OS, confidence_OD, distances, total_frames.
     Returns None if file doesn't exist.
     """
     settings = get_settings()
-    npz_path = settings.dlc_path / subject_name / "mediapipe_prelabels.npz"
+    npz_path = settings.dlc_path / subject_name / filename
     if not npz_path.exists():
         return None
 
@@ -715,6 +748,20 @@ def load_mediapipe_prelabels(subject_name: str) -> dict | None:
             "distances": data.get("distances"),
             "total_frames": n,
         }
+
+
+def load_mediapipe_reverse_prelabels(subject_name: str) -> dict | None:
+    """Load the reverse-pass MediaPipe prelabels for a subject.
+
+    The reverse pass feeds frames to MediaPipe in descending temporal
+    order so the tracker enters cold-start frames already locked on.
+    Output schema matches the forward pass (OS_landmarks /
+    OD_landmarks / confidences / distances / total_frames).
+    """
+    return load_mediapipe_prelabels(
+        subject_name,
+        filename="mediapipe_reverse_prelabels.npz",
+    )
 
 
 def get_mediapipe_for_session(subject_name: str) -> dict | None:

@@ -23,7 +23,7 @@ def _progress_printer(job_id: int):
 
 
 def run_mediapipe(subject_name: str, job_id: int, static_image_mode: bool = False,
-                  trial_idx: int | None = None):
+                  trial_idx: int | None = None, reverse: bool = False):
     from movement_tracker.services.mediapipe_prelabel import run_mediapipe as _run_mp
     # Load any saved per-trial crop boxes for this subject (under
     # model_name='run-mediapipe') so MP runs honour the bbox the user
@@ -57,7 +57,8 @@ def run_mediapipe(subject_name: str, job_id: int, static_image_mode: bool = Fals
     _run_mp(subject_name, progress_callback=_progress_printer(job_id),
             crop_boxes=crop_boxes if crop_boxes else None,
             static_image_mode=static_image_mode,
-            trial_idx=trial_idx)
+            trial_idx=trial_idx,
+            reverse=reverse)
 
 
 def run_pose(subject_name: str, job_id: int):
@@ -211,7 +212,8 @@ def run_vision(subject_name: str, job_id: int):
 JOB_DISPATCH = {
     "mediapipe": lambda args: run_mediapipe(args.subject, args.job_id,
                                               static_image_mode=bool(getattr(args, "static_image_mode", False)),
-                                              trial_idx=getattr(args, "trial_idx", None)),
+                                              trial_idx=getattr(args, "trial_idx", None),
+                                              reverse=bool(getattr(args, "reverse", False))),
     "pose": lambda args: run_pose(args.subject, args.job_id),
     "blur": lambda args: run_blur(args.subject, args.job_id),
     "deidentify": lambda args: run_deidentify(args.subject, args.job_id, args.trial_idx),
@@ -244,6 +246,8 @@ def main():
     parser.add_argument("--trial-idx", type=int, default=None)
     parser.add_argument("--static-image-mode", action="store_true",
                         help="MediaPipe only: disable between-frame tracker (per-frame palm detection)")
+    parser.add_argument("--reverse", action="store_true",
+                        help="MediaPipe only: feed frames in reverse temporal order, writing to mediapipe_reverse_prelabels.npz")
 
     # Set MT_DATA_DIR if passed (for subprocess to find DB/settings)
     parser.add_argument("--data-dir", default=None)

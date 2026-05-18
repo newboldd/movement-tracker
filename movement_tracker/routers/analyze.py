@@ -577,7 +577,8 @@ def run_mediapipe(subject_id: int, body: dict = Body(default={})) -> dict:
                 _ti = None
             run_mediapipe_all(subj_name, progress_callback=progress,
                               crop_boxes=crop_boxes if crop_boxes else None,
-                              trial_idx=_ti)
+                              trial_idx=_ti,
+                              reverse=bool(body.get("reverse", False)))
             with get_db_ctx() as db:
                 db.execute("UPDATE jobs SET status = 'completed', progress_pct = 100, finished_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
         except InterruptedError:

@@ -166,6 +166,17 @@
                 <input type="checkbox" id="showMP3D" style="margin:0;justify-self:center;">
                 <span></span>
 
+                <!-- 1a. Reverse — MediaPipe re-run with frames fed in
+                     reverse temporal order so the tracker enters
+                     cold-start frames already locked on.  Loaded from
+                     mediapipe_reverse_prelabels.npz.  Same 2D + 3D +
+                     skeleton displays as MediaPipe; magenta so the
+                     two layers are distinguishable when both on. -->
+                <span style="color:var(--text-muted);"><span class="layer-swatch" style="background:#e040fb;"></span> Reverse</span>
+                <input type="checkbox" id="showReverse2D" style="margin:0;justify-self:center;">
+                <input type="checkbox" id="showReverse3D" style="margin:0;justify-self:center;">
+                <span></span>
+
                 <!-- 1b. Stereo — partner-camera MP label translated by
                      image-content phase-correlation.  2D only. -->
                 <span style="color:var(--text-muted);padding-left:18px;"><span class="layer-swatch" style="background:#e91e63;"></span> Stereo</span>
@@ -363,6 +374,18 @@
                            title="Disable MediaPipe's between-frame tracker so each frame gets a fresh palm-detector pass.  3-5x slower but recovers detection on hard poses (e.g. back-of-hand views) where the sticky tracker fails to lock on.">
                         <input type="checkbox" id="mpStaticImageMode" style="margin:0;">
                         Static image mode
+                    </label>
+                    <!-- Reverse-pass option for MediaPipe only.  Feeds
+                         frames in descending temporal order so the
+                         tracker enters cold-start frames already locked
+                         on from a later well-labeled frame.  Saved to a
+                         separate npz (mediapipe_reverse_prelabels.npz)
+                         that the Models row "Reverse" displays. -->
+                    <label id="mpReverseRow"
+                           style="display:none;align-items:center;gap:4px;font-size:10px;color:var(--text-muted);padding-left:6px;margin-top:2px;cursor:pointer;"
+                           title="Feed frames to MediaPipe in reverse temporal order.  The tracker enters early-frame failures already locked on from a later well-labeled frame, often filling cold-start gaps.  Saved separately as the 'Reverse' model layer; does not overwrite the forward pass.">
+                        <input type="checkbox" id="mpReverse" style="margin:0;">
+                        Run in reverse
                     </label>
                 </div>
                 <div class="detect-model-row" data-model="run-vision">
@@ -1112,7 +1135,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=361" type="module"></script>
+    <script src="/static/js/labels.js?v=362" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {
