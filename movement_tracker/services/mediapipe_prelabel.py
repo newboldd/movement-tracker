@@ -524,6 +524,23 @@ def run_mediapipe(subject_name: str, progress_callback=None,
     if progress_callback:
         progress_callback(100.0)
 
+    # Whenever we wrote a forward or reverse per-trial file, rebuild
+    # the Combined fusion for any trial that now has both.  Combined
+    # is regenerated rather than partially patched -- it's cheap
+    # (per-frame triangulation) and lets the file always reflect the
+    # latest of either source.
+    try:
+        for _p in written_paths:
+            _trial_stem = Path(_p).parent.name
+            _td = Path(_p).parent
+            if (_td / "mediapipe.npz").exists() and (_td / "mediapipe_reverse.npz").exists():
+                build_combined_mp_npz_for_trial(subject_name, _trial_stem)
+    except Exception as _e:
+        logger.warning(
+            f"Combined-MP rebuild after run_mediapipe failed for "
+            f"{subject_name}: {_e}"
+        )
+
     # Return the first per-trial path written so callers (status logs)
     # still get a meaningful string.  Multi-trial runs append all
     # paths to ``written_paths`` in order if the caller wants them.
@@ -810,6 +827,7 @@ def load_mediapipe_prelabels(subject_name: str,
     per_trial_map = {
         "mediapipe_prelabels.npz":         "mediapipe.npz",
         "mediapipe_reverse_prelabels.npz": "mediapipe_reverse.npz",
+        "mediapipe_combined.npz":          "mediapipe_combined.npz",
     }
     per_trial_filename = per_trial_map.get(filename, "mediapipe.npz")
     per_trial_result = _load_mediapipe_per_trial(subject_name, per_trial_filename)
@@ -945,6 +963,272 @@ def has_mediapipe_data(subject_name: str, reverse: bool = False) -> bool:
     legacy = "mediapipe_reverse_prelabels.npz" if reverse \
         else "mediapipe_prelabels.npz"
     return (subj_dir / legacy).exists()
+
+
+def build_combined_mp_npz_for_trial(subject_name: str, trial_stem: str) -> str | None:
+    """Fuse the forward and reverse per-trial MP outputs for one trial
+    into a single ``mediapipe_combined.npz``.
+
+    Per-frame logic (each camera handled independently):
+      * Both forward AND reverse missing -> NaN.
+      * Exactly one source has labels -> use that source's full
+        21-joint landmark set for that camera, that frame.
+      * Both sources have labels -> consider every (OS_source,
+        OD_source) combination where the thumb tip + index tip are
+        present on both cameras and the triangulated 3D pair is
+        finite.  Choose the combination that minimises the
+        triangulated thumb-index distance.  Forward + reverse
+        often disagree only on the harder of the two cameras --
+        the wrong pass typically yields a noticeably larger 3D
+        distance, so min-distance selects the agreeing pair.
+
+    When no calibration is available the tie-break is on the 2D OS
+    pixel thumb-index distance instead (still useful at picking the
+    less-divergent pair when both sources see the tips).  When even
+    that's tied, falls back to forward.
+
+    Per camera the chosen source's full 21-joint landmark set is
+    copied -- not just the tip joints used in the tie-break -- so
+    Combined behaves like a coherent source layer.
+
+    Writes ``<dlc>/<subject>/<trial>/mediapipe_combined.npz`` and
+    returns its path on success; returns None if neither forward
+    nor reverse exists for the trial, or if file I/O fails.
+    """
+    settings = get_settings()
+    trial_dir = settings.dlc_path / subject_name / trial_stem
+    fwd_path = trial_dir / "mediapipe.npz"
+    rev_path = trial_dir / "mediapipe_reverse.npz"
+    if not fwd_path.exists() and not rev_path.exists():
+        return None
+    fwd = np.load(str(fwd_path)) if fwd_path.exists() else None
+    rev = np.load(str(rev_path)) if rev_path.exists() else None
+    # Pick whichever source we have to size the output arrays.
+    src = fwd if fwd is not None else rev
+    n = int(src["total_frames"]) if "total_frames" in src.files \
+        else int(src["OS_landmarks"].shape[0])
+    start_frame = int(src["start_frame"]) if "start_frame" in src.files else 0
+
+    OS_combined = np.full((n, N_JOINTS, 2), np.nan)
+    OD_combined = np.full((n, N_JOINTS, 2), np.nan)
+    conf_OS = np.full(n, np.nan)
+    conf_OD = np.full(n, np.nan)
+    # Per-frame source-choice trace.  0 = none, 1 = forward, 2 =
+    # reverse.  Used for diagnostics + future UI; consumers that
+    # don't care can ignore.
+    src_OS = np.zeros(n, dtype=np.uint8)
+    src_OD = np.zeros(n, dtype=np.uint8)
+
+    def _get(arr_npz, key):
+        if arr_npz is None:
+            return None
+        if key not in arr_npz.files:
+            return None
+        return arr_npz[key]
+    fwd_OS = _get(fwd, "OS_landmarks"); fwd_OD = _get(fwd, "OD_landmarks")
+    rev_OS = _get(rev, "OS_landmarks"); rev_OD = _get(rev, "OD_landmarks")
+    fwd_cOS = _get(fwd, "confidence_OS"); fwd_cOD = _get(fwd, "confidence_OD")
+    rev_cOS = _get(rev, "confidence_OS"); rev_cOD = _get(rev, "confidence_OD")
+
+    try:
+        calib = get_calibration_for_subject(subject_name)
+    except Exception:
+        calib = None
+
+    THUMB = THUMB_TIP
+    INDEX = INDEX_TIP
+
+    def _has_tips(arr, frame):
+        """Both thumb tip + index tip non-NaN on this frame?"""
+        if arr is None or frame >= arr.shape[0]:
+            return False
+        return (not np.isnan(arr[frame, THUMB, 0])
+                and not np.isnan(arr[frame, INDEX, 0]))
+
+    def _has_any(arr, frame):
+        """Any joint non-NaN on this frame? Used when tips themselves
+        are missing -- we'd rather copy a partial labelling than
+        leave the camera entirely blank."""
+        if arr is None or frame >= arr.shape[0]:
+            return False
+        return bool(np.any(~np.isnan(arr[frame, :, 0])))
+
+    def _dist_3d(os_pair, od_pair):
+        """Triangulate thumb + index from (OS_thumb, OS_index) and
+        (OD_thumb, OD_index), return 3D Euclidean distance or NaN."""
+        if calib is None:
+            return np.nan
+        try:
+            pts3d = triangulate_points(
+                np.array(os_pair, dtype=np.float64),
+                np.array(od_pair, dtype=np.float64),
+                calib,
+            )
+        except Exception:
+            return np.nan
+        if pts3d is None or np.any(np.isnan(pts3d)):
+            return np.nan
+        return float(np.linalg.norm(pts3d[0] - pts3d[1]))
+
+    def _dist_2d_OS(os_pair):
+        """Fallback when no calibration: pixel-space OS thumb-index
+        distance.  Picks the less-divergent pair when calibration
+        isn't available."""
+        return float(np.linalg.norm(np.asarray(os_pair[0]) - np.asarray(os_pair[1])))
+
+    for f in range(n):
+        os_fwd_full = (fwd_OS is not None and _has_any(fwd_OS, f))
+        os_rev_full = (rev_OS is not None and _has_any(rev_OS, f))
+        od_fwd_full = (fwd_OD is not None and _has_any(fwd_OD, f))
+        od_rev_full = (rev_OD is not None and _has_any(rev_OD, f))
+
+        # Source candidates for tip-based selection (need both tips).
+        os_fwd_tips = (fwd_OS is not None and _has_tips(fwd_OS, f))
+        os_rev_tips = (rev_OS is not None and _has_tips(rev_OS, f))
+        od_fwd_tips = (fwd_OD is not None and _has_tips(fwd_OD, f))
+        od_rev_tips = (rev_OD is not None and _has_tips(rev_OD, f))
+
+        os_candidates = []   # list of (src_code, OS_thumb, OS_index)
+        if os_fwd_tips:
+            os_candidates.append((1, fwd_OS[f, THUMB], fwd_OS[f, INDEX]))
+        if os_rev_tips:
+            os_candidates.append((2, rev_OS[f, THUMB], rev_OS[f, INDEX]))
+        od_candidates = []
+        if od_fwd_tips:
+            od_candidates.append((1, fwd_OD[f, THUMB], fwd_OD[f, INDEX]))
+        if od_rev_tips:
+            od_candidates.append((2, rev_OD[f, THUMB], rev_OD[f, INDEX]))
+
+        os_pick = 0  # 0 = none, 1 = forward, 2 = reverse
+        od_pick = 0
+        if os_candidates and od_candidates:
+            best_combo = None
+            best_d = float("inf")
+            for (os_code, ot, oi) in os_candidates:
+                for (od_code, dt, di) in od_candidates:
+                    if calib is not None:
+                        d = _dist_3d([ot, oi], [dt, di])
+                    else:
+                        d = _dist_2d_OS([ot, oi])
+                    if not np.isfinite(d):
+                        continue
+                    if d < best_d:
+                        best_d = d
+                        best_combo = (os_code, od_code)
+            if best_combo is not None:
+                os_pick, od_pick = best_combo
+            else:
+                # All combinations were non-finite (e.g.
+                # triangulation failed across the board); fall back
+                # to whichever single source has the most tip
+                # coverage.  Forward wins ties by convention.
+                os_pick = 1 if os_fwd_tips else (2 if os_rev_tips else 0)
+                od_pick = 1 if od_fwd_tips else (2 if od_rev_tips else 0)
+        elif os_candidates:
+            os_pick = os_candidates[0][0]
+        elif od_candidates:
+            od_pick = od_candidates[0][0]
+
+        # When no tip-based pick succeeded for a given camera but the
+        # camera has SOMETHING non-NaN in one of the passes, still
+        # copy that source's landmarks rather than dropping the
+        # whole camera-frame.  Mirrors the per-camera "use whichever
+        # is available" rule for non-tip joints.
+        if os_pick == 0:
+            if os_fwd_full:   os_pick = 1
+            elif os_rev_full: os_pick = 2
+        if od_pick == 0:
+            if od_fwd_full:   od_pick = 1
+            elif od_rev_full: od_pick = 2
+
+        # Copy the chosen source's full 21-joint set for each camera.
+        if os_pick == 1:
+            OS_combined[f] = fwd_OS[f]
+            if fwd_cOS is not None and f < fwd_cOS.shape[0]:
+                conf_OS[f] = fwd_cOS[f]
+        elif os_pick == 2:
+            OS_combined[f] = rev_OS[f]
+            if rev_cOS is not None and f < rev_cOS.shape[0]:
+                conf_OS[f] = rev_cOS[f]
+        if od_pick == 1:
+            OD_combined[f] = fwd_OD[f]
+            if fwd_cOD is not None and f < fwd_cOD.shape[0]:
+                conf_OD[f] = fwd_cOD[f]
+        elif od_pick == 2:
+            OD_combined[f] = rev_OD[f]
+            if rev_cOD is not None and f < rev_cOD.shape[0]:
+                conf_OD[f] = rev_cOD[f]
+        src_OS[f] = os_pick
+        src_OD[f] = od_pick
+
+    out_path = trial_dir / "mediapipe_combined.npz"
+    try:
+        np.savez(
+            str(out_path),
+            OS_landmarks=OS_combined,
+            OD_landmarks=OD_combined,
+            confidence_OS=conf_OS,
+            confidence_OD=conf_OD,
+            distances=np.full(n, np.nan),  # recomputed at load time
+            start_frame=start_frame,
+            total_frames=n,
+            source_OS=src_OS,
+            source_OD=src_OD,
+        )
+    except OSError as e:
+        logger.warning(f"Failed to write {out_path}: {e}")
+        return None
+    n_os_fwd = int(np.sum(src_OS == 1))
+    n_os_rev = int(np.sum(src_OS == 2))
+    n_od_fwd = int(np.sum(src_OD == 1))
+    n_od_rev = int(np.sum(src_OD == 2))
+    logger.info(
+        f"Combined MP for {subject_name}/{trial_stem}: "
+        f"OS fwd={n_os_fwd} rev={n_os_rev} | OD fwd={n_od_fwd} rev={n_od_rev}"
+    )
+    return str(out_path)
+
+
+def maybe_rebuild_combined_for_subject(subject_name: str) -> int:
+    """Walk a subject's per-trial dirs and rebuild
+    ``mediapipe_combined.npz`` for every trial where BOTH
+    ``mediapipe.npz`` and ``mediapipe_reverse.npz`` exist.  Returns
+    the number of combined files (re)written.  Safe to call anytime;
+    skipping a trial is a no-op."""
+    settings = get_settings()
+    subj_dir = settings.dlc_path / subject_name
+    if not subj_dir.is_dir():
+        return 0
+    n_built = 0
+    for trial_dir in subj_dir.iterdir():
+        if not trial_dir.is_dir():
+            continue
+        if (trial_dir / "mediapipe.npz").exists() \
+                and (trial_dir / "mediapipe_reverse.npz").exists():
+            try:
+                if build_combined_mp_npz_for_trial(subject_name, trial_dir.name):
+                    n_built += 1
+            except Exception as e:
+                logger.warning(
+                    f"Combined rebuild failed for "
+                    f"{subject_name}/{trial_dir.name}: {e}")
+    return n_built
+
+
+def load_mediapipe_combined_prelabels(subject_name: str) -> dict | None:
+    """Load the per-trial combined MediaPipe prelabels for a subject.
+
+    The combined layer is a per-(frame, camera) fusion of the
+    forward + reverse passes -- see ``build_combined_mp_npz_for_trial``
+    for the selection logic.  Loaded just like the other passes
+    so the Labels page can show it as its own source layer.
+    """
+    return load_mediapipe_prelabels(
+        subject_name,
+        filename="mediapipe_combined.npz",  # not a real legacy file;
+                                              # per_trial_map below maps
+                                              # it to the per-trial name.
+    )
 
 
 def load_mediapipe_reverse_prelabels(subject_name: str) -> dict | None:

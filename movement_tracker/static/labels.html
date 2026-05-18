@@ -177,6 +177,22 @@
                 <input type="checkbox" id="showReverse3D" style="margin:0;justify-self:center;">
                 <span></span>
 
+                <!-- 1a'. Combined — per-(frame, camera) fusion of forward
+                     + reverse MediaPipe.  When both passes have valid
+                     thumb + index tips for a frame, picks the source
+                     pair that minimises the triangulated thumb-index
+                     distance; falls through to "use whichever has
+                     labels" when only one pass detected.  Saved to
+                     <trial>/mediapipe_combined.npz and rebuilt
+                     automatically whenever forward or reverse changes. -->
+                <span style="color:var(--text-muted);padding-left:18px;"
+                      title="Forward + Reverse fusion (min-distance tie-break per camera-frame)">
+                    <span class="layer-swatch" style="background:#ffa726;"></span> Combined
+                </span>
+                <input type="checkbox" id="showCombined2D" style="margin:0;justify-self:center;">
+                <input type="checkbox" id="showCombined3D" style="margin:0;justify-self:center;">
+                <span></span>
+
                 <!-- 1b. Stereo — partner-camera MP label translated by
                      image-content phase-correlation.  2D only. -->
                 <span style="color:var(--text-muted);padding-left:18px;"><span class="layer-swatch" style="background:#e91e63;"></span> Stereo</span>
@@ -1146,7 +1162,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=370" type="module"></script>
+    <script src="/static/js/labels.js?v=371" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {
