@@ -1060,6 +1060,7 @@ def remote_preprocess_batch(
     log_path: str,
     registry,
     force: bool = False,
+    reverse: bool = False,
 ):
     """Batch remote preprocessing: upload videos, run MP/blur, download results.
 
@@ -1392,6 +1393,8 @@ def remote_preprocess_batch(
                         f"'--overrides-file', r'{remote_overrides_file}'")
                 if force:
                     launch_args_parts.append("'--force'")
+                if reverse:
+                    launch_args_parts.append("'--reverse'")
                 launch_args_str = ", ".join(launch_args_parts)
                 # Popen stdout/stderr handles C-level AND Python-level output.
                 # Do NOT also pass --log-file (two handles to the same file
@@ -1453,9 +1456,19 @@ def remote_preprocess_batch(
                 ssh_fail_count = 0
                 max_ssh_failures = 30
                 poll_interval = 10
-                # Per-subject "MP done" log line: "Saved <path>/<subj>/mediapipe_prelabels.npz: ..."
+                # Per-subject "MP done" markers.  Two patterns supported:
+                #   * NEW (per-trial output):  "MP_SUBJECT_DONE <subj>"
+                #     emitted once when every trial for the subject has
+                #     been written.
+                #   * LEGACY (combined npz):   "Saved <path>/<subj>/
+                #     mediapipe_prelabels.npz: ..." (older remote
+                #     installs that still write a combined file).
+                # Either pattern triggers the same per-subject SCP pull.
                 import re as _re
-                _mp_done_re = _re.compile(r"Saved\s+\S*?/(\S+?)/mediapipe_prelabels\.npz:")
+                _mp_done_re = _re.compile(
+                    r"(?:MP_SUBJECT_DONE\s+(\S+))"
+                    r"|(?:Saved\s+\S*?/(\S+?)/mediapipe_prelabels\.npz:)"
+                )
                 downloaded_subjects: set[str] = set()
 
                 _dl_lock = threading.Lock()
@@ -1526,7 +1539,11 @@ def remote_preprocess_batch(
                         # those results immediately, instead of waiting for
                         # the batch's Phase-5 download at the end.
                         for m in _mp_done_re.finditer(new_log):
-                            subj_done = m.group(1).strip()
+                            # Group 1 = new MP_SUBJECT_DONE pattern;
+                            # group 2 = legacy combined-npz pattern.
+                            # Either present means the subject's MP
+                            # outputs are stable on disk.
+                            subj_done = (m.group(1) or m.group(2) or "").strip()
                             if subj_done:
                                 _try_running_download(subj_done)
 

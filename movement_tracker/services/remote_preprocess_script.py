@@ -213,7 +213,8 @@ def _pick_tapping_track(tracks, video_name=""):
     return chosen
 
 
-def run_mp_subject(subject_name: str, videos: list[str], output_dir: str):
+def run_mp_subject(subject_name: str, videos: list[str], output_dir: str,
+                    reverse: bool = False):
     """Run MediaPipe on all stereo videos for a subject, save landmarks npz.
 
     Tracks up to two hands per camera using wrist proximity, then
@@ -290,9 +291,21 @@ def run_mp_subject(subject_name: str, videos: list[str], output_dir: str):
         prev_os = [None, None]
         prev_od = [None, None]
 
-        for local_frame in range(n_frames):
+        # Reverse-pass iterates frames in descending temporal order so
+        # the MP tracker enters cold-start frames already locked on
+        # from a later well-labeled frame -- mirrors the local
+        # ``run_mediapipe`` reverse path.  Frame iteration uses
+        # explicit seeks per frame in that mode since cv2 only
+        # supports forward sequential reads natively.
+        frame_indices = (range(n_frames - 1, -1, -1) if reverse
+                          else range(n_frames))
+        for local_frame in frame_indices:
+            if reverse:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, local_frame)
             ret, frame = cap.read()
             if not ret:
+                if reverse:
+                    continue
                 break
 
             frame = np.ascontiguousarray(frame, dtype=np.uint8)
@@ -332,26 +345,87 @@ def run_mp_subject(subject_name: str, videos: list[str], output_dir: str):
                 confidence_OS[global_frame] = os_conf[local_frame, os_idx]
                 confidence_OD[global_frame] = od_conf[local_frame, od_idx]
 
-    # Save npz (distances left as NaN — computed locally with calibration)
+    # Per-trial output: write ``<output>/<subject>/<trial_stem>/
+    # mediapipe.npz`` (or ``mediapipe_reverse.npz`` for the reverse
+    # pass) plus a matching ``.params.json`` sidecar.  Same layout
+    # the LOCAL ``run_mediapipe`` writes -- the post-download path
+    # picks the per-trial files up directly via ``output_specs``
+    # without needing the combined-npz splitter.
+    import json as _json
+    from datetime import datetime as _dt
     out_dir = Path(output_dir) / subject_name
     out_dir.mkdir(parents=True, exist_ok=True)
-    npz_path = str(out_dir / "mediapipe_prelabels.npz")
+    per_trial_filename = ("mediapipe_reverse.npz" if reverse
+                           else "mediapipe.npz")
+    sidecar_filename = ("mediapipe_reverse.params.json" if reverse
+                         else "mediapipe.params.json")
+    distances_full = np.full(total_frames, np.nan)
+    total_valid_os = 0
+    total_valid_od = 0
+    for trial in trials:
+        # ``trial["path"]`` is the source video for THIS trial.
+        # Map filename → trial stem (matching the convention the
+        # local code uses for per-trial directories: <subject>_<L1>
+        # style or whatever the renamed mp4 stem is).
+        sf = int(trial["start"])
+        n_t = int(trial["n_frames"])
+        ef = sf + n_t - 1
+        if n_t <= 0 or sf > total_frames - 1:
+            continue
+        ef = min(ef, total_frames - 1)
+        stem = Path(trial["path"]).stem
+        trial_dir = out_dir / stem
+        trial_dir.mkdir(parents=True, exist_ok=True)
+        npz_path = trial_dir / per_trial_filename
+        _slice = slice(sf, ef + 1)
+        np.savez(
+            str(npz_path),
+            OS_landmarks=OS_landmarks[_slice],
+            OD_landmarks=OD_landmarks[_slice],
+            confidence_OS=confidence_OS[_slice],
+            confidence_OD=confidence_OD[_slice],
+            distances=distances_full[_slice],
+            start_frame=sf,
+            total_frames=n_t,
+        )
+        # Sidecar capturing the params used to produce this output.
+        # ``use_bbox`` is fixed False on remote until bbox upload
+        # lands (item 6 in the punch list); ``static_image_mode``
+        # is False because the remote loop doesn't expose it.
+        params = {
+            "job_type": "mediapipe",
+            "reverse": bool(reverse),
+            "static_image_mode": False,
+            "use_bbox": False,
+            "trial_idx": trials.index(trial),
+            "trial_name": stem,
+            "ran_at": _dt.utcnow().isoformat(timespec="seconds") + "Z",
+            "produced_on": "remote",
+        }
+        try:
+            with open(trial_dir / sidecar_filename, "w") as _f:
+                _json.dump(params, _f, indent=2)
+        except OSError as _e:
+            logger.warning(f"Failed to write {trial_dir/sidecar_filename}: {_e}")
+        v_os = int(np.sum(~np.isnan(OS_landmarks[_slice, 0, 0])))
+        v_od = int(np.sum(~np.isnan(OD_landmarks[_slice, 0, 0])))
+        total_valid_os += v_os
+        total_valid_od += v_od
+        logger.info(
+            f"Saved {npz_path}: OS={v_os}/{n_t}, OD={v_od}/{n_t}"
+        )
 
-    np.savez(
-        npz_path,
-        OS_landmarks=OS_landmarks,
-        OD_landmarks=OD_landmarks,
-        confidence_OS=confidence_OS,
-        confidence_OD=confidence_OD,
-        distances=np.full(total_frames, np.nan),
-        total_frames=total_frames,
-    )
-
-    valid_OS = np.sum(~np.isnan(OS_landmarks[:, 0, 0]))
-    valid_OD = np.sum(~np.isnan(OD_landmarks[:, 0, 0]))
     logger.info(
-        f"Saved {npz_path}: OS={valid_OS}/{total_frames}, OD={valid_OD}/{total_frames}"
+        f"{subject_name}: {len(trials)} trial file(s), "
+        f"OS={total_valid_os}/{total_frames}, OD={total_valid_od}/{total_frames}, "
+        f"reverse={reverse}"
     )
+    # Distinct marker line the local-side running-download monitor
+    # greps for to know all per-trial files for a subject have
+    # landed.  Old combined-output runs emitted "Saved .../<subj>/
+    # mediapipe_prelabels.npz: ..." here; the regex needs a new
+    # subject-level signal now that the script writes per-trial.
+    logger.info(f"MP_SUBJECT_DONE {subject_name}")
     emit_progress(subject_name, 100)
 
 
@@ -362,10 +436,11 @@ def cmd_mp(args):
         logger.error("No subjects found")
         sys.exit(1)
 
-    logger.info(f"Found {len(subjects)} subjects for MediaPipe")
+    logger.info(f"Found {len(subjects)} subjects for MediaPipe (reverse={getattr(args, 'reverse', False)})")
     for name, videos in sorted(subjects.items()):
         logger.info(f"Processing {name} ({len(videos)} videos)")
-        run_mp_subject(name, videos, args.output_dir)
+        run_mp_subject(name, videos, args.output_dir,
+                       reverse=bool(getattr(args, "reverse", False)))
 
     print("MP_COMPLETE", flush=True)
 
@@ -1000,7 +1075,8 @@ def cmd_pipeline(args):
                 _write_status(status_file, "mp", "running", subj_pct_start,
                               current_subject=name)
                 try:
-                    run_mp_subject(name, videos, args.output_dir)
+                    run_mp_subject(name, videos, args.output_dir,
+                                   reverse=bool(getattr(args, "reverse", False)))
                 except Exception as e:
                     logger.error(f"MediaPipe failed for {name}: {e}\n{traceback.format_exc()}")
                     failed_subjects.append(("mp", name, str(e)))
@@ -1071,6 +1147,9 @@ def main():
     mp_p.add_argument("video_dir", help="Directory containing subject videos")
     mp_p.add_argument("output_dir", help="Output directory for results")
     mp_p.add_argument("--subjects", nargs="*", help="Process only these subjects")
+    mp_p.add_argument("--reverse", action="store_true",
+                       help="Feed frames in reverse temporal order; saves "
+                            "to mediapipe_reverse.npz per trial")
 
     blur_p = sub.add_parser("blur", help="Run face de-identification")
     blur_p.add_argument("video_dir", help="Directory containing subject videos")
@@ -1094,6 +1173,8 @@ def main():
                         help="Path to face_blur_overrides.json")
     pipe_p.add_argument("--log-file", default=None,
                         help="Redirect stdout/stderr to this file")
+    pipe_p.add_argument("--reverse", action="store_true",
+                         help="Reverse-pass MediaPipe (see ``mp --reverse``)")
     pipe_p.add_argument("--force", action="store_true",
                         help="Re-run even if outputs already exist on remote")
 
