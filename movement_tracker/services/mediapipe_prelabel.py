@@ -447,22 +447,16 @@ def run_mediapipe(subject_name: str, progress_callback=None,
     # trial's file; the others stay as-is.
     dlc_path = settings.dlc_path / subject_name
     dlc_path.mkdir(parents=True, exist_ok=True)
-    # Per-trial output filename routes by pass:
-    #   reverse=True             → mediapipe_reverse.npz
-    #   static_image_mode=True   → mediapipe_static.npz
-    #   otherwise (forward)      → mediapipe.npz
-    # Static mode runs MediaPipe's per-frame palm detector (no
-    # between-frame tracker), so it's a genuinely different signal
-    # the user should be able to compare side-by-side against the
-    # forward / reverse passes -- own layer on the Labels page, own
-    # file on disk.  Reverse takes precedence when both flags are
-    # set (matches the previous behaviour).
-    if reverse:
-        per_trial_filename = "mediapipe_reverse.npz"
-    elif static_image_mode:
-        per_trial_filename = "mediapipe_static.npz"
-    else:
-        per_trial_filename = "mediapipe.npz"
+    # Per-trial output filename routes by pass.  Reverse and Static
+    # always write to their own files regardless of bbox.  Forward
+    # splits into two files: the bbox-free baseline (mediapipe.npz)
+    # and the bbox-cropped variant (mediapipe_cropped.npz) so the
+    # Labels page can compare them side-by-side -- since the user
+    # observed that bbox choice helps some frames and hurts others,
+    # keeping both is more useful than overwriting one with the other.
+    # Per-trial routing for Forward is decided in the loop below,
+    # because crop_boxes may have an entry for some trials and not
+    # others.
     # Reconstruct the FULL trial list (the run_mediapipe loop above
     # may have filtered to a single trial); we need the start/end for
     # every trial to slice the subject-wide arrays correctly.
@@ -481,6 +475,22 @@ def run_mediapipe(subject_name: str, progress_callback=None,
         _stem = _trial["trial_name"]
         _trial_dir = dlc_path / _stem
         _trial_dir.mkdir(parents=True, exist_ok=True)
+        # Per-trial output filename:
+        #   reverse=True                            → mediapipe_reverse.npz
+        #   static_image_mode=True                  → mediapipe_static.npz
+        #   forward + a crop actually applied here  → mediapipe_cropped.npz
+        #   forward, no crop on this trial          → mediapipe.npz
+        _trial_crop_lookup = (crop_boxes or {}).get(ti) or {}
+        _used_bbox_here = bool(use_bbox and (
+            _trial_crop_lookup.get("OS") or _trial_crop_lookup.get("OD")))
+        if reverse:
+            per_trial_filename = "mediapipe_reverse.npz"
+        elif static_image_mode:
+            per_trial_filename = "mediapipe_static.npz"
+        elif _used_bbox_here:
+            per_trial_filename = "mediapipe_cropped.npz"
+        else:
+            per_trial_filename = "mediapipe.npz"
         _trial_path = _trial_dir / per_trial_filename
         _slice = slice(_sf, _ef + 1)
         _n_trial = _ef - _sf + 1
@@ -518,11 +528,10 @@ def run_mediapipe(subject_name: str, progress_callback=None,
         # Persist the actual bbox the run consumed (if any) so the
         # Labels page can restore the exact crop next session, even
         # if mp_crop_boxes was edited since.
-        _trial_crop = (crop_boxes or {}).get(ti) or {}
-        if _trial_crop.get("OS"):
-            _params["bbox_os"] = [float(v) for v in _trial_crop["OS"]]
-        if _trial_crop.get("OD"):
-            _params["bbox_od"] = [float(v) for v in _trial_crop["OD"]]
+        if _trial_crop_lookup.get("OS"):
+            _params["bbox_os"] = [float(v) for v in _trial_crop_lookup["OS"]]
+        if _trial_crop_lookup.get("OD"):
+            _params["bbox_od"] = [float(v) for v in _trial_crop_lookup["OD"]]
         _sidecar = _trial_dir / (_trial_path.stem + ".params.json")
         try:
             with open(_sidecar, "w") as _f:
@@ -844,6 +853,7 @@ def load_mediapipe_prelabels(subject_name: str,
         "mediapipe_reverse_prelabels.npz": "mediapipe_reverse.npz",
         "mediapipe_combined.npz":          "mediapipe_combined.npz",
         "mediapipe_static.npz":            "mediapipe_static.npz",
+        "mediapipe_cropped.npz":           "mediapipe_cropped.npz",
     }
     per_trial_filename = per_trial_map.get(filename, "mediapipe.npz")
     per_trial_result = _load_mediapipe_per_trial(subject_name, per_trial_filename)
@@ -1244,6 +1254,20 @@ def load_mediapipe_combined_prelabels(subject_name: str) -> dict | None:
         filename="mediapipe_combined.npz",  # not a real legacy file;
                                               # per_trial_map below maps
                                               # it to the per-trial name.
+    )
+
+
+def load_mediapipe_cropped_prelabels(subject_name: str) -> dict | None:
+    """Load the bbox-cropped forward MediaPipe prelabels for a subject.
+
+    Forward MP runs with a non-empty per-trial bbox crop write to
+    ``<dlc>/<subject>/<trial>/mediapipe_cropped.npz`` instead of
+    ``mediapipe.npz``, so the bbox-free baseline and the cropped
+    variant coexist on disk.  Loaded as its own Labels-page layer.
+    """
+    return load_mediapipe_prelabels(
+        subject_name,
+        filename="mediapipe_cropped.npz",
     )
 
 

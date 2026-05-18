@@ -166,6 +166,19 @@
                 <input type="checkbox" id="showMP3D" style="margin:0;justify-self:center;">
                 <span></span>
 
+                <!-- 1a-. Cropped — forward MediaPipe but with a per-trial
+                     bbox crop applied before detection.  Bbox helps some
+                     frames and hurts others, so this stays a separate
+                     layer rather than overwriting the no-bbox baseline.
+                     Stored to <trial>/mediapipe_cropped.npz. -->
+                <span style="color:var(--text-muted);padding-left:18px;"
+                      title="Forward MediaPipe with a per-trial bbox crop applied. Saved to <trial>/mediapipe_cropped.npz.">
+                    <span class="layer-swatch" style="background:#7cb342;"></span> Cropped
+                </span>
+                <input type="checkbox" id="showCropped2D" style="margin:0;justify-self:center;">
+                <input type="checkbox" id="showCropped3D" style="margin:0;justify-self:center;">
+                <span></span>
+
                 <!-- 1a. Reverse — MediaPipe re-run with frames fed in
                      reverse temporal order so the tracker enters
                      cold-start frames already locked on.  Loaded from
@@ -1176,7 +1189,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=373" type="module"></script>
+    <script src="/static/js/labels.js?v=374" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

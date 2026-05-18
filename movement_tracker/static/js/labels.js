@@ -37,11 +37,14 @@ const manoViewer = (() => {
     // can compare forward vs reverse runs frame-by-frame.
     let showReverse2D = false;
     let showReverse3D = false;
+    let showCropped2D = false;
+    let showCropped3D = false;
     let showStatic2D = false;
     let showStatic3D = false;
     let showCombined2D = false;
     let showCombined3D = false;
     let showReverseSkel = true;
+    let showCroppedSkel = true;
     let showStaticSkel = true;
     let showCombinedSkel = true;
     // Stereo (cross-camera image-alignment) overlay.  Only 2D —
@@ -586,7 +589,7 @@ const manoViewer = (() => {
 
     // Three.js
     let scene, camera3d, renderer;
-    let manoGroup, skelV2Group, legacyGroup, mpGroup, reverseGroup, staticGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup;
+    let manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup;
     let camera3dInit = false;
 
     // Scene-space orbit: rotate content around hand center while camera stays fixed
@@ -1553,6 +1556,7 @@ const manoViewer = (() => {
         }
         $('showMP2D').addEventListener('change', e => { showMP2D = e.target.checked; updateLayerFlags(); });
         $('showReverse2D').addEventListener('change', e => { showReverse2D = e.target.checked; updateLayerFlags(); });
+        $('showCropped2D')?.addEventListener('change', e => { showCropped2D = e.target.checked; updateLayerFlags(); });
         $('showStatic2D')?.addEventListener('change', e => { showStatic2D = e.target.checked; updateLayerFlags(); });
         $('showCombined2D')?.addEventListener('change', e => { showCombined2D = e.target.checked; updateLayerFlags(); });
         // Helper: clear the selected-joint marker if none of the three
@@ -1741,6 +1745,7 @@ const manoViewer = (() => {
         });
         $('showMP3D').addEventListener('change', e => { showMP3D = e.target.checked; updateLayerFlags(); });
         $('showReverse3D').addEventListener('change', e => { showReverse3D = e.target.checked; updateLayerFlags(); });
+        $('showCropped3D')?.addEventListener('change', e => { showCropped3D = e.target.checked; updateLayerFlags(); });
         $('showStatic3D')?.addEventListener('change', e => { showStatic3D = e.target.checked; updateLayerFlags(); });
         $('showCombined3D')?.addEventListener('change', e => { showCombined3D = e.target.checked; updateLayerFlags(); });
         $('showMano2D').addEventListener('change', e => { showMano2D = e.target.checked; updateLayerFlags(); _updateHandDiagramColor(); });
@@ -3824,6 +3829,10 @@ const manoViewer = (() => {
         const reverseKp = isLeft
             ? trialData.reverse_tracked_L
             : trialData.reverse_tracked_R;
+        // Cropped-forward MediaPipe layer (forward with bbox crop).
+        const croppedKp = isLeft
+            ? trialData.cropped_tracked_L
+            : trialData.cropped_tracked_R;
         // Static-mode MediaPipe layer (no temporal tracker).
         const staticKp = isLeft
             ? trialData.static_tracked_L
@@ -3915,6 +3924,17 @@ const manoViewer = (() => {
                         reverseKp[fn][j][0] * pixelScale,
                         reverseKp[fn][j][1] * pixelScale,
                         '#e040fb', 1.5, 0.5
+                    );
+                }
+                // Cropped (green) — forward MP with bbox crop applied.
+                if (showCroppedSkel && showCropped2D
+                    && croppedKp?.[fn]?.[i] && croppedKp[fn][j]) {
+                    drawLine(
+                        croppedKp[fn][i][0] * pixelScale,
+                        croppedKp[fn][i][1] * pixelScale,
+                        croppedKp[fn][j][0] * pixelScale,
+                        croppedKp[fn][j][1] * pixelScale,
+                        '#7cb342', 1.5, 0.5
                     );
                 }
                 // Static (cyan) — per-frame palm detector, no tracker.
@@ -4093,6 +4113,16 @@ const manoViewer = (() => {
                 const x = reverseKp[fn][j][0] * pixelScale;
                 const y = reverseKp[fn][j][1] * pixelScale;
                 drawCross(x, y, '#e040fb', 4);
+            }
+        }
+
+        // Cropped-forward joint markers (green).
+        if (showCropped2D && croppedKp && croppedKp[fn]) {
+            for (let j = 0; j < 21; j++) {
+                if (!isJointVisible(j) || !croppedKp[fn][j]) continue;
+                const x = croppedKp[fn][j][0] * pixelScale;
+                const y = croppedKp[fn][j][1] * pixelScale;
+                drawCross(x, y, '#7cb342', 4);
             }
         }
 
@@ -5129,6 +5159,7 @@ const manoViewer = (() => {
             const v2d  = _getMetricData('skel_v2', metric);
             const legacyd = _getMetricData('skel_legacy', metric);
             const mp   = _getMetricData('mp',   metric);
+            const crp  = _getMetricData('cropped', metric);
             const rev  = _getMetricData('reverse', metric);
             const stt  = _getMetricData('static', metric);
             const cmb  = _getMetricData('combined', metric);
@@ -5146,6 +5177,7 @@ const manoViewer = (() => {
             if (showSkelV2_2D || showSkelV2_3D) chk(v2d, isAng);
             if (showLegacyV2_2D || showLegacyV2_3D) chk(legacyd, isAng);
             if (showMP2D || showMP3D) chk(mp, isAng);
+            if (showCropped2D || showCropped3D) chk(crp, isAng);
             if (showReverse2D || showReverse3D) chk(rev, isAng);
             if (showStatic2D || showStatic3D) chk(stt, isAng);
             if (showCombined2D || showCombined3D) chk(cmb, isAng);
@@ -5319,7 +5351,8 @@ const manoViewer = (() => {
         // Source colors used for Thumb-Index Aperture (always) and single-metric mode
         const SOURCE_COLORS = {
             skeleton: 'lime', skel_v2: '#ff9800', skel_legacy: '#e040fb',
-            mp: '#00cccc', reverse: '#e040fb', static: '#26c6da', combined: '#ffa726',
+            mp: '#00cccc', cropped: '#7cb342', reverse: '#e040fb',
+            static: '#26c6da', combined: '#ffa726',
             vision: '#2196f3', dlc: '#ff4444',
             prev: '#b35b00', heatmap: '#ff6600',
             hrnet_centroid:  '#ff9966',
@@ -5368,6 +5401,7 @@ const manoViewer = (() => {
             // bad for most of the trial, reverse MP good for nearly
             // all of it) hid the majority of valid reverse distances.
             const revMask  = _makeInFrameMask(trialData.reverse_tracked_L, trialData.reverse_tracked_R, joints);
+            const crpMask  = _makeInFrameMask(trialData.cropped_tracked_L, trialData.cropped_tracked_R, joints);
             const sttMask  = _makeInFrameMask(trialData.static_tracked_L, trialData.static_tracked_R, joints);
             const cmbMask  = _makeInFrameMask(trialData.combined_tracked_L, trialData.combined_tracked_R, joints);
             const manoMask = _makeInFrameMask(trialData.skeleton_proj_L,      trialData.skeleton_proj_R,      joints);
@@ -5377,6 +5411,7 @@ const manoViewer = (() => {
             const rawV2      = _getMetricData('skel_v2',     metric);
             const rawLegacy  = _getMetricData('skel_legacy', metric);
             const rawMp      = _getMetricData('mp',          metric);
+            const rawCropped  = _getMetricData('cropped',   metric);
             const rawReverse = _getMetricData('reverse',     metric);
             const rawStatic   = _getMetricData('static',    metric);
             const rawCombined = _getMetricData('combined',  metric);
@@ -5400,6 +5435,7 @@ const manoViewer = (() => {
             // when no stage is active).
             if (showLegacyV2_2D || showLegacyV2_3D)   drawSeries(rawLegacy,                       useSourceColor ? SOURCE_COLORS.skel_legacy : metricColor, 'skel_legacy', toY, abdDash);
             if (showMP2D || showMP3D)                 drawSeries(_applyMask(rawMp,    mpMask),   useSourceColor ? SOURCE_COLORS.mp          : metricColor, 'mp',          toY, abdDash);
+            if (showCropped2D || showCropped3D)       drawSeries(_applyMask(rawCropped, crpMask),  useSourceColor ? SOURCE_COLORS.cropped   : metricColor, 'cropped',     toY, abdDash);
             if (showReverse2D || showReverse3D)       drawSeries(_applyMask(rawReverse, revMask), useSourceColor ? SOURCE_COLORS.reverse     : metricColor, 'reverse',     toY, abdDash);
             if (showStatic2D || showStatic3D)         drawSeries(_applyMask(rawStatic, sttMask),   useSourceColor ? SOURCE_COLORS.static    : metricColor, 'static',      toY, abdDash);
             if (showCombined2D || showCombined3D)     drawSeries(_applyMask(rawCombined, cmbMask), useSourceColor ? SOURCE_COLORS.combined  : metricColor, 'combined',    toY, abdDash);
@@ -5945,6 +5981,7 @@ const manoViewer = (() => {
         skelV2Group = new THREE.Group();
         legacyGroup = new THREE.Group();
         mpGroup = new THREE.Group();
+        croppedGroup = new THREE.Group();
         reverseGroup = new THREE.Group();
         staticGroup = new THREE.Group();
         combinedGroup = new THREE.Group();
@@ -5953,7 +5990,7 @@ const manoViewer = (() => {
         poseGroup = new THREE.Group();
         heatmapGroup = new THREE.Group();
         angleArcGroup = new THREE.Group();
-        scene.add(manoGroup, skelV2Group, legacyGroup, mpGroup, reverseGroup, staticGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup);
+        scene.add(manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup);
 
         renderer.render(scene, camera3d);
 
@@ -6258,7 +6295,7 @@ const manoViewer = (() => {
         let arcSrcKey = null;
 
         // Clear groups
-        [manoGroup, skelV2Group, legacyGroup, mpGroup, reverseGroup, staticGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup].forEach(g => {
+        [manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup].forEach(g => {
             while (g.children.length) {
                 const child = g.children[0];
                 g.remove(child);
@@ -6271,6 +6308,7 @@ const manoViewer = (() => {
         const v2_3d = trialData.skel_v2_joints_3d?.[fn];
         const legacy_3d = trialData.skel_legacy_joints_3d?.[fn];
         const mp3d = trialData.mp_joints_3d?.[fn];
+        const cropped3d = trialData.cropped_joints_3d?.[fn];
         const reverse3d = trialData.reverse_joints_3d?.[fn];
         const static3d = trialData.static_joints_3d?.[fn];
         const combined3d = trialData.combined_joints_3d?.[fn];
@@ -6798,6 +6836,30 @@ const manoViewer = (() => {
             }
         }
 
+        // Cropped-forward MediaPipe joints (green) — forward pass
+        // with bbox crop, gated by its own checkbox.
+        if (showCropped3D && cropped3d) {
+            const crpMat = new THREE.MeshPhongMaterial({ color: 0x7cb342, emissive: 0x33691e });
+            const crpBoneMat = new THREE.MeshPhongMaterial({ color: 0x7cb342, emissive: 0x1b5e20 });
+            for (let j = 0; j < 21; j++) {
+                if (!isJointVisible(j) || !cropped3d[j]) continue;
+                const sphere = new THREE.Mesh(sphereGeom, crpMat);
+                sphere.position.copy(orbitPt(getScenePos(cropped3d, j)));
+                croppedGroup.add(sphere);
+            }
+            if (showCroppedSkel && trialData.skeleton) {
+                trialData.skeleton.forEach(([i, j]) => {
+                    if (!isBoneVisible(i, j) || !cropped3d[i] || !cropped3d[j]) return;
+                    const bone = makeBone(
+                        orbitPt(getScenePos(cropped3d, i)),
+                        orbitPt(getScenePos(cropped3d, j)),
+                        1.0, crpBoneMat
+                    );
+                    if (bone) croppedGroup.add(bone);
+                });
+            }
+        }
+
         // Static-mode MediaPipe joints (cyan) — per-frame palm
         // detector, gated by its own checkbox.
         if (showStatic3D && static3d) {
@@ -7177,6 +7239,7 @@ const manoViewer = (() => {
 
         manoGroup.visible = showMano3D;
         mpGroup.visible = showMP3D;
+        croppedGroup.visible = showCropped3D;
         reverseGroup.visible = showReverse3D;
         staticGroup.visible = showStatic3D;
         combinedGroup.visible = showCombined3D;
