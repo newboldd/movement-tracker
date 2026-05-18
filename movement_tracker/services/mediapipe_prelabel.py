@@ -751,6 +751,43 @@ def _load_mediapipe_per_trial(subject_name: str, per_trial_filename: str) -> dic
     }
 
 
+def _attach_fresh_distances(result: dict | None, subject_name: str) -> dict | None:
+    """Always (re)compute the ``distances`` array on the fly from the
+    loaded landmarks + the subject's current calibration.
+
+    Triangulation is cheap (~0.1 ms / frame) and recomputing on read
+    sidesteps three persistent storage hazards:
+      * Remote-produced npz files carry ``distances=NaN`` because the
+        remote script has no access to local calibration.
+      * Re-calibration silently invalidates any stored distances.
+      * Older per-trial layouts may have an empty / placeholder
+        distances slice from partial migrations.
+
+    When no calibration is available, falls back to 2D OS-pixel
+    distance.  When the loaded ``distances`` already has any non-NaN
+    value AND no calibration is found, keeps the stored values rather
+    than overwriting with the 2D fallback -- this preserves a
+    previously-computed 3D set on uncalibrated subjects.
+    """
+    if result is None:
+        return None
+    os_lm = result.get("OS_landmarks")
+    od_lm = result.get("OD_landmarks")
+    if os_lm is None or od_lm is None:
+        return result
+    try:
+        calib = get_calibration_for_subject(subject_name)
+    except Exception:
+        calib = None
+    if calib is not None:
+        result["distances"] = _compute_distances(os_lm, od_lm, calib)
+    else:
+        existing = result.get("distances")
+        if existing is None or not np.any(~np.isnan(existing)):
+            result["distances"] = _compute_2d_distances(os_lm)
+    return result
+
+
 def load_mediapipe_prelabels(subject_name: str,
                               filename: str = "mediapipe_prelabels.npz") -> dict | None:
     """Load saved MediaPipe prelabels for a subject.
@@ -777,7 +814,7 @@ def load_mediapipe_prelabels(subject_name: str,
     per_trial_filename = per_trial_map.get(filename, "mediapipe.npz")
     per_trial_result = _load_mediapipe_per_trial(subject_name, per_trial_filename)
     if per_trial_result is not None:
-        return per_trial_result
+        return _attach_fresh_distances(per_trial_result, subject_name)
 
     # ── Legacy combined-file fallback ──
     settings = get_settings()
@@ -821,7 +858,7 @@ def load_mediapipe_prelabels(subject_name: str,
         for k in data.files if hasattr(data, 'files') else data:
             if k.startswith("distances_run_") or k.startswith("crop_run_"):
                 result[k] = data[k]
-        return result
+        return _attach_fresh_distances(result, subject_name)
     else:
         # Old format: only thumb + index tip stored
         n = int(data["total_frames"])
@@ -842,14 +879,14 @@ def load_mediapipe_prelabels(subject_name: str,
             OD_lm = OD_lm_corrected
             logger.info(f"{subject_name}: Applied frame offset {frame_offset} to MediaPipe data (old format)")
 
-        return {
+        return _attach_fresh_distances({
             "OS_landmarks": OS_lm,
             "OD_landmarks": OD_lm,
             "confidence_OS": data["confidence_OS"],
             "confidence_OD": data["confidence_OD"],
             "distances": data.get("distances"),
             "total_frames": n,
-        }
+        }, subject_name)
 
 
 def build_combined_mp_npz_tempfile(subject_name: str,
