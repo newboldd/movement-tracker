@@ -4199,6 +4199,7 @@ Usage: python remote_deidentify_worker.py bundle.json work_dir output_dir status
 import json
 import os
 import shutil
+import subprocess
 import sys
 import traceback
 import types
