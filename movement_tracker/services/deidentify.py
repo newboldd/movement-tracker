@@ -482,21 +482,14 @@ def deidentify_video(input_path: str, output_path: str,
     _popen_kwargs = {"stdin": subprocess.PIPE,
                       "stdout": subprocess.DEVNULL,
                       "stderr": subprocess.PIPE}
-    if os.name == 'nt':
-        # DETACHED_PROCESS + stdin=PIPE is broken on Windows -- the
-        # "no console" semantics break Python's wiring of the pipe
-        # handle into the child's stdin and the first write fails
-        # with [Errno 22] Invalid argument.  CREATE_NO_WINDOW gives
-        # the same "no console window pops up" UX while keeping the
-        # explicit stdin pipe working.  CREATE_NEW_PROCESS_GROUP +
-        # CREATE_BREAKAWAY_FROM_JOB keep the child alive when the
-        # parent SSH session exits, matching the HRnet detached
-        # launcher pattern.
-        _popen_kwargs["creationflags"] = (
-            getattr(subprocess, "CREATE_NO_WINDOW", 0) |
-            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) |
-            getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
-        )
+    # Intentionally NO creationflags on Windows.  Both DETACHED_PROCESS
+    # and CREATE_NO_WINDOW silently break Python's wiring of the
+    # explicit stdin=PIPE handle into the child, causing the first
+    # write to fail with [Errno 22] Invalid argument.  ffmpeg here is
+    # a GRANDCHILD of the SSH session (owned by the worker process,
+    # which is itself CREATE_BREAKAWAY_FROM_JOB), so it inherits the
+    # SSH-exit-survival behaviour transitively without needing its
+    # own job-breakaway / detach flag.
     # -nostats + -loglevel error: keep stderr small so the 64 KB
     # OS pipe buffer doesn't fill mid-render and deadlock our
     # stdin-frame-write loop.  The finally block reads stderr once
@@ -1184,21 +1177,14 @@ def render_with_blur_specs(input_path: str, output_path: str,
     _popen_kwargs = {"stdin": subprocess.PIPE,
                       "stdout": subprocess.DEVNULL,
                       "stderr": subprocess.PIPE}
-    if os.name == 'nt':
-        # DETACHED_PROCESS + stdin=PIPE is broken on Windows -- the
-        # "no console" semantics break Python's wiring of the pipe
-        # handle into the child's stdin and the first write fails
-        # with [Errno 22] Invalid argument.  CREATE_NO_WINDOW gives
-        # the same "no console window pops up" UX while keeping the
-        # explicit stdin pipe working.  CREATE_NEW_PROCESS_GROUP +
-        # CREATE_BREAKAWAY_FROM_JOB keep the child alive when the
-        # parent SSH session exits, matching the HRnet detached
-        # launcher pattern.
-        _popen_kwargs["creationflags"] = (
-            getattr(subprocess, "CREATE_NO_WINDOW", 0) |
-            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) |
-            getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
-        )
+    # Intentionally NO creationflags on Windows.  Both DETACHED_PROCESS
+    # and CREATE_NO_WINDOW silently break Python's wiring of the
+    # explicit stdin=PIPE handle into the child, causing the first
+    # write to fail with [Errno 22] Invalid argument.  ffmpeg here is
+    # a GRANDCHILD of the SSH session (owned by the worker process,
+    # which is itself CREATE_BREAKAWAY_FROM_JOB), so it inherits the
+    # SSH-exit-survival behaviour transitively without needing its
+    # own job-breakaway / detach flag.
     # -nostats + -loglevel error: keep stderr small so the 64 KB
     # OS pipe buffer doesn't fill mid-render and deadlock our
     # stdin-frame-write loop.  The finally block reads stderr once
@@ -1216,6 +1202,39 @@ def render_with_blur_specs(input_path: str, output_path: str,
         "-movflags", "+faststart",
         output_path,
     ], **_popen_kwargs)
+
+    # Drain ffmpeg's stderr in a background thread so a 64 KB
+    # accumulation can't ever deadlock the stdin-write loop, AND so
+    # the captured text is available immediately on a crash instead
+    # of only after the finally block.  Even with -nostats and
+    # -loglevel error, a single libx264 warning can be enough to
+    # block the writer on a long render.
+    import threading as _thr
+    _stderr_buf: list[bytes] = []
+    def _drain_stderr():
+        try:
+            for line in iter(proc.stderr.readline, b""):
+                _stderr_buf.append(line)
+        except (OSError, ValueError):
+            pass
+    _stderr_thr = _thr.Thread(target=_drain_stderr, daemon=True)
+    _stderr_thr.start()
+
+    # If ffmpeg died before we even started writing (bad output path
+    # permissions, missing codec, etc.) the first stdin.write fails
+    # with [Errno 22] Invalid argument on Windows -- which obscures
+    # the real cause.  Peek at proc.poll() first; if the child has
+    # already exited, surface the stderr we just collected.
+    import time as _time
+    _time.sleep(0.1)  # tiny grace period for ffmpeg startup error
+    if proc.poll() is not None:
+        cap.release()
+        _stderr_thr.join(timeout=0.5)
+        stderr = b"".join(_stderr_buf).decode(errors="replace")
+        raise RuntimeError(
+            f"ffmpeg exited immediately (rc={proc.returncode}). "
+            f"stderr: {stderr[:500]}"
+        )
 
     frames_written = 0
     try:
@@ -1320,8 +1339,10 @@ def render_with_blur_specs(input_path: str, output_path: str,
             proc.stdin.close()
         except Exception:
             pass
-        stderr_bytes = proc.stderr.read() if proc.stderr else b""
         proc.wait(timeout=600)
+        # Background drainer already pulled everything; just join it.
+        _stderr_thr.join(timeout=1.0)
+        stderr_bytes = b"".join(_stderr_buf)
 
     if proc.returncode != 0:
         stderr = stderr_bytes.decode(errors="replace") if stderr_bytes else ""
