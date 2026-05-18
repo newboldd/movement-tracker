@@ -370,7 +370,7 @@ async function loadSubjects() {
 }
 
 // Steps that support per-trial selection
-const TRIAL_STEPS = new Set(['deidentify', 'hrnet', 'preproc']);
+const TRIAL_STEPS = new Set(['deidentify', 'hrnet', 'preproc', 'mediapipe']);
 // Cache: subjectId (number) -> trial array from /api/deidentify/{id}/trials
 const cachedTrialData = {};
 // Cache: subjectId (number) -> trial array from /api/analyze/hrnet/job-status
@@ -458,8 +458,20 @@ function colorSubjectsByStep() {
         // HRnet has no subject-level boolean — derive it from per-trial
         // heatmap output presence.  Kicks off the cache fill if needed
         // (it triggers another colorSubjectsByStep when results land).
-        _ensureHrnetStatusForAllSubjects().then(() => _colorSubjectsHrnet());
-        _colorSubjectsHrnet();
+        _ensureHrnetStatusForAllSubjects().then(() =>
+            _colorSubjectsFromHrnetCache('has_hrnet_output'));
+        _colorSubjectsFromHrnetCache('has_hrnet_output');
+        return;
+    }
+    if (step === 'mediapipe') {
+        // Per-trial MP npz presence — flip between forward / reverse
+        // based on the "Run in reverse" checkbox so the green subject
+        // halo always reflects "all trials have THIS pass's npz".
+        const mpReverse = !!document.getElementById('mpReverseCb')?.checked;
+        const flag = mpReverse ? 'has_mp_reverse_npz' : 'has_mp_npz';
+        _ensureHrnetStatusForAllSubjects().then(() =>
+            _colorSubjectsFromHrnetCache(flag));
+        _colorSubjectsFromHrnetCache(flag);
         return;
     }
     const prop = STEP_DONE_MAP[step];
@@ -472,14 +484,17 @@ function colorSubjectsByStep() {
     });
 }
 
-function _colorSubjectsHrnet() {
+function _colorSubjectsFromHrnetCache(trialFlag) {
+    // ``trialFlag`` is the per-trial boolean key in cachedHrnetStatus
+    // entries to AND across all trials -- e.g. ``has_hrnet_output`` or
+    // ``has_mp_npz`` / ``has_mp_reverse_npz``.
     subjects.forEach(s => {
         const label = document.getElementById('subj-' + s.id);
         if (!label) return;
         const trials = cachedHrnetStatus[s.id];
         let done = false;
         if (Array.isArray(trials) && trials.length > 0) {
-            done = trials.every(t => t.has_hrnet_output);
+            done = trials.every(t => !!t[trialFlag]);
         }
         label.style.borderColor = done ? 'var(--green)' : '';
         label.style.background = done ? 'rgba(76,175,80,0.08)' : '';
@@ -543,8 +558,11 @@ async function updateTrialSection() {
     if (useBboxRow) useBboxRow.style.display = (selectedStep === 'hrnet') ? 'flex' : 'none';
     if (banner && selectedStep !== 'hrnet') banner.style.display = 'none';
 
-    if (selectedStep === 'hrnet') {
-        // Fetch HRnet job-status (saved-bbox / MP-availability / output existence)
+    if (selectedStep === 'hrnet' || selectedStep === 'mediapipe') {
+        // Both steps consume the same /hrnet/job-status payload (which
+        // includes per-trial ``has_hrnet_output`` *and* ``has_mp_npz`` /
+        // ``has_mp_reverse_npz``).  Reuse ``cachedHrnetStatus`` as the
+        // shared cache.
         const idsNeeded = checkedSubjects
             .filter(s => !cachedHrnetStatus[s.id])
             .map(s => s.id);
@@ -597,8 +615,9 @@ function renderTrialGrid(checkedSubjects) {
     let html = '';
     let ineligibleCount = 0;
 
+    const mpReverse = !!document.getElementById('mpReverseCb')?.checked;
     for (const s of checkedSubjects) {
-        const trials = (selectedStep === 'hrnet')
+        const trials = (selectedStep === 'hrnet' || selectedStep === 'mediapipe')
             ? (cachedHrnetStatus[s.id] || [])
             : (cachedTrialData[s.id] || []);
         const prefix = s.name + '_';
@@ -643,6 +662,21 @@ function renderTrialGrid(checkedSubjects) {
                     title = useBbox
                         ? 'No HRnet output yet — default bbox will be derived from MediaPipe labels'
                         : 'No HRnet output yet — will run on full per-camera frame';
+                }
+            } else if (selectedStep === 'mediapipe') {
+                // Green when the per-trial MP npz exists (forward pass by
+                // default, reverse pass when "Run in reverse" is checked).
+                const hasNpz = mpReverse ? t.has_mp_reverse_npz : t.has_mp_npz;
+                if (hasNpz) {
+                    colorClass = 'done';
+                    title = mpReverse
+                        ? 'mediapipe_reverse.npz already exists for this trial'
+                        : 'mediapipe.npz already exists for this trial';
+                } else {
+                    extraStyle = 'border-color:#e53935;background:rgba(229,57,53,0.10);';
+                    title = mpReverse
+                        ? 'No mediapipe_reverse.npz yet — will run reverse pass on this trial'
+                        : 'No mediapipe.npz yet — will run on this trial';
                 }
             } else if (selectedStep === 'preproc') {
                 // No per-trial bake-status flag yet — colour everything
@@ -734,8 +768,16 @@ async function selectIncompleteSubjects() {
     const step = selectedStep;
     if (!step) { alert('Pick a job type first.'); return; }
 
-    if (step === 'hrnet') {
-        // Make sure cachedHrnetStatus is populated for every subject.
+    if (step === 'hrnet' || step === 'mediapipe') {
+        // Both steps consume cachedHrnetStatus.  For MP, the
+        // "incomplete" flag flips between has_mp_npz and
+        // has_mp_reverse_npz based on the Run-in-reverse checkbox so
+        // the user can re-run the missing-pass selection without
+        // changing job type.
+        const trialFlag = step === 'hrnet'
+            ? 'has_hrnet_output'
+            : (document.getElementById('mpReverseCb')?.checked
+                ? 'has_mp_reverse_npz' : 'has_mp_npz');
         await _ensureHrnetStatusForAllSubjects();
         const incompleteIds = new Set();
         subjects.forEach(s => {
@@ -745,7 +787,7 @@ async function selectIncompleteSubjects() {
                 incompleteIds.add(s.id);
                 return;
             }
-            if (trials.some(t => !t.has_hrnet_output)) incompleteIds.add(s.id);
+            if (trials.some(t => !t[trialFlag])) incompleteIds.add(s.id);
         });
         // Toggle subject checkboxes.
         document.querySelectorAll('#subjectGrid input[type=checkbox]').forEach(cb => {
@@ -755,7 +797,7 @@ async function selectIncompleteSubjects() {
             cb.parentElement.classList.toggle('checked', want);
         });
         // After the trial grid renders, uncheck per-trial boxes whose
-        // heatmap already exists.  updateTrialSection is async — wait
+        // output already exists.  updateTrialSection is async — wait
         // for it before mutating the rendered checkboxes.
         await updateTrialSection();
         document.querySelectorAll('#trialGrid input[type=checkbox]').forEach(cb => {
@@ -763,7 +805,7 @@ async function selectIncompleteSubjects() {
             const tidx = parseInt(cb.dataset.trialIdx);
             const trials = cachedHrnetStatus[sid] || [];
             const t = trials.find(tr => tr.trial_idx === tidx);
-            const wanted = !(t && t.has_hrnet_output);
+            const wanted = !(t && t[trialFlag]);
             cb.checked = wanted && !cb.disabled;
             const item = cb.closest('.trial-item');
             if (item) item.classList.toggle('checked', cb.checked);
@@ -829,45 +871,10 @@ async function submitBatch() {
     }
 
     if (selectedStep === 'mediapipe') {
-        const checked = document.querySelectorAll('#subjectGrid input[type=checkbox]:checked');
-        const subs = [];
-        checked.forEach(cb => subs.push({ id: parseInt(cb.value), name: cb.dataset.name }));
-        if (subs.length === 0) {
-            alert('Select at least one subject.');
-            return;
-        }
-        const revCb = document.getElementById('mpReverseCb');
-        const ubCb  = document.getElementById('mpUseBboxCb');
-        const reverse = !!(revCb && revCb.checked);
-        const useBbox = !!(ubCb && ubCb.checked);
-        const baseExtra = {};
-        if (reverse) baseExtra.reverse = true;
-        if (!useBbox) baseExtra.use_bbox = false;
-        const executionTarget = getExecutionTarget();
-        let ok = 0;
-        let firstError = null;
-        for (const s of subs) {
-            try {
-                await API.post('/api/remote/launch', {
-                    job_type: 'mediapipe',
-                    subject_ids: [s.id],
-                    subjects: [s.name],
-                    execution_target: executionTarget,
-                    ...(Object.keys(baseExtra).length ? { extra_params: baseExtra } : {}),
-                });
-                ok++;
-            } catch (e) {
-                if (!firstError) firstError = e;
-            }
-        }
-        clearSubjects();
-        refreshQueue();
-        if (firstError && ok === 0) {
-            alert('All MediaPipe submissions failed: ' + firstError.message);
-        } else if (firstError) {
-            alert(`Submitted ${ok}/${subs.length} MediaPipe jobs.  ` +
-                  `First failure: ${firstError.message}`);
-        }
+        // Per-trial fan-out: one job per checked trial chip.  Falls back
+        // to the legacy whole-subject submission only when the trial grid
+        // is empty (no subjects checked) -- but that's caught below.
+        await submitJob();
         return;
     }
 
@@ -999,6 +1006,53 @@ async function submitJob() {
                         })(),
                     },
                 });
+            } else if (jobType === 'mediapipe') {
+                // Per-trial MP fan-out: one job per (subject, trial) so the
+                // user gets a queue row per trial that maps cleanly onto
+                // the per-trial mediapipe.npz output layout.
+                const revCb = document.getElementById('mpReverseCb');
+                const ubCb  = document.getElementById('mpUseBboxCb');
+                const reverse = !!(revCb && revCb.checked);
+                const useBbox = !(ubCb && !ubCb.checked);
+                let ok = 0;
+                let firstError = null;
+                const submittedSubjectIds = new Set();
+                for (const cb of trialChecks) {
+                    const subjectId = parseInt(cb.dataset.subjectId);
+                    const trialIdx = parseInt(cb.dataset.trialIdx);
+                    const subjName = cb.closest('.trial-item')?.parentElement
+                        ?.parentElement?.querySelector('.trial-group-label')?.textContent
+                        || (subjectNames.length === 1 ? subjectNames[0] : null);
+                    const fullStem = cb.dataset.trialName || '';
+                    const shortTrial = fullStem.includes('_')
+                        ? fullStem.slice(fullStem.indexOf('_') + 1)
+                        : fullStem;
+                    const extra = { trial_idx: trialIdx, trial_name: shortTrial };
+                    if (reverse) extra.reverse = true;
+                    if (!useBbox) extra.use_bbox = false;
+                    try {
+                        await API.post('/api/remote/launch', {
+                            job_type: 'mediapipe',
+                            subject_ids: [subjectId],
+                            subjects: subjName ? [subjName] : [],
+                            execution_target: executionTarget,
+                            extra_params: extra,
+                        });
+                        submittedSubjectIds.add(subjectId);
+                        ok++;
+                    } catch (e) {
+                        if (!firstError) firstError = e;
+                    }
+                }
+                // Bust cache so the green/red coloring updates after the
+                // jobs finish.
+                for (const id of submittedSubjectIds) delete cachedHrnetStatus[id];
+                if (firstError && ok === 0) {
+                    alert('All MediaPipe submissions failed: ' + firstError.message);
+                } else if (firstError) {
+                    alert(`Submitted ${ok}/${trialChecks.length} MediaPipe jobs. ` +
+                          `First failure: ${firstError.message}`);
+                }
             } else if (jobType === 'hrnet') {
                 // Single batched submit: collect every (subject, trial)
                 // selection into one ``extra_params.trials`` array.  The
@@ -2507,6 +2561,18 @@ window.closeTrialsModal = closeTrialsModal;
     if (useBboxCb) {
         useBboxCb.addEventListener('change', () => {
             updateTrialSection();
+        });
+    }
+
+    // "Run in reverse" — flips MP trial colouring between forward-pass and
+    // reverse-pass npz existence.
+    const mpReverseCb = document.getElementById('mpReverseCb');
+    if (mpReverseCb) {
+        mpReverseCb.addEventListener('change', () => {
+            if (selectedStep === 'mediapipe') {
+                colorSubjectsByStep();
+                updateTrialSection();
+            }
         });
     }
 
