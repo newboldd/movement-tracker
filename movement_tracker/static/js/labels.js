@@ -1164,8 +1164,19 @@ const manoViewer = (() => {
         if (_mpRev) {
             _mpRev.addEventListener('change', () => {
                 if (_detectModel === 'run-mediapipe') {
-                    _applyMpSidecarDefaults().catch(() => {});
+                    _applyMpSidecarDefaults()
+                        .catch(() => {})
+                        .finally(() => render());
                 }
+            });
+        }
+        // "Use bounding box" off -> hide green bbox + dim shading;
+        // back on -> reveal.  Just re-render; _drawBboxOverlay handles
+        // the state.
+        const _mpUb = document.getElementById('mpUseBbox');
+        if (_mpUb) {
+            _mpUb.addEventListener('change', () => {
+                if (_detectModel === 'run-mediapipe') render();
             });
         }
 
@@ -3145,8 +3156,15 @@ const manoViewer = (() => {
         // Video canvas: direct events (active when 3D layer is hidden / pointer-events: none)
         canvas.addEventListener('wheel', handleVideoZoom);
         canvas.addEventListener('mousedown', e => {
-            // Bbox editing intercepts left-click
-            if (bboxEditMode && e.button === 0) {
+            // Bbox editing intercepts left-click -- but only when an
+            // editable green bbox is actually on screen.  With MP +
+            // "Use bounding box" unchecked, the bbox is hidden and
+            // any drag handles would be invisible; let the click fall
+            // through to the normal pan/zoom path.
+            const _ubCb = document.getElementById('mpUseBbox');
+            const _mpNoBbox = _detectModel === 'run-mediapipe'
+                && _ubCb && !_ubCb.checked;
+            if (bboxEditMode && !_mpNoBbox && e.button === 0) {
                 const isStereo = cameraMode === 'stereo';
                 const isLeft = currentSide === cameraNames[0];
                 const sw = isStereo ? (isLeft ? midline : vidW - midline) : vidW;
@@ -7368,6 +7386,13 @@ const manoViewer = (() => {
     let bboxEditMode = false;
     let bboxOS = null; // [x1, y1, x2, y2] in camera-half pixel coords
     let bboxOD = null;
+    // Sidecar-recorded "previous" bbox -- the bbox that produced the
+    // current mediapipe.npz / mediapipe_reverse.npz output for this
+    // trial.  Drawn as a non-interactive grey reference outline while
+    // MP detect mode is active so the user can see how a freshly-edited
+    // bbox differs from the one baked into the existing output.
+    let prevBboxOS = null;
+    let prevBboxOD = null;
     let bboxDrag = null; // {handle, startMx, startMy, origBox}
 
     const MODEL_LABELS = {
@@ -7488,48 +7513,26 @@ const manoViewer = (() => {
         if (ubCb && typeof p.use_bbox === 'boolean') {
             ubCb.checked = p.use_bbox;
         }
-        // Bbox handling: only adopt sidecar bbox if nothing else
-        // populated bboxOS/OD yet (rare -- _loadDefaultBbox normally
-        // returns either a saved bbox or a computed default).  When
-        // we DO have a bbox already, compare and warn on divergence.
-        const _bboxesClose = (a, b) => {
-            if (!Array.isArray(a) || !Array.isArray(b)) return false;
-            if (a.length !== 4 || b.length !== 4) return false;
-            for (let i = 0; i < 4; i++) {
-                if (Math.abs(Number(a[i]) - Number(b[i])) > 0.5) return false;
-            }
-            return true;
-        };
-        const _hasOS = Array.isArray(bboxOS) && bboxOS.length === 4;
-        const _hasOD = Array.isArray(bboxOD) && bboxOD.length === 4;
-        if (!_hasOS && Array.isArray(p.bbox_os) && p.bbox_os.length === 4) {
-            bboxOS = p.bbox_os.map(Number);
-        }
-        if (!_hasOD && Array.isArray(p.bbox_od) && p.bbox_od.length === 4) {
-            bboxOD = p.bbox_od.map(Number);
-        }
-        // Divergence indicator: tell the user explicitly when the
-        // saved bbox they're about to re-run with differs from the
-        // bbox that produced the current output file.
-        const divergedOS = _hasOS && Array.isArray(p.bbox_os)
-            && !_bboxesClose(bboxOS, p.bbox_os);
-        const divergedOD = _hasOD && Array.isArray(p.bbox_od)
-            && !_bboxesClose(bboxOD, p.bbox_od);
-        const statusEl = document.getElementById('detectStatus');
-        if (statusEl && (divergedOS || divergedOD)) {
-            const sides = [divergedOS && 'OS', divergedOD && 'OD']
-                .filter(Boolean).join(' + ');
-            const passLabel = reverse ? 'mediapipe_reverse.npz' : 'mediapipe.npz';
-            statusEl.textContent =
-                `Saved ${sides} bbox differs from the one that produced ` +
-                `${passLabel}. Click Run to re-process with the new bbox.`;
-        }
+        // Sidecar bbox = the bbox that produced the current output.
+        // Stash on prevBboxOS / prevBboxOD so render() can paint a
+        // grey, non-interactive reference outline while MP detect
+        // mode is active.  We do NOT overwrite the editable bbox
+        // -- that's what the next Run will consume and the user has
+        // already saved their preferred value via Save Box.
+        prevBboxOS = (Array.isArray(p.bbox_os) && p.bbox_os.length === 4)
+            ? p.bbox_os.map(Number) : null;
+        prevBboxOD = (Array.isArray(p.bbox_od) && p.bbox_od.length === 4)
+            ? p.bbox_od.map(Number) : null;
     }
 
     function _exitDetectMode() {
         _detectModel = null;
         bboxEditMode = false;
         bboxDrag = null;
+        // Clear the sidecar reference outline -- it's MP-only and
+        // shouldn't persist once detect mode is closed.
+        prevBboxOS = null;
+        prevBboxOD = null;
         // Restore pointer-events on Three.js overlay
         const threeEl = $('threejsContainer');
         if (threeEl) threeEl.style.pointerEvents = '';
@@ -7664,6 +7667,29 @@ const manoViewer = (() => {
     // Bbox drawing overlay (called from render)
     function _drawBboxOverlay(pixelScale) {
         if (!bboxEditMode) return;
+        // MediaPipe with "Use bounding box" unchecked: the next run
+        // will scan the full camera-half frame, so the green editable
+        // bbox + dim shading is misleading.  Hide them.  The grey
+        // sidecar reference outline still draws below so the user can
+        // see what bbox produced the existing output.
+        const _ubCb = document.getElementById('mpUseBbox');
+        const _mpNoBbox = _detectModel === 'run-mediapipe'
+            && _ubCb && !_ubCb.checked;
+        // ── Grey reference outline: sidecar bbox that produced the
+        // current MP output.  Non-interactive; informational only.
+        const prevBox = currentSide === cameraNames[0] ? prevBboxOS : prevBboxOD;
+        if (prevBox && Array.isArray(prevBox) && prevBox.length === 4) {
+            const [gx1, gy1, gx2, gy2] = prevBox;
+            ctx.save();
+            ctx.strokeStyle = 'rgba(180,180,180,0.75)';
+            ctx.lineWidth = 1.5 / scale;
+            ctx.setLineDash([5 / scale, 3 / scale]);
+            ctx.strokeRect(gx1 * pixelScale, gy1 * pixelScale,
+                           (gx2 - gx1) * pixelScale, (gy2 - gy1) * pixelScale);
+            ctx.setLineDash([]);
+            ctx.restore();
+        }
+        if (_mpNoBbox) return;        // skip the editable green bbox + shading
         const box = currentSide === cameraNames[0] ? bboxOS : bboxOD;
         if (!box) return;
         const [x1, y1, x2, y2] = box;
