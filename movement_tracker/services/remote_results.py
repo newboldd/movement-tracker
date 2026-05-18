@@ -113,12 +113,21 @@ def _norm_remote_path(p: str) -> str:
 def _ssh_stat_quick(cfg: RemoteConfig, remote_path: str) -> Optional[int]:
     """Single-probe variant of ``_ssh_stat``.  Cheap — used by the
     pending-downloads listing endpoint where we only need to know the
-    file is roughly available, not that it's stable."""
+    file is roughly available, not that it's stable.
+
+    Uses ``cfg.python_executable`` (the explicit conda-env interpreter
+    path) rather than bare ``python``.  Bare ``python`` only works
+    when the user's default shell auto-activates a conda env, which
+    nobody can rely on on Windows SSH sessions -- there ``python``
+    typically isn't on PATH and the probe silently returned None
+    while the file was actually present (which is what masked
+    Con02's missing-MP-npz download)."""
     rp = _norm_remote_path(remote_path)
-    cmd = _ssh_base_args(cfg) + [
-        cfg.host,
-        f"python -c \"import os,sys;p=r'{rp}';print(os.path.getsize(p) if os.path.exists(p) else -1)\"",
-    ]
+    script = (
+        f"import os,sys;p=r'{rp}';"
+        "print(os.path.getsize(p) if os.path.exists(p) else -1)"
+    )
+    cmd = _ssh_base_args(cfg) + [cfg.host, cfg.python_executable, "-c", script]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         if proc.returncode != 0:

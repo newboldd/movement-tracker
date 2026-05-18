@@ -1373,7 +1373,42 @@ class QueueManager:
                             _ti = int(_ti)
                         except (TypeError, ValueError):
                             _ti = None
-                    if _ti is not None and job_type == "mediapipe":
+                    # Reverse-pass MP also has no remote implementation
+                    # (the remote_preprocess_script writes the FORWARD
+                    # filename regardless of any reverse flag).  Route
+                    # those to LOCAL CPU too so the user gets the
+                    # mediapipe_reverse_prelabels.npz they asked for
+                    # instead of silently overwriting the forward
+                    # output.
+                    _rev_only = (
+                        job_type == "mediapipe"
+                        and bool((extra_params or {}).get("reverse"))
+                    )
+                    if _ti is None and _rev_only:
+                        try:
+                            with open(log_path, "a") as _lf:
+                                _lf.write(
+                                    "\n[queue] Reverse-pass MP — routing "
+                                    "to LOCAL CPU.  Remote MP path lacks "
+                                    "reverse support; running locally "
+                                    "preserves the reverse npz.\n"
+                                )
+                        except OSError:
+                            pass
+                        for _sub_name in subject_names:
+                            if registry._cancel_events.get(job_id, threading.Event()).is_set():
+                                break
+                            _sim = bool((extra_params or {}).get("static_image_mode"))
+                            _ub  = bool((extra_params or {}).get("use_bbox", True))
+                            local_executor.execute_mediapipe(
+                                _sub_name, job_id, log_path,
+                                static_image_mode=_sim, trial_idx=None,
+                                reverse=True, use_bbox=_ub,
+                            )
+                            mt = registry._threads.get(job_id)
+                            if mt:
+                                mt.join()
+                    elif _ti is not None and job_type == "mediapipe":
                         try:
                             with open(log_path, "a") as _lf:
                                 _lf.write(
