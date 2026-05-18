@@ -335,10 +335,19 @@
                  in reverse temporal order.  Output is saved separately as
                  mediapipe_reverse_prelabels.npz so the forward pass is never
                  overwritten; shown as the Reverse layer on the Labels page. -->
-            <label id="mpReverseRow" style="display:none;font-size:12px;color:var(--text-muted);margin-bottom:12px;cursor:pointer;align-items:center;gap:6px;"
+            <label id="mpReverseRow" style="display:none;font-size:12px;color:var(--text-muted);margin-bottom:8px;cursor:pointer;align-items:center;gap:6px;"
                    title="Feed frames to MediaPipe in reverse temporal order.  The tracker enters early-frame failures already locked on from a later well-labeled frame, often filling cold-start gaps.  Saved separately as the Reverse model layer; does not overwrite the forward pass.">
                 <input type="checkbox" id="mpReverseCb" style="cursor:pointer;">
                 Run in reverse (saves to <code>mediapipe_reverse_prelabels.npz</code>)
+            </label>
+
+            <!-- MediaPipe-only: honour saved per-trial crop boxes from the
+                 Labels / Auto pages.  Default on; un-check to force MP
+                 to scan the full camera-half frame. -->
+            <label id="mpUseBboxRow" style="display:none;font-size:12px;color:var(--text-muted);margin-bottom:12px;cursor:pointer;align-items:center;gap:6px;"
+                   title="When checked, MediaPipe runs on the saved per-trial bbox for each trial (faster, more robust when set).  When unchecked, MediaPipe scans the full camera-half frame regardless of any saved bbox.">
+                <input type="checkbox" id="mpUseBboxCb" checked style="cursor:pointer;">
+                Use bounding box (per-trial, if saved)
             </label>
 
             <!-- Trial Selection (shown for per-trial steps like deidentify and HRnet) -->
@@ -513,6 +522,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js?v=13"></script>
-    <script src="/static/js/remote.js?v=57"></script>
+    <script src="/static/js/remote.js?v=58"></script>
 </body>
 </html>

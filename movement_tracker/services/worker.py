@@ -23,12 +23,15 @@ def _progress_printer(job_id: int):
 
 
 def run_mediapipe(subject_name: str, job_id: int, static_image_mode: bool = False,
-                  trial_idx: int | None = None, reverse: bool = False):
+                  trial_idx: int | None = None, reverse: bool = False,
+                  use_bbox: bool = True):
     from movement_tracker.services.mediapipe_prelabel import run_mediapipe as _run_mp
-    # Load any saved per-trial crop boxes for this subject (under
-    # model_name='run-mediapipe') so MP runs honour the bbox the user
-    # set in the Auto / Skeleton page.  Same logic as
-    # routers/analyze.py::run_mediapipe.
+    # When ``use_bbox`` is True, load any saved per-trial crop boxes
+    # for this subject (under model_name='run-mediapipe') so MP runs
+    # honour the bbox the user set on the Labels page / Auto page.
+    # Setting it to False skips the lookup so MP runs on the full
+    # camera-half frame -- the Jobs-page "Use bounding box" toggle
+    # uses this to fall back to whole-frame detection on demand.
     from movement_tracker.db import get_db_ctx
     from movement_tracker.config import get_settings
     settings = get_settings()
@@ -36,24 +39,25 @@ def run_mediapipe(subject_name: str, job_id: int, static_image_mode: bool = Fals
     cam_OS = cam_names[0]
     cam_OD = cam_names[1] if len(cam_names) > 1 else cam_names[0]
     crop_boxes: dict = {}
-    try:
-        with get_db_ctx() as db:
-            subj = db.execute("SELECT id FROM subjects WHERE name = ?", (subject_name,)).fetchone()
-            if subj:
-                rows = db.execute(
-                    "SELECT trial_idx, camera_name, x1, y1, x2, y2 FROM mp_crop_boxes "
-                    "WHERE subject_id = ? AND model_name = 'run-mediapipe'",
-                    (subj["id"],),
-                ).fetchall()
-                for r in rows:
-                    ti = r["trial_idx"]
-                    crop_boxes.setdefault(ti, {})
-                    if r["camera_name"] == cam_OS:
-                        crop_boxes[ti]["OS"] = [r["x1"], r["y1"], r["x2"], r["y2"]]
-                    elif r["camera_name"] == cam_OD:
-                        crop_boxes[ti]["OD"] = [r["x1"], r["y1"], r["x2"], r["y2"]]
-    except Exception as _e:
-        print(f"WARN: could not load mp_crop_boxes for {subject_name}: {_e}", flush=True)
+    if use_bbox:
+        try:
+            with get_db_ctx() as db:
+                subj = db.execute("SELECT id FROM subjects WHERE name = ?", (subject_name,)).fetchone()
+                if subj:
+                    rows = db.execute(
+                        "SELECT trial_idx, camera_name, x1, y1, x2, y2 FROM mp_crop_boxes "
+                        "WHERE subject_id = ? AND model_name = 'run-mediapipe'",
+                        (subj["id"],),
+                    ).fetchall()
+                    for r in rows:
+                        ti = r["trial_idx"]
+                        crop_boxes.setdefault(ti, {})
+                        if r["camera_name"] == cam_OS:
+                            crop_boxes[ti]["OS"] = [r["x1"], r["y1"], r["x2"], r["y2"]]
+                        elif r["camera_name"] == cam_OD:
+                            crop_boxes[ti]["OD"] = [r["x1"], r["y1"], r["x2"], r["y2"]]
+        except Exception as _e:
+            print(f"WARN: could not load mp_crop_boxes for {subject_name}: {_e}", flush=True)
     _run_mp(subject_name, progress_callback=_progress_printer(job_id),
             crop_boxes=crop_boxes if crop_boxes else None,
             static_image_mode=static_image_mode,
@@ -213,7 +217,8 @@ JOB_DISPATCH = {
     "mediapipe": lambda args: run_mediapipe(args.subject, args.job_id,
                                               static_image_mode=bool(getattr(args, "static_image_mode", False)),
                                               trial_idx=getattr(args, "trial_idx", None),
-                                              reverse=bool(getattr(args, "reverse", False))),
+                                              reverse=bool(getattr(args, "reverse", False)),
+                                              use_bbox=not bool(getattr(args, "no_bbox", False))),
     "pose": lambda args: run_pose(args.subject, args.job_id),
     "blur": lambda args: run_blur(args.subject, args.job_id),
     "deidentify": lambda args: run_deidentify(args.subject, args.job_id, args.trial_idx),
@@ -248,6 +253,8 @@ def main():
                         help="MediaPipe only: disable between-frame tracker (per-frame palm detection)")
     parser.add_argument("--reverse", action="store_true",
                         help="MediaPipe only: feed frames in reverse temporal order, writing to mediapipe_reverse_prelabels.npz")
+    parser.add_argument("--no-bbox", action="store_true",
+                        help="MediaPipe only: ignore saved per-trial crop boxes and run on the full camera-half frame")
 
     # Set MT_DATA_DIR if passed (for subprocess to find DB/settings)
     parser.add_argument("--data-dir", default=None)

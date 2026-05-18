@@ -280,16 +280,26 @@ function selectStep(step) {
     colorSubjectsByStep();
     if (isTrialStep()) updateTrialSection();
     document.getElementById('trialSection').style.display = isTrialStep() ? '' : 'none';
-    // MediaPipe-only "Run in reverse" option.  Cleared whenever the
-    // user switches away from MediaPipe so a stale checked state doesn't
-    // accidentally tag a different step's launch.
+    // MediaPipe-only "Run in reverse" + "Use bounding box" options.
+    // Cleared / reset whenever the user switches away from MediaPipe
+    // so a stale state doesn't accidentally tag a different step's launch.
+    const isMP = (step === 'mediapipe');
     const mpReverseRow = document.getElementById('mpReverseRow');
     if (mpReverseRow) {
-        const isMP = (step === 'mediapipe');
         mpReverseRow.style.display = isMP ? 'flex' : 'none';
         if (!isMP) {
             const cb = document.getElementById('mpReverseCb');
             if (cb) cb.checked = false;
+        }
+    }
+    const mpUseBboxRow = document.getElementById('mpUseBboxRow');
+    if (mpUseBboxRow) {
+        mpUseBboxRow.style.display = isMP ? 'flex' : 'none';
+        if (!isMP) {
+            const cb = document.getElementById('mpUseBboxCb');
+            // Default state on re-entry: bbox enabled (matches HTML
+            // ``checked`` attribute and the historical default).
+            if (cb) cb.checked = true;
         }
     }
 }
@@ -827,7 +837,12 @@ async function submitBatch() {
             return;
         }
         const revCb = document.getElementById('mpReverseCb');
+        const ubCb  = document.getElementById('mpUseBboxCb');
         const reverse = !!(revCb && revCb.checked);
+        const useBbox = !!(ubCb && ubCb.checked);
+        const baseExtra = {};
+        if (reverse) baseExtra.reverse = true;
+        if (!useBbox) baseExtra.use_bbox = false;
         const executionTarget = getExecutionTarget();
         let ok = 0;
         let firstError = null;
@@ -838,7 +853,7 @@ async function submitBatch() {
                     subject_ids: [s.id],
                     subjects: [s.name],
                     execution_target: executionTarget,
-                    ...(reverse ? { extra_params: { reverse: true } } : {}),
+                    ...(Object.keys(baseExtra).length ? { extra_params: baseExtra } : {}),
                 });
                 ok++;
             } catch (e) {
@@ -1068,15 +1083,22 @@ async function submitJob() {
         return;
     }
 
-    // MediaPipe + reverse-pass option: forwarded as extra_params.reverse,
-    // which the queue manager unpacks and threads through to
-    // local_executor.execute_mediapipe + the worker's --reverse flag.
-    // Output goes to mediapipe_reverse_prelabels.npz (sibling layer to
-    // the forward file).
+    // MediaPipe options forwarded via extra_params:
+    //   reverse  → frames fed in reverse temporal order (Reverse npz)
+    //   use_bbox → honour saved per-trial crop boxes; set to false to
+    //              force MP to scan the full camera-half frame
     let extraParams;
     if (jobType === 'mediapipe') {
         const rev = document.getElementById('mpReverseCb');
-        if (rev && rev.checked) extraParams = { reverse: true };
+        const ub  = document.getElementById('mpUseBboxCb');
+        const useBbox = !!(ub && ub.checked);
+        const obj = {};
+        if (rev && rev.checked) obj.reverse = true;
+        // Default behaviour is "use bbox" -- only forward the flag
+        // when it differs from the default so older queue manager
+        // builds that don't recognize the field keep working.
+        if (!useBbox) obj.use_bbox = false;
+        if (Object.keys(obj).length) extraParams = obj;
     }
 
     try {

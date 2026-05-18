@@ -260,7 +260,8 @@ class LocalExecutor:
     def execute_mediapipe(self, subject_name: str, job_id: int, log_path: str,
                            static_image_mode: bool = False,
                            trial_idx: int | None = None,
-                           reverse: bool = False):
+                           reverse: bool = False,
+                           use_bbox: bool = True):
         """Execute MediaPipe preprocessing as a subprocess.
 
         ``trial_idx`` (when set) restricts the run to a single trial,
@@ -268,12 +269,17 @@ class LocalExecutor:
         Omit (or pass ``None``) to re-process every trial.
         ``reverse`` feeds frames to MediaPipe in descending temporal
         order and writes to ``mediapipe_reverse_prelabels.npz``.
+        ``use_bbox`` (default True) honours saved per-trial crop boxes.
+        Pass False to force MediaPipe to run on the full camera-half
+        frame regardless of any saved bbox.
         """
         extra = ["--static-image-mode"] if static_image_mode else []
         if trial_idx is not None:
             extra += ["--trial-idx", str(trial_idx)]
         if reverse:
             extra += ["--reverse"]
+        if not use_bbox:
+            extra += ["--no-bbox"]
         self._launch_worker("mediapipe", subject_name, job_id, log_path,
                              extra_args=extra)
 
