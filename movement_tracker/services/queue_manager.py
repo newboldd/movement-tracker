@@ -550,6 +550,7 @@ class QueueManager:
                     # CPU lane: preprocessing
                     if job_type == "mediapipe":
                         _sim = bool((extra_params or {}).get("static_image_mode"))
+                        _rev = bool((extra_params or {}).get("reverse"))
                         # Pass trial_idx through when the caller specified
                         # one — the per-trial Run-MediaPipe button on the
                         # skeleton page submits a single-trial job and expects
@@ -564,7 +565,8 @@ class QueueManager:
                             _ti = None
                         local_executor.execute_mediapipe(subject_names[0], job_id, log_path,
                                                           static_image_mode=_sim,
-                                                          trial_idx=_ti)
+                                                          trial_idx=_ti,
+                                                          reverse=_rev)
                     elif job_type == "vision":
                         local_executor.execute_vision(subject_names[0], job_id, log_path)
                     elif job_type == "pose":
@@ -1385,9 +1387,11 @@ class QueueManager:
                         except OSError:
                             pass
                         _sim = bool((extra_params or {}).get("static_image_mode"))
+                        _rev = bool((extra_params or {}).get("reverse"))
                         local_executor.execute_mediapipe(
                             subject_names[0], job_id, log_path,
                             static_image_mode=_sim, trial_idx=_ti,
+                            reverse=_rev,
                         )
                         # Wait for the subprocess to finish (it writes
                         # progress + final status via the registry monitor).
