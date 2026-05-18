@@ -1241,6 +1241,17 @@ const manoViewer = (() => {
         _userZoom = false; // allow auto-crop for new trial
         highlightTrialButton(idx);
         if (typeof setNavState === 'function') setNavState({ trialIdx: idx, frame: currentFrame });
+        // If the user was actively editing a bbox when they switched
+        // trials, refresh the bbox to the saved value for the NEW trial.
+        // Without this, ``bboxOS`` / ``bboxOD`` kept the previous trial's
+        // values, the canvas overlay drew them on top of the new trial,
+        // and a Save Box click would silently copy that old bbox onto
+        // the new trial -- making every trial look like it shared one
+        // bbox.  ``mp_crop_boxes`` has always been keyed per-trial; this
+        // just keeps the UI honest.
+        if (bboxEditMode && typeof _loadDefaultBbox === 'function') {
+            _loadDefaultBbox().then(() => render());
+        }
 
         const trialNameEl = $('trialName');
         if (trialNameEl) trialNameEl.textContent = trial.trial_stem.includes('_') ? trial.trial_stem.split('_').slice(1).join('_') : trial.trial_stem;
