@@ -1330,6 +1330,32 @@ def render_with_blur_specs(input_path: str, output_path: str,
     if progress_callback:
         progress_callback(100)
 
+    # ── Sidecar metadata ────────────────────────────────────────────
+    # Drop ``<output>.params.json`` next to the rendered .mp4 capturing
+    # the hand-mask + arm-geometry parameters used to produce it.  The
+    # Deidentify page reads this on load to show whether the current
+    # slider values diverge from what produced the existing render.
+    import json as _json
+    from datetime import datetime as _dt
+    _params = {
+        "job_type": "deidentify",
+        "hand_mask_radius": int(hand_mask_radius),
+        "hand_smooth": int(hand_smooth),
+        "hand_smooth2": int(hand_smooth2),
+        "forearm_radius": int(forearm_radius),
+        "forearm_extent": float(forearm_extent),
+        "arm_dorsal_dilate": int(arm_dorsal_dilate),
+        "arm_ventral_dilate": int(arm_ventral_dilate),
+        "dlc_radius": int(dlc_radius_val),
+        "ran_at": _dt.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+    _sidecar = os.path.splitext(output_path)[0] + ".params.json"
+    try:
+        with open(_sidecar, "w") as _f:
+            _json.dump(_params, _f, indent=2)
+    except OSError as _e:
+        logger.warning(f"Failed to write {_sidecar}: {_e}")
+
     logger.info(f"Rendered {frames_written} frames → {output_path}")
     return {"n_frames": frames_written, "is_stereo": is_stereo}
 

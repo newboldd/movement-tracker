@@ -299,6 +299,11 @@
                         <button class="btn btn-sm" onclick="deid.setViewMode('original')" style="width:100%;">Edit</button>
                     </div>
                     <div id="renderStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
+                    <!-- Divergence badge: filled in by selectTrial() when
+                         the current slider values differ from the params
+                         that produced the existing rendered video. -->
+                    <div id="renderStale" style="display:none;font-size:11px;color:var(--orange);margin-top:4px;"
+                         title="The rendered video on disk was produced with different hand-mask / arm geometry parameters than the current slider values.  Click Render again to refresh."></div>
                 </div>
             </div>
 
@@ -336,6 +341,6 @@
 
     <script src="/static/js/api.js"></script>
     <script src="/static/js/nav.js?v=9"></script>
-    <script src="/static/js/deidentify.js?v=53"></script>
+    <script src="/static/js/deidentify.js?v=54"></script>
 </body>
 </html>

@@ -378,6 +378,80 @@ const deid = (() => {
     }
 
     // ── Select trial ──
+    async function _applyDeidentifySidecar(trialIdx, hasDbRow) {
+        // Fetch the params sidecar for the currently-rendered .mp4.
+        // Surfaces an "out-of-date" badge when current slider values
+        // differ from what produced the render; adopts the sidecar
+        // values as defaults when no DB row exists (fresh trial that
+        // somehow has a render but never had hand-settings saved).
+        const staleEl = document.getElementById('renderStale');
+        if (staleEl) { staleEl.style.display = 'none'; staleEl.textContent = ''; }
+        let data;
+        try {
+            data = await API.get(
+                `/api/deidentify/${subjectId}/render-params?trial_idx=${trialIdx}`,
+            );
+        } catch {
+            return;
+        }
+        if (!data || data.status !== 'ok' || !data.params) return;
+        const p = data.params;
+        const _applyToSliders = () => {
+            if (typeof p.hand_mask_radius === 'number') {
+                handMaskRadius = p.hand_mask_radius;
+                document.getElementById('handRadiusSlider').value = handMaskRadius;
+                document.getElementById('handRadiusVal').textContent = handMaskRadius;
+            }
+            if (typeof p.hand_smooth === 'number') {
+                handSmooth = p.hand_smooth;
+                document.getElementById('handSmoothSlider').value = handSmooth;
+                document.getElementById('handSmoothVal').textContent = handSmooth;
+            }
+            if (typeof p.forearm_extent === 'number') {
+                forearmExtent = p.forearm_extent;
+                document.getElementById('handExtentSlider').value = forearmExtent;
+                document.getElementById('handExtentVal').textContent = forearmExtent.toFixed(1);
+            }
+            if (typeof p.arm_dorsal_dilate === 'number') {
+                armDorsalDilate = p.arm_dorsal_dilate;
+                const s = document.getElementById('handDorsalSlider');
+                if (s) { s.value = armDorsalDilate; document.getElementById('handDorsalVal').textContent = armDorsalDilate; }
+            }
+            if (typeof p.arm_ventral_dilate === 'number') {
+                armVentralDilate = p.arm_ventral_dilate;
+                const s = document.getElementById('handVentralSlider');
+                if (s) { s.value = armVentralDilate; document.getElementById('handVentralVal').textContent = armVentralDilate; }
+            }
+        };
+        if (!hasDbRow) {
+            // No saved settings for this trial -- use the sidecar as
+            // the source of truth.  Match the existing render exactly
+            // on first open.
+            _applyToSliders();
+            return;
+        }
+        // DB row exists.  Compare the user's current slider values to
+        // the sidecar values; show a badge when any differ.
+        const _close = (a, b, eps = 0.05) =>
+            (a == null && b == null) || (a != null && b != null
+                && Math.abs(Number(a) - Number(b)) <= eps);
+        const fields = [
+            ['Hand radius',   handMaskRadius,   p.hand_mask_radius,   0.5],
+            ['Hand smooth',   handSmooth,       p.hand_smooth,        0.5],
+            ['Forearm extent', forearmExtent,   p.forearm_extent,     0.01],
+            ['Dorsal dilate', armDorsalDilate,  p.arm_dorsal_dilate,  0.5],
+            ['Ventral dilate', armVentralDilate, p.arm_ventral_dilate, 0.5],
+        ];
+        const diverged = fields.filter(([, cur, ran, eps]) =>
+            ran != null && !_close(cur, ran, eps));
+        if (diverged.length && staleEl) {
+            const names = diverged.map(d => d[0]).join(', ');
+            const ts = p.ran_at ? ` (rendered ${p.ran_at})` : '';
+            staleEl.textContent = `Render is out of date — ${names} changed since last render${ts}.`;
+            staleEl.style.display = 'block';
+        }
+    }
+
     async function selectTrial(idx) {
         if (playing) togglePlay();
         // Flush any pending save for the previous trial before switching
@@ -508,6 +582,13 @@ const deid = (() => {
             }
             const overlayToggle = document.getElementById('handOverlayToggle');
             if (overlayToggle) { overlayToggle.checked = handOverlayEnabled; }
+            // Sidecar params for the existing render: when a sidecar
+            // exists, compare its values against the just-loaded slider
+            // state and surface a "Render is out of date" badge.  When
+            // the DB has no row (fresh trial) and a sidecar exists,
+            // adopt the sidecar's values as defaults so re-running
+            // produces the same output as last time.
+            await _applyDeidentifySidecar(idx, hs.has_row);
             if (hs.segments && hs.segments.length > 0) {
                 handProtectSegments = hs.segments.map(s => ({
                     id: nextHandSegId++,

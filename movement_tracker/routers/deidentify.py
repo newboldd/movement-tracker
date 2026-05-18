@@ -307,11 +307,20 @@ def get_frame(
             from ..services.deidentify import interpolate_landmarks_inplace
             _t_start = trial.get("start_frame", 0)
             _t_end = _t_start + trial.get("frame_count", 0) - 1
+            # Snapshot NaN mask BEFORE interpolation so each landmark dict
+            # below can be tagged ``interpolated: True`` when MediaPipe
+            # originally lost detection for that (frame, joint).  The
+            # DLC tip-disagreement path uses this flag to also fire when
+            # the MP tip on this frame was filled in from neighbours.
+            _os_was_nan = None
+            _od_was_nan = None
             if os_lm is not None:
                 os_lm = np.array(os_lm, copy=True)
+                _os_was_nan = np.isnan(os_lm[..., 0]).copy()
                 interpolate_landmarks_inplace(os_lm, _t_start, _t_end)
             if od_lm is not None:
                 od_lm = np.array(od_lm, copy=True)
+                _od_was_nan = np.isnan(od_lm[..., 0]).copy()
                 interpolate_landmarks_inplace(od_lm, _t_start, _t_end)
             if os_lm is not None and frame_num < os_lm.shape[0]:
                 for j in range(os_lm.shape[1]):
@@ -319,14 +328,16 @@ def get_frame(
                     if not np.isnan(x):
                         if frame_num not in hand_lm_data:
                             hand_lm_data[frame_num] = []
-                        hand_lm_data[frame_num].append({"x": float(x), "y": float(y), "side": "left", "type": "hand", "joint": j})
+                        was_interp = bool(_os_was_nan is not None and _os_was_nan[frame_num, j])
+                        hand_lm_data[frame_num].append({"x": float(x), "y": float(y), "side": "left", "type": "hand", "joint": j, "interpolated": was_interp})
             if od_lm is not None and frame_num < od_lm.shape[0]:
                 for j in range(od_lm.shape[1]):
                     x, y = od_lm[frame_num, j, 0], od_lm[frame_num, j, 1]
                     if not np.isnan(x):
                         if frame_num not in hand_lm_data:
                             hand_lm_data[frame_num] = []
-                        hand_lm_data[frame_num].append({"x": float(x), "y": float(y), "side": "right", "type": "hand", "joint": j})
+                        was_interp = bool(_od_was_nan is not None and _od_was_nan[frame_num, j])
+                        hand_lm_data[frame_num].append({"x": float(x), "y": float(y), "side": "right", "type": "hand", "joint": j, "interpolated": was_interp})
             # Also load pose landmarks via the offset-aware helper, then
             # interpolate the trial's slice so the forearm-triangle
             # elbow stays anchored when MediaPipe Pose drops out.
@@ -1022,6 +1033,48 @@ def get_hand_settings(subject_id: int, trial_idx: int = Query(0)) -> dict:
             "dlc_radius": 15, "hand_temporal": 0, "show_landmarks": False,
             "mask_source": "mediapipe", "arm_dorsal_dilate": 0, "arm_ventral_dilate": 0,
             "segments": []}
+
+
+@router.get("/{subject_id}/render-params")
+def get_render_params(subject_id: int, trial_idx: int = Query(...)) -> dict:
+    """Return the params sidecar JSON for this trial's deidentified
+    output video, or ``{"status": "unknown"}`` when no sidecar exists.
+
+    Looks alongside ``<videos>/deidentified/<trial_name>.mp4`` (single)
+    or ``<trial_name>_<cam>.mp4`` (multicam) for a matching
+    ``.params.json``.  The Deidentify page reads this on trial load
+    to surface a divergence indicator when current slider values
+    differ from the values that produced the existing render.
+    """
+    import json as _json
+    settings = get_settings()
+    with get_db_ctx() as db:
+        subj = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
+        if not subj:
+            raise HTTPException(404, "Subject not found")
+    subject_name = subj["name"]
+    camera_mode = subj.get("camera_mode") or "stereo"
+    trials = build_trial_map(subject_name, camera_mode=camera_mode)
+    if trial_idx < 0 or trial_idx >= len(trials):
+        raise HTTPException(400, f"Invalid trial_idx {trial_idx}")
+    trial = trials[trial_idx]
+    deident_dir = Path(str(settings.video_path)) / "deidentified"
+    # Try both naming conventions: single (Trial.params.json) and
+    # multicam (Trial_<cam>.params.json) -- return the first hit so
+    # the page works for both layouts.
+    candidates = [deident_dir / f"{trial['trial_name']}.params.json"]
+    cam_names = settings.camera_names or []
+    for cam in cam_names:
+        candidates.append(deident_dir / f"{trial['trial_name']}_{cam}.params.json")
+    for sidecar in candidates:
+        if sidecar.exists():
+            try:
+                with open(sidecar) as f:
+                    return {"status": "ok", "params": _json.load(f),
+                            "path": str(sidecar)}
+            except (OSError, ValueError) as e:
+                return {"status": "unknown", "error": str(e)}
+    return {"status": "unknown"}
 
 
 @router.put("/{subject_id}/hand-settings")
