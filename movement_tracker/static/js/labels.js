@@ -1,7 +1,7 @@
 /**
- * MANO 3D Hand Model Viewer
+ * Skeleton 3D Hand Model Viewer
  *
- * Canvas-based stereo video viewer with 2D overlay (MANO, MediaPipe, DLC, heatmaps),
+ * Canvas-based stereo video viewer with 2D overlay (Skeleton, MediaPipe, DLC, heatmaps),
  * Three.js 3D hand viewport, distance trace, and per-finger visibility toggles.
  */
 import * as THREE from 'three';
@@ -585,14 +585,14 @@ const manoViewer = (() => {
 
     // Per-model 3D translation offsets (persist across frames)
     const modelTranslations = {
-        mano: new THREE.Vector3(),
+        skeleton: new THREE.Vector3(),
         skel_v2: new THREE.Vector3(),
         mp: new THREE.Vector3(),
         vision: new THREE.Vector3(),
         dlc: new THREE.Vector3(),
     };
     let _translateDragging = false;
-    let _translateTarget = null; // 'mano', 'mp', 'vision', 'dlc'
+    let _translateTarget = null; // 'skeleton', 'mp', 'vision', 'dlc'
     let _translateLastX = 0, _translateLastY = 0;
 
     // Video ready state — prevents drawing labels before video frame is loaded
@@ -900,7 +900,7 @@ const manoViewer = (() => {
                 yzc_z_median_mm: parseFloat($('hfSliderYZ_zm')?.value ?? 0),
             };
             try {
-                const res = await fetch(`/api/mano/${subjectId}/hrnet_correct_preview`, {
+                const res = await fetch(`/api/skeleton/${subjectId}/hrnet_correct_preview`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(body),
@@ -1043,7 +1043,7 @@ const manoViewer = (() => {
             };
             try {
                 if (st) st.textContent = 'Submitting…';
-                const res = await api(`/api/mano/${subjectId}/hrnet_fit`, {
+                const res = await api(`/api/skeleton/${subjectId}/hrnet_fit`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(body),
@@ -1195,7 +1195,7 @@ const manoViewer = (() => {
         if (subj && subj.camera_mode) cameraMode = subj.camera_mode;
 
         try {
-            trials = await api(`/api/mano/${sid}/trials`);
+            trials = await api(`/api/skeleton/${sid}/trials`);
         } catch {
             trials = [];
         }
@@ -1251,7 +1251,7 @@ const manoViewer = (() => {
 
         // Load bulk data (may fail if no calibration — still load video)
         try {
-            trialData = await api(`/api/mano/${subjectId}/trial/${trial.trial_idx}/data`);
+            trialData = await api(`/api/skeleton/${subjectId}/trial/${trial.trial_idx}/data`);
         } catch (e) {
             console.error('Failed to load trial data:', e);
             trialData = null;
@@ -1301,7 +1301,7 @@ const manoViewer = (() => {
         _setupYSliders('distYMinSlider', 'distYMaxSlider', 'yRangeFill');
         _setupYSliders('angleYMinSlider', 'angleYMaxSlider', 'yRangeFillAngle');
 
-        // Update MANO fit status and checkbox state
+        // Update Skeleton fit status and checkbox state
         updateFitStatus();
 
         // Restore fitting sliders + constraints from last fit
@@ -1348,7 +1348,7 @@ const manoViewer = (() => {
         newVideo.preload = 'auto';
         videoEl = newVideo;
 
-        videoEl.src = `/api/mano/${subjectId}/trial/${trial.trial_idx}/video`;
+        videoEl.src = `/api/skeleton/${subjectId}/trial/${trial.trial_idx}/video`;
 
         videoEl.addEventListener('loadedmetadata', () => {
             vidW = videoEl.videoWidth;
@@ -1622,7 +1622,7 @@ const manoViewer = (() => {
             const maskDilatePx = parseInt(($('stereoDilateSlider')?.value ?? '10'), 10) || 0;
             const gaussWeight = (parseInt(($('stereoGaussSlider')?.value ?? '0'), 10) || 0) / 100;
             try {
-                const res = await api(`/api/mano/${subjectId}/run_stereo`, {
+                const res = await api(`/api/skeleton/${subjectId}/run_stereo`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -1844,7 +1844,7 @@ const manoViewer = (() => {
             }
             try {
                 const trial = trials[currentTrialIdx];
-                prevFitData = await api(`/api/mano/${subjectId}/trial/${trial.trial_idx}/fit_history/${slot}`);
+                prevFitData = await api(`/api/skeleton/${subjectId}/trial/${trial.trial_idx}/fit_history/${slot}`);
             } catch (err) {
                 console.error('Failed to load previous fit:', err);
             }
@@ -1871,7 +1871,7 @@ const manoViewer = (() => {
                 _setSlider('v2SliderConstraints',  p.w_constraints);
             }
             if (prevFitData?.fit_constraints) {
-                api('/api/mano/joint-constraints', {
+                api('/api/skeleton/joint-constraints', {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(prevFitData.fit_constraints),
@@ -2608,7 +2608,7 @@ const manoViewer = (() => {
         const pts = [];
         const sources = [
             isLeft ? trialData.skel_v2_proj_L : trialData.skel_v2_proj_R,
-            isLeft ? trialData.mano_proj_L : trialData.mano_proj_R,
+            isLeft ? trialData.skeleton_proj_L : trialData.skeleton_proj_R,
             isLeft ? trialData.mp_tracked_L : trialData.mp_tracked_R,
             isLeft ? trialData.vision_tracked_L : trialData.vision_tracked_R,
         ];
@@ -2673,7 +2673,7 @@ const manoViewer = (() => {
     function _getFrameBbox(frameIdx) {
         if (!trialData) return null;
         const isLeft = currentSide === cameraNames[0];
-        const proj = isLeft ? trialData.mano_proj_L : trialData.mano_proj_R;
+        const proj = isLeft ? trialData.skeleton_proj_L : trialData.skeleton_proj_R;
         const mp = isLeft ? trialData.mp_tracked_L : trialData.mp_tracked_R;
         const vis = isLeft ? trialData.vision_tracked_L : trialData.vision_tracked_R;
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -2828,7 +2828,7 @@ const manoViewer = (() => {
 
         const isStereo = cameraMode === 'stereo';
         const isLeft = currentSide === cameraNames[0];
-        const proj = isLeft ? trialData.mano_proj_L : trialData.mano_proj_R;
+        const proj = isLeft ? trialData.skeleton_proj_L : trialData.skeleton_proj_R;
         const mp   = isLeft ? trialData.mp_tracked_L : trialData.mp_tracked_R;
         const vis  = isLeft ? trialData.vision_tracked_L : trialData.vision_tracked_R;
         // All 2D data is in camera-half coords — no offset needed
@@ -3176,7 +3176,7 @@ const manoViewer = (() => {
                     }
                 }
             };
-            if (showMano2D)      _check(isLeft ? trialData.mano_proj_L : trialData.mano_proj_R, 'mano');
+            if (showMano2D)      _check(isLeft ? trialData.skeleton_proj_L : trialData.skeleton_proj_R, 'skeleton');
             // Skeleton 2D: check whatever stage projections are actually
             // being drawn (may be hr/bc/final), not always the master.
             if (showSkelV2_2D) {
@@ -3240,7 +3240,7 @@ const manoViewer = (() => {
 
                 // Enable the clicked model's source if not already visible
                 const srcMap = {
-                    mano:        ['showMano2D',     'showMano3D'],
+                    skeleton:        ['showMano2D',     'showMano3D'],
                     skel_v2:     ['showSkelV2_2D',  'showSkelV2_3D'],
                     skel_legacy: ['showLegacyV2_2D','showLegacyV2_3D'],
                     mp:          ['showMP2D',       'showMP3D'],
@@ -3362,7 +3362,7 @@ const manoViewer = (() => {
             goToFrame(f);
         });
 
-        // Resize observer — observe the viewport container (.mano-viewports)
+        // Resize observer — observe the viewport container (.skeleton-viewports)
         const viewport = canvas.parentElement.parentElement;
         const ro = new ResizeObserver(() => {
             sizeCanvases();
@@ -3413,7 +3413,7 @@ const manoViewer = (() => {
 
     function sizeCanvases() {
         // Both canvases fill the same viewport container
-        const viewport = canvas.parentElement.parentElement; // .mano-viewports
+        const viewport = canvas.parentElement.parentElement; // .skeleton-viewports
         const vw = viewport.clientWidth;
         const vh = viewport.clientHeight;
         canvas.width = vw;
@@ -3458,7 +3458,7 @@ const manoViewer = (() => {
         if (videoFailed && !videoEl._loggedError) {
             videoEl._loggedError = true;
             const e = videoEl.error;
-            console.error('[mano] video failed to decode:', {
+            console.error('[skeleton] video failed to decode:', {
                 code: e?.code, message: e?.message, src: videoEl.src,
             });
         }
@@ -3732,7 +3732,7 @@ const manoViewer = (() => {
         const hmPeaksYZC = showHRnetYZC2D ? _peakArrFor(hmCam, 'yzc') : null;
         const hmPeaksZSM = showHRnetZSM2D ? _peakArrFor(hmCam, 'zsmooth') : null;
         const hmPeaksHun = showStereoHun2D ? _peakArrFor(hmCam, 'hungarian') : null;
-        const manoProj = isLeft ? trialData.mano_proj_L : trialData.mano_proj_R;
+        const manoProj = isLeft ? trialData.skeleton_proj_L : trialData.skeleton_proj_R;
         const v2Proj = isLeft ? trialData.skel_v2_proj_L : trialData.skel_v2_proj_R;
         const legacyProj = isLeft ? trialData.skel_legacy_proj_L : trialData.skel_legacy_proj_R;
         // Historical-fit 2D projection -- pick the active stage's arrays.
@@ -3765,7 +3765,7 @@ const manoViewer = (() => {
             trialData.skeleton.forEach(([i, j]) => {
                 if (!isBoneVisible(i, j)) return;
 
-                // MANO skeleton v1 (lime)
+                // Skeleton skeleton v1 (lime)
                 if (showManoSkel && showMano2D && manoProj[fn] && manoProj[fn][i] && manoProj[fn][j]) {
                     drawLine(
                         (manoProj[fn][i][0] + manoXOff) * pixelScale,
@@ -3848,7 +3848,7 @@ const manoViewer = (() => {
             });
         }
 
-        // MANO v1 joints (lime circles)
+        // Skeleton v1 joints (lime circles)
         if (showMano2D && manoProj[fn]) {
             for (let j = 0; j < 21; j++) {
                 if (!isJointVisible(j) || !manoProj[fn][j]) continue;
@@ -4756,7 +4756,7 @@ const manoViewer = (() => {
             if (!heatmapCache[key]) {
                 try {
                     heatmapCache[key] = await api(
-                        `/api/mano/${subjectId}/trial/${trial.trial_idx}/heatmap?frame=${frame}&joint=-1&side=${side}`
+                        `/api/skeleton/${subjectId}/trial/${trial.trial_idx}/heatmap?frame=${frame}&joint=-1&side=${side}`
                     );
                 } catch { return; }
             }
@@ -4810,7 +4810,7 @@ const manoViewer = (() => {
             if (!heatmapCache[key]) {
                 try {
                     heatmapCache[key] = await api(
-                        `/api/mano/${subjectId}/trial/${trial.trial_idx}/heatmap?frame=${frame}&joint=${j}&side=${side}`
+                        `/api/skeleton/${subjectId}/trial/${trial.trial_idx}/heatmap?frame=${frame}&joint=${j}&side=${side}`
                     );
                 } catch { continue; }
             }
@@ -4976,7 +4976,7 @@ const manoViewer = (() => {
         let angDataMin = Infinity, angDataMax = -Infinity;
         for (const [metric] of selectedMetrics) {
             const isAng = metric.startsWith('Flex:') || metric.startsWith('Abd:') || metric.startsWith('Spread ') || metric.startsWith('Knuckle:');
-            const mano = _getMetricData('mano', metric);
+            const skeleton = _getMetricData('skeleton', metric);
             const v2d  = _getMetricData('skel_v2', metric);
             const legacyd = _getMetricData('skel_legacy', metric);
             const mp   = _getMetricData('mp',   metric);
@@ -4990,7 +4990,7 @@ const manoViewer = (() => {
                     else     { distDataMin = Math.min(distDataMin, v); distDataMax = Math.max(distDataMax, v); }
                 }
             };
-            if (showMano2D || showMano3D) chk(mano, isAng);
+            if (showMano2D || showMano3D) chk(skeleton, isAng);
             if (showSkelV2_2D || showSkelV2_3D) chk(v2d, isAng);
             if (showLegacyV2_2D || showLegacyV2_3D) chk(legacyd, isAng);
             if (showMP2D || showMP3D) chk(mp, isAng);
@@ -5132,7 +5132,7 @@ const manoViewer = (() => {
         // Source line styles: [lineWidth, dash]
         const SOURCE_STYLES = {
             skel_v2:[2,   []],
-            mano:   [1.5, []],
+            skeleton:   [1.5, []],
             mp:     [1,   []],
             vision: [1,   []],
             dlc:    [1,   []],
@@ -5163,7 +5163,7 @@ const manoViewer = (() => {
 
         // Source colors used for Thumb-Index Aperture (always) and single-metric mode
         const SOURCE_COLORS = {
-            mano: 'lime', skel_v2: '#ff9800', skel_legacy: '#e040fb',
+            skeleton: 'lime', skel_v2: '#ff9800', skel_legacy: '#e040fb',
             mp: '#00cccc', vision: '#2196f3', dlc: '#ff4444',
             prev: '#b35b00', heatmap: '#ff6600',
             hrnet_centroid:  '#ff9966',
@@ -5205,10 +5205,10 @@ const manoViewer = (() => {
             const toY = isAng ? toYAngle : toYDist;
             const joints = _getRequiredJoints(metric);
             const mpMask   = _makeInFrameMask(trialData.mp_tracked_L,     trialData.mp_tracked_R,     joints);
-            const manoMask = _makeInFrameMask(trialData.mano_proj_L,      trialData.mano_proj_R,      joints);
+            const manoMask = _makeInFrameMask(trialData.skeleton_proj_L,      trialData.skeleton_proj_R,      joints);
             const visMask  = _makeInFrameMask(trialData.vision_tracked_L, trialData.vision_tracked_R, joints);
 
-            const rawMano    = _getMetricData('mano',        metric);
+            const rawMano    = _getMetricData('skeleton',        metric);
             const rawV2      = _getMetricData('skel_v2',     metric);
             const rawLegacy  = _getMetricData('skel_legacy', metric);
             const rawMp      = _getMetricData('mp',          metric);
@@ -5225,7 +5225,7 @@ const manoViewer = (() => {
             const isAbd = metric.startsWith('Abd:');
             const abdDash = singleJointAngle && isAbd ? [5, 3] : null;
 
-            if (showMano2D || showMano3D)             drawSeries(_applyMask(rawMano,  manoMask), useSourceColor ? SOURCE_COLORS.mano        : metricColor, 'mano',        toY, abdDash);
+            if (showMano2D || showMano3D)             drawSeries(_applyMask(rawMano,  manoMask), useSourceColor ? SOURCE_COLORS.skeleton        : metricColor, 'skeleton',        toY, abdDash);
             // Note: the Skeleton (v3) distance line is NOT drawn here on its
             // own anymore.  It's drawn per-active-stage below, so the plot
             // shows exactly the stages the user has selected (and nothing
@@ -5922,7 +5922,7 @@ const manoViewer = (() => {
             // Raycast against all model groups, find closest sphere
             const groups = [
                 ['skel_v2', skelV2Group],
-                ['mano', manoGroup],
+                ['skeleton', manoGroup],
                 ['mp', mpGroup],
                 ['vision', visionGroup],
             ];
@@ -5951,7 +5951,7 @@ const manoViewer = (() => {
             const fn = currentFrame;
             const src = bestHit.source;
             const pts = src === 'skel_v2' ? trialData.skel_v2_joints_3d?.[fn]
-                      : src === 'mano' ? trialData.mano_joints_3d?.[fn]
+                      : src === 'skeleton' ? trialData.skeleton_joints_3d?.[fn]
                       : src === 'mp' ? trialData.mp_joints_3d?.[fn]
                       : trialData.vision_joints_3d?.[fn];
             if (!pts) return;
@@ -6003,7 +6003,7 @@ const manoViewer = (() => {
 
         // Test each group — return the name of the closest hit
         const groups = [
-            ['mano', manoGroup],
+            ['skeleton', manoGroup],
             ['skel_v2', skelV2Group],
             ['mp', mpGroup],
             ['vision', visionGroup],
@@ -6046,7 +6046,7 @@ const manoViewer = (() => {
     function makeAngleArc(center, zeroDir, sweepAxis, angleDeg, radius, hexColor, showTick = true) {
         if (Math.abs(angleDeg) < 0.5) return null;
         const segments = 40;
-        const tubeRadius = 0.9;  // slightly narrower than MANO bones (1.2)
+        const tubeRadius = 0.9;  // slightly narrower than Skeleton bones (1.2)
         const angleRad = THREE.MathUtils.degToRad(angleDeg);
 
         const color = new THREE.Color(hexColor);
@@ -6093,7 +6093,7 @@ const manoViewer = (() => {
             }
         });
 
-        const mano3d = trialData.mano_joints_3d?.[fn];
+        const skel3d = trialData.skeleton_joints_3d?.[fn];
         const v2_3d = trialData.skel_v2_joints_3d?.[fn];
         const legacy_3d = trialData.skel_legacy_joints_3d?.[fn];
         const mp3d = trialData.mp_joints_3d?.[fn];
@@ -6116,7 +6116,7 @@ const manoViewer = (() => {
         const T_cam = trialData?.calib?.T;
 
         const getScenePos = (pts3d, j, isMano, override2dFrame) => {
-            // For MANO joints, use raw 3D positions (they have their own fitting),
+            // For Skeleton joints, use raw 3D positions (they have their own fitting),
             // UNLESS an explicit per-stage 2D anchor is provided — then snap the
             // sphere to that 2D pixel using the same depth-from-3D math we use
             // for MP joints, so the 3D sphere lands at the stage's own 2D label
@@ -6164,10 +6164,10 @@ const manoViewer = (() => {
         // Compute orbit pivot = centroid of highest-priority visible model
         if (!orbitDragging) {
             const v2Valid = v2_3d && v2_3d.some(j => j != null);
-            const manoValid = mano3d && mano3d.some(j => j != null);
+            const manoValid = skel3d && skel3d.some(j => j != null);
             const mpValid = mp3d && mp3d.some(j => j != null);
             const visionValid = vision3d && vision3d.some(j => j != null);
-            const pivotPts = v2Valid ? v2_3d : (manoValid ? mano3d : (mpValid ? mp3d : (visionValid ? vision3d : null)));
+            const pivotPts = v2Valid ? v2_3d : (manoValid ? skel3d : (mpValid ? mp3d : (visionValid ? vision3d : null)));
             const pivotIsMano = !!(v2Valid || manoValid);
             if (pivotPts) {
                 let px = 0, py = 0, pz = 0, pn = 0;
@@ -6187,22 +6187,22 @@ const manoViewer = (() => {
             return p.clone().sub(orbitPivot).applyQuaternion(orbitQuat).add(orbitPivot);
         };
 
-        // MANO joints (green)
-        if (showMano3D && mano3d) {
+        // Skeleton joints (green)
+        if (showMano3D && skel3d) {
             const manoMat = new THREE.MeshPhongMaterial({ color: 0x00ff00 });
             const boneMat = new THREE.MeshPhongMaterial({ color: 0x00dd00 });
             for (let j = 0; j < 21; j++) {
-                if (!isJointVisible(j) || !mano3d[j]) continue;
+                if (!isJointVisible(j) || !skel3d[j]) continue;
                 const sphere = new THREE.Mesh(sphereGeom, manoMat);
-                sphere.position.copy(orbitPt(getScenePos(mano3d, j, true)));
+                sphere.position.copy(orbitPt(getScenePos(skel3d, j, true)));
                 manoGroup.add(sphere);
             }
             if (showManoSkel && trialData.skeleton) {
                 trialData.skeleton.forEach(([i, j]) => {
-                    if (!isBoneVisible(i, j) || !mano3d[i] || !mano3d[j]) return;
+                    if (!isBoneVisible(i, j) || !skel3d[i] || !skel3d[j]) return;
                     const bone = makeBone(
-                        orbitPt(getScenePos(mano3d, i, true)),
-                        orbitPt(getScenePos(mano3d, j, true)),
+                        orbitPt(getScenePos(skel3d, i, true)),
+                        orbitPt(getScenePos(skel3d, j, true)),
                         1.2, boneMat
                     );
                     if (bone) manoGroup.add(bone);
@@ -6728,7 +6728,7 @@ const manoViewer = (() => {
             // Use the highest-priority visible model for joint positions & angles
             let pts3d = null, anglesData = null, isManoSrc = false;
             if (showSkelV2_3D && v2_3d)        { pts3d = v2_3d;     anglesData = trialData.angles_skel_v2; isManoSrc = true; arcSrcKey = 'skel_v2'; }
-            else if (showMano3D && mano3d)     { pts3d = mano3d;    anglesData = trialData.angles_mano;    isManoSrc = true; arcSrcKey = 'mano'; }
+            else if (showMano3D && skel3d)     { pts3d = skel3d;    anglesData = trialData.angles_mano;    isManoSrc = true; arcSrcKey = 'skeleton'; }
             else if (showMP3D && mp3d)         { pts3d = mp3d;      anglesData = trialData.angles_mp;      arcSrcKey = 'mp'; }
             else if (showVision3D && vision3d) { pts3d = vision3d;  anglesData = trialData.angles_vision;  arcSrcKey = 'vision'; }
 
@@ -6933,7 +6933,7 @@ const manoViewer = (() => {
         dlcGroup.visible = showDLC3D;
 
         // Apply per-model translations
-        manoGroup.position.copy(modelTranslations.mano);
+        manoGroup.position.copy(modelTranslations.skeleton);
         skelV2Group.position.copy(modelTranslations.skel_v2);
         mpGroup.position.copy(modelTranslations.mp);
         visionGroup.position.copy(modelTranslations.vision);
@@ -6961,7 +6961,7 @@ const manoViewer = (() => {
 
         // Reset orbit rotation and per-model translations
         orbitQuat.identity();
-        modelTranslations.mano.set(0, 0, 0);
+        modelTranslations.skeleton.set(0, 0, 0);
         modelTranslations.skel_v2.set(0, 0, 0);
         modelTranslations.mp.set(0, 0, 0);
         modelTranslations.vision.set(0, 0, 0);
@@ -7084,10 +7084,10 @@ const manoViewer = (() => {
     // ── Boot ─────────────────────────────────────────────────
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', () => {
-            init().catch(e => console.error('MANO viewer init failed:', e));
+            init().catch(e => console.error('Skeleton viewer init failed:', e));
         });
     } else {
-        init().catch(e => console.error('MANO viewer init failed:', e));
+        init().catch(e => console.error('Skeleton viewer init failed:', e));
     }
 
     function _updateHandDiagramColor() {
@@ -7104,7 +7104,7 @@ const manoViewer = (() => {
         const btn = $('runStage1Btn');
         if (!statusEl || !btn) return;
 
-        const hasFit = trialData && trialData.has_mano_fit;
+        const hasFit = trialData && trialData.has_skeleton_v1;
         const hasV2  = trialData && trialData.has_skel_v2;
         const hasAnyFit = hasFit || hasV2;
         const hasMP = trialData && trialData.has_mp;
@@ -7565,7 +7565,7 @@ const manoViewer = (() => {
         // active custom constraints so the next fit uses the same values)
         const cst = trialData?.v2_fit_constraints;
         if (cst) {
-            api('/api/mano/joint-constraints', {
+            api('/api/skeleton/joint-constraints', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(cst),
@@ -7574,7 +7574,7 @@ const manoViewer = (() => {
 
         // Restore error-detection + camera-attribution sliders from the
         // last Run (the correction pipeline saves these into the same
-        // mano_fit_v2_params.json under 'detection' / 'attribution' keys).
+        // skeleton_v3_params.json under 'detection' / 'attribution' keys).
         const detSaved  = p.detection  || {};
         const attrSaved = p.attribution || {};
         const detMap = {
@@ -7687,13 +7687,13 @@ const manoViewer = (() => {
         try {
             let result;
             if (target === 'local-cpu') {
-                result = await api(`/api/mano/${subjectId}/fit`, {
+                result = await api(`/api/skeleton/${subjectId}/fit`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ ...fitParams, stage: 1 }),
                 });
             } else {
-                result = await _submitViaQueue('mano_fit', fitParams, target);
+                result = await _submitViaQueue('skeleton_v1', fitParams, target);
             }
             statusEl.innerHTML = '<span style="color:var(--blue);">Fitting...</span>';
             const jobId = result.job_id || result.queue_id;
@@ -7737,7 +7737,7 @@ const manoViewer = (() => {
 
     async function runFitV2() {
         // Runs the MP correction pipeline (currently: Y-disparity winner-take-all
-        // for every detected error), saves the output as mano_fit_v2.npz, and
+        // for every detected error), saves the output as skeleton_v3.npz, and
         // reloads the trial so it shows up as the Skeleton model.  Also saves
         // the current error matrix (mp_errors.npz) alongside.
         if (!subjectId || currentTrialIdx < 0) {
@@ -7753,7 +7753,7 @@ const manoViewer = (() => {
         if (errStEl)  errStEl.textContent = 'Running corrections…';
 
         try {
-            const result = await api(`/api/mano/${subjectId}/run_corrections`, {
+            const result = await api(`/api/skeleton/${subjectId}/run_corrections`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -7863,7 +7863,7 @@ const manoViewer = (() => {
         };
 
         try {
-            const result = await api(`/api/mano/${subjectId}/fit_v2_legacy`, {
+            const result = await api(`/api/skeleton/${subjectId}/fit_v2_legacy`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(params),
@@ -8324,7 +8324,7 @@ const manoViewer = (() => {
             const cfg = STAGE_CONFIGS[stage];
             if (!cfg?.factor) continue;
             try {
-                await api(`/api/mano/${subjectId}/mp_errors`, {
+                await api(`/api/skeleton/${subjectId}/mp_errors`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -8369,7 +8369,7 @@ const manoViewer = (() => {
                 for (const k of Object.keys(_mpErrorWeights.detection)) {
                     detFiltered[k] = active.has(k) ? _mpErrorWeights.detection[k] : 0;
                 }
-                return api(`/api/mano/${subjectId}/mp_errors`, {
+                return api(`/api/skeleton/${subjectId}/mp_errors`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -8412,7 +8412,7 @@ const manoViewer = (() => {
         if (!subjectId || currentTrialIdx < 0) return;
         const stEl = $('errorsStatus');
         try {
-            await api(`/api/mano/${subjectId}/save_mp_errors`, {
+            await api(`/api/skeleton/${subjectId}/save_mp_errors`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -8431,15 +8431,15 @@ const manoViewer = (() => {
 
     function _enforceSourceConstraint() {
         // When multiple metrics are selected, keep only the highest-priority active source.
-        // Priority: Skeleton (MANO) > MediaPipe > Vision
+        // Priority: Skeleton (Skeleton) > MediaPipe > Vision
         if (selectedMetrics.size <= 1) return;
         const manoOn = showMano2D || showMano3D;
         const mpOn   = showMP2D   || showMP3D;
         const visOn  = showVision2D || showVision3D;
-        const keep = manoOn ? 'mano' : mpOn ? 'mp' : visOn ? 'vision' : null;
+        const keep = manoOn ? 'skeleton' : mpOn ? 'mp' : visOn ? 'vision' : null;
         if (!keep) return;
         const groups = {
-            mano:   ['showMano2D',   'showMano3D',   'showManoSkel'],
+            skeleton:   ['showMano2D',   'showMano3D',   'showManoSkel'],
             mp:     ['showMP2D',     'showMP3D',     'showMPSkel'],
             vision: ['showVision2D', 'showVision3D', 'showVisionSkel'],
         };
@@ -8506,7 +8506,7 @@ const manoViewer = (() => {
         modal.style.display = 'flex';
 
         try {
-            const data = await api('/api/mano/joint-constraints');
+            const data = await api('/api/skeleton/joint-constraints');
             const c = data.constraints;
             badge.style.display = data.is_custom ? '' : 'none';
             // Apply any drag overrides to the loaded values before rendering
@@ -8626,7 +8626,7 @@ const manoViewer = (() => {
     /** Refresh constraint data in trialData and clear drag overrides. */
     async function _refreshConstraints() {
         try {
-            const data = await api('/api/mano/joint-constraints');
+            const data = await api('/api/skeleton/joint-constraints');
             const c = data.constraints;
             if (trialData) {
                 trialData.angle_constraints = c.joints || [];
@@ -8643,7 +8643,7 @@ const manoViewer = (() => {
 
         // Rebuild full JSON from current inputs + original structural data
         let orig;
-        try { orig = (await api('/api/mano/joint-constraints')).constraints; } catch { return; }
+        try { orig = (await api('/api/skeleton/joint-constraints')).constraints; } catch { return; }
 
         const rows = body.querySelectorAll('tr[data-name]');
         const edits = {};
@@ -8679,7 +8679,7 @@ const manoViewer = (() => {
         }
 
         try {
-            await api('/api/mano/joint-constraints', {
+            await api('/api/skeleton/joint-constraints', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(updated),
@@ -8694,9 +8694,9 @@ const manoViewer = (() => {
 
     async function resetConstraints() {
         try {
-            await api('/api/mano/joint-constraints', { method: 'DELETE' });
+            await api('/api/skeleton/joint-constraints', { method: 'DELETE' });
             // Reload table with defaults
-            const data = await api('/api/mano/joint-constraints');
+            const data = await api('/api/skeleton/joint-constraints');
             $('constraintsCustomBadge').style.display = 'none';
             _renderConstraintsTable($('constraintsBody'), data.constraints);
             await _refreshConstraints();
@@ -8713,7 +8713,7 @@ const manoViewer = (() => {
     async function cancelConstraintsEditor() {
         // Discard unsaved edits by re-loading current server state into the table
         try {
-            const data = await api('/api/mano/joint-constraints');
+            const data = await api('/api/skeleton/joint-constraints');
             _renderConstraintsTable($('constraintsBody'), data.constraints);
         } catch {}
         closeConstraintsEditor();
@@ -8722,5 +8722,5 @@ const manoViewer = (() => {
     return { goToFrame, togglePlay, toggleSide, resetZoom, toggleTrackingZoom, prevSubject, nextSubject, getExportContext, runStage1, renderDistanceTrace, resetFitDefaults, resetPlotSelection, togglePlotMode, runFitV2, resetFitV2Defaults, runFitLegacy, resetFitLegacyDefaults, saveErrors, openConstraintsEditor, saveConstraints, resetConstraints, closeConstraintsEditor, cancelConstraintsEditor };
 })();
 
-// Expose on window for cross-module access (mano.js is an ES module)
+// Expose on window for cross-module access (labels.js is an ES module)
 window.manoViewer = manoViewer;

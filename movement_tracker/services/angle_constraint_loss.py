@@ -1,7 +1,7 @@
 """Differentiable joint angle constraint loss using palm-normal decomposition.
 
 Computes flex/abd angles using the *exact same* math as
-``mano_data._compute_angles`` (the function that produces the plotted traces),
+``skeleton_data._compute_angles`` (the function that produces the plotted traces),
 then penalises angles outside the per-joint [min, max] ranges from the priors
 JSON.  Both fitting algorithms (v1, v2) import the single entry-point
 ``compute_angle_constraint_loss``.

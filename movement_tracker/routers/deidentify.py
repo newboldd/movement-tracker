@@ -823,7 +823,7 @@ def get_hrnet_mask_data(subject_id: int, trial_idx: int = Query(...)) -> dict:
 
     from ..config import get_settings
     from ..services.video import build_trial_map
-    from ..services.mano_data import _mano_dir
+    from ..services.skeleton_data import _skeleton_dir
 
     with get_db_ctx() as db:
         subj = db.execute("SELECT name FROM subjects WHERE id=?", (subject_id,)).fetchone()
@@ -837,8 +837,8 @@ def get_hrnet_mask_data(subject_id: int, trial_idx: int = Query(...)) -> dict:
     n_frames = int(trials[trial_idx]["frame_count"])
     start_frame = int(trials[trial_idx].get("start_frame", 0))
 
-    mip_path = _mano_dir(name) / stem / "hrnet_w18_mip.npz"
-    crop_path = _mano_dir(name) / stem / "hand_crop.json"
+    mip_path = _skeleton_dir(name) / stem / "hrnet_w18_mip.npz"
+    crop_path = _skeleton_dir(name) / stem / "hand_crop.json"
     if not mip_path.exists():
         return {"available": False, "reason": f"No HRnet MIP for {stem}"}
     if not crop_path.exists():

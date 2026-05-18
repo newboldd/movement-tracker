@@ -38,9 +38,9 @@ RESOURCE_MAP = {
     "pose": "cpu",
     "deidentify": "cpu",
     "hrnet": "gpu",
-    "mano_fit": "cpu",
-    "mano_fit_v2": "cpu",
-    "mano_fit_v3": "cpu",
+    "skeleton_v1": "cpu",
+    "skeleton_v2": "cpu",
+    "skeleton_v3": "cpu",
     # Per-trial pre-processing: camera trajectory + background/mask bake.
     # Pure CPU (OpenCV + numpy + ffmpeg).  No GPU needed.
     "preproc": "cpu",
@@ -552,7 +552,7 @@ class QueueManager:
                         _sim = bool((extra_params or {}).get("static_image_mode"))
                         # Pass trial_idx through when the caller specified
                         # one — the per-trial Run-MediaPipe button on the
-                        # mano page submits a single-trial job and expects
+                        # skeleton page submits a single-trial job and expects
                         # only THAT trial's slice of the npz to change.
                         # Without this, the worker re-ran every trial and
                         # the user's bbox edits for one trial silently
@@ -902,7 +902,7 @@ class QueueManager:
                     # GPU lane: analyze on local GPU
                     local_executor.execute_analyze(subject_names[0], gpu_index, job_id, log_path)
 
-                elif job_type in ("mano_fit", "mano_fit_v2"):
+                elif job_type in ("skeleton_v1", "skeleton_v2", "skeleton_v3"):
                     # Skeleton fitting — runs in-process (PyTorch CPU)
                     from ..services.jobs import registry as job_registry
                     from ..services.video import build_trial_map
@@ -917,28 +917,43 @@ class QueueManager:
                     if trial_idx >= len(vtm):
                         raise ValueError(f"Trial index {trial_idx} out of range")
                     trial_stem = vtm[trial_idx]["trial_name"]
-                    if job_type == "mano_fit":
-                        from ..services.mano_fitting import run_stage1_fitting
-                        run_stage1_fitting(
+                    if job_type == "skeleton_v1":
+                        # v1 = original FK skeleton fit (writes skeleton_v1.npz)
+                        from ..services.skeleton_v1 import run_skeleton_v1_fit
+                        run_skeleton_v1_fit(
                             subject_names[0], trial_stem,
                             cancel_event=cancel_event, progress_callback=on_progress,
                             w_reproj=ep.get("w_reproj", 1.0), w_bone=ep.get("w_bone", 5.0),
                             w_smooth=ep.get("w_smooth", 1.0), snap_bones=ep.get("snap_bones", False),
                             w_angle=ep.get("w_angle", 2.0),
                         )
-                    else:
-                        from ..services.mano_fitting_v2 import run_v2_fitting
-                        run_v2_fitting(
+                    elif job_type == "skeleton_v2":
+                        # v2 = legacy smoothing fit (writes skeleton_v2.npz)
+                        from ..services.skeleton_v2 import run_skeleton_v2_fit
+                        run_skeleton_v2_fit(
                             subject_names[0], trial_stem,
                             cancel_event=cancel_event, progress_callback=on_progress,
-                            w_mediapipe=ep.get("w_mediapipe", 1.0), w_vision=ep.get("w_vision", 1.0),
-                            w_dlc=ep.get("w_dlc", 1.0), w_hrnet=ep.get("w_hrnet", 0.0),
-                            w_bone=ep.get("w_bone", 0.5), w_smooth_wrist=ep.get("w_smooth_wrist", 1.0),
-                            w_smooth_xy=ep.get("w_smooth_xy", 1.0), w_smooth_z=ep.get("w_smooth_z", 2.0),
-                            w_smooth_angles=ep.get("w_smooth_angles", 1.0),
-                            use_angle_constraints=ep.get("use_angle_constraints", True),
-                            w_constraints=ep.get("w_constraints", 2.0),
-                            w_v1_ref=ep.get("w_v1_ref", 0.5),
+                        )
+                    else:
+                        # v3 = corrections pipeline (writes skeleton_v3.npz).
+                        # skeleton_v3.py's public entry point now wraps
+                        # mp_error_detection.run_correction_pipeline + save_errors
+                        # so the queue manager only knows one function per version.
+                        from ..services.skeleton_v3 import run_skeleton_v3_fit
+                        det = dict(ep.get("detection") or {})
+                        attr = dict(ep.get("attribution") or {})
+                        run_skeleton_v3_fit(
+                            subject_names[0], trial_stem,
+                            detection=det, attribution=attr,
+                            progress_callback=on_progress,
+                            cancel_event=cancel_event,
+                            hrnet_source=ep.get("hrnet_source", "auto"),
+                            stereo_mode=ep.get("stereo_mode", "image"),
+                            stereo_mask_dilate_px=int(ep.get("mask_dilate_px", 10)),
+                            stereo_gauss_center_weight=float(ep.get("gauss_center_weight", 0.0)),
+                            stereo_conf=float(ep.get("stereo_conf", 0.0)),
+                            stereo_dist_px=float(ep.get("stereo_dist_px", 0.0)),
+                            stereo_occlusion_px=float(ep.get("stereo_occlusion_px", 0.0)),
                         )
                     job_registry._cancel_events.pop(job_id, None)
                     with get_db_ctx() as _db:
@@ -1299,7 +1314,7 @@ class QueueManager:
                                 (str(_e)[:500], job_id),
                             )
 
-                elif job_type in ("vision", "pose", "mano_fit", "mano_fit_v2"):
+                elif job_type in ("vision", "pose", "skeleton_v1", "skeleton_v2"):
                     # These don't have remote handlers yet — run locally
                     logger.warning(f"Job {job_id}: {job_type} not supported remotely, running locally")
                     if job_type == "vision":
@@ -1310,7 +1325,7 @@ class QueueManager:
                         local_executor.execute_pose(subject_names[0], job_id, log_path)
                         monitor_thread = registry._threads.get(job_id)
                         if monitor_thread: monitor_thread.join()
-                    elif job_type in ("mano_fit", "mano_fit_v2"):
+                    elif job_type in ("skeleton_v1", "skeleton_v2"):
                         # Re-use the local-cpu in-process dispatch
                         from ..services.jobs import registry as job_registry
                         from ..services.video import build_trial_map as _btm
@@ -1320,29 +1335,22 @@ class QueueManager:
                         def _fallback_progress(pct):
                             with get_db_ctx() as _db:
                                 _db.execute("UPDATE jobs SET progress_pct = ? WHERE id = ?", (pct, job_id))
-                        if job_type == "mano_fit":
-                            from ..services.mano_fitting import run_stage1_fitting
+                        if job_type == "skeleton_v1":
+                            from ..services.skeleton_v1 import run_skeleton_v1_fit
                             vtm = _btm(subject_names[0])
                             trial_stem = vtm[ep.get("trial_idx", 0)]["trial_name"]
-                            run_stage1_fitting(subject_names[0], trial_stem, cancel_event=cancel_event,
+                            run_skeleton_v1_fit(subject_names[0], trial_stem, cancel_event=cancel_event,
                                                progress_callback=_fallback_progress,
                                                w_reproj=ep.get("w_reproj", 1.0), w_bone=ep.get("w_bone", 5.0),
                                                w_smooth=ep.get("w_smooth", 1.0), snap_bones=ep.get("snap_bones", False),
                                                w_angle=ep.get("w_angle", 2.0))
-                        elif job_type == "mano_fit_v2":
-                            from ..services.mano_fitting_v2 import run_v2_fitting
+                        elif job_type == "skeleton_v2":
+                            from ..services.skeleton_v2 import run_skeleton_v2_fit
                             vtm = _btm(subject_names[0])
                             trial_stem = vtm[ep.get("trial_idx", 0)]["trial_name"]
-                            run_v2_fitting(subject_names[0], trial_stem, cancel_event=cancel_event,
-                                           progress_callback=_fallback_progress,
-                                           w_mediapipe=ep.get("w_mediapipe", 1.0), w_vision=ep.get("w_vision", 1.0),
-                                           w_dlc=ep.get("w_dlc", 1.0), w_hrnet=ep.get("w_hrnet", 0.0),
-                                           w_bone=ep.get("w_bone", 0.5), w_smooth_wrist=ep.get("w_smooth_wrist", 1.0),
-                                           w_smooth_xy=ep.get("w_smooth_xy", 1.0), w_smooth_z=ep.get("w_smooth_z", 2.0),
-                                           w_smooth_angles=ep.get("w_smooth_angles", 1.0),
-                                           use_angle_constraints=ep.get("use_angle_constraints", True),
-                                           w_constraints=ep.get("w_constraints", 2.0),
-                                           w_v1_ref=ep.get("w_v1_ref", 0.5))
+                            run_skeleton_v2_fit(subject_names[0], trial_stem,
+                                                cancel_event=cancel_event,
+                                                progress_callback=_fallback_progress)
                         job_registry._cancel_events.pop(job_id, None)
                         with get_db_ctx() as _db:
                             _db.execute("UPDATE jobs SET status='completed', progress_pct=100, finished_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,))

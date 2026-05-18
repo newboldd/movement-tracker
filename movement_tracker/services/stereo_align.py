@@ -22,7 +22,7 @@ fingertips and PIPs).
 A high-pass pre-filter (subtract Gaussian-blurred copy) suppresses
 slowly-varying background gradients before each phase correlation.
 
-Output (per trial, saved to ``<dlc>/<subject>/mano/<stem>/stereo_align.npz``)::
+Output (per trial, saved to ``<dlc>/<subject>/skeleton/<stem>/stereo_align.npz``)::
 
     shifts                 (N, 21, 2) float32  — (dx, dy) per joint per frame
     response               (N, 21)    float32  — phase-corr peak strength
@@ -368,7 +368,7 @@ def run_stereo_align(subject_name: str, trial_idx: int,
     import json as _json
     from ..config import get_settings
     from .video import build_trial_map
-    from .mano_data import _mano_dir
+    from .skeleton_data import _skeleton_dir
 
     settings = get_settings()
     tmap = build_trial_map(subject_name)
@@ -453,7 +453,7 @@ def run_stereo_align(subject_name: str, trial_idx: int,
     hand_shifts = np.full((n_frames, 2), np.nan, dtype=np.float32)
     hand_response = np.full(n_frames, np.nan, dtype=np.float32)
 
-    out_dir = _mano_dir(subject_name) / stem
+    out_dir = _skeleton_dir(subject_name) / stem
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / {
         "image":   "stereo_align.npz",
@@ -665,7 +665,7 @@ def load_stereo_align(subject_name: str, trial_idx: int,
     if mode not in ("image", "outline", "hybrid"):
         raise ValueError(f"Unknown stereo mode: {mode!r}")
     from .video import build_trial_map
-    from .mano_data import _mano_dir
+    from .skeleton_data import _skeleton_dir
     tmap = build_trial_map(subject_name)
     if trial_idx < 0 or trial_idx >= len(tmap):
         return None
@@ -675,7 +675,7 @@ def load_stereo_align(subject_name: str, trial_idx: int,
         "outline": "stereo_align_outline.npz",
         "hybrid":  "stereo_align_hybrid.npz",
     }[mode]
-    path = _mano_dir(subject_name) / stem / fname
+    path = _skeleton_dir(subject_name) / stem / fname
     if not path.exists():
         return None
     try:

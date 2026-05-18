@@ -53,11 +53,11 @@
         .finger-toggle input { margin: 0; }
 
         /* ── Main content area ── */
-        .mano-main {
+        .skeleton-main {
             flex: 1; display: flex; flex-direction: column;
             overflow: hidden; padding: 8px;
         }
-        .mano-viewports {
+        .skeleton-viewports {
             flex: 1; position: relative; min-height: 0;
             background: #111; border-radius: 4px; overflow: hidden;
         }
@@ -117,10 +117,10 @@
             <a href="/videos" class="nav-browse">Browse Videos</a>
             <a href="/subjects">Subjects</a>
             <span class="nav-dropdown">
-                <a href="/mano" class="active">Analyze</a>
+                <a href="/labels" class="active">Analyze</a>
                 <div class="nav-dropdown-menu">
                     <a href="/preproc">Pre-proc</a>
-                    <a href="/mano" class="active">Labels</a>
+                    <a href="/labels" class="active">Labels</a>
                     <a href="/labeling-select">DLC</a>
                     <a href="/events">Events</a>
                     <a href="/deidentify">Deidentify</a>
@@ -356,7 +356,7 @@
                     <button class="btn btn-sm detect-model-btn" style="width:100%;font-size:10px;text-align:left;">MediaPipe (hand joints)</button>
                     <!-- Static-image-mode option for MediaPipe only.  Hidden
                          until the MediaPipe row is the active detect model
-                         (toggled in mano.js by _enterDetectMode /
+                         (toggled in labels.js by _enterDetectMode /
                          _exitDetectMode). -->
                     <label id="mpStaticImageRow"
                            style="display:none;align-items:center;gap:4px;font-size:10px;color:var(--text-muted);padding-left:6px;margin-top:2px;cursor:pointer;"
@@ -1008,8 +1008,8 @@
         </div>
 
         <!-- Main content -->
-        <div class="mano-main">
-            <div class="mano-viewports">
+        <div class="skeleton-main">
+            <div class="skeleton-viewports">
                 <div class="canvas-wrap">
                     <canvas id="videoCanvas"></canvas>
                 </div>
@@ -1112,7 +1112,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/mano.js?v=360" type="module"></script>
+    <script src="/static/js/labels.js?v=361" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

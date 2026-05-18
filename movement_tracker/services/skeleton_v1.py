@@ -12,7 +12,7 @@ Install: pip install torch --index-url https://download.pytorch.org/whl/cpu
 The optimization directly refines 3D joint positions (initialized from
 stereo triangulation) subject to bone length, reprojection, and smoothness
 constraints.  This gives consistent bone lengths, smooth trajectories, and
-optimal dual-camera 2D fit without the MANO license.
+optimal dual-camera 2D fit without the Skeleton license.
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ import numpy as np
 
 from ..config import get_settings
 from .calibration import get_calibration_for_subject, triangulate_points
-from .mano_data import _mano_dir, HAND_SKELETON
+from .skeleton_data import _skeleton_dir, HAND_SKELETON
 from .mediapipe_prelabel import load_mediapipe_prelabels
 from .video import build_trial_map
 
@@ -63,7 +63,7 @@ def check_fitting_available() -> dict:
 
 
 # Keep old name as alias for the router
-check_mano_available = check_fitting_available
+check_skeleton_available = check_fitting_available
 
 
 def _get_hand_side(trial_stem: str) -> str:
@@ -74,7 +74,7 @@ def _get_hand_side(trial_stem: str) -> str:
     return "right"
 
 
-def run_stage1_fitting(
+def run_skeleton_v1_fit(
     subject_name: str,
     trial_stem: str,
     cancel_event: threading.Event | None = None,
@@ -144,7 +144,7 @@ def run_stage1_fitting(
     N = mp_L.shape[0]
 
     # Calibration — use trial-level first (same as display code)
-    from .mano_data import _load_trial_calibration
+    from .skeleton_data import _load_trial_calibration
     calib = _load_trial_calibration(subject_name, trial_stem)
     if calib is None:
         calib = get_calibration_for_subject(subject_name)
@@ -247,7 +247,7 @@ def run_stage1_fitting(
     angle_prior_data = None
     _angle_priors_list = []
     if w_angle > 0:
-        from .mano_data import load_angle_priors
+        from .skeleton_data import load_angle_priors
         angle_prior_data = load_angle_priors()
         _angle_priors_list = angle_prior_data.get("joints", [])
         logger.info(f"  Loaded {len(_angle_priors_list)} joint angle priors (flex+abd per joint)")
@@ -380,10 +380,10 @@ def run_stage1_fitting(
         all_err_L[t] = err_L[i]
         all_err_R[t] = err_R[i]
 
-    mano_trial_dir = _mano_dir(subject_name) / trial_stem
-    mano_trial_dir.mkdir(parents=True, exist_ok=True)
+    skeleton_trial_dir = _skeleton_dir(subject_name) / trial_stem
+    skeleton_trial_dir.mkdir(parents=True, exist_ok=True)
 
-    out_path = mano_trial_dir / "mano_fit.npz"
+    out_path = skeleton_trial_dir / "skeleton_v1.npz"
     np.savez(
         str(out_path),
         joints_3d=all_joints,
@@ -400,7 +400,7 @@ def run_stage1_fitting(
     # Save fitting parameters alongside the npz
     import json as _json
     from datetime import datetime
-    params_path = mano_trial_dir / "mano_fit_params.json"
+    params_path = skeleton_trial_dir / "skeleton_v1_params.json"
     params_path.write_text(_json.dumps({
         "fit_type": "skeleton",
         "version": "v1.0",
@@ -426,8 +426,8 @@ def run_stage1_fitting(
     }, indent=2))
 
     # Clear cached data so next load picks up the new fit
-    from .mano_data import _load_mano_npz
-    _load_mano_npz.cache_clear()
+    from .skeleton_data import _load_skeleton_npz
+    _load_skeleton_npz.cache_clear()
 
     report(100)
     logger.info(f"  Saved {out_path}")

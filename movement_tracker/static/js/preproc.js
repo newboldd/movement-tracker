@@ -25,7 +25,7 @@
     let playTimer = null;
     // Hidden <video> element with the trial's source video.  All
     // playback and scrubbing seeks against this element — same pattern
-    // as mano.js / videos.js, which is what makes smooth playback work.
+    // as labels.js / videos.js, which is what makes smooth playback work.
     let liveVideoEl = null;
     let liveVideoReady = false;
     let vidW = 0, vidH = 0;     // video native dimensions (stereo: full 3840×1080)
@@ -217,7 +217,7 @@
     const SPEED_PRESETS = [0.25, 0.5, 1, 2, 4, 8, 16, 32];
     let playbackRate = 1;
 
-    // Zoom/pan — same conventions as videos.js/mano.js.  Offsets are in
+    // Zoom/pan — same conventions as videos.js/labels.js.  Offsets are in
     // canvas pixels relative to the base-centered origin (computed in
     // getBaseMetrics()).  Scale stacks on top of the base fit-scale.
     let scale = 1, offsetX = 0, offsetY = 0;
@@ -255,10 +255,10 @@
         const subj = subjects.find(s => s.id === id);
         subjectName = subj ? subj.name : '';
         sessionStorage.setItem('lastSubjectId', String(id));
-        try { trials = await api(`/api/mano/${id}/trials`); }
+        try { trials = await api(`/api/skeleton/${id}/trials`); }
         catch (e) { trials = []; }
         const wrap = $('trialBtns');
-        // /api/mano/{id}/trials returns `trial_stem` (e.g. "Con01_R1").
+        // /api/skeleton/{id}/trials returns `trial_stem` (e.g. "Con01_R1").
         // Strip the "{subject}_" prefix for a compact label like "R1" —
         // same convention as the video browser.  Fall back to the stem.
         const _trialLabel = (t) => {
@@ -326,7 +326,7 @@
     function _loadTrialVideo() {
         // Point the hidden <video> element at the trial's source mp4.
         // We seek into it for scrubbing and let the browser decode at
-        // native speed for playback — same pattern as videos.js / mano.js.
+        // native speed for playback — same pattern as videos.js / labels.js.
         liveVideoReady = false;
         if (!liveVideoEl) {
             liveVideoEl = document.createElement('video');
@@ -337,7 +337,7 @@
             liveVideoEl.style.display = 'none';
             document.body.appendChild(liveVideoEl);
         }
-        const src = `/api/mano/${subjectId}/trial/${trialMeta.trial_idx}/video`;
+        const src = `/api/skeleton/${subjectId}/trial/${trialMeta.trial_idx}/video`;
         liveVideoEl.src = src;
         return new Promise(resolve => {
             const onMd = () => {
@@ -2290,7 +2290,7 @@
      */
     function _companionVideos() { return []; }
 
-    // Mirrors mano.js exactly — one videoEl, rVFC when available,
+    // Mirrors labels.js exactly — one videoEl, rVFC when available,
     // playbackRate clamped to 16 (browsers get unreliable above that).
     function _cancelPlayTimer() {
         if (!playTimer) return;
@@ -2667,7 +2667,7 @@
         $('nextFrameBtn').addEventListener('click', () => goToFrame(currentFrame + 1));
         $('sideToggle').addEventListener('click', switchCamera);
 
-        // Speed slider (matches videos.js / mano.js pattern).
+        // Speed slider (matches videos.js / labels.js pattern).
         const speedSlider = $('speedSlider');
         const speedDisplay = $('speedDisplay');
         if (speedSlider) {
@@ -2690,7 +2690,7 @@
 
         // Sidebar buttons / radios / checkboxes shouldn't trap keyboard
         // focus — otherwise Space re-clicks the button instead of
-        // toggling play.  Mirror mano.js: blur after pointerup so the
+        // toggling play.  Mirror labels.js: blur after pointerup so the
         // page-level shortcuts keep working.
         ['pointerup', 'mouseup', 'touchend'].forEach(evt => {
             document.addEventListener(evt, e => {
@@ -2753,7 +2753,7 @@
             }
         });
         // Zoom (mouse wheel) + pan (drag) on the video canvas — same
-        // conventions as the video browser and mano page.
+        // conventions as the video browser and skeleton page.
         canvas.addEventListener('wheel', e => {
             e.preventDefault();
             // Pick dimensions matching whatever the renderer is showing.

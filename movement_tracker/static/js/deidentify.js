@@ -707,7 +707,7 @@ const deid = (() => {
         if (!subjectId) return;
         sessionStorage.setItem('deid_returnFrame', currentFrame);
         sessionStorage.setItem('deid_returnSubject', subjectId);
-        window.location.href = `/mano?subject=${subjectId}`;
+        window.location.href = `/labels?subject=${subjectId}`;
     }
 
     // ── Side label mapping (stereo: left/right ↔ camera names) ──

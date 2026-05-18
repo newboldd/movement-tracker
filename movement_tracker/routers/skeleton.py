@@ -1,4 +1,4 @@
-"""MANO 3D hand model viewer API: trial listing, data loading, heatmap serving, fitting."""
+"""Skeleton 3D hand model viewer API: trial listing, data loading, heatmap serving, fitting."""
 from __future__ import annotations
 
 import json
@@ -11,9 +11,9 @@ from pydantic import BaseModel
 
 from ..config import get_settings
 from ..db import get_db_ctx
-from ..services.mano_data import (
-    list_mano_trials,
-    load_mano_trial_data,
+from ..services.skeleton_data import (
+    list_skeleton_trials,
+    load_skeleton_trial_data,
     load_angle_priors,
     get_heatmap,
     HAND_SKELETON,
@@ -26,7 +26,7 @@ from ..services.mediapipe_prelabel import load_mediapipe_prelabels
 
 from ..services.mp_error_detection import _CorrectionsCancelled
 
-router = APIRouter(prefix="/api/mano", tags=["mano"])
+router = APIRouter(prefix="/api/skeleton", tags=["skeleton"])
 
 
 class _JobCancelled(Exception):
@@ -48,20 +48,20 @@ def _subject_name(subject_id: int) -> str:
 
 @router.get("/{subject_id}/trials")
 def get_trials(subject_id: int) -> list[dict]:
-    """List trials with MediaPipe data and/or MANO fits for a subject."""
+    """List trials with MediaPipe data and/or Skeleton fits for a subject."""
     name = _subject_name(subject_id)
-    return list_mano_trials(name)
+    return list_skeleton_trials(name)
 
 
 @router.get("/{subject_id}/trial/{trial_idx}/data")
 def get_trial_data(subject_id: int, trial_idx: int) -> Response:
-    """Load bulk MANO viewer data for a trial.
+    """Load bulk Skeleton viewer data for a trial.
 
     Returns projected 2D coords, 3D joints, distances, fit quality,
     skeleton/finger constants.  ~5–10 MB JSON for a 1100-frame trial.
     """
     name = _subject_name(subject_id)
-    trials = list_mano_trials(name)
+    trials = list_skeleton_trials(name)
 
     # Find the trial by index
     trial = None
@@ -71,10 +71,10 @@ def get_trial_data(subject_id: int, trial_idx: int) -> Response:
             break
 
     if trial is None:
-        raise HTTPException(404, f"No MANO data for trial index {trial_idx}")
+        raise HTTPException(404, f"No Skeleton data for trial index {trial_idx}")
 
     try:
-        data = load_mano_trial_data(name, trial["trial_stem"])
+        data = load_skeleton_trial_data(name, trial["trial_stem"])
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
 
@@ -116,7 +116,7 @@ def get_trial_heatmap(
     Returns: {heatmap: [[float]], bbox: [x1,y1,x2,y2], max_val: float}
     """
     name = _subject_name(subject_id)
-    trials = list_mano_trials(name)
+    trials = list_skeleton_trials(name)
 
     trial = None
     for t in trials:
@@ -125,7 +125,7 @@ def get_trial_heatmap(
             break
 
     if trial is None:
-        raise HTTPException(404, f"No MANO data for trial index {trial_idx}")
+        raise HTTPException(404, f"No Skeleton data for trial index {trial_idx}")
 
     result = get_heatmap(name, trial["trial_stem"], frame, joint, side)
     if result is None:
@@ -247,9 +247,9 @@ def get_mediapipe_hints(subject_id: int) -> list[dict]:
 @router.get("/{subject_id}/trial/{trial_idx}/fit_history/{slot}")
 def get_fit_history_slot(subject_id: int, trial_idx: int, slot: int) -> Response:
     """Load a previous skeleton v2 fit (slot 1-3) with projections and angles."""
-    from ..services.mano_data import load_v2_fit_history_slot, _load_trial_calibration
+    from ..services.skeleton_data import load_v2_fit_history_slot, _load_trial_calibration
     name = _subject_name(subject_id)
-    trials = list_mano_trials(name)
+    trials = list_skeleton_trials(name)
     trial = None
     for t in trials:
         if t["trial_idx"] == trial_idx:
@@ -318,18 +318,18 @@ class FitRequest(BaseModel):
 
 @router.get("/{subject_id}/fit/status")
 def get_fit_status(subject_id: int) -> dict:
-    """Check if MANO fitting dependencies are available."""
-    from ..services.mano_fitting import check_mano_available
-    return check_mano_available()
+    """Check if Skeleton fitting dependencies are available."""
+    from ..services.skeleton_v1 import check_skeleton_available
+    return check_skeleton_available()
 
 
 @router.post("/{subject_id}/fit")
 def run_fit(subject_id: int, req: FitRequest) -> dict:
-    """Submit a MANO fitting job as a background task."""
-    from ..services.mano_fitting import check_mano_available, run_stage1_fitting
+    """Submit a Skeleton fitting job as a background task."""
+    from ..services.skeleton_v1 import check_skeleton_available, run_skeleton_v1_fit
     from ..services.jobs import registry
 
-    status = check_mano_available()
+    status = check_skeleton_available()
     if not status["available"]:
         raise HTTPException(400, status["message"])
 
@@ -350,7 +350,7 @@ def run_fit(subject_id: int, req: FitRequest) -> dict:
     trial_short = trial_stem.split('_', 1)[1] if '_' in trial_stem else trial_stem
     with get_db_ctx() as db:
         db.execute(
-            "INSERT INTO jobs (subject_id, job_type, status, params_json) VALUES (?, 'mano_fit', 'pending', ?)",
+            "INSERT INTO jobs (subject_id, job_type, status, params_json) VALUES (?, 'skeleton_v1', 'pending', ?)",
             (subject_id, json.dumps({"trial_name": trial_short})),
         )
         job = db.execute(
@@ -377,7 +377,7 @@ def run_fit(subject_id: int, req: FitRequest) -> dict:
                         (pct, job_id),
                     )
 
-            result = run_stage1_fitting(
+            result = run_skeleton_v1_fit(
                 name, trial_stem,
                 cancel_event=cancel_event,
                 progress_callback=on_progress,
@@ -403,7 +403,7 @@ def run_fit(subject_id: int, req: FitRequest) -> dict:
                     )
         except Exception as e:
             import logging
-            logging.getLogger(__name__).exception(f"MANO fit job {job_id} failed")
+            logging.getLogger(__name__).exception(f"Skeleton v1 fit job {job_id} failed")
             with get_db_ctx() as db:
                 db.execute(
                     "UPDATE jobs SET status = 'failed', error_msg = ?, "
@@ -443,7 +443,7 @@ def run_stereo(subject_id: int, req: StereoAlignRequest) -> dict:
     label in each camera and runs phase correlation (no label info used)
     to find the translation that best image-aligns OS onto OD.  Saves
     the per-frame per-joint shifts + correlation responses to
-    ``<mano>/<stem>/stereo_align.npz``.  The Stereo model on the Auto
+    ``<skeleton>/<stem>/stereo_align.npz``.  The Stereo model on the Auto
     page then draws the opposite-camera label, translated by the
     discovered shift, alongside the MP label of the current camera.
     """
@@ -674,124 +674,13 @@ def run_hrnet_fit(subject_id: int, req: HRnetFitRequest) -> dict:
     return {"job_id": job_id, "trial_stem": trial_stem}
 
 
-class FitV2Request(BaseModel):
-    trial_idx: int
-    w_mediapipe: float = 1.0
-    w_vision: float = 1.0
-    w_dlc: float = 1.0
-    w_hrnet: float = 1.0
-    # "centroid" → cluster centroid (HRnet Fit Stage 1)
-    # "hungarian" → joint stereo Hungarian (HRnet Fit Stage 2)
-    # "refined" → legacy MP-Hungarian Peak-Select (deprecated; only when no HRnet Fit ran)
-    hrnet_source: str = "hungarian"
-    hrnet_fingertips_only: bool = False
-    w_bone: float = 0.5
-    w_smooth_wrist: float = 1.0
-    w_smooth_xy: float = 1.0
-    w_smooth_z: float = 2.0
-    w_smooth_angles: float = 1.0
-    use_angle_constraints: bool = True
-    w_constraints: float = 2.0
-    w_v1_ref: float = 0.5
+# NOTE: the legacy `/fit_v2` endpoint that ran an FK-based v2 fit
+# was removed.  The labels UI calls `/fit_v2_legacy` (writes
+# skeleton_v2.npz) and `/run_corrections` (writes skeleton_v3.npz)
+# directly; `/fit_v2` overlapped v3 output and confused the
+# v1/v2/v3 naming.  The FK code lives in services/skeleton_v3.py as
+# the private `_run_skeleton_v3_fk_legacy`.
 
-
-@router.post("/{subject_id}/fit_v2")
-def run_fit_v2(subject_id: int, req: FitV2Request) -> dict:
-    """Submit a v2 FK-parameterised skeleton fitting job."""
-    from ..services.mano_fitting import check_mano_available
-    from ..services.mano_fitting_v2 import run_v2_fitting
-    from ..services.jobs import registry
-
-    status = check_mano_available()
-    if not status["available"]:
-        raise HTTPException(400, status["message"])
-
-    name = _subject_name(subject_id)
-
-    try:
-        video_trials = build_trial_map(name)
-    except Exception:
-        raise HTTPException(404, "No videos found")
-
-    if req.trial_idx < 0 or req.trial_idx >= len(video_trials):
-        raise HTTPException(404, f"Trial index {req.trial_idx} out of range")
-
-    trial_stem = video_trials[req.trial_idx]["trial_name"]
-
-    trial_short = trial_stem.split('_', 1)[1] if '_' in trial_stem else trial_stem
-    with get_db_ctx() as db:
-        db.execute(
-            "INSERT INTO jobs (subject_id, job_type, status, params_json) VALUES (?, 'mano_fit_v2', 'pending', ?)",
-            (subject_id, json.dumps({"trial_name": trial_short})),
-        )
-        job = db.execute(
-            "SELECT * FROM jobs WHERE subject_id = ? ORDER BY id DESC LIMIT 1",
-            (subject_id,),
-        ).fetchone()
-
-    job_id      = job["id"]
-    cancel_event = threading.Event()
-    registry._cancel_events[job_id] = cancel_event
-
-    def _run():
-        try:
-            with get_db_ctx() as db:
-                db.execute(
-                    "UPDATE jobs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (job_id,),
-                )
-
-            def on_progress(pct):
-                with get_db_ctx() as db:
-                    db.execute("UPDATE jobs SET progress_pct = ? WHERE id = ?",
-                               (pct, job_id))
-
-            result = run_v2_fitting(
-                name, trial_stem,
-                cancel_event=cancel_event,
-                progress_callback=on_progress,
-                w_mediapipe=req.w_mediapipe,
-                w_vision=req.w_vision,
-                w_dlc=req.w_dlc,
-                w_hrnet=req.w_hrnet,
-                hrnet_fingertips_only=req.hrnet_fingertips_only,
-                w_bone=req.w_bone,
-                w_smooth_wrist=req.w_smooth_wrist,
-                w_smooth_xy=req.w_smooth_xy,
-                w_smooth_z=req.w_smooth_z,
-                w_smooth_angles=req.w_smooth_angles,
-                use_angle_constraints=req.use_angle_constraints,
-                w_constraints=req.w_constraints,
-                w_v1_ref=req.w_v1_ref,
-            )
-
-            if result.get("cancelled"):
-                with get_db_ctx() as db:
-                    db.execute(
-                        "UPDATE jobs SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP WHERE id = ?",
-                        (job_id,),
-                    )
-            else:
-                with get_db_ctx() as db:
-                    db.execute(
-                        "UPDATE jobs SET status = 'completed', progress_pct = 100, "
-                        "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
-                        (job_id,),
-                    )
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).exception(f"MANO fit v2 job {job_id} failed")
-            with get_db_ctx() as db:
-                db.execute(
-                    "UPDATE jobs SET status = 'failed', error_msg = ?, "
-                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (str(e), job_id),
-                )
-        finally:
-            registry._cancel_events.pop(job_id, None)
-
-    threading.Thread(target=_run, daemon=True).start()
-    return {"job_id": job_id, "trial_stem": trial_stem}
 
 
 class FitV2LegacyRequest(BaseModel):
@@ -811,11 +700,11 @@ class FitV2LegacyRequest(BaseModel):
 @router.post("/{subject_id}/fit_v2_legacy")
 def run_fit_v2_legacy(subject_id: int, req: FitV2LegacyRequest) -> dict:
     """Submit a frozen Skeleton v2 (legacy absolute-position smoothing) job."""
-    from ..services.mano_fitting import check_mano_available
-    from ..services.mano_fitting_v2_legacy import run_v2_legacy_fitting
+    from ..services.skeleton_v1 import check_skeleton_available
+    from ..services.skeleton_v2 import run_skeleton_v2_fit
     from ..services.jobs import registry
 
-    status = check_mano_available()
+    status = check_skeleton_available()
     if not status["available"]:
         raise HTTPException(400, status["message"])
 
@@ -833,7 +722,7 @@ def run_fit_v2_legacy(subject_id: int, req: FitV2LegacyRequest) -> dict:
     trial_short = trial_stem.split('_', 1)[1] if '_' in trial_stem else trial_stem
     with get_db_ctx() as db:
         db.execute(
-            "INSERT INTO jobs (subject_id, job_type, status, params_json) VALUES (?, 'mano_fit_v2', 'pending', ?)",
+            "INSERT INTO jobs (subject_id, job_type, status, params_json) VALUES (?, 'skeleton_v2', 'pending', ?)",
             (subject_id, json.dumps({"trial_name": trial_short, "legacy": True})),
         )
         job = db.execute(
@@ -857,7 +746,7 @@ def run_fit_v2_legacy(subject_id: int, req: FitV2LegacyRequest) -> dict:
                 with get_db_ctx() as db:
                     db.execute("UPDATE jobs SET progress_pct = ? WHERE id = ?", (pct, job_id))
 
-            result = run_v2_legacy_fitting(
+            result = run_skeleton_v2_fit(
                 name, trial_stem,
                 cancel_event=cancel_event,
                 progress_callback=on_progress,
@@ -887,7 +776,7 @@ def run_fit_v2_legacy(subject_id: int, req: FitV2LegacyRequest) -> dict:
                     )
         except Exception as e:
             import logging
-            logging.getLogger(__name__).exception(f"MANO fit v2 legacy job {job_id} failed")
+            logging.getLogger(__name__).exception(f"Skeleton v2 fit job {job_id} failed")
             with get_db_ctx() as db:
                 db.execute(
                     "UPDATE jobs SET status = 'failed', error_msg = ?, "
@@ -992,7 +881,7 @@ def mp_errors(subject_id: int, req: MPErrorRequest) -> dict:
 def run_corrections(subject_id: int, req: MPErrorRequest) -> dict:
     """Submit the MP correction pipeline as a background job so the UI
     stays responsive while the BL optimisation runs.  Saved output:
-    ``mano_fit_v2.npz`` + ``mp_errors.npz``."""
+    ``skeleton_v3.npz`` + ``mp_errors.npz``."""
     from ..services.mp_error_detection import run_correction_pipeline, save_errors
     from ..services.jobs import registry
 
@@ -1008,7 +897,7 @@ def run_corrections(subject_id: int, req: MPErrorRequest) -> dict:
     trial_short = trial_stem.split('_', 1)[1] if '_' in trial_stem else trial_stem
     with get_db_ctx() as db:
         db.execute(
-            "INSERT INTO jobs (subject_id, job_type, status, params_json) VALUES (?, 'mano_fit_v3', 'pending', ?)",
+            "INSERT INTO jobs (subject_id, job_type, status, params_json) VALUES (?, 'skeleton_v3', 'pending', ?)",
             (subject_id, json.dumps({"trial_name": trial_short})),
         )
         job = db.execute(
@@ -1164,7 +1053,7 @@ def save_mp_errors(subject_id: int, req: MPErrorRequest) -> dict:
 
 @router.get("/{subject_id}/video_list")
 def get_video_list(subject_id: int) -> list[dict]:
-    """List all video trials for a subject (for Videos module — no MANO data required).
+    """List all video trials for a subject (for Videos module — no Skeleton data required).
 
     Each trial includes a ``cameras`` list for multicam trials:
     ``[{name, path, idx}]``.  Empty when trial is a single file.

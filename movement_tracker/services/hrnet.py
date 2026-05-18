@@ -821,10 +821,10 @@ def run_hrnet_trial(
     report(95)
 
     # ── Save results ───────────────────────────────────────────
-    # Save to mano trial dir so the viewer can find them
-    from .mano_data import _mano_dir
+    # Save to skeleton trial dir so the viewer can find them
+    from .skeleton_data import _skeleton_dir
     trial_stem = trial["trial_name"]
-    out_dir = _mano_dir(subject_name) / trial_stem
+    out_dir = _skeleton_dir(subject_name) / trial_stem
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "hrnet_w18_heatmaps.npz"
 
@@ -876,8 +876,8 @@ def run_hrnet_trial(
     try:
         logger.info("  Computing peak assignments...")
         import torch as _torch
-        from .mano_fitting_v2 import _load_hrnet_heatmaps, assign_hm_targets_stereo
-        from .mano_data import JOINT_NAMES as _JN
+        from .skeleton_v3 import _load_hrnet_heatmaps, assign_hm_targets_stereo
+        from .skeleton_data import JOINT_NAMES as _JN
         hm_L, _bb_pf_L, hm_R, _bb_pf_R = _load_hrnet_heatmaps(
             subject_name, trial["trial_name"], start_frame, n_frames)
         # Legacy peak-assignment path uses a single union bbox; collapse

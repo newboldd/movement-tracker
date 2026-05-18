@@ -196,6 +196,16 @@ fi
 
 # ── Auto-update ──────────────────────────────────────────────────────────
 
+# Skip auto-update when running from a git checkout — the developer's
+# local commits would otherwise get clobbered every launch by whatever
+# is currently on origin/master.  End-user installs (downloaded zip,
+# no .git/ directory) still run the auto-update path.
+# Set MT_NO_AUTO_UPDATE=1 in .env to force-disable even outside git.
+if [ -d "$PROJECT_DIR/.git" ] || [ "${MT_NO_AUTO_UPDATE:-0}" = "1" ]; then
+    echo ""
+    echo "Auto-update skipped (dev checkout or MT_NO_AUTO_UPDATE=1)."
+else
+
 echo ""
 echo "Checking for updates..."
 "$VENV_DIR/bin/python" -c "
@@ -247,6 +257,8 @@ try:
 except Exception as e:
     print(f'Update check failed (non-fatal): {e}')
 " 2>&1 || true
+
+fi   # end of auto-update skip-on-git-checkout guard
 
 # ── Launch ────────────────────────────────────────────────────────────────
 

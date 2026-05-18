@@ -37,7 +37,7 @@
 
     let canvas, ctx;
 
-    // Zoom/pan (same system as mano.js)
+    // Zoom/pan (same system as labels.js)
     let scale = 1, offsetX = 0, offsetY = 0;
     let dragging = false;
     let dragStartX = 0, dragStartY = 0;
@@ -138,8 +138,8 @@
 
         trials = [];
         mpHints = [];
-        try { trials = await api(`/api/mano/${sid}/video_list`); } catch { /* no videos */ }
-        try { mpHints = await api(`/api/mano/${sid}/mediapipe_hints`); } catch { /* no hints */ }
+        try { trials = await api(`/api/skeleton/${sid}/video_list`); } catch { /* no videos */ }
+        try { mpHints = await api(`/api/skeleton/${sid}/mediapipe_hints`); } catch { /* no hints */ }
 
         buildTrialButtons();
 
@@ -259,7 +259,7 @@
 
     /** Build the video URL for the current trial + camera and load it. */
     function loadCurrentCameraVideo() {
-        let src = `/api/mano/${subjectId}/trial/${trialMeta.trial_idx}/video`;
+        let src = `/api/skeleton/${subjectId}/trial/${trialMeta.trial_idx}/video`;
         if (cameraMode === 'multicam' && multicamCameras.length > 0) {
             src += `?camera=${multicamCameras[currentCameraIdx].idx}`;
         }
@@ -384,7 +384,7 @@
             updateCameraButton();
 
             const frameToRestore = currentFrame;
-            let src = `/api/mano/${subjectId}/trial/${trialMeta.trial_idx}/video`;
+            let src = `/api/skeleton/${subjectId}/trial/${trialMeta.trial_idx}/video`;
             src += `?camera=${multicamCameras[currentCameraIdx].idx}`;
 
             // Preload in a temp video element so the canvas keeps showing the old frame

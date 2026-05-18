@@ -128,18 +128,18 @@ def _load_distances_and_trials(subject_name: str, source: str | None = None) -> 
                 return None
             return None
         elif src in ("skeleton_v1", "skeleton_v2", "skeleton_v3"):
-            # v1 = original stage-1 fit (mano_fit.npz),
-            # v2 = frozen legacy smoothing (mano_fit_v2_legacy.npz),
-            # v3 = corrections pipeline (mano_fit_v2.npz).
-            _NPZ_MAP = {"skeleton_v1": "mano_fit.npz",
-                        "skeleton_v2": "mano_fit_v2_legacy.npz",
-                        "skeleton_v3": "mano_fit_v2.npz"}
-            from ..services.mano_data import _mano_dir
+            # v1 = original stage-1 fit (skeleton_v1.npz),
+            # v2 = frozen legacy smoothing (skeleton_v2.npz),
+            # v3 = corrections pipeline (skeleton_v3.npz).
+            _NPZ_MAP = {"skeleton_v1": "skeleton_v1.npz",
+                        "skeleton_v2": "skeleton_v2.npz",
+                        "skeleton_v3": "skeleton_v3.npz"}
+            from ..services.skeleton_data import _skeleton_dir
             import numpy as np
-            mano_root = _mano_dir(subject_name)
+            skeleton_root = _skeleton_dir(subject_name)
             all_dists = [None] * sum(t["frame_count"] for t in trials)
             for t in trials:
-                npz_path = mano_root / t["trial_name"] / _NPZ_MAP[src]
+                npz_path = skeleton_root / t["trial_name"] / _NPZ_MAP[src]
                 if not npz_path.exists():
                     continue
                 data = np.load(str(npz_path), allow_pickle=True)
@@ -186,14 +186,14 @@ def _try_source_quick(subject_name: str, src: str) -> bool:
         elif src == "vision":
             return (settings.dlc_path / subject_name / "vision_prelabels.npz").exists()
         elif src in ("skeleton_v1", "skeleton_v2", "skeleton_v3"):
-            _QNPZ = {"skeleton_v1": "mano_fit.npz",
-                     "skeleton_v2": "mano_fit_v2_legacy.npz",
-                     "skeleton_v3": "mano_fit_v2.npz"}
-            mano_dir = settings.dlc_path / subject_name / "mano"
-            if not mano_dir.is_dir():
+            _QNPZ = {"skeleton_v1": "skeleton_v1.npz",
+                     "skeleton_v2": "skeleton_v2.npz",
+                     "skeleton_v3": "skeleton_v3.npz"}
+            skel_dir = settings.dlc_path / subject_name / "skeleton"
+            if not skel_dir.is_dir():
                 return False
             want = _QNPZ[src]
-            for d in mano_dir.iterdir():
+            for d in skel_dir.iterdir():
                 if d.is_dir() and (d / want).exists():
                     return True
             return False

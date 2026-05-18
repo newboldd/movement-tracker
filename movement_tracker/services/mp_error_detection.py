@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 
 from .calibration import triangulate_points
-from .mano_data import HAND_SKELETON, _mano_dir
+from .skeleton_data import HAND_SKELETON, _skeleton_dir
 
 logger = logging.getLogger(__name__)
 
@@ -565,7 +565,7 @@ def _bone_agreement_score(mp_3d: np.ndarray,
 
 def _angle_score(mp_3d: np.ndarray, angle_priors: list) -> np.ndarray:
     """Joint-angle violation magnitude (degrees out of allowed range)."""
-    from .mano_data import _compute_angles, FLEX_ANGLE_OPTIONS
+    from .skeleton_data import _compute_angles, FLEX_ANGLE_OPTIONS
     N = mp_3d.shape[0]
     score = np.zeros((N, 21), dtype=np.float32)
     if N == 0:
@@ -646,7 +646,7 @@ def _reprojection_per_camera(mp_L, mp_R, mp_3d, calib) -> np.ndarray:
     sums across cameras per joint.  For the detection factor we collapse
     to (N, 21) via sum across cameras (see _reprojection_score_det).
     """
-    from .mano_data import _project_to_2d
+    from .skeleton_data import _project_to_2d
     rp_L = _project_to_2d(mp_3d, calib["K1"], calib["dist1"],
                            np.eye(3, dtype=np.float64),
                            np.zeros((3, 1), dtype=np.float64))
@@ -1852,14 +1852,14 @@ def _local_poly_fit_3d(frames: np.ndarray, pts: np.ndarray, target_f: int) -> np
 
 
 def _load_mp_labels(subject_name: str, trial_stem: str, start: int, N: int):
-    """Load MP labels using the SAME precedence as mano_data.load_mano_trial_data
+    """Load MP labels using the SAME precedence as skeleton_data.load_skeleton_trial_data
     so the correction pipeline and the viewer's 'MediaPipe' stage read from
     the same source.  Returns (mp_L, mp_R, conf_L, conf_R), with the
     legacy per-trial ``mediapipe.pkl`` preferred over the app's
     ``mediapipe_prelabels.npz``."""
     import pickle
 
-    mp_dir = _mano_dir(subject_name) / trial_stem
+    mp_dir = _skeleton_dir(subject_name) / trial_stem
     pkl_path = mp_dir / "mediapipe.pkl"
     if pkl_path.exists():
         try:
@@ -1942,10 +1942,10 @@ def _hrnet_attr_score(mp_L: np.ndarray, mp_R: np.ndarray,
     Returns ``(N, 21, 2)`` float32 or ``None`` when heatmaps / crop info
     are missing for this trial."""
     import json as _json
-    from .mano_data import _mano_dir
-    mano_trial_dir = _mano_dir(subject_name) / trial_stem
-    hm_path = mano_trial_dir / "hrnet_w18_heatmaps.npz"
-    crop_path = mano_trial_dir / "hand_crop.json"
+    from .skeleton_data import _skeleton_dir
+    skeleton_trial_dir = _skeleton_dir(subject_name) / trial_stem
+    hm_path = skeleton_trial_dir / "hrnet_w18_heatmaps.npz"
+    crop_path = skeleton_trial_dir / "hand_crop.json"
     if not hm_path.exists() or not crop_path.exists():
         return None
     try:
@@ -2038,8 +2038,8 @@ def _load_hrnet_peaks_arr(subject_name: str, trial_stem: str,
       * ``"raw"``       — legacy raw argmax.
     """
     import json as _json
-    from .mano_data import _mano_dir, JOINT_NAMES
-    p = _mano_dir(subject_name) / trial_stem / "hrnet_peak_assignments.json"
+    from .skeleton_data import _skeleton_dir, JOINT_NAMES
+    p = _skeleton_dir(subject_name) / trial_stem / "hrnet_peak_assignments.json"
     if not p.exists():
         return None, None
     try:
@@ -3014,7 +3014,7 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
                              stereo_conf: float = 0.0,
                              stereo_dist_px: float = 0.0,
                              stereo_occlusion_px: float = 0.0) -> dict:
-    """Run the full correction pipeline, save result as ``mano_fit_v2.npz``.
+    """Run the full correction pipeline, save result as ``skeleton_v3.npz``.
 
     Step 0: Stereo-correction.  Runs ``run_stereo_align`` with the chosen
     mode + params, then for every (frame, joint) whose stereo confidence
@@ -3028,7 +3028,7 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
     Returns ``{n_corrected, out_path, n_frames}``.
     """
     from .mediapipe_prelabel import load_mediapipe_prelabels
-    from .mano_data import _load_trial_calibration, load_angle_priors
+    from .skeleton_data import _load_trial_calibration, load_angle_priors
     from .video import build_trial_map
     import json as _json
     from datetime import datetime
@@ -3436,27 +3436,27 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
             mp_L_c[:, j], mp_R_c[:, j], calib).astype(np.float32)
 
     # Save in the same format as the existing Skeleton (v3) fit output
-    out_dir = _mano_dir(subject_name) / trial_stem
+    out_dir = _skeleton_dir(subject_name) / trial_stem
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "mano_fit_v2.npz"
-    params_path = out_dir / "mano_fit_v2_params.json"
+    out_path = out_dir / "skeleton_v3.npz"
+    params_path = out_dir / "skeleton_v3_params.json"
 
     # Rotate history (same as v2 fit does)
     for i in range(3, 0, -1):
-        src_npz = out_dir / f"mano_fit_v2_prev{i}.npz"
-        src_json = out_dir / f"mano_fit_v2_prev{i}_params.json"
+        src_npz = out_dir / f"skeleton_v3_prev{i}.npz"
+        src_json = out_dir / f"skeleton_v3_prev{i}_params.json"
         if i == 3:
             if src_npz.exists(): src_npz.unlink()
             if src_json.exists(): src_json.unlink()
         else:
-            if src_npz.exists(): src_npz.rename(out_dir / f"mano_fit_v2_prev{i+1}.npz")
-            if src_json.exists(): src_json.rename(out_dir / f"mano_fit_v2_prev{i+1}_params.json")
+            if src_npz.exists(): src_npz.rename(out_dir / f"skeleton_v3_prev{i+1}.npz")
+            if src_json.exists(): src_json.rename(out_dir / f"skeleton_v3_prev{i+1}_params.json")
     if out_path.exists():
-        (out_dir / "mano_fit_v2_prev1.npz").unlink(missing_ok=True)
-        out_path.rename(out_dir / "mano_fit_v2_prev1.npz")
+        (out_dir / "skeleton_v3_prev1.npz").unlink(missing_ok=True)
+        out_path.rename(out_dir / "skeleton_v3_prev1.npz")
     if params_path.exists():
-        (out_dir / "mano_fit_v2_prev1_params.json").unlink(missing_ok=True)
-        params_path.rename(out_dir / "mano_fit_v2_prev1_params.json")
+        (out_dir / "skeleton_v3_prev1_params.json").unlink(missing_ok=True)
+        params_path.rename(out_dir / "skeleton_v3_prev1_params.json")
 
     np.savez(
         str(out_path),
@@ -3524,8 +3524,8 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
         "timestamp": datetime.now().isoformat(),
     }, indent=2))
 
-    from .mano_data import _load_mano_npz
-    _load_mano_npz.cache_clear()
+    from .skeleton_data import _load_skeleton_npz
+    _load_skeleton_npz.cache_clear()
 
     return {
         "n_corrected": int(n_corrected),
@@ -3536,7 +3536,7 @@ def run_correction_pipeline(subject_name: str, trial_stem: str,
 
 def _stage_error_cache_path(subject_name: str, trial_stem: str, stage: str | None) -> Path:
     tag = stage or "mediapipe"
-    return _mano_dir(subject_name) / trial_stem / f"mp_errors_{tag}.npz"
+    return _skeleton_dir(subject_name) / trial_stem / f"mp_errors_{tag}.npz"
 
 
 def _weights_match(saved: dict, current: dict) -> bool:
@@ -3554,7 +3554,7 @@ def prefill_error_caches_for_all_subjects(progress_callback=None,
                                             cancel_event=None) -> dict:
     """Walk every subject + trial + stage and pre-compute the per-stage
     error matrix into ``mp_errors_<stage>.npz``.  Slider values are taken
-    from each trial's last-saved fit params (``mano_fit_v2_params.json``)
+    from each trial's last-saved fit params (``skeleton_v3_params.json``)
     when available, otherwise zero — so the cache reflects what the UI
     will request next time the user opens that trial.
 
@@ -3562,7 +3562,7 @@ def prefill_error_caches_for_all_subjects(progress_callback=None,
     """
     import json as _json
     from .video import build_trial_map
-    from .mano_data import _mano_dir, list_mano_trials
+    from .skeleton_data import _skeleton_dir, list_skeleton_trials
     from ..db import get_db_ctx
 
     ALL_STAGES_LOCAL = ["mediapipe", "stereo_correct", "z_correct", "z_smooth",
@@ -3581,9 +3581,9 @@ def prefill_error_caches_for_all_subjects(progress_callback=None,
         if _cancelled():
             raise _CorrectionsCancelled()
         try:
-            trials = list_mano_trials(name)
+            trials = list_skeleton_trials(name)
         except Exception as e:
-            summary["errors"].append(f"{name}: list_mano_trials failed — {e}")
+            summary["errors"].append(f"{name}: list_skeleton_trials failed — {e}")
             continue
         summary["subjects"] += 1
         if progress_callback:
@@ -3595,7 +3595,7 @@ def prefill_error_caches_for_all_subjects(progress_callback=None,
             trial_stem = t["trial_stem"]
             summary["trials"] += 1
             # Slider values: prefer the saved fit params, else zero defaults.
-            params_path = _mano_dir(name) / trial_stem / "mano_fit_v2_params.json"
+            params_path = _skeleton_dir(name) / trial_stem / "skeleton_v3_params.json"
             det_w, attr_w = {}, {}
             if params_path.exists():
                 try:
@@ -3657,7 +3657,7 @@ def compute_errors_for_trial(subject_name: str, trial_stem: str,
       - 'z_correct':    after combined Y-disparity + Z-outlier correction
       - 'z_smooth':     after Y/Z + Z-jump correction (pre-BL)
       - 'bone_correct': after Y/Z + Z-jump + HRnet-snap + bone-length
-    Snapshots are loaded from ``mano_fit_v2.npz`` when present; missing
+    Snapshots are loaded from ``skeleton_v3.npz`` when present; missing
     snapshots fall back to raw MP.
 
     Returns dict with:
@@ -3667,7 +3667,7 @@ def compute_errors_for_trial(subject_name: str, trial_stem: str,
       - 'n_corrected': int count of (frame, joint, camera) corrections applied
     """
     from .mediapipe_prelabel import load_mediapipe_prelabels
-    from .mano_data import _load_trial_calibration, load_angle_priors
+    from .skeleton_data import _load_trial_calibration, load_angle_priors
     from .video import build_trial_map
 
     corr_weights = corr_weights or {}
@@ -3713,7 +3713,7 @@ def compute_errors_for_trial(subject_name: str, trial_stem: str,
     # measures from the most-up-to-date labels).
     stage_tag = ""
     if stage and stage != "mediapipe":
-        v2_path = _mano_dir(subject_name) / trial_stem / "mano_fit_v2.npz"
+        v2_path = _skeleton_dir(subject_name) / trial_stem / "skeleton_v3.npz"
         if v2_path.exists():
             try:
                 with np.load(str(v2_path), allow_pickle=True) as z:
@@ -3760,7 +3760,7 @@ def compute_errors_for_trial(subject_name: str, trial_stem: str,
 
     # Overlay stereo_dist (drives the mediapipe-stage error overlay
     # after the v3 step-0 stereo-correction).  Prefer the BAKED
-    # ``stereo_blame`` mask written into mano_fit_v2.npz by the v3
+    # ``stereo_blame`` mask written into skeleton_v3.npz by the v3
     # fit -- that way the overlay always matches what the
     # Stereo-Correct stage view is actually showing (same MP labels
     # replaced for the same joints / cameras).  Fall back to a live
@@ -3770,7 +3770,7 @@ def compute_errors_for_trial(subject_name: str, trial_stem: str,
     sd_w = float(det_weights.get("stereo_dist", 0.0))
     sc_w = float(det_weights.get("stereo_conf", 0.0))
     if sd_w > 0:
-        v2_path = _mano_dir(subject_name) / trial_stem / "mano_fit_v2.npz"
+        v2_path = _skeleton_dir(subject_name) / trial_stem / "skeleton_v3.npz"
         used_baked = False
         if v2_path.exists():
             try:
@@ -3901,7 +3901,7 @@ def save_errors(subject_name: str, trial_stem: str,
     result = compute_errors_for_trial(subject_name, trial_stem,
                                        det_weights, attr_weights, corr_weights)
     errors = result["errors"]
-    out_dir = _mano_dir(subject_name) / trial_stem
+    out_dir = _skeleton_dir(subject_name) / trial_stem
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "mp_errors.npz"
     np.savez(str(out_path),
@@ -3913,7 +3913,7 @@ def save_errors(subject_name: str, trial_stem: str,
 
 def load_saved_errors(subject_name: str, trial_stem: str):
     """Load saved error matrix + slider values if file exists; else None."""
-    p = _mano_dir(subject_name) / trial_stem / "mp_errors.npz"
+    p = _skeleton_dir(subject_name) / trial_stem / "mp_errors.npz"
     if not p.exists():
         return None
     try:

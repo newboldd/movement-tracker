@@ -512,8 +512,8 @@ def get_subject(subject_id: int) -> dict:
                 (subject_id,),
             ).fetchone()["c"] > 0
         status["events"] = has_events
-        # MANO: placeholder (check for MANO output)
-        status["mano"] = (dlc_path / "mano_output").exists() if (dlc_path / "mano_output").exists() else False
+        # Skeleton: placeholder (check for Skeleton output)
+        status["skeleton"] = (dlc_path / "skeleton").exists() if (dlc_path / "skeleton").exists() else False
         # Has faces: derived from no_face_videos
         status["has_faces"] = trial_name not in no_face_list
 

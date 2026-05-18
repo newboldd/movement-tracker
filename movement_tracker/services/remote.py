@@ -1995,8 +1995,8 @@ def remote_hrnet_job(
         # Phase 4: Download results
         logfile.write("Downloading results\n")
         logfile.flush()
-        from .mano_data import _mano_dir
-        local_out_dir = _mano_dir(subject_name) / trial_name
+        from .skeleton_data import _skeleton_dir
+        local_out_dir = _skeleton_dir(subject_name) / trial_name
         local_out_dir.mkdir(parents=True, exist_ok=True)
 
         # Normalize backslashes → forward slashes for SCP source URIs.
@@ -2077,7 +2077,7 @@ def remote_hrnet_redownload(
     When ``parent_job_id`` is None, the legacy "scan remote dirs" behavior
     is used (mirrors every ``hrnet_jobs/{subject}_*`` directory locally).
     """
-    from .mano_data import _mano_dir
+    from .skeleton_data import _skeleton_dir
     import json as _json
 
     logfile = open(log_path, "a", buffering=1)
@@ -2110,7 +2110,7 @@ def remote_hrnet_redownload(
     # Each work item resolves to:
     #   remote_outer_dir  = "<sub>_<full_stem>"   (e.g. Con04_Con04_L1)
     #   remote_inner_dir  = "<full_stem>"          (e.g. Con04_L1)
-    #   local_dir_name    = "<full_stem>"          (mano/<sub>/<full_stem>/)
+    #   local_dir_name    = "<full_stem>"          (skeleton/<sub>/<full_stem>/)
     if parent_trials and isinstance(parent_trials, list):
         update_outcomes = True
         any_outcomes = any(t.get("outcome") for t in parent_trials)
@@ -2190,7 +2190,7 @@ def remote_hrnet_redownload(
             # Remote layout (mirrors remote_hrnet_job's save path):
             #   hrnet_jobs/<outer>/output/<inner>/<file>
             remote_dir = f"{hrnet_root}/{outer}/output/{inner}".replace("\\", "/")
-            local_trial_dir = _mano_dir(sub) / inner
+            local_trial_dir = _skeleton_dir(sub) / inner
             local_trial_dir.mkdir(parents=True, exist_ok=True)
             logfile.write(f"  [{i+1}/{len(work)}] {sub} {short}\n")
 
@@ -2769,7 +2769,7 @@ def poll_remote_batch(
 
     try:
         import json as _json
-        from .mano_data import _mano_dir
+        from .skeleton_data import _skeleton_dir
         from ..db import get_db_ctx
 
         work_dir = cfg.work_dir.replace("\\", "/")
@@ -2910,7 +2910,7 @@ def poll_remote_batch(
                 # subject is the first underscore-segment.  Per-trial
                 # outputs live at hrnet_jobs/<sub>_<stem>/output/<stem>/.
                 sub = stem.split("_", 1)[0] if "_" in stem else stem
-                local_dir = _mano_dir(sub) / stem
+                local_dir = _skeleton_dir(sub) / stem
                 local_dir.mkdir(parents=True, exist_ok=True)
                 remote_dir = f"{work_root}/{sub}_{stem}/output/{stem}"
                 fail_msg = None
@@ -3632,16 +3632,42 @@ def remote_deidentify(
             remote_log_file = f"{remote_run}/render.log"
             remote_output_dir = f"{remote_run}/output"
 
-            # Upload the deidentify module files needed for rendering (always fresh)
+            # Upload the deidentify module files needed for rendering (always fresh).
+            # Previously this silently swallowed scp failures, so a flaky
+            # ssh handshake or a timeout-during-transfer could leave the
+            # remote running an older deidentify.py and the user would
+            # see stale-render bugs that don't reproduce locally.  Now
+            # we check returncode + remote file size after upload and
+            # fail the job loudly if either is wrong.
             service_dir = Path(__file__).parent
             for mod_file in ("deidentify.py", "ffmpeg.py"):
                 mod_path = service_dir / mod_file
-                if mod_path.exists():
-                    subprocess.run(
-                        _scp_base_args(cfg) + [str(mod_path), f"{cfg.host}:{remote_work}/"],
-                        capture_output=True, timeout=30,
-                    )
-                    logfile.write(f"  Uploaded {mod_file}\n")
+                if not mod_path.exists():
+                    continue
+                local_size = mod_path.stat().st_size
+                up = subprocess.run(
+                    _scp_base_args(cfg) + [str(mod_path), f"{cfg.host}:{remote_work}/"],
+                    capture_output=True, text=True, timeout=60,
+                )
+                if up.returncode != 0:
+                    _fail(f"scp {mod_file} failed: {up.stderr[:200]}")
+                    return
+                probe = subprocess.run(
+                    _py_cmd(cfg,
+                        f"\"import os; "
+                        f"p=r'{remote_work}/{mod_file}'; "
+                        f"print(os.path.getsize(p) if os.path.exists(p) else -1)\""),
+                    capture_output=True, text=True, timeout=15,
+                )
+                try:
+                    remote_size = int((probe.stdout or "-1").strip())
+                except ValueError:
+                    remote_size = -1
+                if remote_size != local_size:
+                    _fail(f"Module upload size mismatch for {mod_file}: "
+                          f"local={local_size}, remote={remote_size}")
+                    return
+                logfile.write(f"  Uploaded {mod_file} ({local_size} bytes)\n")
 
             # Create the per-job run subdirectory and upload bundle there
             subprocess.run(

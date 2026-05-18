@@ -26,7 +26,7 @@ function getNavState() {
 // ── Subject-specific pages ──
 const SUBJECT_PAGES = [
     '/videos', '/mediapipe', '/mediapipe-select', '/deidentify',
-    '/labeling', '/labeling-select', '/mano', '/results', '/oscillations',
+    '/labeling', '/labeling-select', '/labels', '/results', '/oscillations',
 ];
 
 /* ── Build unified single-line header ────────────────────────────
@@ -255,8 +255,8 @@ const SUBJECT_PAGES = [
             window.location.href = '/deidentify?subject=' + sid;
         } else if (path.startsWith('/labeling') || path === '/labeling-select') {
             window.location.href = '/labeling-select?subject=' + sid;
-        } else if (path.startsWith('/mano')) {
-            window.location.href = '/mano?subject=' + sid;
+        } else if (path.startsWith('/labels')) {
+            window.location.href = '/labels?subject=' + sid;
         } else if (path.startsWith('/results')) {
             window.location.href = '/results?subject=' + sid;
         } else if (path.startsWith('/oscillations')) {
@@ -275,7 +275,7 @@ const SUBJECT_PAGES = [
         'deidentify': '/deidentify?subject=' + lastSubj,
         'results': '/results?subject=' + lastSubj,
         'videos': '/videos?subject=' + lastSubj,
-        'mano': '/mano?subject=' + lastSubj,
+        'skeleton': '/labels?subject=' + lastSubj,
         'labeling-select': '/labeling-select?subject=' + lastSubj,
     };
 

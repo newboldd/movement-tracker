@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 
 from .config import get_settings
 from .db import init_db
-from .routers import subjects, labeling, pipeline, jobs, results, settings, filebrowser, video_tools, batch, remote_jobs, mano, export, camera_setups, updater, deidentify, analyze, preproc
+from .routers import subjects, labeling, pipeline, jobs, results, settings, filebrowser, video_tools, batch, remote_jobs, skeleton, export, camera_setups, updater, deidentify, analyze, preproc
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ class NoCacheMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
         if request.url.path.startswith("/static") or request.url.path in (
-            "/", "/labeling", "/labeling-select", "/mediapipe", "/deidentify", "/mano", "/preproc", "/oscillations", "/results", "/settings", "/onboarding", "/remote", "/videos", "/calibration", "/tutorials", "/tutorial", "/events"
+            "/", "/labeling", "/labeling-select", "/mediapipe", "/deidentify", "/labels", "/preproc", "/oscillations", "/results", "/settings", "/onboarding", "/remote", "/videos", "/calibration", "/tutorials", "/tutorial", "/events"
         ):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return response
@@ -65,7 +65,7 @@ app.include_router(video_tools.router)
 app.include_router(batch.router)
 app.include_router(remote_jobs.router)
 
-app.include_router(mano.router)  # API endpoints used by videos.js (page removed)
+app.include_router(skeleton.router)  # API endpoints used by videos.js (page removed)
 app.include_router(export.router)
 app.include_router(camera_setups.router)
 app.include_router(updater.router)
@@ -116,7 +116,7 @@ def _recover_stale_jobs(s):
             except (ValueError, IndexError):
                 pass
 
-        LOCAL_JOB_TYPES = {"hrnet", "mano_fit", "mano_fit_v2", "mano_fit_v3", "vision", "pose", "deidentify"}
+        LOCAL_JOB_TYPES = {"hrnet", "skeleton_v1", "skeleton_v2", "skeleton_v3", "vision", "pose", "deidentify"}
         if not remote_host and job_type in LOCAL_JOB_TYPES:
             # Local in-process job interrupted by server restart — mark failed
             with get_db_ctx() as db:
@@ -322,7 +322,7 @@ def _recover_stale_jobs(s):
                 # full pipeline (inference → SCP-back) finished for that
                 # trial.  Tally completed vs missing and set the parent
                 # job status accordingly with an accurate error_msg.
-                from .services.mano_data import _mano_dir
+                from .services.skeleton_data import _skeleton_dir
                 completed_trials = []
                 missing_trials = []
                 for _t in _trials_batch:
@@ -335,8 +335,8 @@ def _recover_stale_jobs(s):
                     # though extra_params stores the short name ("L1").
                     # Check both forms to be robust.
                     _candidates = [
-                        _mano_dir(_sub) / _tn / "hrnet_w18_heatmaps.npz",
-                        _mano_dir(_sub) / f"{_sub}_{_tn}" / "hrnet_w18_heatmaps.npz",
+                        _skeleton_dir(_sub) / _tn / "hrnet_w18_heatmaps.npz",
+                        _skeleton_dir(_sub) / f"{_sub}_{_tn}" / "hrnet_w18_heatmaps.npz",
                     ]
                     if any(p.exists() and p.stat().st_size > 0 for p in _candidates):
                         completed_trials.append(f"{_sub} {_tn}")
@@ -420,10 +420,10 @@ def _recover_stale_jobs(s):
                 # the function.)
                 def _dl_hrnet():
                     try:
-                        from .services.mano_data import _mano_dir
+                        from .services.skeleton_data import _skeleton_dir
                         _params = _json.loads(job.get("params_json") or "{}") if job.get("params_json") else {}
                         _tn = _params.get("trial_name", "")
-                        local_dir = _mano_dir(subj["name"]) / f"{subj['name']}_{_tn}"
+                        local_dir = _skeleton_dir(subj["name"]) / f"{subj['name']}_{_tn}"
                         local_dir.mkdir(parents=True, exist_ok=True)
                         remote_base = f"{remote_cfg.work_dir}/hrnet_jobs/{subj['name']}_{subj['name']}_{_tn}/output/{subj['name']}_{_tn}"
                         from .services.remote import _scp_base_args
@@ -701,6 +701,90 @@ def _ensure_example_subject(settings):
     dlc_dir.mkdir(parents=True, exist_ok=True)
 
 
+def _migrate_mano_to_skeleton(s) -> None:
+    """One-shot rename of legacy mano* artefacts to skeleton* equivalents.
+
+    On-disk per subject:
+      <dlc>/<subj>/mano/                          → skeleton/
+      <dlc>/<subj>/skeleton/<trial>/mano_fit.npz             → skeleton_v1.npz
+      <dlc>/<subj>/skeleton/<trial>/mano_fit_v2_legacy.npz   → skeleton_v2.npz
+      <dlc>/<subj>/skeleton/<trial>/mano_fit_v2.npz          → skeleton_v3.npz
+      <dlc>/<subj>/skeleton/<trial>/mano_fit_v2_prev1.npz    → skeleton_v3_prev1.npz
+      *params.json sidecars renamed the same way
+
+    DB ``jobs.job_type`` column:
+      mano_fit      → skeleton_v1
+      mano_fit_v2   → skeleton_v2
+      mano_fit_v3   → skeleton_v3
+
+    Idempotent: skips renames where the destination already exists.
+    """
+    from pathlib import Path
+    dlc_root = Path(s.dlc_path) if hasattr(s, "dlc_path") else None
+    file_map = {
+        "mano_fit.npz":                   "skeleton_v1.npz",
+        "mano_fit_v2_legacy.npz":         "skeleton_v2.npz",
+        "mano_fit_v2.npz":                "skeleton_v3.npz",
+        "mano_fit_v2_prev1.npz":          "skeleton_v3_prev1.npz",
+        "mano_fit_params.json":           "skeleton_v1_params.json",
+        "mano_fit_v2_legacy_params.json": "skeleton_v2_params.json",
+        "mano_fit_v2_params.json":        "skeleton_v3_params.json",
+    }
+    renamed_dirs = 0
+    renamed_files = 0
+    if dlc_root and dlc_root.exists():
+        for subj_dir in dlc_root.iterdir():
+            if not subj_dir.is_dir():
+                continue
+            legacy_dir = subj_dir / "mano"
+            skel_dir   = subj_dir / "skeleton"
+            if legacy_dir.exists() and not skel_dir.exists():
+                try:
+                    legacy_dir.rename(skel_dir)
+                    renamed_dirs += 1
+                except OSError as e:
+                    logger.warning(f"mano→skeleton rename failed for {subj_dir.name}: {e}")
+                    continue
+            target = skel_dir if skel_dir.exists() else None
+            if not target:
+                continue
+            for trial_dir in target.iterdir():
+                if not trial_dir.is_dir():
+                    continue
+                for old, new in file_map.items():
+                    old_p = trial_dir / old
+                    new_p = trial_dir / new
+                    if old_p.exists() and not new_p.exists():
+                        try:
+                            old_p.rename(new_p)
+                            renamed_files += 1
+                        except OSError as e:
+                            logger.warning(f"file rename failed {old_p}: {e}")
+        if renamed_dirs or renamed_files:
+            logger.info(f"Skeleton migration: renamed {renamed_dirs} dir(s) + "
+                        f"{renamed_files} file(s) from mano* → skeleton*")
+
+    from .db import get_db_ctx
+    try:
+        with get_db_ctx() as db:
+            job_type_map = {
+                "mano_fit":    "skeleton_v1",
+                "mano_fit_v2": "skeleton_v2",
+                "mano_fit_v3": "skeleton_v3",
+            }
+            n = 0
+            for old, new in job_type_map.items():
+                r = db.execute(
+                    "UPDATE jobs SET job_type = ? WHERE job_type = ?",
+                    (new, old),
+                )
+                n += r.rowcount or 0
+            if n:
+                logger.info(f"Skeleton migration: updated job_type on {n} row(s)")
+    except Exception as e:
+        logger.warning(f"DB job_type migration skipped: {e}")
+
+
 @app.on_event("startup")
 def startup():
     """Initialize database and sync subjects from filesystem."""
@@ -711,6 +795,9 @@ def startup():
     if not s.is_configured:
         logger.info("App not configured. Visit /settings to set up paths.")
         return
+
+    # One-shot rename of legacy mano* artefacts on disk + in DB.
+    _migrate_mano_to_skeleton(s)
 
     # Handle stale jobs from prior server sessions
     _recover_stale_jobs(s)
@@ -826,7 +913,7 @@ def deidentify_page():
 
 @app.get("/analyze")
 def analyze_page(subject: Optional[int] = None, trial: Optional[int] = None):
-    """Redirect /analyze to /mano (Auto page).
+    """Redirect /analyze to /skeleton (Auto page).
 
     Preserves both ``subject`` and ``trial`` query params so deep-links
     (e.g. from the Jobs-page trial chips) land on the right trial.
@@ -838,13 +925,13 @@ def analyze_page(subject: Optional[int] = None, trial: Optional[int] = None):
     if trial is not None:
         parts.append(f"trial={trial}")
     qs = ("?" + "&".join(parts)) if parts else ""
-    return RedirectResponse(url=f"/mano{qs}", status_code=302)
+    return RedirectResponse(url=f"/labels{qs}", status_code=302)
 
 
-@app.get("/mano")
-def mano_page():
-    """Serve the MANO viewer page."""
-    return FileResponse(str(STATIC_DIR / "mano.html"))
+@app.get("/labels")
+def labels_page():
+    """Serve the Skeleton viewer page."""
+    return FileResponse(str(STATIC_DIR / "labels.html"))
 
 
 @app.get("/preproc")
@@ -1000,8 +1087,8 @@ def mediapipe_select_page(subject: Optional[int] = None):
     """Redirect to the new Analyze page."""
     from fastapi.responses import RedirectResponse
     if subject:
-        return RedirectResponse(url=f"/mano?subject={subject}", status_code=302)
-    return RedirectResponse(url="/mano", status_code=302)
+        return RedirectResponse(url=f"/labels?subject={subject}", status_code=302)
+    return RedirectResponse(url="/labels", status_code=302)
 
 
 @app.get("/results")

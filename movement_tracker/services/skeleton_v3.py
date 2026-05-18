@@ -32,7 +32,7 @@ import numpy as np
 
 from ..config import get_settings
 from .calibration import get_calibration_for_subject, triangulate_points
-from .mano_data import _mano_dir, HAND_SKELETON
+from .skeleton_data import _skeleton_dir, HAND_SKELETON
 from .mediapipe_prelabel import load_mediapipe_prelabels
 from .video import build_trial_map
 
@@ -259,9 +259,9 @@ def _load_hrnet_peaks(subject_name, trial_stem, start_frame, N, calib):
     Returns (N,21,2) per camera mapped to image coords, or None.
     """
     try:
-        mano_dir = _mano_dir(subject_name) / trial_stem
-        hm_path  = mano_dir / "hrnet_w18_heatmaps.npz"
-        crop_path = mano_dir / "hand_crop.json"
+        skel_dir = _skeleton_dir(subject_name) / trial_stem
+        hm_path  = skel_dir / "hrnet_w18_heatmaps.npz"
+        crop_path = skel_dir / "hand_crop.json"
         if not hm_path.exists() or not crop_path.exists():
             return None, None
 
@@ -317,9 +317,9 @@ def _load_hrnet_heatmaps(subject_name, trial_stem, start_frame, N):
     """
     from .hrnet_bbox import read_per_frame_bboxes
     try:
-        mano_dir = _mano_dir(subject_name) / trial_stem
-        hm_path  = mano_dir / "hrnet_w18_heatmaps.npz"
-        crop_path = mano_dir / "hand_crop.json"
+        skel_dir = _skeleton_dir(subject_name) / trial_stem
+        hm_path  = skel_dir / "hrnet_w18_heatmaps.npz"
+        crop_path = skel_dir / "hand_crop.json"
         if not hm_path.exists() or not crop_path.exists():
             return None, None, None, None
 
@@ -583,7 +583,7 @@ def assign_hm_targets_stereo(proj_L, proj_R, hm_L, hm_R, bbox_L, bbox_R):
     # Build a calibration dict for triangulation (numpy arrays)
     calib_np = None
     try:
-        from .mano_data import _load_trial_calibration
+        from .skeleton_data import _load_trial_calibration
         # We need the calibration but don't have subject/trial here.
         # Use the bbox to find it — actually, we'll pass it through.
         # For now, triangulate using a simple approach.
@@ -1148,10 +1148,54 @@ def assign_hm_targets_stereo(proj_L, proj_R, hm_L, hm_R, bbox_L, bbox_R):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Main v2 fitting entry point
+# Public v3 entry point — wraps the corrections pipeline
 # ──────────────────────────────────────────────────────────────────────────────
 
-def run_v2_fitting(
+def run_skeleton_v3_fit(
+    subject_name: str,
+    trial_stem: str,
+    detection: dict | None = None,
+    attribution: dict | None = None,
+    cancel_event: threading.Event | None = None,
+    progress_callback: Callable[[float], None] | None = None,
+    hrnet_source: str = "auto",
+    stereo_mode: str = "image",
+    stereo_mask_dilate_px: int = 10,
+    stereo_gauss_center_weight: float = 0.0,
+    stereo_conf: float = 0.0,
+    stereo_dist_px: float = 0.0,
+    stereo_occlusion_px: float = 0.0,
+) -> dict[str, Any]:
+    """Run the v3 corrections pipeline for one trial.
+
+    Thin wrapper around :func:`mp_error_detection.run_correction_pipeline`
+    + :func:`mp_error_detection.save_errors`.  Writes ``skeleton_v3.npz``
+    and ``mp_errors.npz`` under the subject's trial dir.
+
+    ``detection`` and ``attribution`` are the per-factor weight dicts
+    (see :class:`routers.skeleton.MPErrorRequest` for the schema).
+    """
+    from .mp_error_detection import run_correction_pipeline, save_errors
+
+    det = dict(detection or {})
+    attr = dict(attribution or {})
+    result = run_correction_pipeline(
+        subject_name, trial_stem, det, attr,
+        progress_callback=progress_callback,
+        cancel_event=cancel_event,
+        hrnet_source=hrnet_source,
+        stereo_mode=stereo_mode,
+        stereo_mask_dilate_px=int(stereo_mask_dilate_px),
+        stereo_gauss_center_weight=float(stereo_gauss_center_weight),
+        stereo_conf=float(stereo_conf),
+        stereo_dist_px=float(stereo_dist_px),
+        stereo_occlusion_px=float(stereo_occlusion_px),
+    )
+    save_errors(subject_name, trial_stem, det, attr)
+    return result
+
+
+def _run_skeleton_v3_fk_legacy(
     subject_name: str,
     trial_stem: str,
     cancel_event: threading.Event | None = None,
@@ -1170,10 +1214,14 @@ def run_v2_fitting(
     w_constraints: float = 2.0,
     w_v1_ref: float = 0.5,
 ) -> dict[str, Any]:
-    """Fit the v2 skeleton for one trial.
+    """Legacy FK-based v2-style fit (no longer the public v3 entry).
 
-    Uses FK parameterisation with constant bone lengths and separate temporal
-    smoothing for wrist position and joint angles.
+    Kept private because helper functions in this file
+    (``_load_hrnet_heatmaps``, ``assign_hm_targets_stereo``) are
+    imported by other modules.  Writes the same ``skeleton_v3.npz``
+    output path as the corrections pipeline -- callers who actually
+    want this FK solver must invoke it under this private name to
+    avoid double-clobbering the v3 output file.
 
     Returns dict with output path and quality metrics.
     """
@@ -1215,7 +1263,7 @@ def run_v2_fitting(
     # ── Calibration ─────────────────────────────────────────────
     # Use _load_trial_calibration (same as display code) so the fit
     # uses the same calibration that the viewer uses for projection.
-    from .mano_data import _load_trial_calibration
+    from .skeleton_data import _load_trial_calibration
     calib = _load_trial_calibration(subject_name, trial_stem)
     if calib is None:
         calib = get_calibration_for_subject(subject_name)
@@ -1270,7 +1318,7 @@ def run_v2_fitting(
     # shifts the reprojection optimum along the trusted camera's ray and
     # biases 3D depth.  Now we weight both cameras equally and rely on the
     # refined per-trial calibration to keep round-trip error balanced.
-    from .mano_data import _project_to_2d
+    from .skeleton_data import _project_to_2d
     _rp_L = _project_to_2d(mp_3d, calib["K1"], calib["dist1"],
                             np.eye(3, dtype=np.float64),
                             np.zeros((3, 1), dtype=np.float64))
@@ -1324,7 +1372,7 @@ def run_v2_fitting(
     # The other three are simple point-to-point.
     MCP_P2P_PAIRS = [(5, 9), (9, 13), (13, 17)]
     MCP_ALL_NAMES = ["Thumb-Index", "Index-Middle", "Middle-Ring", "Ring-Pinky"]
-    from .mano_data import load_angle_priors, _point_to_segment_dist
+    from .skeleton_data import load_angle_priors, _point_to_segment_dist
     _priors_data = load_angle_priors()
 
     # Compute constant targets from data (robust median, same as bone lengths)
@@ -1458,10 +1506,10 @@ def run_v2_fitting(
     # even if less anatomically correct.  Penalise v2 for deviating from
     # v1 angles to prevent wild solutions.
     v1_angles_ref = None  # will be (n_valid, n_angles, 2) tensor if available
-    v1_path = _mano_dir(subject_name) / trial_stem / "mano_fit.npz"
+    v1_path = _skeleton_dir(subject_name) / trial_stem / "skeleton_v1.npz"
     if v1_path.exists():
-        from .mano_data import _compute_angles, FLEX_ANGLE_OPTIONS, _load_mano_npz
-        v1_data = _load_mano_npz(str(v1_path))
+        from .skeleton_data import _compute_angles, FLEX_ANGLE_OPTIONS, _load_skeleton_npz
+        v1_data = _load_skeleton_npz(str(v1_path))
         v1_j3d = v1_data["joints_3d"]  # (N_total, 21, 3)
         v1_valid = v1_j3d[valid_idx]   # (n_valid, 21, 3)
         v1_wrist_ref = v1_valid[:, 0].astype(np.float32)  # (n_valid, 3)
@@ -1601,13 +1649,13 @@ def run_v2_fitting(
         logger.info(f"  Heatmaps loaded: L={hm_t_L.shape} bbox={hm_bbox_L}")
 
         # Load pre-computed peak assignments from JSON (generated by HRNet job)
-        _mano_trial_dir = _mano_dir(subject_name) / trial_stem
-        peak_json_path = _mano_trial_dir / "hrnet_peak_assignments.json"
+        _skeleton_trial_dir = _skeleton_dir(subject_name) / trial_stem
+        peak_json_path = _skeleton_trial_dir / "hrnet_peak_assignments.json"
         _hm_targets_L = None
         _hm_targets_R = None
         if peak_json_path.exists():
             peak_data = json.loads(peak_json_path.read_text())
-            from .mano_data import JOINT_NAMES as _JN
+            from .skeleton_data import JOINT_NAMES as _JN
             def _load_peaks(peaks_dict, n_frames):
                 arr = np.full((n_frames, 21, 2), np.nan, dtype=np.float32)
                 for j in range(21):
@@ -1640,7 +1688,7 @@ def run_v2_fitting(
     angle_prior_data = None
     _angle_priors_list = []
     if use_angle_constraints:
-        from .mano_data import load_angle_priors
+        from .skeleton_data import load_angle_priors
         angle_prior_data = load_angle_priors()
         _angle_priors_list = angle_prior_data.get("joints", [])
         logger.info(f"  Loaded {len(_angle_priors_list)} joint angle priors (flex+abd per joint)")
@@ -1657,7 +1705,7 @@ def run_v2_fitting(
         {"params": [meta_abd],     "lr": 0.005},
     ])
 
-    from .mano_fitting import _project_torch  # reuse the same differentiable projector
+    from .skeleton_v1 import _project_torch  # reuse the same differentiable projector
 
     target_bl = _t(target_bone_lengths)
     mcp_p2p_idx    = torch.tensor(MCP_P2P_PAIRS, dtype=torch.long)  # (3, 2)
@@ -1875,7 +1923,7 @@ def run_v2_fitting(
         ]
         _flex_coupling_w = 1.0
         if _angle_priors_list:
-            from .mano_data import load_angle_priors as _lap
+            from .skeleton_data import load_angle_priors as _lap
             _flex_coupling_w = _lap().get("flex_coupling", 1.0)
 
         if w_constraints > 0 and _flex_coupling_w > 0:
@@ -1908,7 +1956,7 @@ def run_v2_fitting(
         # Uses the same palm-normal decomposition for both.
         if v1_ref_t is not None and w_v1_ref > 0:
             from .angle_constraint_loss import _tnorm, _talign
-            from .mano_data import FLEX_ANGLE_OPTIONS
+            from .skeleton_data import FLEX_ANGLE_OPTIONS
             _w = joints_3d[:, 0]
             _ei = joints_3d[:, 5] - _w; _em = joints_3d[:, 9] - _w
             _er = joints_3d[:, 13] - _w; _ep = joints_3d[:, 17] - _w
@@ -2029,31 +2077,31 @@ def run_v2_fitting(
     final_bone_lengths = bl_final.detach().cpu().numpy()
 
     # ── Save (rotate old fits to keep up to 3 previous runs) ───
-    mano_trial_dir = _mano_dir(subject_name) / trial_stem
-    mano_trial_dir.mkdir(parents=True, exist_ok=True)
-    out_path = mano_trial_dir / "mano_fit_v2.npz"
-    params_path = mano_trial_dir / "mano_fit_v2_params.json"
+    skeleton_trial_dir = _skeleton_dir(subject_name) / trial_stem
+    skeleton_trial_dir.mkdir(parents=True, exist_ok=True)
+    out_path = skeleton_trial_dir / "skeleton_v3.npz"
+    params_path = skeleton_trial_dir / "skeleton_v3_params.json"
 
     # Rotate: prev3 → deleted, prev2 → prev3, prev1 → prev2, current → prev1
     for i in range(3, 0, -1):
-        src_npz = mano_trial_dir / f"mano_fit_v2_prev{i}.npz"
-        src_json = mano_trial_dir / f"mano_fit_v2_prev{i}_params.json"
+        src_npz = skeleton_trial_dir / f"skeleton_v3_prev{i}.npz"
+        src_json = skeleton_trial_dir / f"skeleton_v3_prev{i}_params.json"
         if i == 3:
             # Delete oldest
             if src_npz.exists(): src_npz.unlink()
             if src_json.exists(): src_json.unlink()
         else:
-            dst_npz = mano_trial_dir / f"mano_fit_v2_prev{i+1}.npz"
-            dst_json = mano_trial_dir / f"mano_fit_v2_prev{i+1}_params.json"
+            dst_npz = skeleton_trial_dir / f"skeleton_v3_prev{i+1}.npz"
+            dst_json = skeleton_trial_dir / f"skeleton_v3_prev{i+1}_params.json"
             if src_npz.exists(): src_npz.rename(dst_npz)
             if src_json.exists(): src_json.rename(dst_json)
     # Current → prev1
     if out_path.exists():
-        (mano_trial_dir / "mano_fit_v2_prev1.npz").unlink(missing_ok=True)
-        out_path.rename(mano_trial_dir / "mano_fit_v2_prev1.npz")
+        (skeleton_trial_dir / "skeleton_v3_prev1.npz").unlink(missing_ok=True)
+        out_path.rename(skeleton_trial_dir / "skeleton_v3_prev1.npz")
     if params_path.exists():
-        (mano_trial_dir / "mano_fit_v2_prev1_params.json").unlink(missing_ok=True)
-        params_path.rename(mano_trial_dir / "mano_fit_v2_prev1_params.json")
+        (skeleton_trial_dir / "skeleton_v3_prev1_params.json").unlink(missing_ok=True)
+        params_path.rename(skeleton_trial_dir / "skeleton_v3_prev1_params.json")
 
     np.savez(
         str(out_path),
@@ -2070,7 +2118,7 @@ def run_v2_fitting(
 
     # Save fitting parameters alongside the npz
     from datetime import datetime
-    params_path = mano_trial_dir / "mano_fit_v2_params.json"
+    params_path = skeleton_trial_dir / "skeleton_v3_params.json"
     params_path.write_text(json.dumps({
         "fit_type": "skeleton_v2",
         "version": "v2",
@@ -2111,8 +2159,8 @@ def run_v2_fitting(
         "timestamp": datetime.now().isoformat(),
     }, indent=2))
 
-    from .mano_data import _load_mano_npz
-    _load_mano_npz.cache_clear()
+    from .skeleton_data import _load_skeleton_npz
+    _load_skeleton_npz.cache_clear()
 
     report(100)
     logger.info(f"  Saved {out_path}")

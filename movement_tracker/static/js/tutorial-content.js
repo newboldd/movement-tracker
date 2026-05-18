@@ -409,46 +409,46 @@ window.TUTORIALS = [
             },
             {
                 title: 'Check the Dashboard',
-                body: 'Return to the <a href="/"><strong>Dashboard</strong></a>. Your subject\u2019s stage badge should now reflect the full pipeline completion. From here, you can proceed to MANO fitting for 3D hand model reconstruction.',
+                body: 'Return to the <a href="/"><strong>Dashboard</strong></a>. Your subject\u2019s stage badge should now reflect the full pipeline completion. From here, you can proceed to Skeleton fitting for 3D hand model reconstruction.',
                 tips: [],
             },
         ],
     },
 
-    // ── 10. MANO Fitting & Viewing ──────────────────────────
+    // ── 10. Skeleton Fitting & Viewing ──────────────────────────
     {
         id: 10,
-        title: 'MANO Fitting & Viewing',
+        title: 'Skeleton Fitting & Viewing',
         subtitle: 'Fit a 3D hand model to your tracked keypoints and visualize the results.',
         time: '~5 min',
         series: 'advanced',
         steps: [
             {
                 title: 'Prerequisites',
-                body: 'MANO fitting requires completed DLC analysis (keypoints on all frames) and stereo calibration. Ensure your subject has been analyzed and a calibration file is assigned in Settings.',
+                body: 'Skeleton fitting requires completed DLC analysis (keypoints on all frames) and stereo calibration. Ensure your subject has been analyzed and a calibration file is assigned in Settings.',
                 tips: [],
             },
             {
-                title: 'Run MANO fitting',
-                body: 'Go to <a href="/remote"><strong>Processing</strong></a>. Select <strong>MANO Fit</strong> from the Step dropdown, check your subject, and submit. This is a GPU-accelerated job that fits the MANO 3D hand model to your 2D keypoint detections across all frames.',
+                title: 'Run Skeleton fitting',
+                body: 'Go to <a href="/remote"><strong>Processing</strong></a>. Select <strong>Skeleton Fit</strong> from the Step dropdown, check your subject, and submit. This is a GPU-accelerated job that fits the Skeleton 3D hand model to your 2D keypoint detections across all frames.',
                 tips: [
-                    'MANO fitting is computationally intensive \u2014 a GPU is strongly recommended. On CPU it may take significantly longer.',
+                    'Skeleton fitting is computationally intensive \u2014 a GPU is strongly recommended. On CPU it may take significantly longer.',
                     'If you have a remote GPU configured, select <strong>Remote</strong> as the execution target.',
                 ],
             },
             {
                 title: 'Monitor the fitting job',
-                body: 'The job appears in the <strong>Queue</strong>. MANO fitting typically takes a few minutes per trial on GPU. The progress indicator shows which trial is currently being processed.',
+                body: 'The job appears in the <strong>Queue</strong>. Skeleton fitting typically takes a few minutes per trial on GPU. The progress indicator shows which trial is currently being processed.',
                 tips: [],
             },
             {
-                title: 'Open the MANO viewer',
-                body: 'Once fitting completes, click <a href="/mano"><strong>MANO</strong></a> in the nav bar and select your subject. The viewer shows a 3D hand mesh overlaid on the video frame.',
+                title: 'Open the Skeleton viewer',
+                body: 'Once fitting completes, click <a href="/labels"><strong>Skeleton</strong></a> in the nav bar and select your subject. The viewer shows a 3D hand mesh overlaid on the video frame.',
                 tips: [],
             },
             {
                 title: 'Navigate the 3D view',
-                body: 'The MANO viewer has the same frame navigation as the video viewer (<kbd>\u2190</kbd> / <kbd>\u2192</kbd>, <kbd>Space</kbd> to play). Additionally, you can <strong>rotate</strong> the 3D view by dragging, and <strong>zoom</strong> with the scroll wheel.',
+                body: 'The Skeleton viewer has the same frame navigation as the video viewer (<kbd>\u2190</kbd> / <kbd>\u2192</kbd>, <kbd>Space</kbd> to play). Additionally, you can <strong>rotate</strong> the 3D view by dragging, and <strong>zoom</strong> with the scroll wheel.',
                 tips: [
                     'Toggle between the video overlay and a standalone 3D mesh view using the view mode selector.',
                 ],
@@ -457,7 +457,7 @@ window.TUTORIALS = [
                 title: 'Assess fit quality',
                 body: 'Scrub through the trial and check that the 3D mesh follows the actual hand movement. The mesh should align with the fingers during opening and closing. Misalignment usually indicates DLC prediction errors upstream.',
                 tips: [
-                    'If the mesh doesn\u2019t align well, go back to the Refinement tutorial to correct DLC predictions, retrain, re-analyze, and re-fit MANO.',
+                    'If the mesh doesn\u2019t align well, go back to the Refinement tutorial to correct DLC predictions, retrain, re-analyze, and re-fit Skeleton.',
                 ],
             },
         ],

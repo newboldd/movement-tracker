@@ -2,7 +2,7 @@
  * Video Export Module
  *
  * Captures frames from a viewer's canvases and uploads to the server for
- * ffmpeg encoding into an MP4 video.  Works with both the MANO 3D viewer
+ * ffmpeg encoding into an MP4 video.  Works with both the Skeleton 3D viewer
  * and the label viewer via a common exportContext interface.
  *
  * Usage:

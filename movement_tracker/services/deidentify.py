@@ -1,6 +1,6 @@
 """Face de-identification with hand protection for stereo/single-camera videos.
 
-Adapted from the mano pipeline's deidentify_videos.py, simplified for the
+Adapted from the skeleton pipeline's deidentify_videos.py, simplified for the
 movement-tracker context. Uses only MediaPipe (no HRNet dependency).
 
 Usage:
@@ -235,7 +235,7 @@ def build_hand_mask_from_hrnet_mip(
     """Build an HRnet-MIP-based hand mask for one camera half.
 
     Reads ``hrnet_w18_mip.npz`` + ``hand_crop.json`` from the subject's
-    mano output dir, thresholds the 64×64 MIP at ``thresh``, drops it
+    skeleton output dir, thresholds the 64×64 MIP at ``thresh``, drops it
     into the per-frame bbox on a (h_side, w_side) canvas, then runs a
     Gaussian-blur + re-threshold smoothing pass (``smooth_px`` controls
     the dilation amount).
@@ -256,7 +256,7 @@ def build_hand_mask_from_hrnet_mip(
         smooth_px: dilation strength.  0 = no smoothing.
     """
     import numpy as _np
-    from .mano_data import _mano_dir
+    from .skeleton_data import _skeleton_dir
     from .video import build_trial_map as _btm
     import json as _jjson
 
@@ -269,8 +269,8 @@ def build_hand_mask_from_hrnet_mip(
         return None
     tdef = tmap[trial_idx]
     stem = tdef["trial_name"]
-    mip_path = _mano_dir(subject_name) / stem / "hrnet_w18_mip.npz"
-    crop_path = _mano_dir(subject_name) / stem / "hand_crop.json"
+    mip_path = _skeleton_dir(subject_name) / stem / "hrnet_w18_mip.npz"
+    crop_path = _skeleton_dir(subject_name) / stem / "hand_crop.json"
     if not mip_path.exists() or not crop_path.exists():
         return None
     try:
@@ -1043,7 +1043,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
             return
         _hrnet_mip["loaded"] = True
         try:
-            from .mano_data import _mano_dir
+            from .skeleton_data import _skeleton_dir
             from .video import build_trial_map as _btm
             import json as _jjson, numpy as _np
             tmap = _btm(subject_name)
@@ -1052,8 +1052,8 @@ def render_with_blur_specs(input_path: str, output_path: str,
             if tdef is None:
                 return
             stem = tdef["trial_name"]
-            mip_path = _mano_dir(subject_name) / stem / "hrnet_w18_mip.npz"
-            crop_path = _mano_dir(subject_name) / stem / "hand_crop.json"
+            mip_path = _skeleton_dir(subject_name) / stem / "hrnet_w18_mip.npz"
+            crop_path = _skeleton_dir(subject_name) / stem / "hand_crop.json"
             if not mip_path.exists() or not crop_path.exists():
                 return
             d = _np.load(mip_path)
@@ -1172,14 +1172,30 @@ def render_with_blur_specs(input_path: str, output_path: str,
             if active_specs:
                 frame = np.ascontiguousarray(frame, dtype=np.uint8)
 
-                # Check hand protection per-side (segments can be camera-specific)
+                # Hand protection activates for both cameras whenever ANY
+                # segment overlaps the current frame -- matching the
+                # preview's permissive behavior.  When a side-matching
+                # segment exists we use its radius/smooth; otherwise we
+                # fall back to the first segment that covers the frame so
+                # both cameras render with the same look the preview shows.
                 def _hand_active_for_side(side_label):
+                    side_match = None
+                    any_match = None
                     for seg in hand_segments:
-                        seg_side = seg.get("side", "full")
-                        if (seg_side == side_label or seg_side == "full") and \
-                           seg.get("start", 0) <= global_frame <= seg.get("end", 0):
-                            return True, seg.get("radius", hand_mask_radius), seg.get("smooth", hand_smooth)
-                    return False, hand_mask_radius, hand_smooth
+                        if not (seg.get("start", 0) <= global_frame <= seg.get("end", 0)):
+                            continue
+                        seg_side = seg.get("side")
+                        if any_match is None:
+                            any_match = seg
+                        if seg_side is None or seg_side == "full" or seg_side == side_label:
+                            side_match = seg
+                            break
+                    chosen = side_match or any_match
+                    if chosen is None:
+                        return False, hand_mask_radius, hand_smooth
+                    return (True,
+                            chosen.get("radius", hand_mask_radius),
+                            chosen.get("smooth", hand_smooth))
 
                 if is_stereo:
                     left = frame[:, :half_w, :].copy()

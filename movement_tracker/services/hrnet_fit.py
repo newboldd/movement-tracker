@@ -900,8 +900,8 @@ def compute_yzc_preview(
     joint, camera) flag arrays for live overlay rendering on the Peaks
     sub-stage.
     """
-    from .mano_data import _load_trial_calibration, load_angle_priors, JOINT_NAMES
-    from .mano_fitting_v2 import _load_hrnet_heatmaps
+    from .skeleton_data import _load_trial_calibration, load_angle_priors, JOINT_NAMES
+    from .skeleton_v3 import _load_hrnet_heatmaps
     from .video import build_trial_map
     from .mp_error_detection import (
         compute_scores_hrnet, _errors_for_factor, _combined_attr_per_cam,
@@ -1276,8 +1276,8 @@ def run_hrnet_fit_for_trial(
     Returns ``{n_frames, n_joints, written: bool, params: {...}}``.
     """
     import json as _json
-    from .mano_data import _mano_dir, JOINT_NAMES, _load_trial_calibration, load_angle_priors
-    from .mano_fitting_v2 import _load_hrnet_heatmaps
+    from .skeleton_data import _skeleton_dir, JOINT_NAMES, _load_trial_calibration, load_angle_priors
+    from .skeleton_v3 import _load_hrnet_heatmaps
     from .video import build_trial_map
 
     trials = build_trial_map(subject_name)
@@ -1331,8 +1331,8 @@ def run_hrnet_fit_for_trial(
                 "cancelled": True, "params": {}}
 
     # ── Merge into hrnet_peak_assignments.json (preserve legacy fields) ──
-    mano_trial_dir = _mano_dir(subject_name) / trial_stem
-    peak_path = mano_trial_dir / "hrnet_peak_assignments.json"
+    skeleton_trial_dir = _skeleton_dir(subject_name) / trial_stem
+    peak_path = skeleton_trial_dir / "hrnet_peak_assignments.json"
     existing = {}
     if peak_path.exists():
         try:

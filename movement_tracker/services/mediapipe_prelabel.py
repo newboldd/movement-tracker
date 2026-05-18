@@ -221,7 +221,7 @@ def run_mediapipe(subject_name: str, progress_callback=None,
         trial_idx: When set, process ONLY this trial — the other trials'
             slices in the saved npz are preserved from the existing file
             (or left NaN if no prior file exists).  Used by the per-trial
-            "Run MediaPipe" button on the mano page so adjusting one
+            "Run MediaPipe" button on the skeleton page so adjusting one
             trial's bbox doesn't silently re-process the others.
 
     Returns:

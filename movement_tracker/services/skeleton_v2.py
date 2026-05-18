@@ -7,7 +7,7 @@ the UI.  It uses:
   - Per-joint Z-constancy (mean-Z deviation penalty)
   - No HRNet, no Apple Vision — MediaPipe + DLC tips only
 
-Future changes to `mano_fitting_v2.py` (the "Skeleton fit" button) must NOT
+Future changes to `skeleton_v3.py` (the "Skeleton fit" button) must NOT
 propagate here.  This module is a frozen copy; edit only to fix bugs present
 at the time it was forked.
 """
@@ -23,14 +23,14 @@ import numpy as np
 
 from ..config import get_settings
 from .calibration import get_calibration_for_subject, triangulate_points
-from .mano_data import _mano_dir, HAND_SKELETON
+from .skeleton_data import _skeleton_dir, HAND_SKELETON
 from .mediapipe_prelabel import load_mediapipe_prelabels
 from .video import build_trial_map
 # FK helpers are pulled from the active v2 module at time of forking.
 # These are mathematical primitives (FK, inverse-FK, wrist-frame) and are
 # considered stable enough to share — if they ever need to diverge, copy them
 # in here.
-from .mano_fitting_v2 import (
+from .skeleton_v3 import (
     _forward_kinematics,
     _compute_wrist_frame,
     _inverse_fk_init,
@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 BONES = HAND_SKELETON
 
 
-def run_v2_legacy_fitting(
+def run_skeleton_v2_fit(
     subject_name: str,
     trial_stem: str,
     cancel_event: threading.Event | None = None,
@@ -92,7 +92,7 @@ def run_v2_legacy_fitting(
     mp_R = od_lm[start_frame:end].copy().astype(np.float32)
     N = mp_L.shape[0]
 
-    from .mano_data import _load_trial_calibration
+    from .skeleton_data import _load_trial_calibration
     calib = _load_trial_calibration(subject_name, trial_stem)
     if calib is None:
         calib = get_calibration_for_subject(subject_name)
@@ -113,7 +113,7 @@ def run_v2_legacy_fitting(
     for j in range(21):
         mp_3d[:, j] = triangulate_points(mp_L[:, j], mp_R[:, j], calib).astype(np.float32)
 
-    from .mano_data import _project_to_2d
+    from .skeleton_data import _project_to_2d
     _rp_L = _project_to_2d(mp_3d, calib["K1"], calib["dist1"],
                             np.eye(3, dtype=np.float64),
                             np.zeros((3, 1), dtype=np.float64))
@@ -265,7 +265,7 @@ def run_v2_legacy_fitting(
     angle_prior_data = None
     _angle_priors_list = []
     if use_angle_constraints:
-        from .mano_data import load_angle_priors
+        from .skeleton_data import load_angle_priors
         angle_prior_data = load_angle_priors()
         _angle_priors_list = angle_prior_data.get("joints", [])
 
@@ -280,7 +280,7 @@ def run_v2_legacy_fitting(
         {"params": [meta_abd],     "lr": 0.005},
     ])
 
-    from .mano_fitting import _project_torch
+    from .skeleton_v1 import _project_torch
 
     target_bl = _t(target_bone_lengths)
 
@@ -466,12 +466,12 @@ def run_v2_legacy_fitting(
 
     final_bone_lengths = bl_final.detach().cpu().numpy()
 
-    mano_trial_dir = _mano_dir(subject_name) / trial_stem
-    mano_trial_dir.mkdir(parents=True, exist_ok=True)
-    out_path = mano_trial_dir / "mano_fit_v2_legacy.npz"
-    params_path = mano_trial_dir / "mano_fit_v2_legacy_params.json"
+    skeleton_trial_dir = _skeleton_dir(subject_name) / trial_stem
+    skeleton_trial_dir.mkdir(parents=True, exist_ok=True)
+    out_path = skeleton_trial_dir / "skeleton_v2.npz"
+    params_path = skeleton_trial_dir / "skeleton_v2_params.json"
     # Legacy fit has no history rotation — it overwrites its own file.
-    # The active "Skeleton" fit has its own history chain under mano_fit_v2_prev*.npz.
+    # The active "Skeleton" fit has its own history chain under skeleton_v3_prev*.npz.
 
     np.savez(
         str(out_path),
@@ -516,8 +516,8 @@ def run_v2_legacy_fitting(
         "timestamp": datetime.now().isoformat(),
     }, indent=2))
 
-    from .mano_data import _load_mano_npz
-    _load_mano_npz.cache_clear()
+    from .skeleton_data import _load_skeleton_npz
+    _load_skeleton_npz.cache_clear()
 
     report(100)
     logger.info(f"  Saved {out_path}")

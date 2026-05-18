@@ -771,7 +771,7 @@ def hrnet_job_status(subject_ids: str = Query(...)) -> dict:
           trial (already-completed flag → green cell)
     """
     from pathlib import Path
-    from ..services.mano_data import _mano_dir
+    from ..services.skeleton_data import _skeleton_dir
     try:
         ids = [int(x) for x in subject_ids.split(",") if x.strip()]
     except ValueError:
@@ -817,17 +817,17 @@ def hrnet_job_status(subject_ids: str = Query(...)) -> dict:
             has_mp = False
         # Per-trial HRnet output existence.
         try:
-            mano_root = _mano_dir(name)
+            skeleton_root = _skeleton_dir(name)
         except Exception:
-            mano_root = None
+            skeleton_root = None
         saved_set = saved_by_subj.get(sid, set())
 
         trial_rows = []
         for ti, t in enumerate(trials):
             stem = t["trial_name"]
             has_hrnet = False
-            if mano_root is not None:
-                hm = mano_root / stem / "hrnet_w18_heatmaps.npz"
+            if skeleton_root is not None:
+                hm = skeleton_root / stem / "hrnet_w18_heatmaps.npz"
                 has_hrnet = hm.exists()
             trial_rows.append({
                 "trial_idx": ti,

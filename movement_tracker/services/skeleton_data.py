@@ -1,7 +1,7 @@
-"""MANO 3D hand model data loading, projection, and serving.
+"""Skeleton 3D hand model data loading, projection, and serving.
 
-Loads mano_fit_v2.npz, mediapipe.pkl, heatmaps, and calibration for each trial.
-Projects 3D MANO joints to 2D camera coordinates.  Computes distance traces.
+Loads skeleton_v3.npz, mediapipe.pkl, heatmaps, and calibration for each trial.
+Projects 3D Skeleton joints to 2D camera coordinates.  Computes distance traces.
 """
 from __future__ import annotations
 
@@ -565,10 +565,10 @@ def _project_to_2d(joints_3d: np.ndarray, K, dist, R, T) -> np.ndarray:
 
 # ── Trial discovery ────────────────────────────────────────────────────
 
-def _mano_dir(subject_name: str) -> Path:
-    """Return path to mano data directory for a subject."""
+def _skeleton_dir(subject_name: str) -> Path:
+    """Return path to skeleton data directory for a subject."""
     settings = get_settings()
-    return settings.dlc_path / subject_name / "mano"
+    return settings.dlc_path / subject_name / "skeleton"
 
 
 def list_v2_fit_history(subject_name: str, trial_stem: str) -> list[dict]:
@@ -576,11 +576,11 @@ def list_v2_fit_history(subject_name: str, trial_stem: str) -> list[dict]:
 
     Returns list of dicts with keys: slot (1-3), timestamp, params summary.
     """
-    mano_trial_dir = _mano_dir(subject_name) / trial_stem
+    skeleton_trial_dir = _skeleton_dir(subject_name) / trial_stem
     history = []
     for i in range(1, 4):
-        npz_path = mano_trial_dir / f"mano_fit_v2_prev{i}.npz"
-        params_path = mano_trial_dir / f"mano_fit_v2_prev{i}_params.json"
+        npz_path = skeleton_trial_dir / f"skeleton_v3_prev{i}.npz"
+        params_path = skeleton_trial_dir / f"skeleton_v3_prev{i}_params.json"
         if not npz_path.exists():
             continue
         info = {"slot": i, "label": f"Run -{i}", "version": "v2"}
@@ -620,12 +620,12 @@ def load_v2_fit_history_slot(subject_name: str, trial_stem: str, slot: int, cali
     """
     if slot < 1 or slot > 3:
         return None
-    mano_trial_dir = _mano_dir(subject_name) / trial_stem
-    npz_path = mano_trial_dir / f"mano_fit_v2_prev{slot}.npz"
+    skeleton_trial_dir = _skeleton_dir(subject_name) / trial_stem
+    npz_path = skeleton_trial_dir / f"skeleton_v3_prev{slot}.npz"
     if not npz_path.exists():
         return None
 
-    v2 = _load_mano_npz(str(npz_path))
+    v2 = _load_skeleton_npz(str(npz_path))
     joints_3d = v2["joints_3d"]
     N = joints_3d.shape[0]
     fit_error_L = v2.get("fit_error_L", np.full(N, np.nan))
@@ -657,7 +657,7 @@ def load_v2_fit_history_slot(subject_name: str, trial_stem: str, slot: int, cali
     positions = _compute_joint_positions(joints_3d)
 
     # Load params
-    params_path = mano_trial_dir / f"mano_fit_v2_prev{slot}_params.json"
+    params_path = skeleton_trial_dir / f"skeleton_v3_prev{slot}_params.json"
     fit_params = None
     if params_path.exists():
         try:
@@ -724,11 +724,11 @@ def load_angle_priors() -> dict:
     return json.loads(default_path.read_text())
 
 
-def list_mano_trials(subject_name: str) -> list[dict]:
-    """List trials that have MediaPipe data and/or MANO fit results.
+def list_skeleton_trials(subject_name: str) -> list[dict]:
+    """List trials that have MediaPipe data and/or Skeleton fit results.
 
     Returns trials from the video trial map that have MediaPipe prelabels
-    available.  Each entry includes ``has_mano_fit`` flag.
+    available.  Each entry includes ``has_skeleton_v1`` flag.
     """
     # Build video trial map for index alignment
     try:
@@ -744,7 +744,7 @@ def list_mano_trials(subject_name: str) -> list[dict]:
     mp_data = load_mediapipe_prelabels(subject_name)
 
     # Check for mano_fit files
-    mano_root = _mano_dir(subject_name)
+    skeleton_root = _skeleton_dir(subject_name)
 
     results = []
     for i, vt in enumerate(video_trials):
@@ -764,23 +764,23 @@ def list_mano_trials(subject_name: str) -> list[dict]:
                     trial_slice = os_lm[start:end]
                     has_mp = np.any(~np.isnan(trial_slice[:, 0, 0]))
 
-        # Check for mano_fit_v2.npz or mano_fit.npz
-        mano_trial_dir = mano_root / trial_stem
-        has_mano_fit = (
-            (mano_trial_dir / "mano_fit_v2.npz").exists()
-            or (mano_trial_dir / "mano_fit.npz").exists()
+        # Check for skeleton_v3.npz or skeleton_v1.npz
+        skeleton_trial_dir = skeleton_root / trial_stem
+        has_skeleton_v1 = (
+            (skeleton_trial_dir / "skeleton_v3.npz").exists()
+            or (skeleton_trial_dir / "skeleton_v1.npz").exists()
         )
-        has_heatmaps = (mano_trial_dir / "hrnet_w18_heatmaps.npz").exists()
+        has_heatmaps = (skeleton_trial_dir / "hrnet_w18_heatmaps.npz").exists()
 
         # Include every trial the subject's videos produce — even when no
-        # MediaPipe/MANO data exists yet — so the viewer can show an empty
+        # MediaPipe/Skeleton data exists yet — so the viewer can show an empty
         # trial and the user can launch detection jobs from there.
         results.append({
             "trial_idx": i,
             "trial_stem": trial_stem,
             "n_frames": n_frames,
             "has_heatmaps": has_heatmaps,
-            "has_mano_fit": has_mano_fit,
+            "has_skeleton_v1": has_skeleton_v1,
             "has_mp": bool(has_mp),
             "fps": fps,
         })
@@ -791,8 +791,8 @@ def list_mano_trials(subject_name: str) -> list[dict]:
 # ── Data loading ───────────────────────────────────────────────────────
 
 @lru_cache(maxsize=8)
-def _load_mano_npz(npz_path: str) -> dict:
-    """Load and cache MANO fit npz.  Returns dict of numpy arrays."""
+def _load_skeleton_npz(npz_path: str) -> dict:
+    """Load and cache Skeleton fit npz.  Returns dict of numpy arrays."""
     data = np.load(npz_path, allow_pickle=True)
     return dict(data)
 
@@ -804,7 +804,7 @@ def _load_mediapipe_pkl(pkl_path: str) -> dict:
         return pickle.load(f)
 
 
-def _triangulate_hrnet_peaks(mano_trial_dir: Path, calib, N: int, kind: str = "refined",
+def _triangulate_hrnet_peaks(skeleton_trial_dir: Path, calib, N: int, kind: str = "refined",
                               peaks: dict | None = None):
     """Load HRNet peak JSON and triangulate per-frame 3D positions using
     the stereo calibration.  Returns the numpy (N, 21, 3) array, or None
@@ -824,7 +824,7 @@ def _triangulate_hrnet_peaks(mano_trial_dir: Path, calib, N: int, kind: str = "r
     if calib is None:
         return None
     if peaks is None:
-        peaks = _load_hrnet_peaks_json(mano_trial_dir)
+        peaks = _load_hrnet_peaks_json(skeleton_trial_dir)
     if not peaks:
         return None
     if kind == "raw":
@@ -863,9 +863,9 @@ def _triangulate_hrnet_peaks(mano_trial_dir: Path, calib, N: int, kind: str = "r
     return out
 
 
-def _load_hrnet_peaks_json(mano_trial_dir: Path) -> dict | None:
+def _load_hrnet_peaks_json(skeleton_trial_dir: Path) -> dict | None:
     """Load pre-computed HRNet peak assignments if available."""
-    p = mano_trial_dir / "hrnet_peak_assignments.json"
+    p = skeleton_trial_dir / "hrnet_peak_assignments.json"
     if not p.exists():
         return None
     try:
@@ -910,11 +910,11 @@ def _load_trial_calibration(subject_name: str, trial_stem: str) -> dict | None:
     """Load calibration for a trial.
 
     Priority:
-      1. Per-trial calibration.yaml in mano data dir
+      1. Per-trial calibration.yaml in skeleton data dir
       2. Subject-level calibration from the app's calibration service
     """
-    mano_trial_dir = _mano_dir(subject_name) / trial_stem
-    local_calib = mano_trial_dir / "calibration.yaml"
+    skeleton_trial_dir = _skeleton_dir(subject_name) / trial_stem
+    local_calib = skeleton_trial_dir / "calibration.yaml"
     if local_calib.exists():
         try:
             return load_calibration(str(local_calib))
@@ -927,16 +927,16 @@ def _load_trial_calibration(subject_name: str, trial_stem: str) -> dict | None:
     return calib
 
 
-def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
-    """Load all MANO viewer data for a single trial.
+def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
+    """Load all Skeleton viewer data for a single trial.
 
     Works in two modes:
-    - Full mode: mano_fit_v2.npz or mano_fit.npz exists → load MANO + MP
-    - MP-only mode: no MANO fit → load MediaPipe from prelabels, return null MANO fields
+    - Full mode: skeleton_v3.npz or skeleton_v1.npz exists → load Skeleton + MP
+    - MP-only mode: no Skeleton fit → load MediaPipe from prelabels, return null Skeleton fields
 
     Returns a dict ready for JSON serialisation (numpy arrays converted to lists).
     """
-    mano_trial_dir = _mano_dir(subject_name) / trial_stem
+    skeleton_trial_dir = _skeleton_dir(subject_name) / trial_stem
 
     # ── Determine frame count from video trial map ────────────
     N = 0
@@ -953,19 +953,19 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     except Exception:
         pass
 
-    # ── Load MANO fit (if available) ───────────────────────────
-    has_mano = False
-    # ── Load v1 skeleton fit (mano_fit.npz) ──────────────────────
+    # ── Load Skeleton fit (if available) ───────────────────────────
+    has_skeleton_fit = False
+    # ── Load v1 skeleton fit (skeleton_v1.npz) ──────────────────────
     joints_3d = None
     fit_error_L = np.full(N, np.nan)
     fit_error_R = np.full(N, np.nan)
     mp_weights_L = None
     mp_weights_R = None
 
-    v1_path = mano_trial_dir / "mano_fit.npz"
+    v1_path = skeleton_trial_dir / "skeleton_v1.npz"
     v1_fit_params = None
     if v1_path.exists():
-        v1 = _load_mano_npz(str(v1_path))
+        v1 = _load_skeleton_npz(str(v1_path))
         joints_3d = v1["joints_3d"]
         if N == 0:
             N = joints_3d.shape[0]
@@ -973,16 +973,16 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         fit_error_R = v1.get("fit_error_R", np.full(N, np.nan))
         mp_weights_L = v1.get("mp_weights_L")
         mp_weights_R = v1.get("mp_weights_R")
-        has_mano = True
+        has_skeleton_fit = True
         # Load saved fit parameters
-        v1_params_path = mano_trial_dir / "mano_fit_params.json"
+        v1_params_path = skeleton_trial_dir / "skeleton_v1_params.json"
         if v1_params_path.exists():
             try:
                 v1_fit_params = json.loads(v1_params_path.read_text())
             except Exception:
                 pass
 
-    # ── Load v2 skeleton fit (mano_fit_v2.npz) ─────────────────
+    # ── Load v2 skeleton fit (skeleton_v3.npz) ─────────────────
     v2_joints_3d = None
     v2_fit_error_L = np.full(max(N, 1), np.nan)
     v2_fit_error_R = np.full(max(N, 1), np.nan)
@@ -1018,9 +1018,9 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     v2_hrnet_along_R = None
     v2_hrnet_perp_R  = None
     v2_hrnet_child   = None
-    v2_path = mano_trial_dir / "mano_fit_v2.npz"
+    v2_path = skeleton_trial_dir / "skeleton_v3.npz"
     if v2_path.exists():
-        v2 = _load_mano_npz(str(v2_path))
+        v2 = _load_skeleton_npz(str(v2_path))
         v2_joints_3d = v2["joints_3d"]
         if N == 0:
             N = v2_joints_3d.shape[0]
@@ -1066,7 +1066,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         v2_hrnet_perp_R  = v2.get("hrnet_perp_R")
         v2_hrnet_child   = v2.get("hrnet_child")
         # Load saved fit parameters
-        v2_params_path = mano_trial_dir / "mano_fit_v2_params.json"
+        v2_params_path = skeleton_trial_dir / "skeleton_v3_params.json"
         if v2_params_path.exists():
             try:
                 v2_fit_params = json.loads(v2_params_path.read_text())
@@ -1078,13 +1078,13 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     legacy_joints_3d = None
     legacy_fit_params = None
     has_skel_legacy = False
-    legacy_path = mano_trial_dir / "mano_fit_v2_legacy.npz"
+    legacy_path = skeleton_trial_dir / "skeleton_v2.npz"
     if legacy_path.exists():
-        leg = _load_mano_npz(str(legacy_path))
+        leg = _load_skeleton_npz(str(legacy_path))
         legacy_joints_3d = leg["joints_3d"]
         if N == 0:
             N = legacy_joints_3d.shape[0]
-        legacy_params_path = mano_trial_dir / "mano_fit_v2_legacy_params.json"
+        legacy_params_path = skeleton_trial_dir / "skeleton_v2_params.json"
         if legacy_params_path.exists():
             try:
                 legacy_fit_params = json.loads(legacy_params_path.read_text())
@@ -1116,7 +1116,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     T_zero = np.zeros((3, 1), dtype=np.float64)
 
     # ── Apply learned 2D offsets to 3D joints (before projection) ──
-    if has_mano and has_calib:
+    if has_skeleton_fit and has_calib:
         offset_L = v1.get("offset_L")
         offset_R = v1.get("offset_R")
         # Convert the average of L/R 2D pixel offsets to a 3D world-space shift
@@ -1138,14 +1138,14 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
                 joints_3d[valid_mask, :, 0] += dx_3d
                 joints_3d[valid_mask, :, 1] += dy_3d
 
-    # ── Project MANO 3D→2D (if available) ──────────────────────
-    if has_mano and has_calib:
-        mano_proj_L = _project_to_2d(joints_3d, K1, dist1, R_eye, T_zero)
-        mano_proj_R = _project_to_2d(joints_3d, K2, dist2, R, T)
+    # ── Project Skeleton 3D→2D (if available) ──────────────────────
+    if has_skeleton_fit and has_calib:
+        skeleton_proj_L = _project_to_2d(joints_3d, K1, dist1, R_eye, T_zero)
+        skeleton_proj_R = _project_to_2d(joints_3d, K2, dist2, R, T)
     else:
-        mano_proj_L = np.full((N, 21, 2), np.nan)
-        mano_proj_R = np.full((N, 21, 2), np.nan)
-        if not has_mano:
+        skeleton_proj_L = np.full((N, 21, 2), np.nan)
+        skeleton_proj_R = np.full((N, 21, 2), np.nan)
+        if not has_skeleton_fit:
             joints_3d = np.full((N, 21, 3), np.nan)
 
     # ── Skeleton v2 2D: prefer directly saved corrected MP over 3D→2D ──
@@ -1182,8 +1182,8 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     mp_tracked_L = np.full((N, 21, 2), np.nan)
     mp_tracked_R = np.full((N, 21, 2), np.nan)
 
-    # Try mano-dir mediapipe.pkl first (legacy hand_tracking format)
-    mp_path = mano_trial_dir / "mediapipe.pkl"
+    # Try skeleton-dir mediapipe.pkl first (legacy hand_tracking format)
+    mp_path = skeleton_trial_dir / "mediapipe.pkl"
     if mp_path.exists():
         mp_data = _load_mediapipe_pkl(str(mp_path))
         mp_L = mp_data.get("tracked_L")
@@ -1394,7 +1394,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         v2_joints_3d_after_hr = None
     has_skel_v2_bc = v2_joints_3d_after_bc is not None and np.any(~np.isnan(v2_joints_3d_after_bc))
 
-    distances_mano = _compute_distances(joints_3d) if has_mano else {}
+    distances_mano = _compute_distances(joints_3d) if has_skeleton_fit else {}
     distances_skel_v2 = _compute_distances(v2_joints_3d) if has_skel_v2 else {}
     distances_skel_v2_sc = _compute_distances(v2_joints_3d_after_sc) if has_skel_v2_sc else {}
     distances_skel_v2_y = _compute_distances(v2_joints_3d_after_y) if has_skel_v2_y else {}
@@ -1410,15 +1410,15 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     # payload).  The JSON now contains all five HRnet Correct stages × 2
     # cameras × 21 joints × N frames — re-parsing it 6 times dominated
     # cold page load.
-    hrnet_peaks_cached = _load_hrnet_peaks_json(mano_trial_dir)
+    hrnet_peaks_cached = _load_hrnet_peaks_json(skeleton_trial_dir)
     # HRNet heatmap-peak triangulated 3D — used as its own "model"
-    hrnet_peaks_3d = _triangulate_hrnet_peaks(mano_trial_dir, calib, N, kind="refined", peaks=hrnet_peaks_cached)
-    hrnet_peaks_raw_3d = _triangulate_hrnet_peaks(mano_trial_dir, calib, N, kind="raw",       peaks=hrnet_peaks_cached)
+    hrnet_peaks_3d = _triangulate_hrnet_peaks(skeleton_trial_dir, calib, N, kind="refined", peaks=hrnet_peaks_cached)
+    hrnet_peaks_raw_3d = _triangulate_hrnet_peaks(skeleton_trial_dir, calib, N, kind="raw",       peaks=hrnet_peaks_cached)
     # New HRnet Correct pipeline outputs (centroid → Y/Z-correct → Z-smooth → Hungarian).
-    hrnet_centroid_3d  = _triangulate_hrnet_peaks(mano_trial_dir, calib, N, kind="centroid",  peaks=hrnet_peaks_cached)
-    hrnet_yzc_3d       = _triangulate_hrnet_peaks(mano_trial_dir, calib, N, kind="yzc",       peaks=hrnet_peaks_cached)
-    hrnet_zsmooth_3d   = _triangulate_hrnet_peaks(mano_trial_dir, calib, N, kind="zsmooth",   peaks=hrnet_peaks_cached)
-    hrnet_hungarian_3d = _triangulate_hrnet_peaks(mano_trial_dir, calib, N, kind="hungarian", peaks=hrnet_peaks_cached)
+    hrnet_centroid_3d  = _triangulate_hrnet_peaks(skeleton_trial_dir, calib, N, kind="centroid",  peaks=hrnet_peaks_cached)
+    hrnet_yzc_3d       = _triangulate_hrnet_peaks(skeleton_trial_dir, calib, N, kind="yzc",       peaks=hrnet_peaks_cached)
+    hrnet_zsmooth_3d   = _triangulate_hrnet_peaks(skeleton_trial_dir, calib, N, kind="zsmooth",   peaks=hrnet_peaks_cached)
+    hrnet_hungarian_3d = _triangulate_hrnet_peaks(skeleton_trial_dir, calib, N, kind="hungarian", peaks=hrnet_peaks_cached)
     has_heatmap_3d = hrnet_peaks_3d is not None and np.any(~np.isnan(hrnet_peaks_3d))
     has_heatmap_raw_3d = hrnet_peaks_raw_3d is not None and np.any(~np.isnan(hrnet_peaks_raw_3d))
     has_centroid_3d  = hrnet_centroid_3d is not None and np.any(~np.isnan(hrnet_centroid_3d))
@@ -1437,7 +1437,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     distances_hrnet_hungarian = _compute_distances(hrnet_hungarian_3d) if has_hungarian_3d else {}
     if has_hungarian_3d: distances_hrnet_hungarian.update(_compute_mcp_distances(hrnet_hungarian_3d))
     # MCP inter-joint distances
-    if has_mano: distances_mano.update(_compute_mcp_distances(joints_3d))
+    if has_skeleton_fit: distances_mano.update(_compute_mcp_distances(joints_3d))
     if has_skel_v2: distances_skel_v2.update(_compute_mcp_distances(v2_joints_3d))
     if has_skel_v2_sc: distances_skel_v2_sc.update(_compute_mcp_distances(v2_joints_3d_after_sc))
     if has_skel_v2_y: distances_skel_v2_y.update(_compute_mcp_distances(v2_joints_3d_after_y))
@@ -1450,7 +1450,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     distances_vision.update(_compute_mcp_distances(vision_joints_3d))
 
     # Compute joint angle traces
-    angles_mano = _compute_angles(joints_3d) if has_mano else {}
+    angles_mano = _compute_angles(joints_3d) if has_skeleton_fit else {}
     angles_skel_v2 = _compute_angles(v2_joints_3d) if has_skel_v2 else {}
     angles_skel_v2_sc = _compute_angles(v2_joints_3d_after_sc) if has_skel_v2_sc else {}
     angles_skel_v2_y = _compute_angles(v2_joints_3d_after_y) if has_skel_v2_y else {}
@@ -1467,7 +1467,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     angles_hrnet_hungarian = _compute_angles(hrnet_hungarian_3d) if has_hungarian_3d else {}
 
     # Knuckle angles (inter-MCP segment angles at M_MCP and R_MCP)
-    if has_mano: angles_mano.update(_compute_knuckle_angles(joints_3d))
+    if has_skeleton_fit: angles_mano.update(_compute_knuckle_angles(joints_3d))
     if has_skel_v2: angles_skel_v2.update(_compute_knuckle_angles(v2_joints_3d))
     if has_skel_v2_sc: angles_skel_v2_sc.update(_compute_knuckle_angles(v2_joints_3d_after_sc))
     if has_skel_v2_y: angles_skel_v2_y.update(_compute_knuckle_angles(v2_joints_3d_after_y))
@@ -1486,7 +1486,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     # Wrist flex/abd angles (requires elbow 3D)
     has_elbow = bool(np.any(~np.isnan(elbow_3d[:, 0])))
     if has_elbow:
-        if has_mano:    angles_mano.update(_compute_wrist_angles(joints_3d, elbow_3d))
+        if has_skeleton_fit:    angles_mano.update(_compute_wrist_angles(joints_3d, elbow_3d))
         if has_skel_v2: angles_skel_v2.update(_compute_wrist_angles(v2_joints_3d, elbow_3d))
         if has_skel_v2_sc: angles_skel_v2_sc.update(_compute_wrist_angles(v2_joints_3d_after_sc, elbow_3d))
         if has_skel_v2_y: angles_skel_v2_y.update(_compute_wrist_angles(v2_joints_3d_after_y, elbow_3d))
@@ -1503,7 +1503,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         if has_hungarian_3d: angles_hrnet_hungarian.update(_compute_wrist_angles(hrnet_hungarian_3d, elbow_3d))
 
     # Compute finger spread angles
-    spreads_mano = _compute_spreads(joints_3d) if has_mano else {}
+    spreads_mano = _compute_spreads(joints_3d) if has_skeleton_fit else {}
     spreads_skel_v2 = _compute_spreads(v2_joints_3d) if has_skel_v2 else {}
     spreads_skel_v2_sc = _compute_spreads(v2_joints_3d_after_sc) if has_skel_v2_sc else {}
     spreads_skel_v2_y = _compute_spreads(v2_joints_3d_after_y) if has_skel_v2_y else {}
@@ -1520,7 +1520,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     spreads_hrnet_hungarian = _compute_spreads(hrnet_hungarian_3d) if has_hungarian_3d else {}
 
     # Compute wrist 3D coordinates
-    wrist_coords_mano = _compute_wrist_coords(joints_3d) if has_mano else {}
+    wrist_coords_mano = _compute_wrist_coords(joints_3d) if has_skeleton_fit else {}
     wrist_coords_skel_v2 = _compute_wrist_coords(v2_joints_3d) if has_skel_v2 else {}
     wrist_coords_skel_v2_sc = _compute_wrist_coords(v2_joints_3d_after_sc) if has_skel_v2_sc else {}
     wrist_coords_skel_v2_y = _compute_wrist_coords(v2_joints_3d_after_y) if has_skel_v2_y else {}
@@ -1537,7 +1537,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     wrist_coords_hrnet_hungarian = _compute_wrist_coords(hrnet_hungarian_3d) if has_hungarian_3d else {}
 
     # Compute per-joint position traces (de-meaned, +100mm)
-    positions_mano = _compute_joint_positions(joints_3d) if has_mano else {}
+    positions_mano = _compute_joint_positions(joints_3d) if has_skeleton_fit else {}
     positions_skel_v2 = _compute_joint_positions(v2_joints_3d) if has_skel_v2 else {}
     positions_skel_v2_sc = _compute_joint_positions(v2_joints_3d_after_sc) if has_skel_v2_sc else {}
     positions_skel_v2_y = _compute_joint_positions(v2_joints_3d_after_y) if has_skel_v2_y else {}
@@ -1576,7 +1576,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
     result: dict[str, Any] = {
         "n_frames": N,
         "fps": fps,
-        "has_mano_fit": has_mano,
+        "has_skeleton_v1": has_skeleton_fit,
         "has_skel_v2": has_skel_v2,
         # Per-stage flags so the frontend can hide stage rows that the
         # active v3 fit didn't actually produce (e.g. HRnet-snap when
@@ -1587,7 +1587,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         "has_skel_v2_zs": bool(has_skel_v2_zs),
         "has_skel_v2_hr": bool(has_skel_v2_hr),
         "has_skel_v2_bc": bool(has_skel_v2_bc),
-        "has_heatmaps": (mano_trial_dir / "hrnet_w18_heatmaps.npz").exists(),
+        "has_heatmaps": (skeleton_trial_dir / "hrnet_w18_heatmaps.npz").exists(),
         "has_mp": bool(np.any(~np.isnan(mp_tracked_L))),
         "has_mp_3d": bool(np.any(~np.isnan(mp_joints_3d))),
         "has_vision": bool(np.any(~np.isnan(vision_tracked_L))),
@@ -1607,10 +1607,10 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
             "T": T.ravel().tolist(),
         },
         # 2D projections
-        "mano_proj_L": _points_to_list(mano_proj_L),
-        "mano_proj_R": _points_to_list(mano_proj_R),
+        "skeleton_proj_L": _points_to_list(skeleton_proj_L),
+        "skeleton_proj_R": _points_to_list(skeleton_proj_R),
         # 3D joints
-        "mano_joints_3d": _points_to_list(joints_3d),
+        "skeleton_joints_3d": _points_to_list(joints_3d),
         # Skeleton v2
         "skel_v2_proj_L": _points_to_list(v2_proj_L),
         "skel_v2_proj_R": _points_to_list(v2_proj_R),
@@ -1663,7 +1663,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
         "has_skel_legacy": bool(has_skel_legacy),
         # MediaPipe error matrix (if previously saved)
         "mp_errors": _load_mp_errors_for_response(subject_name, trial_stem),
-        "has_mp_errors": bool((mano_trial_dir / "mp_errors.npz").exists()),
+        "has_mp_errors": bool((skeleton_trial_dir / "mp_errors.npz").exists()),
         # MediaPipe
         "mp_tracked_L": _points_to_list(mp_tracked_L),
         "mp_tracked_R": _points_to_list(mp_tracked_R),
@@ -1835,7 +1835,7 @@ def load_mano_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
                                     for j in range(21)] for t in range(N)]
 
     # ── Stereo image-based cross-camera label alignment ─────────────
-    # Loads ``<mano>/<stem>/stereo_align.npz`` if present and emits the
+    # Loads ``<skeleton>/<stem>/stereo_align.npz`` if present and emits the
     # OS / OD labels translated by the per-frame per-joint phase-corr
     # shift discovered between the two crops — the Stereo model on the
     # Auto page renders these alongside the local MP labels to surface
@@ -2042,10 +2042,10 @@ def get_heatmap(subject_name: str, trial_stem: str,
     (max over 21 joints) when available.  Uses memory-mapped access to
     avoid loading the entire ~350MB per-joint file.
     """
-    mano_trial_dir = _mano_dir(subject_name) / trial_stem
-    hm_path = mano_trial_dir / "hrnet_w18_heatmaps.npz"
-    mip_path = mano_trial_dir / "hrnet_w18_mip.npz"
-    crop_path = mano_trial_dir / "hand_crop.json"
+    skeleton_trial_dir = _skeleton_dir(subject_name) / trial_stem
+    hm_path = skeleton_trial_dir / "hrnet_w18_heatmaps.npz"
+    mip_path = skeleton_trial_dir / "hrnet_w18_mip.npz"
+    crop_path = skeleton_trial_dir / "hand_crop.json"
 
     if not crop_path.exists():
         return None

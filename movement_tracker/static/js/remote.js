@@ -2327,9 +2327,9 @@ async function _refreshTrialsModal() {
                 train: 'Train',
                 analyze_v1: 'Analyze v1',
                 analyze_v2: 'Analyze v2',
-                mano_fit: 'MANO fit',
-                mano_fit_v2: 'MANO fit v2',
-                mano_fit_v3: 'MANO fit v3',
+                skeleton_v1: 'Skeleton fit v1',
+                skeleton_v2: 'Skeleton fit v2',
+                skeleton_v3: 'Skeleton fit v3',
             };
             const typeStr = TYPE_LABEL[j.job_type] || j.job_type || '';
             const resource = (j.remote_host && j.remote_host !== 'localhost')

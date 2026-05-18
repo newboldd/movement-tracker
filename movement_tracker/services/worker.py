@@ -27,7 +27,7 @@ def run_mediapipe(subject_name: str, job_id: int, static_image_mode: bool = Fals
     from movement_tracker.services.mediapipe_prelabel import run_mediapipe as _run_mp
     # Load any saved per-trial crop boxes for this subject (under
     # model_name='run-mediapipe') so MP runs honour the bbox the user
-    # set in the Auto / MANO page.  Same logic as
+    # set in the Auto / Skeleton page.  Same logic as
     # routers/analyze.py::run_mediapipe.
     from movement_tracker.db import get_db_ctx
     from movement_tracker.config import get_settings
