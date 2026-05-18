@@ -7438,21 +7438,32 @@ const manoViewer = (() => {
                 btn.classList.remove('active');
             }
         });
-        _loadDefaultBbox().then(() => render());
-        // ── Apply sidecar defaults (MediaPipe only) ──────────────────
-        // The per-trial ``mediapipe.params.json`` (or
-        // ``mediapipe_reverse.params.json``) sidecar captures the
-        // parameters used the last time MediaPipe was run on this
-        // trial.  We restore them as defaults so the user re-runs with
-        // the same options unless they explicitly change them.  When
-        // the sidecar is missing (no run yet), defaults stay as-is.
-        if (endpoint === 'run-mediapipe') {
-            _applyMpSidecarDefaults().catch(e =>
-                console.warn('[labels] sidecar load failed:', e));
-        }
+        // Sequence the two bbox sources: DB-saved bbox (mp_crop_boxes)
+        // is what the user is editing -- it's the bbox the next run
+        // will consume.  Sidecar bbox is informational only ("what
+        // produced the CURRENT npz").  Awaiting _loadDefaultBbox
+        // before consulting the sidecar avoids the race where the
+        // older sidecar bbox silently masked a newly-saved Save-Box
+        // value.
+        (async () => {
+            await _loadDefaultBbox();
+            if (endpoint === 'run-mediapipe') {
+                await _applyMpSidecarDefaults();
+            }
+            render();
+        })().catch(e => console.warn('[labels] detect-mode init failed:', e));
     }
 
     async function _applyMpSidecarDefaults() {
+        // Pulls the per-trial mediapipe params sidecar and applies the
+        // non-bbox parameters (static_image_mode, use_bbox) as defaults.
+        // The bbox is intentionally NOT overridden when the user already
+        // has a saved per-trial bbox -- that bbox is what the next run
+        // will consume, and silently swapping it back to the sidecar's
+        // value would mask a deliberate Save Box.  Instead we compare
+        // and surface the divergence in #detectStatus so the user
+        // knows clicking Run will change the bbox the output was
+        // produced from.
         if (!subjectId || currentTrialIdx < 0) return;
         const trial = trials[currentTrialIdx];
         const revCb = document.getElementById('mpReverse');
@@ -7477,16 +7488,42 @@ const manoViewer = (() => {
         if (ubCb && typeof p.use_bbox === 'boolean') {
             ubCb.checked = p.use_bbox;
         }
-        // Sidecar's bbox wins over the per-trial DB row when both
-        // exist -- it's the bbox the run actually consumed, which is
-        // the most precise "restore my last setup" value.
-        if (Array.isArray(p.bbox_os) && p.bbox_os.length === 4) {
+        // Bbox handling: only adopt sidecar bbox if nothing else
+        // populated bboxOS/OD yet (rare -- _loadDefaultBbox normally
+        // returns either a saved bbox or a computed default).  When
+        // we DO have a bbox already, compare and warn on divergence.
+        const _bboxesClose = (a, b) => {
+            if (!Array.isArray(a) || !Array.isArray(b)) return false;
+            if (a.length !== 4 || b.length !== 4) return false;
+            for (let i = 0; i < 4; i++) {
+                if (Math.abs(Number(a[i]) - Number(b[i])) > 0.5) return false;
+            }
+            return true;
+        };
+        const _hasOS = Array.isArray(bboxOS) && bboxOS.length === 4;
+        const _hasOD = Array.isArray(bboxOD) && bboxOD.length === 4;
+        if (!_hasOS && Array.isArray(p.bbox_os) && p.bbox_os.length === 4) {
             bboxOS = p.bbox_os.map(Number);
         }
-        if (Array.isArray(p.bbox_od) && p.bbox_od.length === 4) {
+        if (!_hasOD && Array.isArray(p.bbox_od) && p.bbox_od.length === 4) {
             bboxOD = p.bbox_od.map(Number);
         }
-        render();
+        // Divergence indicator: tell the user explicitly when the
+        // saved bbox they're about to re-run with differs from the
+        // bbox that produced the current output file.
+        const divergedOS = _hasOS && Array.isArray(p.bbox_os)
+            && !_bboxesClose(bboxOS, p.bbox_os);
+        const divergedOD = _hasOD && Array.isArray(p.bbox_od)
+            && !_bboxesClose(bboxOD, p.bbox_od);
+        const statusEl = document.getElementById('detectStatus');
+        if (statusEl && (divergedOS || divergedOD)) {
+            const sides = [divergedOS && 'OS', divergedOD && 'OD']
+                .filter(Boolean).join(' + ');
+            const passLabel = reverse ? 'mediapipe_reverse.npz' : 'mediapipe.npz';
+            statusEl.textContent =
+                `Saved ${sides} bbox differs from the one that produced ` +
+                `${passLabel}. Click Run to re-process with the new bbox.`;
+        }
     }
 
     function _exitDetectMode() {
