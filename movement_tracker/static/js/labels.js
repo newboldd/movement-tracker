@@ -5022,6 +5022,7 @@ const manoViewer = (() => {
             const v2d  = _getMetricData('skel_v2', metric);
             const legacyd = _getMetricData('skel_legacy', metric);
             const mp   = _getMetricData('mp',   metric);
+            const rev  = _getMetricData('reverse', metric);
             const vis  = _getMetricData('vision', metric);
             const dlc  = isAng ? null : trialData.distances_dlc?.[metric];
             const chk = (arr, isA) => {
@@ -5036,6 +5037,7 @@ const manoViewer = (() => {
             if (showSkelV2_2D || showSkelV2_3D) chk(v2d, isAng);
             if (showLegacyV2_2D || showLegacyV2_3D) chk(legacyd, isAng);
             if (showMP2D || showMP3D) chk(mp, isAng);
+            if (showReverse2D || showReverse3D) chk(rev, isAng);
             if (showVision2D || showVision3D) chk(vis, isAng);
             if (showDLC || showDLC3D) chk(dlc, isAng);
             if (showHeatmap2D || showHeatmap3D) chk(_getMetricData('heatmap', metric), isAng);
@@ -5206,7 +5208,8 @@ const manoViewer = (() => {
         // Source colors used for Thumb-Index Aperture (always) and single-metric mode
         const SOURCE_COLORS = {
             skeleton: 'lime', skel_v2: '#ff9800', skel_legacy: '#e040fb',
-            mp: '#00cccc', vision: '#2196f3', dlc: '#ff4444',
+            mp: '#00cccc', reverse: '#e040fb',
+            vision: '#2196f3', dlc: '#ff4444',
             prev: '#b35b00', heatmap: '#ff6600',
             hrnet_centroid:  '#ff9966',
             hrnet_yzc:       '#ffb074',
@@ -5254,6 +5257,7 @@ const manoViewer = (() => {
             const rawV2      = _getMetricData('skel_v2',     metric);
             const rawLegacy  = _getMetricData('skel_legacy', metric);
             const rawMp      = _getMetricData('mp',          metric);
+            const rawReverse = _getMetricData('reverse',     metric);
             const rawVis     = _getMetricData('vision',      metric);
             const rawDlc   = isAng ? null : trialData.distances_dlc?.[metric];
 
@@ -5274,6 +5278,7 @@ const manoViewer = (() => {
             // when no stage is active).
             if (showLegacyV2_2D || showLegacyV2_3D)   drawSeries(rawLegacy,                       useSourceColor ? SOURCE_COLORS.skel_legacy : metricColor, 'skel_legacy', toY, abdDash);
             if (showMP2D || showMP3D)                 drawSeries(_applyMask(rawMp,    mpMask),   useSourceColor ? SOURCE_COLORS.mp          : metricColor, 'mp',          toY, abdDash);
+            if (showReverse2D || showReverse3D)       drawSeries(_applyMask(rawReverse, mpMask), useSourceColor ? SOURCE_COLORS.reverse     : metricColor, 'reverse',     toY, abdDash);
             if (showVision2D || showVision3D)         drawSeries(_applyMask(rawVis,   visMask),  useSourceColor ? SOURCE_COLORS.vision      : metricColor, 'vision',      toY, abdDash);
             if (showDLC || showDLC3D)                 drawSeries(rawDlc,                                                     useSourceColor ? SOURCE_COLORS.dlc         : metricColor, 'dlc',         toY, abdDash);
             if (showHeatmap2D || showHeatmap3D) {

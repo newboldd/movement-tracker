@@ -1433,6 +1433,7 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
     distances_skel_v2_bc = _compute_distances(v2_joints_3d_after_bc) if has_skel_v2_bc else {}
     distances_skel_legacy = _compute_distances(legacy_joints_3d) if has_skel_legacy else {}
     distances_mp = _compute_distances(mp_joints_3d)
+    distances_reverse = _compute_distances(reverse_joints_3d)
     distances_vision = _compute_distances(vision_joints_3d)
     # Parse the HRnet peaks JSON once and reuse for every kind below
     # (refined / raw / centroid / yzc / zsmooth / hungarian + the response
@@ -1476,6 +1477,7 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
     if has_skel_v2_bc: distances_skel_v2_bc.update(_compute_mcp_distances(v2_joints_3d_after_bc))
     if has_skel_legacy: distances_skel_legacy.update(_compute_mcp_distances(legacy_joints_3d))
     distances_mp.update(_compute_mcp_distances(mp_joints_3d))
+    distances_reverse.update(_compute_mcp_distances(reverse_joints_3d))
     distances_vision.update(_compute_mcp_distances(vision_joints_3d))
 
     # Compute joint angle traces
@@ -1581,6 +1583,22 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
     positions_hrnet_yzc       = _compute_joint_positions(hrnet_yzc_3d)       if has_yzc_3d       else {}
     positions_hrnet_zsmooth   = _compute_joint_positions(hrnet_zsmooth_3d)   if has_zsmooth_3d   else {}
     positions_hrnet_hungarian = _compute_joint_positions(hrnet_hungarian_3d) if has_hungarian_3d else {}
+
+    # Reverse-pass distance fallback — same logic as the forward path:
+    # if 3D triangulation produced nothing (no calibration or no
+    # frames with both cameras' labels), fall back to the OS-side 2D
+    # thumb-index aperture so the distance plot still has data.
+    rev_has_3d = any(
+        any(v is not None for v in vals) for vals in distances_reverse.values()
+    )
+    if not rev_has_3d:
+        _saved_rev = load_mediapipe_reverse_prelabels(subject_name)
+        saved_rev_dist = _saved_rev.get("distances") if _saved_rev else None
+        if saved_rev_dist is not None and len(saved_rev_dist) > start_frame:
+            trial_dist = saved_rev_dist[start_frame:start_frame + N]
+            distances_reverse = {"Thumb-Index Aperture": _array_to_list(trial_dist)}
+        else:
+            distances_reverse = _compute_distances_2d(reverse_tracked_L)
 
     # Fallback: if 3D distances are all empty, try pre-computed from prelabels npz
     mp_has_3d = any(
@@ -1762,6 +1780,7 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
         "distances_skel_v2_bc": distances_skel_v2_bc,
         "distances_skel_legacy": distances_skel_legacy,
         "distances_mp": distances_mp,
+        "distances_reverse": distances_reverse,
         "distances_vision": distances_vision,
         "distances_heatmap": distances_heatmap,
         "distances_hrnet_centroid":  distances_hrnet_centroid,
