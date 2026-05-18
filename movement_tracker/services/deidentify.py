@@ -863,8 +863,18 @@ def render_with_blur_specs(input_path: str, output_path: str,
     if subject_name and hand_segments:
         import numpy as np2
 
-        def _build_lm_data(os_lm, od_lm, existing=None):
-            """Build hand_lm_data dict from OS/OD landmark arrays."""
+        def _build_lm_data(os_lm, od_lm, existing=None,
+                            os_was_nan=None, od_was_nan=None):
+            """Build hand_lm_data dict from OS/OD landmark arrays.
+
+            ``os_was_nan`` / ``od_was_nan`` are optional (N, J) bool arrays
+            captured BEFORE interpolation; when present, each landmark
+            dict is tagged ``interpolated: True`` for joints whose
+            position was filled in by ``interpolate_landmarks_inplace``.
+            The DLC tip-disagreement path in
+            ``_build_hand_mask_from_landmarks`` uses this flag to also
+            fire when MP "saw" the tip only via interpolation.
+            """
             lm_data = existing or {}
             if os_lm is not None:
                 for f in range(os_lm.shape[0]):
@@ -873,7 +883,8 @@ def render_with_blur_specs(input_path: str, output_path: str,
                     for j in range(os_lm.shape[1]):
                         x, y = os_lm[f, j, 0], os_lm[f, j, 1]
                         if not np.isnan(x):
-                            lm_data[f].append({"x": float(x), "y": float(y), "side": "left", "type": "hand", "joint": j})
+                            was_interp = bool(os_was_nan is not None and os_was_nan[f, j])
+                            lm_data[f].append({"x": float(x), "y": float(y), "side": "left", "type": "hand", "joint": j, "interpolated": was_interp})
             if od_lm is not None:
                 for f in range(od_lm.shape[0]):
                     if f not in lm_data:
@@ -881,7 +892,8 @@ def render_with_blur_specs(input_path: str, output_path: str,
                     for j in range(od_lm.shape[1]):
                         x, y = od_lm[f, j, 0], od_lm[f, j, 1]
                         if not np.isnan(x):
-                            lm_data[f].append({"x": float(x), "y": float(y), "side": "right", "type": "hand", "joint": j})
+                            was_interp = bool(od_was_nan is not None and od_was_nan[f, j])
+                            lm_data[f].append({"x": float(x), "y": float(y), "side": "right", "type": "hand", "joint": j, "interpolated": was_interp})
             return lm_data
 
         def _build_pose_data(pose_os, pose_od, existing):
@@ -917,13 +929,19 @@ def render_with_blur_specs(input_path: str, output_path: str,
             # no file I/O or relative imports needed.
             os_lm = mp_data.get("OS_landmarks")
             od_lm = mp_data.get("OD_landmarks")
+            os_was_nan = None
+            od_was_nan = None
             if os_lm is not None:
                 os_lm = np2.array(os_lm, copy=True)
+                os_was_nan = np2.isnan(os_lm[..., 0]).copy()
                 interpolate_landmarks_inplace(os_lm, _interp_start, _interp_end)
             if od_lm is not None:
                 od_lm = np2.array(od_lm, copy=True)
+                od_was_nan = np2.isnan(od_lm[..., 0]).copy()
                 interpolate_landmarks_inplace(od_lm, _interp_start, _interp_end)
-            hand_lm_data = _build_lm_data(os_lm, od_lm)
+            hand_lm_data = _build_lm_data(os_lm, od_lm,
+                                          os_was_nan=os_was_nan,
+                                          od_was_nan=od_was_nan)
             if pose_data is not None:
                 pose_os = pose_data.get("OS_pose")
                 pose_od = pose_data.get("OD_pose")
@@ -952,13 +970,19 @@ def render_with_blur_specs(input_path: str, output_path: str,
                     od_lm = od_lm[_mp_offset:]
                 # Interpolate AFTER the offset trim (so frame indices
                 # align with the renderer's start_frame/total range).
+                os_was_nan = None
+                od_was_nan = None
                 if os_lm is not None:
                     os_lm = np2.array(os_lm, copy=True)
+                    os_was_nan = np2.isnan(os_lm[..., 0]).copy()
                     interpolate_landmarks_inplace(os_lm, _interp_start, _interp_end)
                 if od_lm is not None:
                     od_lm = np2.array(od_lm, copy=True)
+                    od_was_nan = np2.isnan(od_lm[..., 0]).copy()
                     interpolate_landmarks_inplace(od_lm, _interp_start, _interp_end)
-                hand_lm_data = _build_lm_data(os_lm, od_lm)
+                hand_lm_data = _build_lm_data(os_lm, od_lm,
+                                              os_was_nan=os_was_nan,
+                                              od_was_nan=od_was_nan)
 
                 # Also load pose landmarks for forearm triangle (elbow)
                 pose_npz_path = settings.dlc_path / subject_name / "pose_prelabels.npz"
@@ -989,9 +1013,17 @@ def render_with_blur_specs(input_path: str, output_path: str,
     try:
         from .ffmpeg import get_ffmpeg_path
         ffmpeg = get_ffmpeg_path()
-    except (ImportError, FileNotFoundError):
+    except (ImportError, FileNotFoundError) as _e:
         cap.release()
-        raise RuntimeError("ffmpeg not found. Install FFmpeg or pip install imageio-ffmpeg")
+        # Preserve the underlying lookup failure -- the remote worker's
+        # ``get_ffmpeg_path`` includes specifics like "imageio_ffmpeg
+        # returned X but path doesn't exist" that vanished here, leaving
+        # the user with a generic message that didn't match the diagnostic
+        # already printed to the job log.
+        raise RuntimeError(
+            f"ffmpeg not found. Install FFmpeg or pip install imageio-ffmpeg. "
+            f"Underlying error: {type(_e).__name__}: {_e}"
+        )
 
     # Each trial has its own video file starting at local frame 0.
     # start_frame is the global subject-level offset used only for looking up
@@ -1435,11 +1467,15 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
             "type": "interp",
         })
 
-    # DLC tip-disagreement: when DLC's thumb or index tip is more
-    # than 20 px from the MP tip, seed extra circles along the
-    # MCP/CMC -> DLC-tip line so the mask covers both possibilities.
-    # MP circles are kept too (a generous mask is safer than a wrong
-    # one).  Joint numbers: thumb 1=CMC, 4=tip; index 5=MCP, 8=tip.
+    # DLC tip-disagreement: seed extra circles along MCP/CMC -> DLC-tip
+    # line so the mask covers both possibilities whenever EITHER:
+    #   * DLC's tip is > 20 px from MP's tip (the original signal — MP
+    #     and DLC disagree on where the tip is), OR
+    #   * MP's tip on this frame is interpolated (the original
+    #     MediaPipe pass had NaN for this joint on this frame, so the
+    #     MP tip we're using is just a linear blend of neighbours; DLC
+    #     is the only actual per-frame measurement).
+    # Joint numbers: thumb 1=CMC, 4=tip; index 5=MCP, 8=tip.
     _DLC_TIP_DISAGREE_PX = 20.0
     _dlc_by_joint = {lm.get("joint"): lm for lm in dlc_lms
                       if lm.get("joint") is not None}
@@ -1451,7 +1487,9 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
             continue
         dx_t = float(mp_tip["x"]) - float(dlc_tip["x"])
         dy_t = float(mp_tip["y"]) - float(dlc_tip["y"])
-        if (dx_t * dx_t + dy_t * dy_t) ** 0.5 <= _DLC_TIP_DISAGREE_PX:
+        far_apart = (dx_t * dx_t + dy_t * dy_t) ** 0.5 > _DLC_TIP_DISAGREE_PX
+        mp_interpolated = bool(mp_tip.get("interpolated"))
+        if not (far_apart or mp_interpolated):
             continue
         dx = float(dlc_tip["x"]) - float(mcp_lm["x"])
         dy = float(dlc_tip["y"]) - float(mcp_lm["y"])
@@ -1524,8 +1562,16 @@ def _build_hand_mask_from_landmarks(landmarks: list[dict], w: int, h: int,
             continue
         cv2.circle(hand_mask, (int(xf), int(yf)), radius, 255, -1)
     if smooth > 0 and hand_mask.any():
-        blurred = cv2.GaussianBlur(hand_mask.astype(np.float32), (0, 0), smooth)
-        hand_mask = (blurred > 5).astype(np.uint8) * 255
+        # Pixel-exact mirror of the frontend's ``_morphClose`` in
+        # static/js/deidentify.js: Gaussian blur, then 8 alpha-stacked
+        # source-over draws (= ``1 - (1 - α)^8``), then threshold at
+        # 30/255.  Using the same compositing math here keeps the
+        # rendered/preview hand mask identical to the green outline
+        # shown in the edit view.
+        blurred = cv2.GaussianBlur(hand_mask.astype(np.float32) / 255.0,
+                                    (0, 0), smooth)
+        stacked = 1.0 - np.power(1.0 - np.clip(blurred, 0.0, 1.0), 8)
+        hand_mask = (stacked > 30.0 / 255.0).astype(np.uint8) * 255
 
     # ── Arm-triangle mask (independent of Hand-dilate).
     # Triangle: pinky MCP (17) → elbow → thumb CMC (1).  Dorsal edge =

@@ -4261,28 +4261,87 @@ def _patch_deidentify_imports(work_dir):
     # Create a stub 'ffmpeg' module with get_ffmpeg_path
     ffmpeg_mod = types.ModuleType("ffmpeg")
 
-    def _try_pip_install_imageio_ffmpeg():
+    def _try_pip_install_imageio_ffmpeg(force_reinstall: bool = False):
         """One-shot self-install on the remote when ``imageio_ffmpeg`` is
-        missing.  The package ships a small (~20 MB) ffmpeg binary — far
-        less friction than asking the user to put ffmpeg on PATH manually.
-        Returns the module on success, None on failure."""
+        missing or its cached binary disappeared.  The package ships a
+        small (~20 MB) ffmpeg binary -- far less friction than asking
+        the user to put ffmpeg on PATH manually.
+
+        ``force_reinstall=True`` runs ``pip install --force-reinstall``
+        so the bundled binary is re-extracted under AppData even when
+        the Python package is technically already importable.  Use
+        this when ``get_ffmpeg_exe()`` returned a path that no longer
+        exists (e.g. AV quarantined the file).
+
+        Returns the module on success, None on failure.  Captures pip's
+        stderr / stdout into the job log on failure so Windows-specific
+        DLL-init crashes (e.g. exit code 0xC0000142 from Defender
+        intercepting the child python) are debuggable.
+        """
         import subprocess as _sp
         try:
-            print("[worker] imageio_ffmpeg not found; pip-installing now...",
+            label = "force-reinstalling" if force_reinstall else "pip-installing"
+            print(f"[worker] imageio_ffmpeg not found; {label} now...",
                   flush=True)
-            _sp.check_call([
+            cmd = [
                 sys.executable, "-m", "pip", "install",
-                "--disable-pip-version-check", "--quiet",
-                "imageio-ffmpeg",
-            ])
+                "--disable-pip-version-check",
+            ]
+            if force_reinstall:
+                cmd += ["--force-reinstall", "--no-deps"]
+            cmd.append("imageio-ffmpeg")
+            proc = _sp.run(cmd, capture_output=True, text=True, timeout=180)
+            if proc.returncode != 0:
+                _hex = f"0x{proc.returncode & 0xFFFFFFFF:08X}" if proc.returncode < 0 \
+                    or proc.returncode > 0xFFFF else str(proc.returncode)
+                print(f"[worker] pip exited {proc.returncode} ({_hex})",
+                      flush=True)
+                if proc.stdout:
+                    print(f"[worker] pip stdout: {proc.stdout[-400:]}",
+                          flush=True)
+                if proc.stderr:
+                    print(f"[worker] pip stderr: {proc.stderr[-400:]}",
+                          flush=True)
+                return None
+            if force_reinstall and "imageio_ffmpeg" in sys.modules:
+                del sys.modules["imageio_ffmpeg"]
             import imageio_ffmpeg
             print(f"[worker] imageio_ffmpeg installed at {imageio_ffmpeg.__file__}",
                   flush=True)
             return imageio_ffmpeg
         except Exception as _e:
-            print(f"[worker] pip install imageio-ffmpeg failed: {_e}",
-                  flush=True)
+            print(f"[worker] pip install imageio-ffmpeg failed: "
+                  f"{type(_e).__name__}: {_e}", flush=True)
             return None
+
+    def _imageio_ffmpeg_env_override():
+        """Honour ``IMAGEIO_FFMPEG_EXE`` if the user / admin set it on the
+        remote.  Most reliable escape hatch when pip + imageio_ffmpeg's
+        auto-download are both broken on a locked-down host."""
+        exe = os.environ.get("IMAGEIO_FFMPEG_EXE")
+        if exe and os.path.exists(exe):
+            print(f"[worker] using IMAGEIO_FFMPEG_EXE={exe}", flush=True)
+            return exe
+        return None
+
+    def _conda_env_ffmpeg():
+        """Probe ``<sys.prefix>/Library/bin/ffmpeg.exe`` (Windows) or
+        ``<sys.prefix>/bin/ffmpeg`` (Linux/macOS).  ``conda install
+        ffmpeg`` puts the binary there, but the env's PATH isn't always
+        active when the worker is launched as a detached subprocess --
+        so ``shutil.which`` misses it.  Probing the prefix directly is
+        the reliable recovery when the user has run ``conda install -n
+        <env> ffmpeg`` on the host."""
+        candidates = []
+        if os.name == "nt":
+            candidates.append(os.path.join(sys.prefix, "Library", "bin", "ffmpeg.exe"))
+        else:
+            candidates.append(os.path.join(sys.prefix, "bin", "ffmpeg"))
+        for c in candidates:
+            if os.path.exists(c):
+                print(f"[worker] found ffmpeg via conda env: {c}", flush=True)
+                return c
+        return None
 
     def _imageio_ffmpeg_exe():
         """Return ``imageio_ffmpeg.get_ffmpeg_exe()`` only if the binary
@@ -4312,22 +4371,41 @@ def _patch_deidentify_imports(work_dir):
         return exe
 
     def get_ffmpeg_path():
-        # Try 1: ffmpeg on PATH (most reliable when installed).
+        # Try 1: IMAGEIO_FFMPEG_EXE env var (explicit user override).
+        env_exe = _imageio_ffmpeg_env_override()
+        if env_exe:
+            return env_exe
+        # Try 2: ffmpeg on PATH.
         p = shutil.which("ffmpeg")
         if p and os.path.exists(p):
             return p
-        # Try 2: imageio_ffmpeg's bundled binary.
+        # Try 3: conda env's Library/bin/ffmpeg.exe -- present after
+        # ``conda install -n <env> ffmpeg`` even when not on PATH.
+        conda_exe = _conda_env_ffmpeg()
+        if conda_exe:
+            return conda_exe
+        # Try 4: imageio_ffmpeg's bundled / downloaded binary.
         exe = _imageio_ffmpeg_exe()
         if exe:
             return exe
-        # Try 3: pip-install imageio_ffmpeg + retry.
+        # Try 5: pip-install imageio_ffmpeg + retry.
         if _try_pip_install_imageio_ffmpeg() is not None:
             exe = _imageio_ffmpeg_exe()
             if exe:
                 return exe
+        # Try 6: --force-reinstall so the bundled binary is re-extracted.
+        # Covers AV-quarantined-binary + importable-package case.
+        if _try_pip_install_imageio_ffmpeg(force_reinstall=True) is not None:
+            exe = _imageio_ffmpeg_exe()
+            if exe:
+                return exe
         raise FileNotFoundError(
-            "ffmpeg not found on remote.  Put ffmpeg on PATH or run "
-            f"'{sys.executable}' -m pip install imageio-ffmpeg"
+            "ffmpeg not found on remote and all auto-recovery attempts failed.  "
+            "Easiest fix on this Windows host: run "
+            f"'conda install -n <env> -y ffmpeg' (the env containing "
+            f"'{sys.executable}'), or set IMAGEIO_FFMPEG_EXE to an existing "
+            "ffmpeg.exe.  See the [worker] lines above for the underlying "
+            "cause (pip exit code, get_ffmpeg_exe() error, etc.)."
         )
 
     def get_ffprobe_path():
@@ -4335,8 +4413,15 @@ def _patch_deidentify_imports(work_dir):
         p = shutil.which("ffprobe")
         if p and os.path.exists(p):
             return p
-        # Try 2: derive ffprobe from imageio_ffmpeg's ffmpeg path.
         from pathlib import Path as _Path
+        # Try 1b: conda env's Library/bin/ffprobe.exe.
+        if os.name == "nt":
+            _conda_probe = os.path.join(sys.prefix, "Library", "bin", "ffprobe.exe")
+        else:
+            _conda_probe = os.path.join(sys.prefix, "bin", "ffprobe")
+        if os.path.exists(_conda_probe):
+            return _conda_probe
+        # Try 2: derive ffprobe from imageio_ffmpeg's ffmpeg path.
         exe = _imageio_ffmpeg_exe()
         if exe:
             fp = _Path(exe)
@@ -4345,6 +4430,15 @@ def _patch_deidentify_imports(work_dir):
                 return str(probe)
         # Try 3: pip-install + retry.
         if _try_pip_install_imageio_ffmpeg() is not None:
+            exe = _imageio_ffmpeg_exe()
+            if exe:
+                fp = _Path(exe)
+                probe = fp.parent / fp.name.replace("ffmpeg", "ffprobe")
+                if probe.exists():
+                    return str(probe)
+        # Final fallback: --force-reinstall to re-extract the bundled
+        # binary if AV / file-lock / manual delete removed it.
+        if _try_pip_install_imageio_ffmpeg(force_reinstall=True) is not None:
             exe = _imageio_ffmpeg_exe()
             if exe:
                 fp = _Path(exe)
