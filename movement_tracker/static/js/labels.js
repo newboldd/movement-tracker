@@ -1156,6 +1156,19 @@ const manoViewer = (() => {
             }
         }, true);
 
+        // ``Run in reverse`` flips which sidecar (forward vs reverse
+        // pass) drives the restored defaults.  Re-load when toggled
+        // while MP detect mode is active so the bbox + flags reflect
+        // whichever pass the user is about to run.
+        const _mpRev = document.getElementById('mpReverse');
+        if (_mpRev) {
+            _mpRev.addEventListener('change', () => {
+                if (_detectModel === 'run-mediapipe') {
+                    _applyMpSidecarDefaults().catch(() => {});
+                }
+            });
+        }
+
         // Load initial subject and restore trial/frame from nav state.
         // ``?trial=N`` URL param (used by Jobs-page deep links) takes
         // precedence over the sessionStorage nav-state restoration.
@@ -1252,6 +1265,10 @@ const manoViewer = (() => {
         if (bboxEditMode && typeof _loadDefaultBbox === 'function') {
             _loadDefaultBbox().then(() => render());
         }
+        // Clear stale save-status from the previous trial so the next
+        // "Saved bbox for ..." message is unambiguously this trial's.
+        const _ds = $('detectStatus');
+        if (_ds) _ds.textContent = '';
 
         const trialNameEl = $('trialName');
         if (trialNameEl) trialNameEl.textContent = trial.trial_stem.includes('_') ? trial.trial_stem.split('_').slice(1).join('_') : trial.trial_stem;
@@ -7389,6 +7406,8 @@ const manoViewer = (() => {
         if (_simRow) _simRow.style.display = (endpoint === 'run-mediapipe') ? 'flex' : 'none';
         const _revRow = document.getElementById('mpReverseRow');
         if (_revRow) _revRow.style.display = (endpoint === 'run-mediapipe') ? 'flex' : 'none';
+        const _ubRow = document.getElementById('mpUseBboxRow');
+        if (_ubRow) _ubRow.style.display = (endpoint === 'run-mediapipe') ? 'flex' : 'none';
 
         // Disable pointer-events on the Three.js overlay so the video canvas
         // receives mouse events directly (needed for bbox drag handles).
@@ -7420,6 +7439,54 @@ const manoViewer = (() => {
             }
         });
         _loadDefaultBbox().then(() => render());
+        // ── Apply sidecar defaults (MediaPipe only) ──────────────────
+        // The per-trial ``mediapipe.params.json`` (or
+        // ``mediapipe_reverse.params.json``) sidecar captures the
+        // parameters used the last time MediaPipe was run on this
+        // trial.  We restore them as defaults so the user re-runs with
+        // the same options unless they explicitly change them.  When
+        // the sidecar is missing (no run yet), defaults stay as-is.
+        if (endpoint === 'run-mediapipe') {
+            _applyMpSidecarDefaults().catch(e =>
+                console.warn('[labels] sidecar load failed:', e));
+        }
+    }
+
+    async function _applyMpSidecarDefaults() {
+        if (!subjectId || currentTrialIdx < 0) return;
+        const trial = trials[currentTrialIdx];
+        const revCb = document.getElementById('mpReverse');
+        const reverse = !!(revCb && revCb.checked);
+        let data;
+        try {
+            data = await api(
+                `/api/analyze/${subjectId}/mp-params`
+                + `?trial_idx=${trial.trial_idx}`
+                + `&reverse=${reverse ? 1 : 0}`,
+            );
+        } catch {
+            return;
+        }
+        if (!data || data.status !== 'ok' || !data.params) return;
+        const p = data.params;
+        const simCb = document.getElementById('mpStaticImageMode');
+        if (simCb && typeof p.static_image_mode === 'boolean') {
+            simCb.checked = p.static_image_mode;
+        }
+        const ubCb = document.getElementById('mpUseBbox');
+        if (ubCb && typeof p.use_bbox === 'boolean') {
+            ubCb.checked = p.use_bbox;
+        }
+        // Sidecar's bbox wins over the per-trial DB row when both
+        // exist -- it's the bbox the run actually consumed, which is
+        // the most precise "restore my last setup" value.
+        if (Array.isArray(p.bbox_os) && p.bbox_os.length === 4) {
+            bboxOS = p.bbox_os.map(Number);
+        }
+        if (Array.isArray(p.bbox_od) && p.bbox_od.length === 4) {
+            bboxOD = p.bbox_od.map(Number);
+        }
+        render();
     }
 
     function _exitDetectMode() {
@@ -7439,12 +7506,19 @@ const manoViewer = (() => {
         if (_simRow) _simRow.style.display = 'none';
         const _revRow = document.getElementById('mpReverseRow');
         if (_revRow) _revRow.style.display = 'none';
+        const _ubRow = document.getElementById('mpUseBboxRow');
+        if (_ubRow) _ubRow.style.display = 'none';
         render();
     }
 
     async function _saveBbox() {
         if (!subjectId || currentTrialIdx < 0) return;
         const trial = trials[currentTrialIdx];
+        const statusEl = $('detectStatus');
+        // Clear first so the user sees the message re-appear even when the
+        // previous save's text is identical -- otherwise the static label
+        // gives no feedback on subsequent clicks.
+        if (statusEl) statusEl.textContent = 'Saving…';
         try {
             await api(`/api/analyze/${subjectId}/hrnet/bbox`, {
                 method: 'POST',
@@ -7455,9 +7529,15 @@ const manoViewer = (() => {
                     model: _detectModel || 'default',
                 }),
             });
-            $('detectStatus').textContent = 'Bounding box saved.';
+            if (statusEl) {
+                const stem = (trial.trial_stem || '').includes('_')
+                    ? trial.trial_stem.split('_').slice(1).join('_')
+                    : (trial.trial_stem || `trial ${trial.trial_idx}`);
+                const ts = new Date().toLocaleTimeString();
+                statusEl.textContent = `Saved bbox for ${stem} at ${ts}.`;
+            }
         } catch (e) {
-            $('detectStatus').textContent = 'Save failed: ' + e.message;
+            if (statusEl) statusEl.textContent = 'Save failed: ' + e.message;
         }
     }
 
@@ -7497,6 +7577,12 @@ const manoViewer = (() => {
                 // Reverse model row.
                 const rev = document.getElementById('mpReverse');
                 if (rev && rev.checked) body.reverse = true;
+                // Use-bbox option: when unchecked, run on the full
+                // camera-half frame instead of the saved bbox.  Default
+                // true; only forward when explicitly off so older
+                // backends that don't understand the flag keep working.
+                const ub = document.getElementById('mpUseBbox');
+                if (ub && !ub.checked) body.use_bbox = false;
             }
 
             const DETECT_JOB_TYPE = {

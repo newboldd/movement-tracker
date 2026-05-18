@@ -62,7 +62,8 @@ def run_mediapipe(subject_name: str, job_id: int, static_image_mode: bool = Fals
             crop_boxes=crop_boxes if crop_boxes else None,
             static_image_mode=static_image_mode,
             trial_idx=trial_idx,
-            reverse=reverse)
+            reverse=reverse,
+            use_bbox=use_bbox)
 
 
 def run_pose(subject_name: str, job_id: int):

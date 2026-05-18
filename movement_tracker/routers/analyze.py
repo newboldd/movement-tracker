@@ -783,6 +783,7 @@ def hrnet_job_status(subject_ids: str = Query(...)) -> dict:
     if not ids:
         return {"subjects": {}}
 
+    settings = get_settings()
     out: dict[str, dict] = {}
     with get_db_ctx() as db:
         placeholders = ",".join("?" * len(ids))
@@ -826,6 +827,9 @@ def hrnet_job_status(subject_ids: str = Query(...)) -> dict:
             skeleton_root = None
         saved_set = saved_by_subj.get(sid, set())
 
+        # Per-trial MediaPipe npz existence — used by the Jobs page to
+        # colour MP trial chips the same way HRnet ones are coloured.
+        dlc_subj_dir = settings.dlc_path / name
         trial_rows = []
         for ti, t in enumerate(trials):
             stem = t["trial_name"]
@@ -833,12 +837,16 @@ def hrnet_job_status(subject_ids: str = Query(...)) -> dict:
             if skeleton_root is not None:
                 hm = skeleton_root / stem / "hrnet_w18_heatmaps.npz"
                 has_hrnet = hm.exists()
+            has_mp_npz = (dlc_subj_dir / stem / "mediapipe.npz").exists()
+            has_mp_reverse_npz = (dlc_subj_dir / stem / "mediapipe_reverse.npz").exists()
             trial_rows.append({
                 "trial_idx": ti,
                 "trial_name": stem,
                 "has_saved_bbox": ti in saved_set,
                 "has_mp_labels": bool(has_mp),
                 "has_hrnet_output": bool(has_hrnet),
+                "has_mp_npz": bool(has_mp_npz),
+                "has_mp_reverse_npz": bool(has_mp_reverse_npz),
             })
         out[str(sid)] = {"name": name, "trials": trial_rows}
 
@@ -872,6 +880,38 @@ def save_bbox(subject_id: int, body: dict = Body(...)) -> dict:
                 (sid, trial_idx, cam, model_name, int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])),
             )
     return {"status": "ok"}
+
+
+@router.get("/{subject_id}/mp-params")
+def mp_params(subject_id: int,
+              trial_idx: int = Query(..., ge=0),
+              reverse: bool = Query(False)) -> dict:
+    """Return the params-sidecar JSON for one trial's MP output.
+
+    Looks for ``<dlc>/<subject>/<trial_stem>/<file>.params.json``,
+    where ``<file>`` is ``mediapipe`` or ``mediapipe_reverse``.  When
+    the file is missing, returns ``{"status": "unknown"}`` so the
+    caller can fall back to its own defaults (per the user's choice
+    to not auto-backfill).  Used by the Labels page to restore the
+    parameters of the most recent MP run on trial open.
+    """
+    import json as _json
+    subj_name = _subject_name(subject_id)
+    settings = get_settings()
+    trials = build_trial_map(subj_name)
+    if trial_idx >= len(trials):
+        raise HTTPException(404, f"Trial index {trial_idx} out of range")
+    stem = trials[trial_idx]["trial_name"]
+    fname = "mediapipe_reverse.params.json" if reverse else "mediapipe.params.json"
+    sidecar = settings.dlc_path / subj_name / stem / fname
+    if not sidecar.exists():
+        return {"status": "unknown"}
+    try:
+        with open(sidecar) as f:
+            data = _json.load(f)
+    except (OSError, ValueError) as e:
+        return {"status": "unknown", "error": str(e)}
+    return {"status": "ok", "params": data}
 
 
 @router.post("/{subject_id}/run-hrnet")

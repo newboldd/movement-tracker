@@ -387,6 +387,17 @@
                         <input type="checkbox" id="mpReverse" style="margin:0;">
                         Run in reverse
                     </label>
+                    <!-- Use-bbox option for MediaPipe.  Default on; un-check
+                         to force MediaPipe to scan the full camera-half frame
+                         regardless of any saved per-trial crop box.  Matches
+                         the Jobs page checkbox so trials submitted from either
+                         page can run with the same options. -->
+                    <label id="mpUseBboxRow"
+                           style="display:none;align-items:center;gap:4px;font-size:10px;color:var(--text-muted);padding-left:6px;margin-top:2px;cursor:pointer;"
+                           title="When checked, MediaPipe runs on the saved per-trial bbox.  When unchecked, MediaPipe scans the full camera-half frame.">
+                        <input type="checkbox" id="mpUseBbox" checked style="margin:0;">
+                        Use bounding box
+                    </label>
                 </div>
                 <div class="detect-model-row" data-model="run-vision">
                     <button class="btn btn-sm detect-model-btn" style="width:100%;font-size:10px;text-align:left;">Vision (hand joints)</button>
@@ -1135,7 +1146,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=365" type="module"></script>
+    <script src="/static/js/labels.js?v=367" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

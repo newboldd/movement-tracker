@@ -199,7 +199,8 @@ def run_mediapipe(subject_name: str, progress_callback=None,
                   crop_boxes: dict | None = None,
                   static_image_mode: bool = False,
                   trial_idx: int | None = None,
-                  reverse: bool = False) -> str:
+                  reverse: bool = False,
+                  use_bbox: bool = True) -> str:
     """Run MediaPipe on all stereo videos for a subject.
 
     Extracts all 21 hand joint positions from both camera halves.
@@ -480,6 +481,39 @@ def run_mediapipe(subject_name: str, progress_callback=None,
             start_frame=_sf,
             total_frames=_n_trial,
         )
+        # ── Sidecar metadata ────────────────────────────────────────
+        # Companion ``<stem>.params.json`` next to the npz captures the
+        # parameters used to produce this output, so the Labels page can
+        # reload them as defaults on the next open + the user can audit
+        # what produced a given file independent of the jobs table.
+        # File is named after the npz (mediapipe.npz → mediapipe.params
+        # .json, mediapipe_reverse.npz → mediapipe_reverse.params.json)
+        # so multiple-output subjects keep their metadata granular.
+        import json as _json
+        from datetime import datetime as _dt
+        _params: dict = {
+            "job_type": "mediapipe",
+            "reverse": bool(reverse),
+            "static_image_mode": bool(static_image_mode),
+            "use_bbox": bool(use_bbox),
+            "trial_idx": int(ti),
+            "trial_name": _stem,
+            "ran_at": _dt.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+        # Persist the actual bbox the run consumed (if any) so the
+        # Labels page can restore the exact crop next session, even
+        # if mp_crop_boxes was edited since.
+        _trial_crop = (crop_boxes or {}).get(ti) or {}
+        if _trial_crop.get("OS"):
+            _params["bbox_os"] = [float(v) for v in _trial_crop["OS"]]
+        if _trial_crop.get("OD"):
+            _params["bbox_od"] = [float(v) for v in _trial_crop["OD"]]
+        _sidecar = _trial_dir / (_trial_path.stem + ".params.json")
+        try:
+            with open(_sidecar, "w") as _f:
+                _json.dump(_params, _f, indent=2)
+        except OSError as _e:
+            logger.warning(f"Failed to write {_sidecar}: {_e}")
         written_paths.append(str(_trial_path))
         _vO = int(np.sum(~np.isnan(OS_landmarks[_slice, 0, 0])))
         _vD = int(np.sum(~np.isnan(OD_landmarks[_slice, 0, 0])))
