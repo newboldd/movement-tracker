@@ -1403,6 +1403,9 @@ class QueueManager:
                         if job_type in ("blur", "mediapipe+blur"):
                             steps.append("blur")
                         _rev = bool((extra_params or {}).get("reverse"))
+                        # use_bbox defaults to True (matches the local
+                        # behaviour); only forward False explicitly.
+                        _ub  = bool((extra_params or {}).get("use_bbox", True))
                         remote_preprocess_batch(
                             job_id=job_id,
                             cfg=remote_cfg,
@@ -1412,6 +1415,7 @@ class QueueManager:
                             registry=registry,
                             force=True,
                             reverse=_rev,
+                            use_bbox=_ub,
                         )
 
                 elif job_type in ("train", "refine"):

@@ -214,7 +214,8 @@ def _pick_tapping_track(tracks, video_name=""):
 
 
 def run_mp_subject(subject_name: str, videos: list[str], output_dir: str,
-                    reverse: bool = False):
+                    reverse: bool = False,
+                    crop_boxes: dict | None = None):
     """Run MediaPipe on all stereo videos for a subject, save landmarks npz.
 
     Tracks up to two hands per camera using wrist proximity, then
@@ -257,11 +258,17 @@ def run_mp_subject(subject_name: str, videos: list[str], output_dir: str,
 
     frames_done = 0
 
-    for trial in trials:
+    for trial_idx, trial in enumerate(trials):
         vpath = trial["path"]
         start_frame = trial["start"]
         n_frames = trial["n_frames"]
         video_name = Path(vpath).stem
+        # Per-trial crop boxes (per-camera).  ``crop_boxes`` is the
+        # JSON dict uploaded by the local dispatcher: keyed by
+        # trial stem with subkeys 'OS' / 'OD' → [x1,y1,x2,y2] in
+        # half-frame pixel coords.  Trial-stem keying mirrors the
+        # video filename so subject->trial mapping is unambiguous.
+        trial_crop = (crop_boxes or {}).get(video_name)
 
         cap = cv2.VideoCapture(vpath)
         full_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -311,17 +318,53 @@ def run_mp_subject(subject_name: str, videos: list[str], output_dir: str,
             frame = np.ascontiguousarray(frame, dtype=np.uint8)
             frame_L = frame[:, :midline, :]
             frame_R = frame[:, midline:, :]
+            right_w = full_w - midline
 
-            # Process left camera (OS)
-            rgb_L = cv2.cvtColor(frame_L, cv2.COLOR_BGR2RGB)
-            res_L = det_L.process(rgb_L)
-            hands_L, scores_L = _extract_hands(res_L, midline, h)
+            # Process left camera (OS) -- apply crop if set.  Landmarks
+            # returned from MediaPipe are in cropped coords; we add the
+            # crop origin back so the saved per-trial npz holds
+            # half-frame-pixel coords just like the no-crop path.
+            crop_L = trial_crop.get("OS") if trial_crop else None
+            if crop_L:
+                cx1 = max(0, int(crop_L[0])); cy1 = max(0, int(crop_L[1]))
+                cx2 = min(midline, int(crop_L[2])); cy2 = min(h, int(crop_L[3]))
+                cropped_L = frame_L[cy1:cy2, cx1:cx2, :]
+                if cropped_L.size > 0:
+                    cw_l = cx2 - cx1; ch_l = cy2 - cy1
+                    rgb_L = cv2.cvtColor(cropped_L, cv2.COLOR_BGR2RGB)
+                    res_L = det_L.process(rgb_L)
+                    hands_L, scores_L = _extract_hands(res_L, cw_l, ch_l)
+                    for hand in hands_L:
+                        hand[:, 0] += cx1
+                        hand[:, 1] += cy1
+                else:
+                    hands_L, scores_L = [], []
+            else:
+                rgb_L = cv2.cvtColor(frame_L, cv2.COLOR_BGR2RGB)
+                res_L = det_L.process(rgb_L)
+                hands_L, scores_L = _extract_hands(res_L, midline, h)
             _assign_hands_to_tracks(hands_L, scores_L, prev_os, os_tracks, os_conf, local_frame)
 
             # Process right camera (OD)
-            rgb_R = cv2.cvtColor(frame_R, cv2.COLOR_BGR2RGB)
-            res_R = det_R.process(rgb_R)
-            hands_R, scores_R = _extract_hands(res_R, full_w - midline, h)
+            crop_R = trial_crop.get("OD") if trial_crop else None
+            if crop_R:
+                cx1 = max(0, int(crop_R[0])); cy1 = max(0, int(crop_R[1]))
+                cx2 = min(right_w, int(crop_R[2])); cy2 = min(h, int(crop_R[3]))
+                cropped_R = frame_R[cy1:cy2, cx1:cx2, :]
+                if cropped_R.size > 0:
+                    cw_r = cx2 - cx1; ch_r = cy2 - cy1
+                    rgb_R = cv2.cvtColor(cropped_R, cv2.COLOR_BGR2RGB)
+                    res_R = det_R.process(rgb_R)
+                    hands_R, scores_R = _extract_hands(res_R, cw_r, ch_r)
+                    for hand in hands_R:
+                        hand[:, 0] += cx1
+                        hand[:, 1] += cy1
+                else:
+                    hands_R, scores_R = [], []
+            else:
+                rgb_R = cv2.cvtColor(frame_R, cv2.COLOR_BGR2RGB)
+                res_R = det_R.process(rgb_R)
+                hands_R, scores_R = _extract_hands(res_R, right_w, h)
             _assign_hands_to_tracks(hands_R, scores_R, prev_od, od_tracks, od_conf, local_frame)
 
             frames_done += 1
@@ -389,19 +432,26 @@ def run_mp_subject(subject_name: str, videos: list[str], output_dir: str,
             total_frames=n_t,
         )
         # Sidecar capturing the params used to produce this output.
-        # ``use_bbox`` is fixed False on remote until bbox upload
-        # lands (item 6 in the punch list); ``static_image_mode``
-        # is False because the remote loop doesn't expose it.
+        # ``use_bbox`` is True when a per-camera crop was actually
+        # applied for this trial (uploaded by the local dispatcher);
+        # ``static_image_mode`` is False because the remote loop
+        # doesn't expose it.
+        _trial_crop = (crop_boxes or {}).get(stem) or {}
+        _used_bbox = bool(_trial_crop.get("OS") or _trial_crop.get("OD"))
         params = {
             "job_type": "mediapipe",
             "reverse": bool(reverse),
             "static_image_mode": False,
-            "use_bbox": False,
+            "use_bbox": _used_bbox,
             "trial_idx": trials.index(trial),
             "trial_name": stem,
             "ran_at": _dt.utcnow().isoformat(timespec="seconds") + "Z",
             "produced_on": "remote",
         }
+        if _trial_crop.get("OS"):
+            params["bbox_os"] = [float(v) for v in _trial_crop["OS"]]
+        if _trial_crop.get("OD"):
+            params["bbox_od"] = [float(v) for v in _trial_crop["OD"]]
         try:
             with open(trial_dir / sidecar_filename, "w") as _f:
                 _json.dump(params, _f, indent=2)
@@ -429,6 +479,30 @@ def run_mp_subject(subject_name: str, videos: list[str], output_dir: str,
     emit_progress(subject_name, 100)
 
 
+def _load_bbox_json(bbox_dir, subject_name):
+    """Load ``<bbox_dir>/<subject>_bboxes.json`` if present.
+
+    Returns a dict keyed by trial stem (e.g. ``Con02_L1``) with
+    sub-keys ``OS`` / ``OD`` → ``[x1,y1,x2,y2]`` in half-frame
+    pixel coords.  Returns None when the dir is missing, the
+    subject file is missing, or the JSON fails to parse -- the
+    caller then falls back to the no-crop path.
+    """
+    if not bbox_dir:
+        return None
+    import json as _json
+    bbox_path = Path(bbox_dir) / f"{subject_name}_bboxes.json"
+    if not bbox_path.exists():
+        return None
+    try:
+        with open(bbox_path) as f:
+            data = _json.load(f)
+    except (OSError, ValueError) as e:
+        logger.warning(f"Failed to load {bbox_path}: {e}")
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def cmd_mp(args):
     """MediaPipe subcommand handler."""
     subjects = discover_subjects(args.video_dir, args.subjects)
@@ -436,11 +510,17 @@ def cmd_mp(args):
         logger.error("No subjects found")
         sys.exit(1)
 
-    logger.info(f"Found {len(subjects)} subjects for MediaPipe (reverse={getattr(args, 'reverse', False)})")
+    logger.info(
+        f"Found {len(subjects)} subjects for MediaPipe "
+        f"(reverse={getattr(args, 'reverse', False)}, "
+        f"bbox_dir={getattr(args, 'bbox_dir', None)})"
+    )
     for name, videos in sorted(subjects.items()):
         logger.info(f"Processing {name} ({len(videos)} videos)")
         run_mp_subject(name, videos, args.output_dir,
-                       reverse=bool(getattr(args, "reverse", False)))
+                       reverse=bool(getattr(args, "reverse", False)),
+                       crop_boxes=_load_bbox_json(
+                           getattr(args, "bbox_dir", None), name))
 
     print("MP_COMPLETE", flush=True)
 
@@ -1076,7 +1156,9 @@ def cmd_pipeline(args):
                               current_subject=name)
                 try:
                     run_mp_subject(name, videos, args.output_dir,
-                                   reverse=bool(getattr(args, "reverse", False)))
+                                   reverse=bool(getattr(args, "reverse", False)),
+                                   crop_boxes=_load_bbox_json(
+                                       getattr(args, "bbox_dir", None), name))
                 except Exception as e:
                     logger.error(f"MediaPipe failed for {name}: {e}\n{traceback.format_exc()}")
                     failed_subjects.append(("mp", name, str(e)))
@@ -1150,6 +1232,11 @@ def main():
     mp_p.add_argument("--reverse", action="store_true",
                        help="Feed frames in reverse temporal order; saves "
                             "to mediapipe_reverse.npz per trial")
+    mp_p.add_argument("--bbox-dir", default=None,
+                       help="Directory containing <subject>_bboxes.json files "
+                            "with per-trial crop boxes.  When present, "
+                            "MediaPipe runs on the crops and remaps "
+                            "landmarks back to half-frame coords.")
 
     blur_p = sub.add_parser("blur", help="Run face de-identification")
     blur_p.add_argument("video_dir", help="Directory containing subject videos")
@@ -1175,6 +1262,9 @@ def main():
                         help="Redirect stdout/stderr to this file")
     pipe_p.add_argument("--reverse", action="store_true",
                          help="Reverse-pass MediaPipe (see ``mp --reverse``)")
+    pipe_p.add_argument("--bbox-dir", default=None,
+                         help="Per-subject crop-box JSON dir (see "
+                              "``mp --bbox-dir``)")
     pipe_p.add_argument("--force", action="store_true",
                         help="Re-run even if outputs already exist on remote")
 

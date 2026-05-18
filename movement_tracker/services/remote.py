@@ -1061,6 +1061,7 @@ def remote_preprocess_batch(
     registry,
     force: bool = False,
     reverse: bool = False,
+    use_bbox: bool = False,
 ):
     """Batch remote preprocessing: upload videos, run MP/blur, download results.
 
@@ -1098,6 +1099,7 @@ def remote_preprocess_batch(
     _work_dir = cfg.work_dir.replace("\\", "/")
     remote_video_dir = f"{_work_dir}/videos"
     remote_output_dir = f"{_work_dir}/preprocess_output"
+    remote_bbox_dir = f"{_work_dir}/bboxes"
     script_path = Path(__file__).parent / "remote_preprocess_script.py"
 
     cancel_event = registry.register_cancel_event(job_id)
@@ -1147,11 +1149,85 @@ def remote_preprocess_batch(
             logfile.flush()
             _check_cancel()
 
-            # Ensure remote dirs exist
+            # Ensure remote dirs exist (videos + outputs + bbox JSON dir).
             subprocess.run(
-                _py_cmd(cfg, f"\"import os; os.makedirs(r'{remote_video_dir}', exist_ok=True); os.makedirs(r'{remote_output_dir}', exist_ok=True)\""),
+                _py_cmd(cfg,
+                    f"\"import os; "
+                    f"os.makedirs(r'{remote_video_dir}', exist_ok=True); "
+                    f"os.makedirs(r'{remote_output_dir}', exist_ok=True); "
+                    f"os.makedirs(r'{remote_bbox_dir}', exist_ok=True)\""),
                 capture_output=True, timeout=15,
             )
+
+            # ── Phase 1a: build + upload per-subject bbox JSON ─────
+            # Reads ``mp_crop_boxes`` (model_name='run-mediapipe') for
+            # every subject in this run, packages into one JSON per
+            # subject keyed by trial stem, and SCPs to
+            # ``<work>/bboxes/<subject>_bboxes.json``.  The remote
+            # script reads these when --use-bbox is set; absent files
+            # transparently fall through to the no-crop path.
+            if do_mp and use_bbox and subjects:
+                import json as _bbox_json
+                import tempfile as _bbox_tmp
+                from .video import build_trial_map
+                cam_names = settings.camera_names or ["OS", "OD"]
+                cam_OS = cam_names[0]
+                cam_OD = cam_names[1] if len(cam_names) > 1 else cam_names[0]
+                uploaded = 0
+                with get_db_ctx() as _db:
+                    for sub in subjects:
+                        try:
+                            tmap = build_trial_map(sub)
+                        except Exception:
+                            tmap = []
+                        if not tmap:
+                            continue
+                        srow = _db.execute(
+                            "SELECT id FROM subjects WHERE name = ?", (sub,)
+                        ).fetchone()
+                        if not srow:
+                            continue
+                        rows = _db.execute(
+                            "SELECT trial_idx, camera_name, x1, y1, x2, y2 "
+                            "FROM mp_crop_boxes "
+                            "WHERE subject_id = ? AND model_name = 'run-mediapipe'",
+                            (srow["id"],),
+                        ).fetchall()
+                        if not rows:
+                            continue
+                        by_trial: dict = {}
+                        for r in rows:
+                            stem = tmap[r["trial_idx"]]["trial_name"] \
+                                if 0 <= r["trial_idx"] < len(tmap) else None
+                            if not stem:
+                                continue
+                            d = by_trial.setdefault(stem, {})
+                            box = [r["x1"], r["y1"], r["x2"], r["y2"]]
+                            if r["camera_name"] == cam_OS:
+                                d["OS"] = box
+                            elif r["camera_name"] == cam_OD:
+                                d["OD"] = box
+                        if not by_trial:
+                            continue
+                        with _bbox_tmp.NamedTemporaryFile(
+                                mode="w", suffix=".json", delete=False) as fh:
+                            _bbox_json.dump(by_trial, fh)
+                            tmp_path = fh.name
+                        proc = subprocess.run(
+                            _scp_base_args(cfg) + [
+                                tmp_path,
+                                f"{cfg.host}:{remote_bbox_dir}/{sub}_bboxes.json",
+                            ],
+                            capture_output=True, text=True, timeout=30,
+                        )
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+                        if proc.returncode == 0:
+                            uploaded += 1
+                logfile.write(f"  Uploaded bbox JSON for {uploaded}/{len(subjects)} subject(s)\n")
+                logfile.flush()
 
             # List remote videos to skip already-uploaded ones
             result = subprocess.run(
@@ -1395,6 +1471,9 @@ def remote_preprocess_batch(
                     launch_args_parts.append("'--force'")
                 if reverse:
                     launch_args_parts.append("'--reverse'")
+                if use_bbox:
+                    launch_args_parts.append(
+                        f"'--bbox-dir', r'{remote_bbox_dir}'")
                 launch_args_str = ", ".join(launch_args_parts)
                 # Popen stdout/stderr handles C-level AND Python-level output.
                 # Do NOT also pass --log-file (two handles to the same file
