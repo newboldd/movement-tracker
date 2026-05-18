@@ -21,6 +21,54 @@ from scipy.ndimage import gaussian_filter1d
 
 logger = logging.getLogger(__name__)
 
+
+# Cache: ffmpeg_path -> chosen encoder name.  Probing ffmpeg -encoders
+# is ~50 ms so we don't want to do it per-render.
+_H264_ENCODER_CACHE: dict[str, str] = {}
+
+
+def _pick_h264_encoder(ffmpeg: str) -> str:
+    """Return the best available H.264 encoder name for this ffmpeg.
+
+    Default-channel conda ffmpeg on Windows ships WITHOUT libx264
+    (license reasons), so hard-coding ``-c:v libx264`` blows up with
+    "Unknown encoder 'libx264'".  Probe ``ffmpeg -encoders`` once and
+    pick the first available of:
+
+      libx264     -- best quality, but missing from minimal builds
+      libopenh264 -- royalty-free H.264, in nearly every build
+      h264_mf     -- Windows Media Foundation hardware encoder
+
+    Raises RuntimeError if none is found, with a fix hint pointing
+    at conda-forge ffmpeg.
+    """
+    cached = _H264_ENCODER_CACHE.get(ffmpeg)
+    if cached:
+        return cached
+    try:
+        proc = subprocess.run(
+            [ffmpeg, "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=10,
+        )
+        output = (proc.stdout or "") + (proc.stderr or "")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"Could not probe ffmpeg encoders: {e}")
+    candidates = ("libx264", "libopenh264", "h264_mf")
+    for name in candidates:
+        # ``ffmpeg -encoders`` lines look like ``V..... libx264   ...``
+        # so a simple substring check on the name suffices.
+        if f" {name} " in output or output.endswith(f" {name}") \
+                or f" {name}\n" in output:
+            _H264_ENCODER_CACHE[ffmpeg] = name
+            logger.info(f"Using H.264 encoder: {name}")
+            return name
+    raise RuntimeError(
+        "No H.264 encoder available in this ffmpeg build "
+        f"({ffmpeg}).  Tried: {', '.join(candidates)}.  Fix on a "
+        "conda env: 'conda install -c conda-forge -y ffmpeg' (the "
+        "conda-forge build ships libx264)."
+    )
+
 # ── Configuration ────────────────────────────────────────────────────────
 FACE_CONF_THRESHOLD = 0.2
 FACE_MODEL_SELECTION = 1        # full-range model (up to 5m)
@@ -490,6 +538,11 @@ def deidentify_video(input_path: str, output_path: str,
     # which is itself CREATE_BREAKAWAY_FROM_JOB), so it inherits the
     # SSH-exit-survival behaviour transitively without needing its
     # own job-breakaway / detach flag.
+    h264_encoder = _pick_h264_encoder(ffmpeg)
+    if h264_encoder == "libx264":
+        encoder_args = ["-c:v", "libx264", "-preset", "slow", "-crf", "18"]
+    else:
+        encoder_args = ["-c:v", h264_encoder, "-b:v", "8M"]
     # -nostats + -loglevel error: keep stderr small so the 64 KB
     # OS pipe buffer doesn't fill mid-render and deadlock our
     # stdin-frame-write loop.  The finally block reads stderr once
@@ -500,7 +553,7 @@ def deidentify_video(input_path: str, output_path: str,
         "-s", f"{full_w}x{h}", "-pix_fmt", "bgr24",
         "-r", str(fps),
         "-i", "-",
-        "-c:v", "libx264", "-preset", "slow", "-crf", "18",
+        *encoder_args,
         "-pix_fmt", "yuv420p", "-an",
         "-movflags", "+faststart",
         output_path,
@@ -1185,6 +1238,20 @@ def render_with_blur_specs(input_path: str, output_path: str,
     # which is itself CREATE_BREAKAWAY_FROM_JOB), so it inherits the
     # SSH-exit-survival behaviour transitively without needing its
     # own job-breakaway / detach flag.
+    # Pick an H.264 encoder this ffmpeg build actually has.  Conda's
+    # default-channel ffmpeg often ships WITHOUT libx264 (license
+    # reasons), in which case "-c:v libx264" fails immediately with
+    # "Unknown encoder 'libx264'".  Probe once: prefer libx264 (best
+    # quality), fall back to libopenh264 (royalty-free, in most
+    # builds), then h264_mf (Windows Media Foundation hardware
+    # encoder).  If none is available, raise with a fix hint.
+    h264_encoder = _pick_h264_encoder(ffmpeg)
+    # libopenh264 doesn't support -preset/-crf; use bitrate.  libx264
+    # supports both.  h264_mf takes bitrate too.
+    if h264_encoder == "libx264":
+        encoder_args = ["-c:v", "libx264", "-preset", "slow", "-crf", "18"]
+    else:
+        encoder_args = ["-c:v", h264_encoder, "-b:v", "8M"]
     # -nostats + -loglevel error: keep stderr small so the 64 KB
     # OS pipe buffer doesn't fill mid-render and deadlock our
     # stdin-frame-write loop.  The finally block reads stderr once
@@ -1195,7 +1262,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
         "-s", f"{full_w}x{fh}", "-pix_fmt", "bgr24",
         "-r", str(fps),
         "-i", "-",
-        "-c:v", "libx264", "-preset", "slow", "-crf", "18",
+        *encoder_args,
         "-pix_fmt", "yuv420p", "-an",
         # +faststart moves the moov atom to the front so HTML5 <video>
         # can start playing before the entire file is downloaded.
