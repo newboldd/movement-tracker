@@ -483,12 +483,26 @@ def deidentify_video(input_path: str, output_path: str,
                       "stdout": subprocess.DEVNULL,
                       "stderr": subprocess.PIPE}
     if os.name == 'nt':
+        # DETACHED_PROCESS + stdin=PIPE is broken on Windows -- the
+        # "no console" semantics break Python's wiring of the pipe
+        # handle into the child's stdin and the first write fails
+        # with [Errno 22] Invalid argument.  CREATE_NO_WINDOW gives
+        # the same "no console window pops up" UX while keeping the
+        # explicit stdin pipe working.  CREATE_NEW_PROCESS_GROUP +
+        # CREATE_BREAKAWAY_FROM_JOB keep the child alive when the
+        # parent SSH session exits, matching the HRnet detached
+        # launcher pattern.
         _popen_kwargs["creationflags"] = (
-            getattr(subprocess, "DETACHED_PROCESS", 0) |
-            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            getattr(subprocess, "CREATE_NO_WINDOW", 0) |
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) |
+            getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
         )
+    # -nostats + -loglevel error: keep stderr small so the 64 KB
+    # OS pipe buffer doesn't fill mid-render and deadlock our
+    # stdin-frame-write loop.  The finally block reads stderr once
+    # at the end and that's enough for surfacing errors.
     proc = subprocess.Popen([
-        ffmpeg, "-y",
+        ffmpeg, "-y", "-nostats", "-loglevel", "error",
         "-f", "rawvideo", "-vcodec", "rawvideo",
         "-s", f"{full_w}x{h}", "-pix_fmt", "bgr24",
         "-r", str(fps),
@@ -1171,12 +1185,26 @@ def render_with_blur_specs(input_path: str, output_path: str,
                       "stdout": subprocess.DEVNULL,
                       "stderr": subprocess.PIPE}
     if os.name == 'nt':
+        # DETACHED_PROCESS + stdin=PIPE is broken on Windows -- the
+        # "no console" semantics break Python's wiring of the pipe
+        # handle into the child's stdin and the first write fails
+        # with [Errno 22] Invalid argument.  CREATE_NO_WINDOW gives
+        # the same "no console window pops up" UX while keeping the
+        # explicit stdin pipe working.  CREATE_NEW_PROCESS_GROUP +
+        # CREATE_BREAKAWAY_FROM_JOB keep the child alive when the
+        # parent SSH session exits, matching the HRnet detached
+        # launcher pattern.
         _popen_kwargs["creationflags"] = (
-            getattr(subprocess, "DETACHED_PROCESS", 0) |
-            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            getattr(subprocess, "CREATE_NO_WINDOW", 0) |
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) |
+            getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
         )
+    # -nostats + -loglevel error: keep stderr small so the 64 KB
+    # OS pipe buffer doesn't fill mid-render and deadlock our
+    # stdin-frame-write loop.  The finally block reads stderr once
+    # at the end and that's enough for surfacing errors.
     proc = subprocess.Popen([
-        ffmpeg, "-y",
+        ffmpeg, "-y", "-nostats", "-loglevel", "error",
         "-f", "rawvideo", "-vcodec", "rawvideo",
         "-s", f"{full_w}x{fh}", "-pix_fmt", "bgr24",
         "-r", str(fps),
