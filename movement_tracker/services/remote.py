@@ -4314,6 +4314,40 @@ def _patch_deidentify_imports(work_dir):
                   f"{type(_e).__name__}: {_e}", flush=True)
             return None
 
+    def _ffmpeg_actually_works(path):
+        """Smoke-test the binary by running ``ffmpeg -version`` and
+        checking we got recognisable output AND a real-sized binary
+        (a missing-DLL silent failure on Windows can leave us with
+        an exit-0 stub that produced no output).  Returns True on
+        success, prints a [worker] diagnostic + returns False on
+        failure so the caller falls through to the next candidate."""
+        try:
+            st = os.stat(path)
+        except OSError as _e:
+            print(f"[worker] ffmpeg stat failed for {path}: {_e}", flush=True)
+            return False
+        # A 360 KB ffmpeg.exe wrapped a missing-DLL stub for the user
+        # in May 2026.  Real ffmpeg builds are all >1 MB.  Use 1 MB as
+        # a low-confidence floor.
+        if st.st_size < 1_000_000:
+            print(f"[worker] ffmpeg at {path} is suspiciously small "
+                  f"({st.st_size} bytes) -- likely a broken stub.",
+                  flush=True)
+            return False
+        try:
+            proc = subprocess.run([path, "-version"], capture_output=True,
+                                  timeout=10)
+        except (OSError, subprocess.TimeoutExpired) as _e:
+            print(f"[worker] {path} -version failed: {_e}", flush=True)
+            return False
+        out = (proc.stdout + proc.stderr).decode("utf-8", errors="replace")
+        if "ffmpeg version" not in out.lower():
+            print(f"[worker] {path} -version rc={proc.returncode} but "
+                  f"output looks wrong ({len(out)} chars). First 200: "
+                  f"{out[:200]!r}", flush=True)
+            return False
+        return True
+
     def _imageio_ffmpeg_env_override():
         """Honour ``IMAGEIO_FFMPEG_EXE`` if the user / admin set it on the
         remote.  Most reliable escape hatch when pip + imageio_ffmpeg's
@@ -4373,31 +4407,31 @@ def _patch_deidentify_imports(work_dir):
     def get_ffmpeg_path():
         # Try 1: IMAGEIO_FFMPEG_EXE env var (explicit user override).
         env_exe = _imageio_ffmpeg_env_override()
-        if env_exe:
+        if env_exe and _ffmpeg_actually_works(env_exe):
             return env_exe
-        # Try 2: ffmpeg on PATH.
+        # Try 2: ffmpeg on PATH (after a working check).
         p = shutil.which("ffmpeg")
-        if p and os.path.exists(p):
+        if p and os.path.exists(p) and _ffmpeg_actually_works(p):
             return p
         # Try 3: conda env's Library/bin/ffmpeg.exe -- present after
         # ``conda install -n <env> ffmpeg`` even when not on PATH.
         conda_exe = _conda_env_ffmpeg()
-        if conda_exe:
+        if conda_exe and _ffmpeg_actually_works(conda_exe):
             return conda_exe
         # Try 4: imageio_ffmpeg's bundled / downloaded binary.
         exe = _imageio_ffmpeg_exe()
-        if exe:
+        if exe and _ffmpeg_actually_works(exe):
             return exe
         # Try 5: pip-install imageio_ffmpeg + retry.
         if _try_pip_install_imageio_ffmpeg() is not None:
             exe = _imageio_ffmpeg_exe()
-            if exe:
+            if exe and _ffmpeg_actually_works(exe):
                 return exe
         # Try 6: --force-reinstall so the bundled binary is re-extracted.
         # Covers AV-quarantined-binary + importable-package case.
         if _try_pip_install_imageio_ffmpeg(force_reinstall=True) is not None:
             exe = _imageio_ffmpeg_exe()
-            if exe:
+            if exe and _ffmpeg_actually_works(exe):
                 return exe
         raise FileNotFoundError(
             "ffmpeg not found on remote and all auto-recovery attempts failed.  "
