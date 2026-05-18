@@ -1144,6 +1144,50 @@ def remote_preprocess_batch(
 
     try:
         with open(log_path, "w") as logfile:
+            # ── Phase 0: Seed params_json.trials so the in-progress
+            # trial-detail modal can render per-trial chips for this
+            # MP batch (HRnet batches already do this; MP didn't).
+            # Each entry: {subject_name, trial_idx, trial_name, outcome:
+            # None}.  Outcomes flip to "ok" / "remote_only" / "failed"
+            # in _try_running_download as per-subject downloads land.
+            if do_mp and subjects:
+                from .video import build_trial_map as _btm
+                import json as _seed_json
+                _seed_trials: list[dict] = []
+                for _sub in subjects:
+                    try:
+                        _tmap = _btm(_sub)
+                    except Exception:
+                        _tmap = []
+                    for _ti, _t in enumerate(_tmap):
+                        _seed_trials.append({
+                            "subject_name": _sub,
+                            "trial_idx": _ti,
+                            "trial_name": _t.get("trial_name", ""),
+                            "uploaded": True,  # remote MP reads videos from
+                                                # shared video dir; treat as
+                                                # "ready" so chips render
+                                                # blue (pending) instead of
+                                                # grey (uploading) until the
+                                                # download flips them green.
+                        })
+                if _seed_trials:
+                    with get_db_ctx() as db:
+                        _row = db.execute(
+                            "SELECT params_json FROM jobs WHERE id=?", (job_id,)
+                        ).fetchone()
+                        try:
+                            _ep = _seed_json.loads(_row["params_json"]) \
+                                if _row and _row["params_json"] else {}
+                        except (ValueError, TypeError):
+                            _ep = {}
+                        _ep["trials"] = _seed_trials
+                        _ep["subjects"] = list(subjects)
+                        db.execute(
+                            "UPDATE jobs SET params_json=? WHERE id=?",
+                            (_seed_json.dumps(_ep), job_id),
+                        )
+
             # ── Phase 1: Upload videos ────────────────────────────
             logfile.write(f"=== Phase 1: Uploading videos to {cfg.host}:{remote_video_dir} ===\n")
             logfile.flush()
@@ -1551,6 +1595,47 @@ def remote_preprocess_batch(
                 downloaded_subjects: set[str] = set()
 
                 _dl_lock = threading.Lock()
+                _params_write_lock = threading.Lock()
+
+                def _mark_mp_subject_done(subj_name: str):
+                    """Mark every params_json.trials entry for ``subj_name``
+                    with ``outcome='ok'`` so the trial-detail modal turns
+                    its chips green.  Re-reads params_json fresh under a
+                    lock to avoid clobbering concurrent writes."""
+                    import json as _pj_json
+                    with _params_write_lock:
+                        try:
+                            with get_db_ctx() as _db:
+                                _r = _db.execute(
+                                    "SELECT params_json FROM jobs WHERE id=?",
+                                    (job_id,),
+                                ).fetchone()
+                                try:
+                                    _pj = _pj_json.loads(_r["params_json"]) \
+                                        if _r and _r["params_json"] else {}
+                                except (ValueError, TypeError):
+                                    _pj = {}
+                                _tlist = _pj.get("trials") or []
+                                _changed = False
+                                for _t in _tlist:
+                                    if _t.get("subject_name") == subj_name \
+                                            and _t.get("outcome") != "ok":
+                                        _t["outcome"] = "ok"
+                                        _changed = True
+                                if _changed:
+                                    _pj["trials"] = _tlist
+                                    _db.execute(
+                                        "UPDATE jobs SET params_json=? WHERE id=?",
+                                        (_pj_json.dumps(_pj), job_id),
+                                    )
+                        except Exception as _e:
+                            try:
+                                logfile.write(
+                                    f"  Warning: failed to mark {subj_name} "
+                                    f"outcome=ok in params_json: {_e}\n")
+                                logfile.flush()
+                            except Exception:
+                                pass
 
                 def _try_running_download(subj_name: str):
                     """Pull this subject's MP npz now that the remote has
@@ -1583,6 +1668,14 @@ def remote_preprocess_batch(
                                 logfile.write(
                                     f"  Downloaded (running): {subj_name}/mediapipe_prelabels.npz\n")
                                 logfile.flush()
+                                # Flip outcome=ok on this subject's trial
+                                # entries in params_json so the in-progress
+                                # trial-detail modal turns the chips green
+                                # the moment files land locally.  Mirrors
+                                # the HRnet poller's per-trial outcome
+                                # writes -- the chip renderer reads outcome
+                                # from params_json.trials[i].outcome.
+                                _mark_mp_subject_done(subj_name)
                             else:
                                 # File wasn't ready/stable — let the next
                                 # detection (or Phase 5) try again.
