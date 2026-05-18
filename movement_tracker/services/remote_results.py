@@ -386,20 +386,23 @@ def download_one(spec: OutputSpec, cfg: RemoteConfig,
                 logger.warning(
                     f"Post-download MP split failed for {spec.local_path}: {e}"
                 )
-        # If we just pulled a per-trial mediapipe.npz / mediapipe_
-        # reverse.npz, rebuild the Combined fusion when the OTHER
-        # pass already exists for the same trial.  Keeps the
-        # Combined layer current without waiting for a manual
-        # backfill or a full local re-run.
-        if spec.job_type == "mediapipe" and spec.local_path.name in (
-            "mediapipe.npz", "mediapipe_reverse.npz"
-        ):
+        # If we just pulled a per-trial MP source npz (any of the
+        # four passes), rebuild the Combined fusion when at least
+        # one OTHER pass already exists for the same trial.  Keeps
+        # Combined current without waiting for a manual backfill
+        # or a full local re-run.
+        _mp_source_files = {
+            "mediapipe.npz", "mediapipe_cropped.npz",
+            "mediapipe_reverse.npz", "mediapipe_static.npz",
+        }
+        if spec.job_type == "mediapipe" and spec.local_path.name in _mp_source_files:
             try:
                 trial_dir = spec.local_path.parent
                 subject_name = trial_dir.parent.name
                 trial_stem = trial_dir.name
-                if (trial_dir / "mediapipe.npz").exists() \
-                        and (trial_dir / "mediapipe_reverse.npz").exists():
+                present = sum(1 for fn in _mp_source_files
+                               if (trial_dir / fn).exists())
+                if present >= 2:
                     from .mediapipe_prelabel import build_combined_mp_npz_for_trial
                     build_combined_mp_npz_for_trial(subject_name, trial_stem)
             except Exception as e:

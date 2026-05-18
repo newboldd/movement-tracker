@@ -548,16 +548,18 @@ def run_mediapipe(subject_name: str, progress_callback=None,
     if progress_callback:
         progress_callback(100.0)
 
-    # Whenever we wrote a forward or reverse per-trial file, rebuild
-    # the Combined fusion for any trial that now has both.  Combined
-    # is regenerated rather than partially patched -- it's cheap
-    # (per-frame triangulation) and lets the file always reflect the
-    # latest of either source.
+    # Whenever any per-trial MP source file (forward / cropped /
+    # reverse / static) is written, rebuild the Combined fusion for
+    # that trial when at least 2 of the 4 sources are now present.
+    # Combined is regenerated rather than partially patched -- it's
+    # cheap and keeps the file aligned with the latest sources.
     try:
         for _p in written_paths:
             _trial_stem = Path(_p).parent.name
             _td = Path(_p).parent
-            if (_td / "mediapipe.npz").exists() and (_td / "mediapipe_reverse.npz").exists():
+            _present = sum(1 for _, _fn in COMBINED_SRC_FILES
+                            if (_td / _fn).exists())
+            if _present >= 2:
                 build_combined_mp_npz_for_trial(subject_name, _trial_stem)
     except Exception as _e:
         logger.warning(
@@ -991,199 +993,292 @@ def has_mediapipe_data(subject_name: str, reverse: bool = False) -> bool:
     return (subj_dir / legacy).exists()
 
 
+# Source codes used by the Combined-MP builder.  Stored per frame in
+# the output npz under ``source_OS`` / ``source_OD`` so consumers can
+# tell which pass drove each camera-frame.
+COMBINED_SRC_NONE     = 0
+COMBINED_SRC_FORWARD  = 1
+COMBINED_SRC_CROPPED  = 2
+COMBINED_SRC_REVERSE  = 3
+COMBINED_SRC_STATIC   = 4
+COMBINED_SRC_FILES = [
+    (COMBINED_SRC_FORWARD, "mediapipe.npz"),
+    (COMBINED_SRC_CROPPED, "mediapipe_cropped.npz"),
+    (COMBINED_SRC_REVERSE, "mediapipe_reverse.npz"),
+    (COMBINED_SRC_STATIC,  "mediapipe_static.npz"),
+]
+COMBINED_SRC_NAMES = {
+    COMBINED_SRC_FORWARD: "forward",
+    COMBINED_SRC_CROPPED: "cropped",
+    COMBINED_SRC_REVERSE: "reverse",
+    COMBINED_SRC_STATIC:  "static",
+}
+
+# Joint indices (MediaPipe Hands convention) used by the Combined
+# bone-length consistency term.  Thumb CMC -> tip (full thumb) and
+# index MCP -> tip (full index) are the segments whose endpoints
+# define the thumb-index aperture, so their lengths are the most
+# diagnostic of bad-tip combos.
+THUMB_CMC = 1
+INDEX_MCP = 5
+
+
 def build_combined_mp_npz_for_trial(subject_name: str, trial_stem: str) -> str | None:
-    """Fuse the forward and reverse per-trial MP outputs for one trial
-    into a single ``mediapipe_combined.npz``.
+    """Fuse up to four per-trial MP source npzs (forward, cropped,
+    reverse, static) into a single ``mediapipe_combined.npz``.
 
     Per-frame logic (each camera handled independently):
-      * Both forward AND reverse missing -> NaN.
+
+      * No source has labels -> NaN.
       * Exactly one source has labels -> use that source's full
-        21-joint landmark set for that camera, that frame.
-      * Both sources have labels -> consider every (OS_source,
-        OD_source) combination where the thumb tip + index tip are
-        present on both cameras and the triangulated 3D pair is
-        finite.  Choose the combination that minimises the
-        triangulated thumb-index distance.  Forward + reverse
-        often disagree only on the harder of the two cameras --
-        the wrong pass typically yields a noticeably larger 3D
-        distance, so min-distance selects the agreeing pair.
+        21-joint set for that camera, that frame.
+      * Multiple sources have labels -> consider every
+        (OS_source, OD_source) combination where the thumb tip +
+        index tip are present on both cameras and the triangulated
+        thumb / index 3D points are finite.  Score each candidate
+        and pick the lowest-score combination; fall back to
+        min-distance when scoring isn't possible.
 
-    When no calibration is available the tie-break is on the 2D OS
-    pixel thumb-index distance instead (still useful at picking the
-    less-divergent pair when both sources see the tips).  When even
-    that's tied, falls back to forward.
+    Scoring (lower is better) blends three z-scored terms:
 
-    Per camera the chosen source's full 21-joint landmark set is
-    copied -- not just the tip joints used in the tie-break -- so
-    Combined behaves like a coherent source layer.
+      z_dist  = |dist_3d - ref_dist(frame)| / max(ref_dist_std, ε)
+      z_thumb = |thumb_bone_len - thumb_median| / max(thumb_std, ε)
+      z_index = |index_bone_len - index_median| / max(index_std, ε)
+      score   = z_dist + z_thumb + z_index
+
+    ``ref_dist`` is a rolling median (window ±15 frames) of the
+    first-pass min-distance pick across the trial.  The bone-length
+    medians + stds come from "stable" first-pass frames -- frames
+    whose min-distance distance is within k_std of its local rolling
+    median.  Using ``std`` derived from the actual stable distribution
+    instead of a fixed % deviation makes the tolerance scale with the
+    subject's hand size + the trial's typical motion noise.
+
+    Both heuristic terms are skipped when there aren't enough stable
+    frames to fit them (e.g. very short trials, or trials where
+    every frame has multiple disagreeing sources).  In that case
+    the function gracefully reverts to the original min-distance
+    behaviour.
 
     Writes ``<dlc>/<subject>/<trial>/mediapipe_combined.npz`` and
-    returns its path on success; returns None if neither forward
-    nor reverse exists for the trial, or if file I/O fails.
+    returns its path on success; returns None if no source exists
+    for the trial.
     """
     settings = get_settings()
     trial_dir = settings.dlc_path / subject_name / trial_stem
-    fwd_path = trial_dir / "mediapipe.npz"
-    rev_path = trial_dir / "mediapipe_reverse.npz"
-    if not fwd_path.exists() and not rev_path.exists():
+    sources: dict[int, np.lib.npyio.NpzFile] = {}
+    for code, fname in COMBINED_SRC_FILES:
+        p = trial_dir / fname
+        if p.exists():
+            try:
+                sources[code] = np.load(str(p))
+            except (OSError, ValueError) as e:
+                logger.warning(f"Combined: skipping {p} ({e})")
+    if not sources:
         return None
-    fwd = np.load(str(fwd_path)) if fwd_path.exists() else None
-    rev = np.load(str(rev_path)) if rev_path.exists() else None
-    # Pick whichever source we have to size the output arrays.
-    src = fwd if fwd is not None else rev
-    n = int(src["total_frames"]) if "total_frames" in src.files \
-        else int(src["OS_landmarks"].shape[0])
-    start_frame = int(src["start_frame"]) if "start_frame" in src.files else 0
 
-    OS_combined = np.full((n, N_JOINTS, 2), np.nan)
-    OD_combined = np.full((n, N_JOINTS, 2), np.nan)
-    conf_OS = np.full(n, np.nan)
-    conf_OD = np.full(n, np.nan)
-    # Per-frame source-choice trace.  0 = none, 1 = forward, 2 =
-    # reverse.  Used for diagnostics + future UI; consumers that
-    # don't care can ignore.
-    src_OS = np.zeros(n, dtype=np.uint8)
-    src_OD = np.zeros(n, dtype=np.uint8)
+    # Size output arrays from any available source (they all should
+    # share the same length, but defensively pick the first).
+    any_src = next(iter(sources.values()))
+    n = int(any_src["total_frames"]) if "total_frames" in any_src.files \
+        else int(any_src["OS_landmarks"].shape[0])
+    start_frame = int(any_src["start_frame"]) if "start_frame" in any_src.files else 0
 
-    def _get(arr_npz, key):
-        if arr_npz is None:
+    # Per-source landmark + confidence views (None if source absent).
+    def _arr(code, key):
+        s = sources.get(code)
+        if s is None or key not in s.files:
             return None
-        if key not in arr_npz.files:
-            return None
-        return arr_npz[key]
-    fwd_OS = _get(fwd, "OS_landmarks"); fwd_OD = _get(fwd, "OD_landmarks")
-    rev_OS = _get(rev, "OS_landmarks"); rev_OD = _get(rev, "OD_landmarks")
-    fwd_cOS = _get(fwd, "confidence_OS"); fwd_cOD = _get(fwd, "confidence_OD")
-    rev_cOS = _get(rev, "confidence_OS"); rev_cOD = _get(rev, "confidence_OD")
+        return s[key]
+    os_lm = {c: _arr(c, "OS_landmarks") for c, _ in COMBINED_SRC_FILES}
+    od_lm = {c: _arr(c, "OD_landmarks") for c, _ in COMBINED_SRC_FILES}
+    os_cf = {c: _arr(c, "confidence_OS") for c, _ in COMBINED_SRC_FILES}
+    od_cf = {c: _arr(c, "confidence_OD") for c, _ in COMBINED_SRC_FILES}
 
     try:
         calib = get_calibration_for_subject(subject_name)
     except Exception:
         calib = None
 
-    THUMB = THUMB_TIP
-    INDEX = INDEX_TIP
+    def _valid(arr, f, joint):
+        return (arr is not None and f < arr.shape[0]
+                and not np.isnan(arr[f, joint, 0]))
 
-    def _has_tips(arr, frame):
-        """Both thumb tip + index tip non-NaN on this frame?"""
-        if arr is None or frame >= arr.shape[0]:
-            return False
-        return (not np.isnan(arr[frame, THUMB, 0])
-                and not np.isnan(arr[frame, INDEX, 0]))
-
-    def _has_any(arr, frame):
-        """Any joint non-NaN on this frame? Used when tips themselves
-        are missing -- we'd rather copy a partial labelling than
-        leave the camera entirely blank."""
-        if arr is None or frame >= arr.shape[0]:
-            return False
-        return bool(np.any(~np.isnan(arr[frame, :, 0])))
-
-    def _dist_3d(os_pair, od_pair):
-        """Triangulate thumb + index from (OS_thumb, OS_index) and
-        (OD_thumb, OD_index), return 3D Euclidean distance or NaN."""
+    def _tri(os_pt, od_pt):
+        """Triangulate a single 2D pair to 3D, returning None on
+        failure (no calibration / NaN / cv2 hiccup)."""
         if calib is None:
-            return np.nan
+            return None
         try:
             pts3d = triangulate_points(
-                np.array(os_pair, dtype=np.float64),
-                np.array(od_pair, dtype=np.float64),
+                np.array([os_pt], dtype=np.float64),
+                np.array([od_pt], dtype=np.float64),
                 calib,
             )
         except Exception:
-            return np.nan
+            return None
         if pts3d is None or np.any(np.isnan(pts3d)):
-            return np.nan
-        return float(np.linalg.norm(pts3d[0] - pts3d[1]))
+            return None
+        return pts3d[0]
 
-    def _dist_2d_OS(os_pair):
-        """Fallback when no calibration: pixel-space OS thumb-index
-        distance.  Picks the less-divergent pair when calibration
-        isn't available."""
-        return float(np.linalg.norm(np.asarray(os_pair[0]) - np.asarray(os_pair[1])))
+    # ── Pass 1: gather candidate combos per frame ─────────────────
+    # candidate := (os_src, od_src, thumb_pt_3d, index_pt_3d,
+    #               thumb_bone_len, index_bone_len, dist_3d).
+    # We need thumb CMC (joint 1) + tip (joint 4) and index MCP
+    # (joint 5) + tip (joint 8) all triangulated for bone-length
+    # scoring.  Each combo's lengths use the chosen source per
+    # camera for ALL of those joints, so picking a source applies
+    # consistently across the whole landmark set.
+    cand_per_frame: list[list[tuple]] = [[] for _ in range(n)]
+    # First-pass min-distance pick + its bone lengths -- the seed
+    # for the temporal + bone-length statistics below.
+    first_dist = np.full(n, np.nan)
+    first_thumb = np.full(n, np.nan)
+    first_index = np.full(n, np.nan)
 
     for f in range(n):
-        os_fwd_full = (fwd_OS is not None and _has_any(fwd_OS, f))
-        os_rev_full = (rev_OS is not None and _has_any(rev_OS, f))
-        od_fwd_full = (fwd_OD is not None and _has_any(fwd_OD, f))
-        od_rev_full = (rev_OD is not None and _has_any(rev_OD, f))
+        os_codes = [c for c in os_lm if (_valid(os_lm[c], f, THUMB_TIP)
+                                          and _valid(os_lm[c], f, INDEX_TIP)
+                                          and _valid(os_lm[c], f, THUMB_CMC)
+                                          and _valid(os_lm[c], f, INDEX_MCP))]
+        od_codes = [c for c in od_lm if (_valid(od_lm[c], f, THUMB_TIP)
+                                          and _valid(od_lm[c], f, INDEX_TIP)
+                                          and _valid(od_lm[c], f, THUMB_CMC)
+                                          and _valid(od_lm[c], f, INDEX_MCP))]
+        if not os_codes or not od_codes:
+            continue
+        best_d = float("inf"); best_c = None
+        for oc in os_codes:
+            for dc in od_codes:
+                tip_t = _tri(os_lm[oc][f, THUMB_TIP],
+                             od_lm[dc][f, THUMB_TIP])
+                tip_i = _tri(os_lm[oc][f, INDEX_TIP],
+                             od_lm[dc][f, INDEX_TIP])
+                if tip_t is None or tip_i is None:
+                    continue
+                bone_t = _tri(os_lm[oc][f, THUMB_CMC],
+                              od_lm[dc][f, THUMB_CMC])
+                bone_i = _tri(os_lm[oc][f, INDEX_MCP],
+                              od_lm[dc][f, INDEX_MCP])
+                if bone_t is None or bone_i is None:
+                    continue
+                d_ti = float(np.linalg.norm(tip_t - tip_i))
+                l_t  = float(np.linalg.norm(tip_t - bone_t))
+                l_i  = float(np.linalg.norm(tip_i - bone_i))
+                cand_per_frame[f].append((oc, dc, d_ti, l_t, l_i))
+                if d_ti < best_d:
+                    best_d = d_ti
+                    best_c = (oc, dc, d_ti, l_t, l_i)
+        if best_c is not None:
+            first_dist[f]  = best_c[2]
+            first_thumb[f] = best_c[3]
+            first_index[f] = best_c[4]
 
-        # Source candidates for tip-based selection (need both tips).
-        os_fwd_tips = (fwd_OS is not None and _has_tips(fwd_OS, f))
-        os_rev_tips = (rev_OS is not None and _has_tips(rev_OS, f))
-        od_fwd_tips = (fwd_OD is not None and _has_tips(fwd_OD, f))
-        od_rev_tips = (rev_OD is not None and _has_tips(rev_OD, f))
+    # ── Pass 2: rolling reference + bone-length statistics ────────
+    WINDOW = 15           # ± window (frames) for rolling median + MAD
+    K_STABLE = 2.5        # z threshold for "stable" frame inclusion
+    MAD_TO_STD = 1.4826   # MAD → robust std scale
+    EPS = 1e-6
 
-        os_candidates = []   # list of (src_code, OS_thumb, OS_index)
-        if os_fwd_tips:
-            os_candidates.append((1, fwd_OS[f, THUMB], fwd_OS[f, INDEX]))
-        if os_rev_tips:
-            os_candidates.append((2, rev_OS[f, THUMB], rev_OS[f, INDEX]))
-        od_candidates = []
-        if od_fwd_tips:
-            od_candidates.append((1, fwd_OD[f, THUMB], fwd_OD[f, INDEX]))
-        if od_rev_tips:
-            od_candidates.append((2, rev_OD[f, THUMB], rev_OD[f, INDEX]))
+    def _rolling_median_mad(arr, w):
+        """Return (med, mad*scale) arrays of length n; NaN-aware."""
+        med = np.full(len(arr), np.nan)
+        scale = np.full(len(arr), np.nan)
+        for i in range(len(arr)):
+            lo = max(0, i - w); hi = min(len(arr), i + w + 1)
+            chunk = arr[lo:hi]
+            chunk = chunk[~np.isnan(chunk)]
+            if chunk.size >= 3:
+                m = float(np.median(chunk))
+                med[i] = m
+                scale[i] = MAD_TO_STD * float(np.median(np.abs(chunk - m)))
+        return med, scale
 
-        os_pick = 0  # 0 = none, 1 = forward, 2 = reverse
-        od_pick = 0
-        if os_candidates and od_candidates:
-            best_combo = None
-            best_d = float("inf")
-            for (os_code, ot, oi) in os_candidates:
-                for (od_code, dt, di) in od_candidates:
-                    if calib is not None:
-                        d = _dist_3d([ot, oi], [dt, di])
-                    else:
-                        d = _dist_2d_OS([ot, oi])
-                    if not np.isfinite(d):
-                        continue
-                    if d < best_d:
-                        best_d = d
-                        best_combo = (os_code, od_code)
-            if best_combo is not None:
-                os_pick, od_pick = best_combo
-            else:
-                # All combinations were non-finite (e.g.
-                # triangulation failed across the board); fall back
-                # to whichever single source has the most tip
-                # coverage.  Forward wins ties by convention.
-                os_pick = 1 if os_fwd_tips else (2 if os_rev_tips else 0)
-                od_pick = 1 if od_fwd_tips else (2 if od_rev_tips else 0)
-        elif os_candidates:
-            os_pick = os_candidates[0][0]
-        elif od_candidates:
-            od_pick = od_candidates[0][0]
+    ref_dist, ref_dist_std = _rolling_median_mad(first_dist, WINDOW)
 
-        # When no tip-based pick succeeded for a given camera but the
-        # camera has SOMETHING non-NaN in one of the passes, still
-        # copy that source's landmarks rather than dropping the
-        # whole camera-frame.  Mirrors the per-camera "use whichever
-        # is available" rule for non-tip joints.
-        if os_pick == 0:
-            if os_fwd_full:   os_pick = 1
-            elif os_rev_full: os_pick = 2
-        if od_pick == 0:
-            if od_fwd_full:   od_pick = 1
-            elif od_rev_full: od_pick = 2
+    # Stable mask: first-pass distance was within k_std of its
+    # local rolling median.  Use this to compute SUBJECT-LEVEL
+    # bone-length medians / stds (one constant per trial), since
+    # bone lengths shouldn't vary much across a trial -- a single
+    # median + spread is more reliable than per-frame estimates.
+    diffs = np.abs(first_dist - ref_dist)
+    eff_std = np.where(ref_dist_std > EPS, ref_dist_std, np.nan)
+    stable = ~np.isnan(diffs) & ~np.isnan(eff_std) & (diffs <= K_STABLE * eff_std)
+    thumb_stable = first_thumb[stable]
+    index_stable = first_index[stable]
+    have_bone_stats = thumb_stable.size >= 5 and index_stable.size >= 5
+    if have_bone_stats:
+        thumb_med = float(np.median(thumb_stable))
+        thumb_std = MAD_TO_STD * float(np.median(np.abs(thumb_stable - thumb_med)))
+        index_med = float(np.median(index_stable))
+        index_std = MAD_TO_STD * float(np.median(np.abs(index_stable - index_med)))
+    else:
+        thumb_med = thumb_std = index_med = index_std = None
 
-        # Copy the chosen source's full 21-joint set for each camera.
-        if os_pick == 1:
-            OS_combined[f] = fwd_OS[f]
-            if fwd_cOS is not None and f < fwd_cOS.shape[0]:
-                conf_OS[f] = fwd_cOS[f]
-        elif os_pick == 2:
-            OS_combined[f] = rev_OS[f]
-            if rev_cOS is not None and f < rev_cOS.shape[0]:
-                conf_OS[f] = rev_cOS[f]
-        if od_pick == 1:
-            OD_combined[f] = fwd_OD[f]
-            if fwd_cOD is not None and f < fwd_cOD.shape[0]:
-                conf_OD[f] = fwd_cOD[f]
-        elif od_pick == 2:
-            OD_combined[f] = rev_OD[f]
-            if rev_cOD is not None and f < rev_cOD.shape[0]:
-                conf_OD[f] = rev_cOD[f]
+    # ── Pass 3: score each frame's candidates + pick best ─────────
+    OS_combined = np.full((n, N_JOINTS, 2), np.nan)
+    OD_combined = np.full((n, N_JOINTS, 2), np.nan)
+    conf_OS = np.full(n, np.nan)
+    conf_OD = np.full(n, np.nan)
+    src_OS = np.zeros(n, dtype=np.uint8)
+    src_OD = np.zeros(n, dtype=np.uint8)
+
+    for f in range(n):
+        cands = cand_per_frame[f]
+        os_pick = od_pick = COMBINED_SRC_NONE
+
+        if cands:
+            # When we have rolling stats AND bone stats, score by
+            # z-sum.  Otherwise score by raw distance (original
+            # min-distance behaviour) so trials too short / sparse
+            # for stats still come out reasonable.
+            rd  = ref_dist[f] if np.isfinite(ref_dist[f]) else None
+            rds = ref_dist_std[f] if (rd is not None
+                                       and np.isfinite(ref_dist_std[f])) else None
+            best = None; best_score = float("inf")
+            for (oc, dc, d, l_t, l_i) in cands:
+                if rd is not None and rds is not None and have_bone_stats:
+                    z_d = abs(d   - rd       ) / max(rds,       EPS)
+                    z_t = abs(l_t - thumb_med) / max(thumb_std, EPS)
+                    z_i = abs(l_i - index_med) / max(index_std, EPS)
+                    score = z_d + z_t + z_i
+                else:
+                    score = d
+                if score < best_score:
+                    best_score = score
+                    best = (oc, dc)
+            if best is not None:
+                os_pick, od_pick = best
+
+        # When tip-based selection didn't run for a camera (no
+        # candidate had both tips), fall back to "use whichever
+        # source has any non-NaN joint" so non-tip joints still
+        # get populated.  Preference order matches the source
+        # code numbering: forward → cropped → reverse → static.
+        if os_pick == COMBINED_SRC_NONE:
+            for c, _ in COMBINED_SRC_FILES:
+                arr = os_lm.get(c)
+                if arr is not None and f < arr.shape[0] \
+                        and np.any(~np.isnan(arr[f, :, 0])):
+                    os_pick = c; break
+        if od_pick == COMBINED_SRC_NONE:
+            for c, _ in COMBINED_SRC_FILES:
+                arr = od_lm.get(c)
+                if arr is not None and f < arr.shape[0] \
+                        and np.any(~np.isnan(arr[f, :, 0])):
+                    od_pick = c; break
+
+        # Copy the chosen source's full 21-joint set per camera.
+        if os_pick != COMBINED_SRC_NONE:
+            OS_combined[f] = os_lm[os_pick][f]
+            cf = os_cf.get(os_pick)
+            if cf is not None and f < cf.shape[0]:
+                conf_OS[f] = cf[f]
+        if od_pick != COMBINED_SRC_NONE:
+            OD_combined[f] = od_lm[od_pick][f]
+            cf = od_cf.get(od_pick)
+            if cf is not None and f < cf.shape[0]:
+                conf_OD[f] = cf[f]
         src_OS[f] = os_pick
         src_OD[f] = od_pick
 
@@ -1204,13 +1299,17 @@ def build_combined_mp_npz_for_trial(subject_name: str, trial_stem: str) -> str |
     except OSError as e:
         logger.warning(f"Failed to write {out_path}: {e}")
         return None
-    n_os_fwd = int(np.sum(src_OS == 1))
-    n_os_rev = int(np.sum(src_OS == 2))
-    n_od_fwd = int(np.sum(src_OD == 1))
-    n_od_rev = int(np.sum(src_OD == 2))
+
+    def _counts(arr):
+        return ", ".join(
+            f"{COMBINED_SRC_NAMES[c]}={int(np.sum(arr == c))}"
+            for c, _ in COMBINED_SRC_FILES if int(np.sum(arr == c))
+        ) or "none"
     logger.info(
         f"Combined MP for {subject_name}/{trial_stem}: "
-        f"OS fwd={n_os_fwd} rev={n_os_rev} | OD fwd={n_od_fwd} rev={n_od_rev}"
+        f"OS [{_counts(src_OS)}] | OD [{_counts(src_OD)}] | "
+        f"bone-stats {'on' if have_bone_stats else 'off'} "
+        f"(stable_n={int(np.sum(stable))}/{int(np.sum(~np.isnan(first_dist)))})"
     )
     return str(out_path)
 
@@ -1229,8 +1328,12 @@ def maybe_rebuild_combined_for_subject(subject_name: str) -> int:
     for trial_dir in subj_dir.iterdir():
         if not trial_dir.is_dir():
             continue
-        if (trial_dir / "mediapipe.npz").exists() \
-                and (trial_dir / "mediapipe_reverse.npz").exists():
+        # Build combined as long as at least TWO of the four source
+        # files exist (one source alone is just that source -- no
+        # fusion to do).  Mirrors the 4-source builder's input set.
+        present = sum(1 for _, fname in COMBINED_SRC_FILES
+                       if (trial_dir / fname).exists())
+        if present >= 2:
             try:
                 if build_combined_mp_npz_for_trial(subject_name, trial_dir.name):
                     n_built += 1
@@ -1244,10 +1347,11 @@ def maybe_rebuild_combined_for_subject(subject_name: str) -> int:
 def load_mediapipe_combined_prelabels(subject_name: str) -> dict | None:
     """Load the per-trial combined MediaPipe prelabels for a subject.
 
-    The combined layer is a per-(frame, camera) fusion of the
-    forward + reverse passes -- see ``build_combined_mp_npz_for_trial``
-    for the selection logic.  Loaded just like the other passes
-    so the Labels page can show it as its own source layer.
+    The combined layer is a per-(frame, camera) fusion of up to four
+    MP source passes (forward, cropped, reverse, static) -- see
+    ``build_combined_mp_npz_for_trial`` for the selection logic.
+    Loaded just like the other passes so the Labels page can show
+    it as its own source layer.
     """
     return load_mediapipe_prelabels(
         subject_name,
