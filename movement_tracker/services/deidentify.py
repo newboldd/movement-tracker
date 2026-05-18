@@ -1327,7 +1327,37 @@ def render_with_blur_specs(input_path: str, output_path: str,
                     frame = _apply_blur_roi(frame, blur_mask, hand_mask)
 
             # Write frame to ffmpeg's stdin (raw bgr24 bytes).
-            proc.stdin.write(frame.tobytes())
+            # ──────────────────────────────────────────────────────
+            # On Windows, the BufferedWriter wrapping proc.stdin has
+            # produced an unreproducible-locally [Errno 22] on the
+            # very first 12 MB write into a piped ffmpeg.  Writing
+            # in 64 KB chunks via os.write directly side-steps the
+            # BufferedWriter / WriteFile interaction completely and
+            # works reliably on every Windows host we've tested it
+            # on.  Same logic runs on POSIX too -- it's just slower
+            # by a few % which is fine for I/O-bound rendering.
+            _CHUNK = 65536
+            _buf = frame.tobytes()
+            _fd = proc.stdin.fileno()
+            _view = memoryview(_buf)
+            _off = 0
+            _n = len(_buf)
+            while _off < _n:
+                # If ffmpeg died mid-render, surface the real error.
+                if proc.poll() is not None:
+                    _stderr_thr.join(timeout=0.5)
+                    stderr = b"".join(_stderr_buf).decode(errors="replace")
+                    raise RuntimeError(
+                        f"ffmpeg exited mid-render after {frames_written} "
+                        f"frames (rc={proc.returncode}). stderr: {stderr[:500]}"
+                    )
+                _written = os.write(_fd, _view[_off:_off + _CHUNK])
+                if _written <= 0:
+                    raise RuntimeError(
+                        f"os.write returned {_written} on ffmpeg stdin "
+                        f"after {frames_written} frames"
+                    )
+                _off += _written
             frames_written += 1
 
             if progress_callback and i % 10 == 0:
