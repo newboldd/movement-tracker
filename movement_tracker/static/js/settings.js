@@ -338,7 +338,15 @@ async function checkForUpdates() {
 
         versionEl.textContent = `Version: ${data.current_short}`;
 
-        if (data.update_available) {
+        // On dev checkouts the server refuses /apply, so don't expose
+        // the button at all and surface a clear status instead.
+        if (data.dev_checkout) {
+            const aheadOrBehind = data.update_available
+                ? `Local SHA (<b>${data.current_short}</b>) differs from origin/master (<b>${data.latest_short}</b>).`
+                : `Up to date (${data.current_short}).`;
+            statusEl.innerHTML = `<span style="color:var(--text-muted);">${aheadOrBehind} In-app update disabled on git checkout — use <code>git pull</code> in the terminal.</span>`;
+            applyBtn.style.display = 'none';
+        } else if (data.update_available) {
             statusEl.innerHTML = `<span style="color:var(--blue);">Update available: <b>${data.latest_short}</b> — ${data.latest_message}</span>`;
             applyBtn.style.display = '';
         } else if (data.first_install) {

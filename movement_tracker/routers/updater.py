@@ -43,6 +43,15 @@ def _read_local_sha() -> str | None:
         return None
 
 
+def _is_dev_checkout() -> bool:
+    """True if this install is a git checkout (has .git/) or the
+    operator opted out via env var.  In either case we refuse the
+    in-app update so local commits don't get clobbered."""
+    if os.environ.get("MT_NO_AUTO_UPDATE") == "1":
+        return True
+    return (PROJECT_DIR / ".git").exists()
+
+
 @router.get("/check")
 def check_for_updates() -> dict:
     """Compare local version against latest GitHub commit."""
@@ -71,6 +80,10 @@ def check_for_updates() -> dict:
         "latest_message": latest_message,
         "update_available": bool(local_sha and latest_sha and local_sha != latest_sha),
         "first_install": local_sha is None,
+        # When True, /apply will 409.  The Settings UI uses this to
+        # hide / disable the "Update Now" button so dev checkouts can't
+        # be downgraded by a misclick.
+        "dev_checkout": _is_dev_checkout(),
     }
 
 
@@ -80,7 +93,19 @@ def apply_update() -> dict:
 
     After copying new files, writes the new SHA to VERSION and exits
     with code 42 to trigger a restart from the launcher script.
+
+    Refuses on dev checkouts (presence of ``.git/`` or
+    ``MT_NO_AUTO_UPDATE=1``) so a misclick of "Update Now" in the
+    Settings page can't clobber local commits.
     """
+    if _is_dev_checkout():
+        raise HTTPException(
+            409,
+            "Refusing to overwrite a git checkout.  Use `git pull` from "
+            "the terminal, or unset MT_NO_AUTO_UPDATE and remove the "
+            "`.git/` directory to enable the in-app updater on this "
+            "install.",
+        )
     # 1. Get latest SHA
     try:
         req = urllib.request.Request(GITHUB_API, headers={
