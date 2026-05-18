@@ -420,6 +420,7 @@ def detect_strategy_g(
     steps: dict,
     params: dict,
     peaks_only: bool = False,
+    existing_peaks: list[int] | None = None,
 ) -> dict[str, list[int]]:
     """Configurable Strategy G: multi-metric event detection.
 
@@ -455,25 +456,37 @@ def detect_strategy_g(
         dist, min_event_gap, min_peak_height, valley_thresh, max_valid_dist
     )
 
-    # Refine peaks with reversal metric
-    refined_peaks = []
-    if use_reversal:
-        rev = np.array(reversal, dtype=np.float64)
-        for pk in merged_peaks:
-            search_lo = max(0, pk - reversal_search_radius)
-            search_hi = min(n - 1, pk + reversal_search_radius)
-            candidates = list(range(search_lo, search_hi + 1))
-            valid = [f for f in candidates if rev[f] > 0]
-            if valid:
-                refined = min(valid, key=lambda f: float(rev[f]))
-                if use_peak_guard and peak_guard_factor > 0 and d[refined] < d[pk] * (1 - peak_guard_factor):
-                    refined_peaks.append(pk)
-                else:
-                    refined_peaks.append(refined)
-            else:
-                refined_peaks.append(pk)
+    # ``existing_peaks`` lets the caller hand us the peak set to use
+    # for open/close detection without re-running peak finding.  This
+    # is what the Events page's "Detect Opens/Closes" button sends:
+    # the user's current (possibly hand-edited, possibly unsaved)
+    # peaks become the anchors, and downstream open/close detection
+    # runs around them.  Peaks are in LOCAL (trial-relative) indices,
+    # already clipped to [0, n).
+    if existing_peaks is not None:
+        refined_peaks = sorted(set(
+            int(p) for p in existing_peaks if 0 <= int(p) < n
+        ))
     else:
-        refined_peaks = list(merged_peaks)
+        # Refine peaks with reversal metric
+        refined_peaks = []
+        if use_reversal:
+            rev = np.array(reversal, dtype=np.float64)
+            for pk in merged_peaks:
+                search_lo = max(0, pk - reversal_search_radius)
+                search_hi = min(n - 1, pk + reversal_search_radius)
+                candidates = list(range(search_lo, search_hi + 1))
+                valid = [f for f in candidates if rev[f] > 0]
+                if valid:
+                    refined = min(valid, key=lambda f: float(rev[f]))
+                    if use_peak_guard and peak_guard_factor > 0 and d[refined] < d[pk] * (1 - peak_guard_factor):
+                        refined_peaks.append(pk)
+                    else:
+                        refined_peaks.append(refined)
+                else:
+                    refined_peaks.append(pk)
+        else:
+            refined_peaks = list(merged_peaks)
 
     # Peaks-only mode: skip open/close detection entirely
     if peaks_only:

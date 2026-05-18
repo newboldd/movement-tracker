@@ -1425,8 +1425,34 @@ def detect_events_v2(session_id: int, body: dict = Body(...)) -> dict:
     params = body.get("params", {})
     steps = body.get("steps", {})
     metrics = body.get("metrics")
-    peaks_only = bool(body.get("peaks_only", False))
+    # ``phase`` is the new explicit control replacing the boolean
+    # ``peaks_only`` flag.  Three values:
+    #   "peaks"        — detect peaks only, leave opens/closes alone
+    #   "opens_closes" — skip peak detection, use the caller-supplied
+    #                    ``existing_peaks`` (global frame numbers) as
+    #                    anchors for open/close detection.  Peaks in
+    #                    the event marker arrays stay untouched.
+    #   "all"          — full pipeline (default), unchanged behaviour.
+    # ``peaks_only`` is honoured as a legacy fallback so older clients
+    # keep working until they migrate to ``phase``.
+    phase = body.get("phase")
+    if phase not in ("peaks", "opens_closes", "all"):
+        # Map legacy peaks_only → phase.
+        phase = "peaks" if bool(body.get("peaks_only", False)) else "all"
+    peaks_only = (phase == "peaks")
+    skip_peak_detect = (phase == "opens_closes")
     enforce_sequence = bool(body.get("enforce_sequence", True))
+
+    # Convert caller-supplied peaks (global frame numbers) into local
+    # trial-relative indices, dropped if outside the trial.  Only used
+    # by phase="opens_closes"; ignored otherwise.
+    existing_peaks_local = None
+    if skip_peak_detect:
+        raw = body.get("existing_peaks") or []
+        existing_peaks_local = sorted({
+            int(f) - sf for f in raw
+            if isinstance(f, (int, float)) and sf <= int(f) <= ef
+        })
 
     min_event_gap = int(params.get("min_event_gap", 10))
 
@@ -1472,8 +1498,17 @@ def detect_events_v2(session_id: int, body: dict = Body(...)) -> dict:
     # Run Strategy G detection (returns global frame numbers)
     detected = detect_strategy_g(
         trial_dist, reversal, motion_ssd, per_cam_ssd, cam_names,
-        start_frame=sf, steps=steps, params=params, peaks_only=peaks_only,
+        start_frame=sf, steps=steps, params=params,
+        peaks_only=peaks_only,
+        existing_peaks=existing_peaks_local,
     )
+
+    # In opens-closes phase the caller's peaks are authoritative — we
+    # never touch the peak array, and we plumb the user-supplied
+    # global frame numbers back through so downstream "close after
+    # peak" logic uses them.
+    if skip_peak_detect:
+        detected["peak"] = sorted({sf + p for p in (existing_peaks_local or [])})
 
     # Merge with saved events (scoped to this trial)
     saved_events = _read_events_csv(subject_name)
@@ -1481,7 +1516,16 @@ def detect_events_v2(session_id: int, body: dict = Body(...)) -> dict:
     def _trial_events(frames):
         return [f for f in frames if sf <= f <= ef]
 
-    merge_types = ("peak",) if peaks_only else AUTO_DETECT_TYPES
+    # Which event types this phase WRITES — used for both saved-events
+    # merging and the edge-margin filter below.  "peaks" only touches
+    # peaks.  "opens_closes" only touches open + close.  "all" touches
+    # everything.
+    if phase == "peaks":
+        merge_types = ("peak",)
+    elif phase == "opens_closes":
+        merge_types = ("open", "close")
+    else:
+        merge_types = AUTO_DETECT_TYPES
     for etype in merge_types:
         trial_saved = _trial_events(saved_events.get(etype, []))
         if trial_saved:
@@ -1493,7 +1537,7 @@ def detect_events_v2(session_id: int, body: dict = Body(...)) -> dict:
     # closes are not, compute a close after every peak — the minimum distance
     # between each peak and the following open (or trial end).
     trial_saved_closes = _trial_events(saved_events.get("close", []))
-    if not trial_saved_closes and not peaks_only and detected["peak"]:
+    if not trial_saved_closes and phase != "peaks" and detected["peak"]:
         max_valid_dist = float(params.get("max_valid_dist", 200.0))
         d = [float(v) if v is not None and 0 <= float(v) <= max_valid_dist
              else float("inf") for v in trial_dist]
@@ -1521,8 +1565,10 @@ def detect_events_v2(session_id: int, body: dict = Body(...)) -> dict:
         detected[etype] = [f for f in detected[etype] if valid_start <= f <= valid_end]
 
     # Validate event sequence: open → peak → close → repeat
-    # Skipped in peaks_only mode or when enforce_sequence is disabled
-    if not peaks_only and enforce_sequence:
+    # Skipped in peaks-only mode or when enforce_sequence is disabled.
+    # opens_closes phase still runs sequence enforcement because the
+    # peaks the caller supplied are part of the chain we're validating.
+    if phase != "peaks" and enforce_sequence:
         all_events = []
         for f in detected["open"]:
             all_events.append((f, "open"))

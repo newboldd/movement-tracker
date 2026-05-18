@@ -228,16 +228,13 @@
             <!-- Detection Mode -->
             <div style="margin-bottom:10px;">
                 <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">Detection Mode</div>
-                <div style="display:flex;gap:16px;margin-bottom:4px;">
-                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;" title="Only detect peaks -- skip open/close detection and sequence validation.">
-                        <input type="checkbox" id="stepPeaksOnly" checked>
-                        Peaks only
-                    </label>
-                    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;" title="Enforce open/peak/close sequence: drop events that don't fit.">
-                        <input type="checkbox" id="stepEnforceSequence" checked>
-                        Enforce sequence
-                    </label>
+                <div style="font-size:11px;color:var(--text-muted);line-height:1.5;margin-bottom:6px;">
+                    Two-phase workflow: <b>Detect Peaks</b> → edit peaks → <b>Detect Opens/Closes</b> (uses your current peaks as anchors and won't touch them) → edit → <b>Save</b>.  Or click <b>Detect All</b> to run both phases at once.
                 </div>
+                <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;" title="Enforce open/peak/close sequence: drop events that don't fit.  Disabled for the Detect Peaks button.">
+                    <input type="checkbox" id="stepEnforceSequence" checked>
+                    Enforce open/peak/close sequence
+                </label>
             </div>
 
             <!-- Refinement Step toggles -->
@@ -282,13 +279,19 @@
             <!-- Actions -->
             <div class="actions">
                 <button class="btn btn-sm" id="detectCancelBtn">Cancel</button>
-                <button class="btn btn-sm btn-success" id="runDetectBtn">Run Detection</button>
+                <div style="flex:1;"></div>
+                <button class="btn btn-sm" id="detectPeaksBtn"
+                        title="Detect peaks only.  Edits to existing opens/closes are preserved.">Detect Peaks</button>
+                <button class="btn btn-sm" id="detectOpensClosesBtn"
+                        title="Detect opens and closes anchored to the trial's CURRENT peaks (whatever is on screen now, edited or not).  Peaks are not modified.">Detect Opens/Closes</button>
+                <button class="btn btn-sm btn-success" id="detectAllBtn"
+                        title="Run both phases in one shot.  Replaces any unsaved peak / open / close edits for this trial.">Detect All</button>
             </div>
         </div>
     </div>
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js?v=10"></script>
-    <script src="/static/js/events.js?v=1"></script>
+    <script src="/static/js/events.js?v=2"></script>
 </body>
 </html>

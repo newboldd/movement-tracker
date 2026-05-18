@@ -1100,13 +1100,28 @@ const eventsPage = (() => {
             trialLabel.textContent = `(${_shortTrialName(trials[currentEventTrialIdx].trial_name)})`;
         }
 
-        // Auto-default "Peaks only" based on saved events
-        const peaksOnlyCb = $('stepPeaksOnly');
-        if (peaksOnlyCb) {
-            const trialEvts = eventsInTrial(currentEventTrialIdx);
-            const hasSavedPeaks = (savedEventFrames.peak || new Set()).size > 0 &&
-                trialEvts.peak && trialEvts.peak.some(f => savedEventFrames.peak.has(f));
-            peaksOnlyCb.checked = !hasSavedPeaks;
+        // Highlight the recommended button based on what's already on
+        // the timeline.  No peaks yet -> Detect Peaks.  Peaks present
+        // (saved or in-memory from a prior detect run) but no
+        // opens/closes -> Detect Opens/Closes.  Both present -> Detect
+        // All is the only fresh-restart option, so highlight nothing.
+        // "Recommended" is a soft hint -- the user can click any of the
+        // three at any time.
+        const trialEvts = eventsInTrial(currentEventTrialIdx);
+        const havePeaks = (trialEvts.peak || []).length > 0;
+        const haveOC = ((trialEvts.open || []).length + (trialEvts.close || []).length) > 0;
+        const btnP = $('detectPeaksBtn');
+        const btnOC = $('detectOpensClosesBtn');
+        const btnAll = $('detectAllBtn');
+        [btnP, btnOC, btnAll].forEach(b => { if (b) b.classList.remove('btn-success'); });
+        if (!havePeaks) {
+            if (btnP) btnP.classList.add('btn-success');
+        } else if (!haveOC) {
+            if (btnOC) btnOC.classList.add('btn-success');
+        } else {
+            // Both sets exist -- Detect All is the only fresh-restart
+            // path so highlight that as the "default loud action".
+            if (btnAll) btnAll.classList.add('btn-success');
         }
 
         showMetricPlotsForCurrentTrial();
@@ -1370,13 +1385,29 @@ const eventsPage = (() => {
         });
     }
 
-    async function runDetection() {
-        const btn = $('runDetectBtn');
-        if (btn) { btn.textContent = 'Running...'; btn.disabled = true; }
+    // Phase: "peaks" / "opens_closes" / "all".
+    //   peaks         — only the peak array is overwritten.  Existing
+    //                   opens/closes are untouched.
+    //   opens_closes  — current peaks (from the timeline, edited or
+    //                   not) are sent to the backend as anchors.
+    //                   Backend skips peak detection entirely and
+    //                   only writes opens + closes.
+    //   all           — both phases run fresh.  Replaces all three
+    //                   event arrays for this trial.
+    async function runDetection(phase) {
+        if (!phase) phase = 'all';
+        const triggerBtn = phase === 'peaks'        ? $('detectPeaksBtn')
+                          : phase === 'opens_closes' ? $('detectOpensClosesBtn')
+                          : $('detectAllBtn');
+        const allBtns = [
+            $('detectPeaksBtn'), $('detectOpensClosesBtn'),
+            $('detectAllBtn'), $('detectCancelBtn'),
+        ].filter(Boolean);
+        const originalText = triggerBtn ? triggerBtn.textContent : '';
+        allBtns.forEach(b => { b.disabled = true; });
+        if (triggerBtn) triggerBtn.textContent = 'Running...';
 
         const snapshot = snapshotEventMarkers();
-
-        const peaksOnly = $('stepPeaksOnly').checked;
         const enforceSequence = $('stepEnforceSequence').checked;
 
         const params = {
@@ -1408,18 +1439,43 @@ const eventsPage = (() => {
             ? { reversal: cached.reversal, motion_ssd: cached.motion_ssd, per_cam_ssd: cached.per_cam_ssd }
             : null;
 
+        const trial = trials[currentEventTrialIdx];
+        // For phase="opens_closes", send the current in-memory peaks
+        // (filtered to this trial's frame range) as global frame
+        // numbers.  Backend converts these to local indices and
+        // anchors open/close detection on them; peak detection is
+        // skipped entirely so the user's edits survive.
+        let existingPeaks;
+        if (phase === 'opens_closes') {
+            existingPeaks = (eventMarkers.peak || []).filter(
+                f => f >= trial.start_frame && f <= trial.end_frame
+            );
+            if (existingPeaks.length === 0) {
+                allBtns.forEach(b => { b.disabled = false; });
+                if (triggerBtn) triggerBtn.textContent = originalText;
+                alert('No peaks in this trial to anchor opens/closes on.  Run "Detect Peaks" first (or add peaks manually).');
+                return;
+            }
+        }
+
         try {
             const result = await API.post(`/api/labeling/sessions/${sessionId}/detect_events_v2`, {
                 trial_index: currentEventTrialIdx,
-                peaks_only: peaksOnly,
+                phase,
+                existing_peaks: existingPeaks,
                 enforce_sequence: enforceSequence,
                 params,
                 steps,
                 metrics,
             });
 
-            const trial = trials[currentEventTrialIdx];
-            const typesToReplace = peaksOnly ? ['peak'] : EVENT_TYPES;
+            // typesToReplace: which event arrays this phase wrote.
+            // peaks         → ['peak']
+            // opens_closes  → ['open', 'close']  (peaks left alone)
+            // all           → all three
+            const typesToReplace = phase === 'peaks'         ? ['peak']
+                                  : phase === 'opens_closes' ? ['open', 'close']
+                                  : EVENT_TYPES;
             typesToReplace.forEach(t => {
                 const otherTrialEvents = eventMarkers[t].filter(
                     f => f < trial.start_frame || f > trial.end_frame
@@ -1441,14 +1497,21 @@ const eventsPage = (() => {
             if (cached) showMetricPlotsForCurrentTrial();
 
             const trialEvents = eventsInTrial(currentEventTrialIdx);
-            const total = EVENT_TYPES.reduce((s, t) => s + (trialEvents[t] || []).length, 0);
-            const modeLabel = peaksOnly ? 'peaks' : 'events';
+            const phaseLabel = phase === 'peaks' ? 'peaks'
+                              : phase === 'opens_closes' ? 'opens/closes'
+                              : 'events';
+            const total = (phase === 'peaks'
+                ? (trialEvents.peak || []).length
+                : phase === 'opens_closes'
+                ? (trialEvents.open || []).length + (trialEvents.close || []).length
+                : EVENT_TYPES.reduce((s, t) => s + (trialEvents[t] || []).length, 0));
             const tn = _shortTrialName(trial.trial_name);
-            setStatus(`Detected ${total} ${modeLabel} in ${tn} -- Save to keep`);
+            setStatus(`Detected ${total} ${phaseLabel} in ${tn} -- Save to keep`);
         } catch (e) {
             alert('Detection failed: ' + e.message);
         } finally {
-            if (btn) { btn.textContent = 'Run Detection'; btn.disabled = false; }
+            allBtns.forEach(b => { b.disabled = false; });
+            if (triggerBtn) triggerBtn.textContent = originalText;
         }
     }
 
@@ -1508,7 +1571,9 @@ const eventsPage = (() => {
 
         // Detect modal buttons
         $('detectCancelBtn').addEventListener('click', closeDetectModal);
-        $('runDetectBtn').addEventListener('click', runDetection);
+        $('detectPeaksBtn')?.addEventListener('click', () => runDetection('peaks'));
+        $('detectOpensClosesBtn')?.addEventListener('click', () => runDetection('opens_closes'));
+        $('detectAllBtn')?.addEventListener('click', () => runDetection('all'));
         document.querySelectorAll('#detectFocusSelector button').forEach(btn => {
             btn.addEventListener('click', () => setDetectFocus(btn.getAttribute('data-focus')));
         });
