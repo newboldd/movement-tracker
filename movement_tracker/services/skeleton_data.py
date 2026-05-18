@@ -1247,6 +1247,35 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
             reverse_joints_3d[:, j, :] = triangulate_points(
                 reverse_tracked_L[:, j, :], reverse_tracked_R[:, j, :], calib)
 
+    # ── Load Static-mode MediaPipe (per-frame palm detector, no tracker) ──
+    # Static mode disables MediaPipe's between-frame tracker so every
+    # frame is a fresh detection.  Stored to a separate per-trial npz
+    # so the user can compare against forward / reverse without one
+    # source overwriting another.
+    static_tracked_L = np.full((N, 21, 2), np.nan)
+    static_tracked_R = np.full((N, 21, 2), np.nan)
+    from .mediapipe_prelabel import load_mediapipe_static_prelabels
+    stat = load_mediapipe_static_prelabels(subject_name)
+    if stat is not None:
+        os_lm_s = stat.get("OS_landmarks")
+        od_lm_s = stat.get("OD_landmarks")
+        if os_lm_s is not None:
+            end_s = min(start_frame + N, os_lm_s.shape[0])
+            if end_s > start_frame:
+                n = end_s - start_frame
+                static_tracked_L[:n] = os_lm_s[start_frame:end_s]
+        if od_lm_s is not None:
+            end_s = min(start_frame + N, od_lm_s.shape[0])
+            if end_s > start_frame:
+                n = end_s - start_frame
+                static_tracked_R[:n] = od_lm_s[start_frame:end_s]
+
+    static_joints_3d = np.full((N, 21, 3), np.nan)
+    if has_calib:
+        for j in range(21):
+            static_joints_3d[:, j, :] = triangulate_points(
+                static_tracked_L[:, j, :], static_tracked_R[:, j, :], calib)
+
     # ── Load Combined-pass MediaPipe (forward+reverse fusion) ──
     # Combined picks per-camera-per-frame between forward and reverse
     # using min-triangulated-distance as the tie-break -- see
@@ -1463,6 +1492,7 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
     distances_skel_legacy = _compute_distances(legacy_joints_3d) if has_skel_legacy else {}
     distances_mp = _compute_distances(mp_joints_3d)
     distances_reverse = _compute_distances(reverse_joints_3d)
+    distances_static = _compute_distances(static_joints_3d)
     distances_combined = _compute_distances(combined_joints_3d)
     distances_vision = _compute_distances(vision_joints_3d)
     # Parse the HRnet peaks JSON once and reuse for every kind below
@@ -1508,6 +1538,7 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
     if has_skel_legacy: distances_skel_legacy.update(_compute_mcp_distances(legacy_joints_3d))
     distances_mp.update(_compute_mcp_distances(mp_joints_3d))
     distances_reverse.update(_compute_mcp_distances(reverse_joints_3d))
+    distances_static.update(_compute_mcp_distances(static_joints_3d))
     distances_combined.update(_compute_mcp_distances(combined_joints_3d))
     distances_vision.update(_compute_mcp_distances(vision_joints_3d))
 
@@ -1754,6 +1785,12 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
         "reverse_joints_3d": _points_to_list(reverse_joints_3d),
         "has_reverse_mp": bool(np.any(~np.isnan(reverse_tracked_L))
                                 or np.any(~np.isnan(reverse_tracked_R))),
+        # Static-mode MediaPipe (per-frame palm detector, no tracker)
+        "static_tracked_L": _points_to_list(static_tracked_L),
+        "static_tracked_R": _points_to_list(static_tracked_R),
+        "static_joints_3d": _points_to_list(static_joints_3d),
+        "has_static_mp": bool(np.any(~np.isnan(static_tracked_L))
+                                or np.any(~np.isnan(static_tracked_R))),
         # Combined-pass MediaPipe (per-camera fusion of forward + reverse)
         "combined_tracked_L": _points_to_list(combined_tracked_L),
         "combined_tracked_R": _points_to_list(combined_tracked_R),
@@ -1818,6 +1855,7 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
         "distances_skel_legacy": distances_skel_legacy,
         "distances_mp": distances_mp,
         "distances_reverse": distances_reverse,
+        "distances_static": distances_static,
         "distances_combined": distances_combined,
         "distances_vision": distances_vision,
         "distances_heatmap": distances_heatmap,

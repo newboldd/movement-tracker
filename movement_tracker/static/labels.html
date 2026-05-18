@@ -177,6 +177,20 @@
                 <input type="checkbox" id="showReverse3D" style="margin:0;justify-self:center;">
                 <span></span>
 
+                <!-- 1a''. Static — MediaPipe run with static_image_mode=True,
+                     i.e. the full palm detector on every frame (no
+                     between-frame tracker).  Stored separately in
+                     <trial>/mediapipe_static.npz so it doesn't
+                     overwrite the forward / reverse passes.  May
+                     later be folded into Combined's source set. -->
+                <span style="color:var(--text-muted);padding-left:18px;"
+                      title="MediaPipe static_image_mode=True: per-frame palm detector with no temporal tracker. Saved to <trial>/mediapipe_static.npz.">
+                    <span class="layer-swatch" style="background:#26c6da;"></span> Static
+                </span>
+                <input type="checkbox" id="showStatic2D" style="margin:0;justify-self:center;">
+                <input type="checkbox" id="showStatic3D" style="margin:0;justify-self:center;">
+                <span></span>
+
                 <!-- 1a'. Combined — per-(frame, camera) fusion of forward
                      + reverse MediaPipe.  When both passes have valid
                      thumb + index tips for a frame, picks the source
@@ -1162,7 +1176,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=372" type="module"></script>
+    <script src="/static/js/labels.js?v=373" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

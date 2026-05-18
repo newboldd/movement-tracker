@@ -37,9 +37,12 @@ const manoViewer = (() => {
     // can compare forward vs reverse runs frame-by-frame.
     let showReverse2D = false;
     let showReverse3D = false;
+    let showStatic2D = false;
+    let showStatic3D = false;
     let showCombined2D = false;
     let showCombined3D = false;
     let showReverseSkel = true;
+    let showStaticSkel = true;
     let showCombinedSkel = true;
     // Stereo (cross-camera image-alignment) overlay.  Only 2D —
     // there's no 3D representation; the partner-camera MP label is
@@ -583,7 +586,7 @@ const manoViewer = (() => {
 
     // Three.js
     let scene, camera3d, renderer;
-    let manoGroup, skelV2Group, legacyGroup, mpGroup, reverseGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup;
+    let manoGroup, skelV2Group, legacyGroup, mpGroup, reverseGroup, staticGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup;
     let camera3dInit = false;
 
     // Scene-space orbit: rotate content around hand center while camera stays fixed
@@ -1550,6 +1553,7 @@ const manoViewer = (() => {
         }
         $('showMP2D').addEventListener('change', e => { showMP2D = e.target.checked; updateLayerFlags(); });
         $('showReverse2D').addEventListener('change', e => { showReverse2D = e.target.checked; updateLayerFlags(); });
+        $('showStatic2D')?.addEventListener('change', e => { showStatic2D = e.target.checked; updateLayerFlags(); });
         $('showCombined2D')?.addEventListener('change', e => { showCombined2D = e.target.checked; updateLayerFlags(); });
         // Helper: clear the selected-joint marker if none of the three
         // Stereo variants is visible anymore.
@@ -1737,6 +1741,7 @@ const manoViewer = (() => {
         });
         $('showMP3D').addEventListener('change', e => { showMP3D = e.target.checked; updateLayerFlags(); });
         $('showReverse3D').addEventListener('change', e => { showReverse3D = e.target.checked; updateLayerFlags(); });
+        $('showStatic3D')?.addEventListener('change', e => { showStatic3D = e.target.checked; updateLayerFlags(); });
         $('showCombined3D')?.addEventListener('change', e => { showCombined3D = e.target.checked; updateLayerFlags(); });
         $('showMano2D').addEventListener('change', e => { showMano2D = e.target.checked; updateLayerFlags(); _updateHandDiagramColor(); });
         $('showMano3D').addEventListener('change', e => { showMano3D = e.target.checked; updateLayerFlags(); _updateHandDiagramColor(); });
@@ -3819,6 +3824,10 @@ const manoViewer = (() => {
         const reverseKp = isLeft
             ? trialData.reverse_tracked_L
             : trialData.reverse_tracked_R;
+        // Static-mode MediaPipe layer (no temporal tracker).
+        const staticKp = isLeft
+            ? trialData.static_tracked_L
+            : trialData.static_tracked_R;
         // Combined MediaPipe layer (per-camera-frame forward/reverse fusion).
         const combinedKp = isLeft
             ? trialData.combined_tracked_L
@@ -3906,6 +3915,17 @@ const manoViewer = (() => {
                         reverseKp[fn][j][0] * pixelScale,
                         reverseKp[fn][j][1] * pixelScale,
                         '#e040fb', 1.5, 0.5
+                    );
+                }
+                // Static (cyan) — per-frame palm detector, no tracker.
+                if (showStaticSkel && showStatic2D
+                    && staticKp?.[fn]?.[i] && staticKp[fn][j]) {
+                    drawLine(
+                        staticKp[fn][i][0] * pixelScale,
+                        staticKp[fn][i][1] * pixelScale,
+                        staticKp[fn][j][0] * pixelScale,
+                        staticKp[fn][j][1] * pixelScale,
+                        '#26c6da', 1.5, 0.5
                     );
                 }
                 // Combined (orange) — fused forward+reverse layer.
@@ -4073,6 +4093,16 @@ const manoViewer = (() => {
                 const x = reverseKp[fn][j][0] * pixelScale;
                 const y = reverseKp[fn][j][1] * pixelScale;
                 drawCross(x, y, '#e040fb', 4);
+            }
+        }
+
+        // Static-mode MediaPipe joint markers (cyan).
+        if (showStatic2D && staticKp && staticKp[fn]) {
+            for (let j = 0; j < 21; j++) {
+                if (!isJointVisible(j) || !staticKp[fn][j]) continue;
+                const x = staticKp[fn][j][0] * pixelScale;
+                const y = staticKp[fn][j][1] * pixelScale;
+                drawCross(x, y, '#26c6da', 4);
             }
         }
 
@@ -5100,6 +5130,7 @@ const manoViewer = (() => {
             const legacyd = _getMetricData('skel_legacy', metric);
             const mp   = _getMetricData('mp',   metric);
             const rev  = _getMetricData('reverse', metric);
+            const stt  = _getMetricData('static', metric);
             const cmb  = _getMetricData('combined', metric);
             const vis  = _getMetricData('vision', metric);
             const dlc  = isAng ? null : trialData.distances_dlc?.[metric];
@@ -5116,6 +5147,7 @@ const manoViewer = (() => {
             if (showLegacyV2_2D || showLegacyV2_3D) chk(legacyd, isAng);
             if (showMP2D || showMP3D) chk(mp, isAng);
             if (showReverse2D || showReverse3D) chk(rev, isAng);
+            if (showStatic2D || showStatic3D) chk(stt, isAng);
             if (showCombined2D || showCombined3D) chk(cmb, isAng);
             if (showVision2D || showVision3D) chk(vis, isAng);
             if (showDLC || showDLC3D) chk(dlc, isAng);
@@ -5287,7 +5319,7 @@ const manoViewer = (() => {
         // Source colors used for Thumb-Index Aperture (always) and single-metric mode
         const SOURCE_COLORS = {
             skeleton: 'lime', skel_v2: '#ff9800', skel_legacy: '#e040fb',
-            mp: '#00cccc', reverse: '#e040fb', combined: '#ffa726',
+            mp: '#00cccc', reverse: '#e040fb', static: '#26c6da', combined: '#ffa726',
             vision: '#2196f3', dlc: '#ff4444',
             prev: '#b35b00', heatmap: '#ff6600',
             hrnet_centroid:  '#ff9966',
@@ -5336,6 +5368,7 @@ const manoViewer = (() => {
             // bad for most of the trial, reverse MP good for nearly
             // all of it) hid the majority of valid reverse distances.
             const revMask  = _makeInFrameMask(trialData.reverse_tracked_L, trialData.reverse_tracked_R, joints);
+            const sttMask  = _makeInFrameMask(trialData.static_tracked_L, trialData.static_tracked_R, joints);
             const cmbMask  = _makeInFrameMask(trialData.combined_tracked_L, trialData.combined_tracked_R, joints);
             const manoMask = _makeInFrameMask(trialData.skeleton_proj_L,      trialData.skeleton_proj_R,      joints);
             const visMask  = _makeInFrameMask(trialData.vision_tracked_L, trialData.vision_tracked_R, joints);
@@ -5345,6 +5378,7 @@ const manoViewer = (() => {
             const rawLegacy  = _getMetricData('skel_legacy', metric);
             const rawMp      = _getMetricData('mp',          metric);
             const rawReverse = _getMetricData('reverse',     metric);
+            const rawStatic   = _getMetricData('static',    metric);
             const rawCombined = _getMetricData('combined',  metric);
             const rawVis     = _getMetricData('vision',      metric);
             const rawDlc   = isAng ? null : trialData.distances_dlc?.[metric];
@@ -5367,6 +5401,7 @@ const manoViewer = (() => {
             if (showLegacyV2_2D || showLegacyV2_3D)   drawSeries(rawLegacy,                       useSourceColor ? SOURCE_COLORS.skel_legacy : metricColor, 'skel_legacy', toY, abdDash);
             if (showMP2D || showMP3D)                 drawSeries(_applyMask(rawMp,    mpMask),   useSourceColor ? SOURCE_COLORS.mp          : metricColor, 'mp',          toY, abdDash);
             if (showReverse2D || showReverse3D)       drawSeries(_applyMask(rawReverse, revMask), useSourceColor ? SOURCE_COLORS.reverse     : metricColor, 'reverse',     toY, abdDash);
+            if (showStatic2D || showStatic3D)         drawSeries(_applyMask(rawStatic, sttMask),   useSourceColor ? SOURCE_COLORS.static    : metricColor, 'static',      toY, abdDash);
             if (showCombined2D || showCombined3D)     drawSeries(_applyMask(rawCombined, cmbMask), useSourceColor ? SOURCE_COLORS.combined  : metricColor, 'combined',    toY, abdDash);
             if (showVision2D || showVision3D)         drawSeries(_applyMask(rawVis,   visMask),  useSourceColor ? SOURCE_COLORS.vision      : metricColor, 'vision',      toY, abdDash);
             if (showDLC || showDLC3D)                 drawSeries(rawDlc,                                                     useSourceColor ? SOURCE_COLORS.dlc         : metricColor, 'dlc',         toY, abdDash);
@@ -5911,13 +5946,14 @@ const manoViewer = (() => {
         legacyGroup = new THREE.Group();
         mpGroup = new THREE.Group();
         reverseGroup = new THREE.Group();
+        staticGroup = new THREE.Group();
         combinedGroup = new THREE.Group();
         visionGroup = new THREE.Group();
         dlcGroup = new THREE.Group();
         poseGroup = new THREE.Group();
         heatmapGroup = new THREE.Group();
         angleArcGroup = new THREE.Group();
-        scene.add(manoGroup, skelV2Group, legacyGroup, mpGroup, reverseGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup);
+        scene.add(manoGroup, skelV2Group, legacyGroup, mpGroup, reverseGroup, staticGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup);
 
         renderer.render(scene, camera3d);
 
@@ -6222,7 +6258,7 @@ const manoViewer = (() => {
         let arcSrcKey = null;
 
         // Clear groups
-        [manoGroup, skelV2Group, legacyGroup, mpGroup, reverseGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup].forEach(g => {
+        [manoGroup, skelV2Group, legacyGroup, mpGroup, reverseGroup, staticGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup].forEach(g => {
             while (g.children.length) {
                 const child = g.children[0];
                 g.remove(child);
@@ -6236,6 +6272,7 @@ const manoViewer = (() => {
         const legacy_3d = trialData.skel_legacy_joints_3d?.[fn];
         const mp3d = trialData.mp_joints_3d?.[fn];
         const reverse3d = trialData.reverse_joints_3d?.[fn];
+        const static3d = trialData.static_joints_3d?.[fn];
         const combined3d = trialData.combined_joints_3d?.[fn];
         const vision3d = trialData.vision_joints_3d?.[fn];
 
@@ -6761,6 +6798,30 @@ const manoViewer = (() => {
             }
         }
 
+        // Static-mode MediaPipe joints (cyan) — per-frame palm
+        // detector, gated by its own checkbox.
+        if (showStatic3D && static3d) {
+            const sttMat = new THREE.MeshPhongMaterial({ color: 0x26c6da, emissive: 0x006978 });
+            const sttBoneMat = new THREE.MeshPhongMaterial({ color: 0x26c6da, emissive: 0x004d5a });
+            for (let j = 0; j < 21; j++) {
+                if (!isJointVisible(j) || !static3d[j]) continue;
+                const sphere = new THREE.Mesh(sphereGeom, sttMat);
+                sphere.position.copy(orbitPt(getScenePos(static3d, j)));
+                staticGroup.add(sphere);
+            }
+            if (showStaticSkel && trialData.skeleton) {
+                trialData.skeleton.forEach(([i, j]) => {
+                    if (!isBoneVisible(i, j) || !static3d[i] || !static3d[j]) return;
+                    const bone = makeBone(
+                        orbitPt(getScenePos(static3d, i)),
+                        orbitPt(getScenePos(static3d, j)),
+                        1.0, sttBoneMat
+                    );
+                    if (bone) staticGroup.add(bone);
+                });
+            }
+        }
+
         // Combined-pass MediaPipe joints (orange) — per-camera fusion of
         // forward + reverse, gated by its own checkbox.
         if (showCombined3D && combined3d) {
@@ -7117,6 +7178,7 @@ const manoViewer = (() => {
         manoGroup.visible = showMano3D;
         mpGroup.visible = showMP3D;
         reverseGroup.visible = showReverse3D;
+        staticGroup.visible = showStatic3D;
         combinedGroup.visible = showCombined3D;
         visionGroup.visible = showVision3D;
         dlcGroup.visible = showDLC3D;

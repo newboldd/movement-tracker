@@ -447,7 +447,22 @@ def run_mediapipe(subject_name: str, progress_callback=None,
     # trial's file; the others stay as-is.
     dlc_path = settings.dlc_path / subject_name
     dlc_path.mkdir(parents=True, exist_ok=True)
-    per_trial_filename = "mediapipe_reverse.npz" if reverse else "mediapipe.npz"
+    # Per-trial output filename routes by pass:
+    #   reverse=True             → mediapipe_reverse.npz
+    #   static_image_mode=True   → mediapipe_static.npz
+    #   otherwise (forward)      → mediapipe.npz
+    # Static mode runs MediaPipe's per-frame palm detector (no
+    # between-frame tracker), so it's a genuinely different signal
+    # the user should be able to compare side-by-side against the
+    # forward / reverse passes -- own layer on the Labels page, own
+    # file on disk.  Reverse takes precedence when both flags are
+    # set (matches the previous behaviour).
+    if reverse:
+        per_trial_filename = "mediapipe_reverse.npz"
+    elif static_image_mode:
+        per_trial_filename = "mediapipe_static.npz"
+    else:
+        per_trial_filename = "mediapipe.npz"
     # Reconstruct the FULL trial list (the run_mediapipe loop above
     # may have filtered to a single trial); we need the start/end for
     # every trial to slice the subject-wide arrays correctly.
@@ -828,6 +843,7 @@ def load_mediapipe_prelabels(subject_name: str,
         "mediapipe_prelabels.npz":         "mediapipe.npz",
         "mediapipe_reverse_prelabels.npz": "mediapipe_reverse.npz",
         "mediapipe_combined.npz":          "mediapipe_combined.npz",
+        "mediapipe_static.npz":            "mediapipe_static.npz",
     }
     per_trial_filename = per_trial_map.get(filename, "mediapipe.npz")
     per_trial_result = _load_mediapipe_per_trial(subject_name, per_trial_filename)
@@ -1228,6 +1244,20 @@ def load_mediapipe_combined_prelabels(subject_name: str) -> dict | None:
         filename="mediapipe_combined.npz",  # not a real legacy file;
                                               # per_trial_map below maps
                                               # it to the per-trial name.
+    )
+
+
+def load_mediapipe_static_prelabels(subject_name: str) -> dict | None:
+    """Load the static-image-mode MediaPipe prelabels for a subject.
+
+    Static mode runs MediaPipe's full palm detector on every frame
+    (no between-frame tracker), giving a fundamentally different
+    signal from the forward / reverse tracked passes.  Stored
+    per-trial in ``<dlc>/<subject>/<trial>/mediapipe_static.npz``.
+    """
+    return load_mediapipe_prelabels(
+        subject_name,
+        filename="mediapipe_static.npz",
     )
 
 
