@@ -40,6 +40,7 @@ const manoViewer = (() => {
     let showCombined2D = false;
     let showCombined3D = false;
     let showReverseSkel = true;
+    let showCombinedSkel = true;
     // Stereo (cross-camera image-alignment) overlay.  Only 2D —
     // there's no 3D representation; the partner-camera MP label is
     // translated into the current view by the per-frame per-joint
@@ -582,7 +583,7 @@ const manoViewer = (() => {
 
     // Three.js
     let scene, camera3d, renderer;
-    let manoGroup, skelV2Group, legacyGroup, mpGroup, reverseGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup;
+    let manoGroup, skelV2Group, legacyGroup, mpGroup, reverseGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup;
     let camera3dInit = false;
 
     // Scene-space orbit: rotate content around hand center while camera stays fixed
@@ -3818,6 +3819,10 @@ const manoViewer = (() => {
         const reverseKp = isLeft
             ? trialData.reverse_tracked_L
             : trialData.reverse_tracked_R;
+        // Combined MediaPipe layer (per-camera-frame forward/reverse fusion).
+        const combinedKp = isLeft
+            ? trialData.combined_tracked_L
+            : trialData.combined_tracked_R;
 
         // All 2D data is in camera-half coords — no offset needed
         const manoXOff = 0;
@@ -3901,6 +3906,17 @@ const manoViewer = (() => {
                         reverseKp[fn][j][0] * pixelScale,
                         reverseKp[fn][j][1] * pixelScale,
                         '#e040fb', 1.5, 0.5
+                    );
+                }
+                // Combined (orange) — fused forward+reverse layer.
+                if (showCombinedSkel && showCombined2D
+                    && combinedKp?.[fn]?.[i] && combinedKp[fn][j]) {
+                    drawLine(
+                        combinedKp[fn][i][0] * pixelScale,
+                        combinedKp[fn][i][1] * pixelScale,
+                        combinedKp[fn][j][0] * pixelScale,
+                        combinedKp[fn][j][1] * pixelScale,
+                        '#ffa726', 1.5, 0.5
                     );
                 }
 
@@ -4057,6 +4073,17 @@ const manoViewer = (() => {
                 const x = reverseKp[fn][j][0] * pixelScale;
                 const y = reverseKp[fn][j][1] * pixelScale;
                 drawCross(x, y, '#e040fb', 4);
+            }
+        }
+
+        // Combined-pass MediaPipe joint markers (orange).  Same pattern
+        // as Reverse: bones in the loop above, per-joint dots here.
+        if (showCombined2D && combinedKp && combinedKp[fn]) {
+            for (let j = 0; j < 21; j++) {
+                if (!isJointVisible(j) || !combinedKp[fn][j]) continue;
+                const x = combinedKp[fn][j][0] * pixelScale;
+                const y = combinedKp[fn][j][1] * pixelScale;
+                drawCross(x, y, '#ffa726', 4);
             }
         }
 
@@ -5884,12 +5911,13 @@ const manoViewer = (() => {
         legacyGroup = new THREE.Group();
         mpGroup = new THREE.Group();
         reverseGroup = new THREE.Group();
+        combinedGroup = new THREE.Group();
         visionGroup = new THREE.Group();
         dlcGroup = new THREE.Group();
         poseGroup = new THREE.Group();
         heatmapGroup = new THREE.Group();
         angleArcGroup = new THREE.Group();
-        scene.add(manoGroup, skelV2Group, legacyGroup, mpGroup, reverseGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup);
+        scene.add(manoGroup, skelV2Group, legacyGroup, mpGroup, reverseGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup);
 
         renderer.render(scene, camera3d);
 
@@ -6194,7 +6222,7 @@ const manoViewer = (() => {
         let arcSrcKey = null;
 
         // Clear groups
-        [manoGroup, skelV2Group, legacyGroup, mpGroup, reverseGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup].forEach(g => {
+        [manoGroup, skelV2Group, legacyGroup, mpGroup, reverseGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup].forEach(g => {
             while (g.children.length) {
                 const child = g.children[0];
                 g.remove(child);
@@ -6208,6 +6236,7 @@ const manoViewer = (() => {
         const legacy_3d = trialData.skel_legacy_joints_3d?.[fn];
         const mp3d = trialData.mp_joints_3d?.[fn];
         const reverse3d = trialData.reverse_joints_3d?.[fn];
+        const combined3d = trialData.combined_joints_3d?.[fn];
         const vision3d = trialData.vision_joints_3d?.[fn];
 
         const sphereGeom = new THREE.SphereGeometry(2.5, 12, 8);
@@ -6732,6 +6761,30 @@ const manoViewer = (() => {
             }
         }
 
+        // Combined-pass MediaPipe joints (orange) — per-camera fusion of
+        // forward + reverse, gated by its own checkbox.
+        if (showCombined3D && combined3d) {
+            const cmbMat = new THREE.MeshPhongMaterial({ color: 0xffa726, emissive: 0xb26500 });
+            const cmbBoneMat = new THREE.MeshPhongMaterial({ color: 0xffa726, emissive: 0x8a4a00 });
+            for (let j = 0; j < 21; j++) {
+                if (!isJointVisible(j) || !combined3d[j]) continue;
+                const sphere = new THREE.Mesh(sphereGeom, cmbMat);
+                sphere.position.copy(orbitPt(getScenePos(combined3d, j)));
+                combinedGroup.add(sphere);
+            }
+            if (showCombinedSkel && trialData.skeleton) {
+                trialData.skeleton.forEach(([i, j]) => {
+                    if (!isBoneVisible(i, j) || !combined3d[i] || !combined3d[j]) return;
+                    const bone = makeBone(
+                        orbitPt(getScenePos(combined3d, i)),
+                        orbitPt(getScenePos(combined3d, j)),
+                        1.0, cmbBoneMat
+                    );
+                    if (bone) combinedGroup.add(bone);
+                });
+            }
+        }
+
         // Vision joints (light blue)
         if (showVision3D && vision3d) {
             const vMat = new THREE.MeshPhongMaterial({ color: 0x2196f3, emissive: 0x0d47a1 });
@@ -7064,6 +7117,7 @@ const manoViewer = (() => {
         manoGroup.visible = showMano3D;
         mpGroup.visible = showMP3D;
         reverseGroup.visible = showReverse3D;
+        combinedGroup.visible = showCombined3D;
         visionGroup.visible = showVision3D;
         dlcGroup.visible = showDLC3D;
 
