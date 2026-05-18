@@ -786,28 +786,78 @@ function renderRedownloadSubjects() {
 }
 
 // ── Submit job ──────────────────────────────────────────
-// Submit Batch — opt into the long-lived remote runner.  Sets a flag the
-// queue manager + remote dispatcher use to route through dispatch_remote_batch
-// instead of the per-trial loop.  Otherwise reuses the same selection +
-// validation logic as submitJob().  Currently only HRnet is wired up; for
-// any other job type we fall back to the legacy submit so the button is
-// always safe to click.
+// Submit Batch — opt into the long-lived remote runner / per-subject fan-out.
+//
+//   * HRnet   → sets _useBatchRunnerForNextSubmit, then routes through the
+//               normal submitJob() path so the queue manager picks up
+//               extra_params._use_batch_runner=true and dispatches via
+//               dispatch_remote_batch (single long-lived runner that
+//               survives local-server restarts).
+//   * MediaPipe → posts one /api/remote/launch per selected subject so
+//                  each subject appears as its own cancellable queue row.
+//                  The forward queue manager's MP dispatch only honours
+//                  ``subject_names[0]``, so the legacy multi-subject
+//                  submit path silently drops every subject after the
+//                  first.  Per-subject fan-out side-steps that and gives
+//                  the user one row per subject in the queue.  The
+//                  Run-in-reverse checkbox is forwarded to every job.
 let _useBatchRunnerForNextSubmit = false;
 async function submitBatch() {
-    if (selectedStep !== 'hrnet') {
-        alert('Submit Batch currently only supports HRnet jobs. Use Submit Processing Job for ' + selectedStep + '.');
-        return;
-    }
     if (getExecutionTarget() !== 'remote') {
-        alert('Submit Batch only runs on the remote server. Switch the execution target to Remote.');
+        alert('Submit Batch only runs on the remote server.  Switch the execution target to Remote.');
         return;
     }
-    _useBatchRunnerForNextSubmit = true;
-    try {
-        await submitJob();
-    } finally {
-        _useBatchRunnerForNextSubmit = false;
+
+    if (selectedStep === 'hrnet') {
+        _useBatchRunnerForNextSubmit = true;
+        try {
+            await submitJob();
+        } finally {
+            _useBatchRunnerForNextSubmit = false;
+        }
+        return;
     }
+
+    if (selectedStep === 'mediapipe') {
+        const checked = document.querySelectorAll('#subjectGrid input[type=checkbox]:checked');
+        const subs = [];
+        checked.forEach(cb => subs.push({ id: parseInt(cb.value), name: cb.dataset.name }));
+        if (subs.length === 0) {
+            alert('Select at least one subject.');
+            return;
+        }
+        const revCb = document.getElementById('mpReverseCb');
+        const reverse = !!(revCb && revCb.checked);
+        const executionTarget = getExecutionTarget();
+        let ok = 0;
+        let firstError = null;
+        for (const s of subs) {
+            try {
+                await API.post('/api/remote/launch', {
+                    job_type: 'mediapipe',
+                    subject_ids: [s.id],
+                    subjects: [s.name],
+                    execution_target: executionTarget,
+                    ...(reverse ? { extra_params: { reverse: true } } : {}),
+                });
+                ok++;
+            } catch (e) {
+                if (!firstError) firstError = e;
+            }
+        }
+        clearSubjects();
+        refreshQueue();
+        if (firstError && ok === 0) {
+            alert('All MediaPipe submissions failed: ' + firstError.message);
+        } else if (firstError) {
+            alert(`Submitted ${ok}/${subs.length} MediaPipe jobs.  ` +
+                  `First failure: ${firstError.message}`);
+        }
+        return;
+    }
+
+    alert('Submit Batch currently supports HRnet and MediaPipe.  ' +
+          'Use Submit Processing Job for ' + selectedStep + '.');
 }
 
 async function submitJob() {

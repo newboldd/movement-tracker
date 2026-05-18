@@ -358,7 +358,7 @@
             <!-- Submit Button -->
             <div style="display:flex;justify-content:flex-end;gap:8px;">
                 <button class="btn" onclick="submitBatch()"
-                        title="Upload all videos + MP data once, then launch a single long-lived runner on the remote.  Survives local-server restarts.  Currently HRnet only.">Submit Batch</button>
+                        title="HRnet: upload all videos + MP data once, then launch a single long-lived runner on the remote (survives local-server restarts).  MediaPipe: submit one job per selected subject so each appears as its own queue row.">Submit Batch</button>
                 <button class="btn btn-primary" onclick="submitJob()">Submit Processing Job</button>
             </div>
         </div>
@@ -513,6 +513,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js?v=13"></script>
-    <script src="/static/js/remote.js?v=56"></script>
+    <script src="/static/js/remote.js?v=57"></script>
 </body>
 </html>
