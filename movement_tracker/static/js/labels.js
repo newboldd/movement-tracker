@@ -5296,6 +5296,13 @@ const manoViewer = (() => {
             const toY = isAng ? toYAngle : toYDist;
             const joints = _getRequiredJoints(metric);
             const mpMask   = _makeInFrameMask(trialData.mp_tracked_L,     trialData.mp_tracked_R,     joints);
+            // Reverse-pass MP is a SEPARATE source from forward MP --
+            // each has its own valid-frame coverage.  Using mpMask
+            // here suppressed reverse on every frame forward had
+            // dropped, which on subjects like Con03_R1 (forward MP
+            // bad for most of the trial, reverse MP good for nearly
+            // all of it) hid the majority of valid reverse distances.
+            const revMask  = _makeInFrameMask(trialData.reverse_tracked_L, trialData.reverse_tracked_R, joints);
             const manoMask = _makeInFrameMask(trialData.skeleton_proj_L,      trialData.skeleton_proj_R,      joints);
             const visMask  = _makeInFrameMask(trialData.vision_tracked_L, trialData.vision_tracked_R, joints);
 
@@ -5324,7 +5331,7 @@ const manoViewer = (() => {
             // when no stage is active).
             if (showLegacyV2_2D || showLegacyV2_3D)   drawSeries(rawLegacy,                       useSourceColor ? SOURCE_COLORS.skel_legacy : metricColor, 'skel_legacy', toY, abdDash);
             if (showMP2D || showMP3D)                 drawSeries(_applyMask(rawMp,    mpMask),   useSourceColor ? SOURCE_COLORS.mp          : metricColor, 'mp',          toY, abdDash);
-            if (showReverse2D || showReverse3D)       drawSeries(_applyMask(rawReverse, mpMask), useSourceColor ? SOURCE_COLORS.reverse     : metricColor, 'reverse',     toY, abdDash);
+            if (showReverse2D || showReverse3D)       drawSeries(_applyMask(rawReverse, revMask), useSourceColor ? SOURCE_COLORS.reverse     : metricColor, 'reverse',     toY, abdDash);
             if (showVision2D || showVision3D)         drawSeries(_applyMask(rawVis,   visMask),  useSourceColor ? SOURCE_COLORS.vision      : metricColor, 'vision',      toY, abdDash);
             if (showDLC || showDLC3D)                 drawSeries(rawDlc,                                                     useSourceColor ? SOURCE_COLORS.dlc         : metricColor, 'dlc',         toY, abdDash);
             if (showHeatmap2D || showHeatmap3D) {
