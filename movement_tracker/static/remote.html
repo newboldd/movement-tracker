@@ -331,6 +331,16 @@
                 </div>
             </div>
 
+            <!-- MediaPipe-only: opt in to running the tracker on frames fed
+                 in reverse temporal order.  Output is saved separately as
+                 mediapipe_reverse_prelabels.npz so the forward pass is never
+                 overwritten; shown as the Reverse layer on the Labels page. -->
+            <label id="mpReverseRow" style="display:none;font-size:12px;color:var(--text-muted);margin-bottom:12px;cursor:pointer;align-items:center;gap:6px;"
+                   title="Feed frames to MediaPipe in reverse temporal order.  The tracker enters early-frame failures already locked on from a later well-labeled frame, often filling cold-start gaps.  Saved separately as the Reverse model layer; does not overwrite the forward pass.">
+                <input type="checkbox" id="mpReverseCb" style="cursor:pointer;">
+                Run in reverse (saves to <code>mediapipe_reverse_prelabels.npz</code>)
+            </label>
+
             <!-- Trial Selection (shown for per-trial steps like deidentify and HRnet) -->
             <div id="trialSection" style="display:none;margin-bottom:12px;">
                 <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:6px;">Trials:</label>
@@ -503,6 +513,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js?v=13"></script>
-    <script src="/static/js/remote.js?v=55"></script>
+    <script src="/static/js/remote.js?v=56"></script>
 </body>
 </html>

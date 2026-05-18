@@ -280,6 +280,18 @@ function selectStep(step) {
     colorSubjectsByStep();
     if (isTrialStep()) updateTrialSection();
     document.getElementById('trialSection').style.display = isTrialStep() ? '' : 'none';
+    // MediaPipe-only "Run in reverse" option.  Cleared whenever the
+    // user switches away from MediaPipe so a stale checked state doesn't
+    // accidentally tag a different step's launch.
+    const mpReverseRow = document.getElementById('mpReverseRow');
+    if (mpReverseRow) {
+        const isMP = (step === 'mediapipe');
+        mpReverseRow.style.display = isMP ? 'flex' : 'none';
+        if (!isMP) {
+            const cb = document.getElementById('mpReverseCb');
+            if (cb) cb.checked = false;
+        }
+    }
 }
 
 // ── Load steps ──────────────────────────────────────────
@@ -1006,6 +1018,17 @@ async function submitJob() {
         return;
     }
 
+    // MediaPipe + reverse-pass option: forwarded as extra_params.reverse,
+    // which the queue manager unpacks and threads through to
+    // local_executor.execute_mediapipe + the worker's --reverse flag.
+    // Output goes to mediapipe_reverse_prelabels.npz (sibling layer to
+    // the forward file).
+    let extraParams;
+    if (jobType === 'mediapipe') {
+        const rev = document.getElementById('mpReverseCb');
+        if (rev && rev.checked) extraParams = { reverse: true };
+    }
+
     try {
         const result = await API.post('/api/remote/launch', {
             job_type: jobType,
@@ -1013,6 +1036,7 @@ async function submitJob() {
             subjects: subjectNames,
             execution_target: executionTarget,
             gpu_index: gpuIndex,
+            ...(extraParams ? { extra_params: extraParams } : {}),
         });
 
         // Show inline warning if training on local CPU
