@@ -17,6 +17,38 @@ from ..services.mediapipe_prelabel import get_mediapipe_for_session
 from ..services.metrics import auto_detect_from_distance
 from ..services.video import build_trial_map
 
+
+def _mp_newest_mtime(settings, subject_name: str) -> float:
+    """Return the newest mtime across this subject's MediaPipe outputs.
+
+    Walks ``<dlc>/<subject>/<trial_stem>/mediapipe.npz`` (per-trial layout)
+    and includes the legacy ``mediapipe_prelabels.npz`` if still present.
+    Returns 0.0 when nothing exists.  Used as a cache-invalidation proxy
+    by the distance / metric cache freshness checks.
+    """
+    import os
+    subj_dir = settings.dlc_path / subject_name
+    newest = 0.0
+    if not subj_dir.exists():
+        return newest
+    try:
+        for trial_dir in subj_dir.iterdir():
+            if not trial_dir.is_dir():
+                continue
+            for fname in ("mediapipe.npz", "mediapipe_reverse.npz"):
+                p = trial_dir / fname
+                if p.exists():
+                    newest = max(newest, os.path.getmtime(str(p)))
+    except OSError:
+        pass
+    legacy = subj_dir / "mediapipe_prelabels.npz"
+    if legacy.exists():
+        try:
+            newest = max(newest, os.path.getmtime(str(legacy)))
+        except OSError:
+            pass
+    return newest
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/results", tags=["results"])
@@ -182,7 +214,8 @@ def _try_source_quick(subject_name: str, src: str) -> bool:
                     return True
             return False
         elif src == "mediapipe":
-            return (settings.dlc_path / subject_name / "mediapipe_prelabels.npz").exists()
+            from ..services.mediapipe_prelabel import has_mediapipe_data
+            return has_mediapipe_data(subject_name)
         elif src == "vision":
             return (settings.dlc_path / subject_name / "vision_prelabels.npz").exists()
         elif src in ("skeleton_v1", "skeleton_v2", "skeleton_v3"):
@@ -519,9 +552,9 @@ def refresh_preview_distances() -> dict:
         sid = str(subj["id"])
         name = subj["name"]
 
-        # Check npz mtime
-        npz_path = settings.dlc_path / name / "mediapipe_prelabels.npz"
-        current_mtime = os.path.getmtime(str(npz_path)) if npz_path.exists() else 0
+        # Newest MediaPipe-output mtime across per-trial files; falls back
+        # to the legacy combined file when present.
+        current_mtime = _mp_newest_mtime(settings, name)
 
         # If mtime matches cached value, reuse cached preview
         old_entry = old_cache.get(sid)
@@ -562,8 +595,7 @@ def _rebuild_preview_cache() -> dict:
 
     previews = {}
     for subj in subjects:
-        npz_path = settings.dlc_path / subj["name"] / "mediapipe_prelabels.npz"
-        mtime = os.path.getmtime(str(npz_path)) if npz_path.exists() else 0
+        mtime = _mp_newest_mtime(settings, subj["name"])
 
         preview = _compute_preview_for_subject(subj["name"], subj["id"])
         if preview:

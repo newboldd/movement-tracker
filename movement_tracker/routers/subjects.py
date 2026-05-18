@@ -488,8 +488,11 @@ def get_subject(subject_id: int) -> dict:
         # Deidentified: check if deidentified video exists
         deident_dir = Path(str(video_path)) / "deidentified"
         status["deident"] = (deident_dir / f"{trial_name}.mp4").exists()
-        # MP hand: check mediapipe_prelabels.npz exists (subject-level, not per-trial)
-        status["mp_hands"] = (dlc_path / "mediapipe_prelabels.npz").exists()
+        # MP hand: check that this subject has MediaPipe data on disk.
+        # Per-trial layout means we scan trial subdirs for a
+        # mediapipe.npz; legacy combined file also counted.
+        from ..services.mediapipe_prelabel import has_mediapipe_data
+        status["mp_hands"] = has_mediapipe_data(subject_name)
         # MP pose: check pose_prelabels.npz exists
         status["mp_pose"] = (dlc_path / "pose_prelabels.npz").exists()
         # DLC training: check labeled-data directory has frames

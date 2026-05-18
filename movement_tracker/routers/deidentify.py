@@ -33,8 +33,8 @@ def get_trials(subject_id: int) -> dict:
 
     # Check for mediapipe prelabels
     settings = get_settings()
-    npz_path = settings.dlc_path / subj["name"] / "mediapipe_prelabels.npz"
-    has_mediapipe = npz_path.exists()
+    from ..services.mediapipe_prelabel import has_mediapipe_data
+    has_mediapipe = has_mediapipe_data(subj["name"])
     pose_path = settings.dlc_path / subj["name"] / "pose_prelabels.npz"
     has_pose = pose_path.exists()
 

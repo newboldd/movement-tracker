@@ -380,9 +380,10 @@ def run_stereo_align(subject_name: str, trial_idx: int,
     video_path  = trial["video_path"]
     stem        = trial["trial_name"]
 
-    npz_path = settings.dlc_path / subject_name / "mediapipe_prelabels.npz"
-    if not npz_path.exists():
-        raise FileNotFoundError(f"MediaPipe prelabels not found: {npz_path}")
+    from .mediapipe_prelabel import has_mediapipe_data
+    if not has_mediapipe_data(subject_name):
+        raise FileNotFoundError(f"MediaPipe prelabels not found for {subject_name}")
+    npz_path = settings.dlc_path / subject_name / "mediapipe_prelabels.npz"  # for downstream code paths still expecting it
     mp = np.load(str(npz_path))
     OS_lm = mp["OS_landmarks"]
     OD_lm = mp["OD_landmarks"]

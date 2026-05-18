@@ -103,20 +103,23 @@ def _landmarks_to_list(arr: np.ndarray) -> list:
 
 
 def _load_mediapipe(subject_name: str) -> dict | None:
-    """Load mediapipe_prelabels.npz for a subject.
+    """Load MediaPipe prelabels for a subject.
 
-    Returns dict with OS and OD landmark arrays (N, 21, 2) or None.
+    Uses the per-trial aggregator (with legacy combined-file fallback)
+    and returns dict with OS and OD landmark arrays (N, 21, 2), or
+    ``None`` when no data exists.
     """
-    settings = get_settings()
-    npz_path = settings.dlc_path / subject_name / "mediapipe_prelabels.npz"
-    if not npz_path.exists():
+    from ..services.mediapipe_prelabel import load_mediapipe_prelabels
+    data = load_mediapipe_prelabels(subject_name)
+    if data is None:
         return None
-    data = np.load(str(npz_path))
     result = {}
-    if "OS_landmarks" in data:
-        result["OS"] = data["OS_landmarks"]
-    if "OD_landmarks" in data:
-        result["OD"] = data["OD_landmarks"]
+    os_lm = data.get("OS_landmarks")
+    od_lm = data.get("OD_landmarks")
+    if os_lm is not None:
+        result["OS"] = os_lm
+    if od_lm is not None:
+        result["OD"] = od_lm
     return result if result else None
 
 

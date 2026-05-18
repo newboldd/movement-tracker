@@ -122,6 +122,14 @@ def _has_labels_v1(dlc_path: Path) -> bool:
 
 def _has_mediapipe(dlc_path: Path) -> bool:
     """Check if MediaPipe prelabels exist for this subject."""
+    # Per-trial layout: any <subject>/<trial>/mediapipe.npz counts.
+    subj_name = dlc_path.name
+    try:
+        for trial_dir in dlc_path.iterdir():
+            if trial_dir.is_dir() and (trial_dir / "mediapipe.npz").exists():
+                return True
+    except OSError:
+        pass
     return (dlc_path / "mediapipe_prelabels.npz").exists()
 
 

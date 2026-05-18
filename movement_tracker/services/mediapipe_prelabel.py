@@ -254,49 +254,13 @@ def run_mediapipe(subject_name: str, progress_callback=None,
     confidence_OS = np.full(total_frames, np.nan)
     confidence_OD = np.full(total_frames, np.nan)
 
-    # Single-trial mode: pre-populate the output arrays with whatever the
-    # existing npz already has, so the slices for trials we're NOT going
-    # to process are preserved.  Without this, run-MP-for-trial-K would
-    # blow away every other trial's landmarks because the npz is rewritten
-    # whole each time.
-    # Output filename: forward vs reverse pass stored separately so the
-    # forward labels (the v1 "ground-truth" source) are never clobbered
-    # by a reverse experiment.
-    output_filename = "mediapipe_reverse_prelabels.npz" if reverse \
-        else "mediapipe_prelabels.npz"
-
+    # Per-trial output layout means single-trial reruns no longer have
+    # to preload the subject-wide arrays from a combined npz -- we
+    # only WRITE the requested trial's file, so untouched trials'
+    # per-trial files stay on disk untouched.  Just filter the trial
+    # list and let OS_landmarks et al. stay NaN for the trials we're
+    # not processing.
     if trial_idx is not None:
-        existing_npz = settings.dlc_path / subject_name / output_filename
-        if existing_npz.exists():
-            try:
-                _prev = np.load(str(existing_npz))
-                def _load_into(dst, key):
-                    if key in _prev.files:
-                        src = _prev[key]
-                        n = min(dst.shape[0], src.shape[0])
-                        if src.shape[1:] == dst.shape[1:]:
-                            dst[:n] = src[:n]
-                _load_into(OS_landmarks, "OS_landmarks")
-                _load_into(OD_landmarks, "OD_landmarks")
-                _load_into(OS_all_tracks, "OS_all_tracks")
-                _load_into(OD_all_tracks, "OD_all_tracks")
-                if "confidence_OS" in _prev.files:
-                    src = _prev["confidence_OS"]
-                    n = min(confidence_OS.shape[0], src.shape[0])
-                    confidence_OS[:n] = src[:n]
-                if "confidence_OD" in _prev.files:
-                    src = _prev["confidence_OD"]
-                    n = min(confidence_OD.shape[0], src.shape[0])
-                    confidence_OD[:n] = src[:n]
-            except Exception as _e:
-                logger.warning(f"Could not preload existing npz: {_e} — single-trial run will leave other trials as NaN")
-        else:
-            logger.info(f"No existing npz at {existing_npz} — single-trial run will leave other trials as NaN")
-        # Filter trials list to just the requested index.  Stash the
-        # original index on the trial dict so the per-trial crop_boxes
-        # lookup below still uses the user-visible trial number rather
-        # than ``trials.index(trial)`` (which would always be 0 after
-        # filtering).
         if 0 <= trial_idx < len(trials):
             _picked = dict(trials[trial_idx])
             _picked["__orig_idx__"] = trial_idx
@@ -474,34 +438,62 @@ def run_mediapipe(subject_name: str, progress_callback=None,
         valid_dist = np.sum(~np.isnan(distances))
         logger.info(f"Computed 2D pixel distances for {valid_dist}/{total_frames} frames (no calibration)")
 
-    # Save to npz (forward + reverse passes have separate filenames)
+    # Per-trial output: one ``mediapipe.npz`` (or ``mediapipe_reverse.npz``
+    # for the reverse pass) under ``<dlc>/<subject>/<trial_stem>/`` per
+    # trial.  The old combined ``mediapipe_prelabels.npz`` was confusing
+    # and made single-trial reruns expensive (the whole file had to be
+    # rewritten).  In single-trial mode we only write the requested
+    # trial's file; the others stay as-is.
     dlc_path = settings.dlc_path / subject_name
     dlc_path.mkdir(parents=True, exist_ok=True)
-    npz_path = str(dlc_path / output_filename)
-
-    np.savez(
-        npz_path,
-        OS_landmarks=OS_landmarks,
-        OD_landmarks=OD_landmarks,
-        OS_all_tracks=OS_all_tracks,    # (N, 2, 21, 2) — both hands for re-selection
-        OD_all_tracks=OD_all_tracks,
-        confidence_OS=confidence_OS,
-        confidence_OD=confidence_OD,
-        distances=distances,
-        total_frames=total_frames,
-    )
-
-    valid_OS = np.sum(~np.isnan(OS_landmarks[:, 0, 0]))
-    valid_OD = np.sum(~np.isnan(OD_landmarks[:, 0, 0]))
-    logger.info(
-        f"MediaPipe prelabels saved: {npz_path} "
-        f"(OS: {valid_OS}/{total_frames}, OD: {valid_OD}/{total_frames})"
-    )
+    per_trial_filename = "mediapipe_reverse.npz" if reverse else "mediapipe.npz"
+    # Reconstruct the FULL trial list (the run_mediapipe loop above
+    # may have filtered to a single trial); we need the start/end for
+    # every trial to slice the subject-wide arrays correctly.
+    all_trials = build_trial_map(subject_name)
+    written_paths: list[str] = []
+    target_trial_idxs = {trial_idx} if trial_idx is not None \
+        else {i for i in range(len(all_trials))}
+    for ti, _trial in enumerate(all_trials):
+        if ti not in target_trial_idxs:
+            continue
+        _sf = int(_trial["start_frame"])
+        _ef = _sf + int(_trial["frame_count"]) - 1
+        if _ef < _sf or _sf >= total_frames:
+            continue
+        _ef = min(_ef, total_frames - 1)
+        _stem = _trial["trial_name"]
+        _trial_dir = dlc_path / _stem
+        _trial_dir.mkdir(parents=True, exist_ok=True)
+        _trial_path = _trial_dir / per_trial_filename
+        _slice = slice(_sf, _ef + 1)
+        _n_trial = _ef - _sf + 1
+        np.savez(
+            str(_trial_path),
+            OS_landmarks=OS_landmarks[_slice],
+            OD_landmarks=OD_landmarks[_slice],
+            OS_all_tracks=OS_all_tracks[_slice],
+            OD_all_tracks=OD_all_tracks[_slice],
+            confidence_OS=confidence_OS[_slice],
+            confidence_OD=confidence_OD[_slice],
+            distances=distances[_slice],
+            start_frame=_sf,
+            total_frames=_n_trial,
+        )
+        written_paths.append(str(_trial_path))
+        _vO = int(np.sum(~np.isnan(OS_landmarks[_slice, 0, 0])))
+        _vD = int(np.sum(~np.isnan(OD_landmarks[_slice, 0, 0])))
+        logger.info(
+            f"Saved {_trial_path} (OS: {_vO}/{_n_trial}, OD: {_vD}/{_n_trial})"
+        )
 
     if progress_callback:
         progress_callback(100.0)
 
-    return npz_path
+    # Return the first per-trial path written so callers (status logs)
+    # still get a meaningful string.  Multi-trial runs append all
+    # paths to ``written_paths`` in order if the caller wants them.
+    return written_paths[0] if written_paths else ""
 
 
 def _compute_distances(OS_landmarks, OD_landmarks, calib):
@@ -660,24 +652,100 @@ def _detect_frame_offset(subject_name: str, npz_data: dict) -> int:
         return 0
 
 
+def _load_mediapipe_per_trial(subject_name: str, per_trial_filename: str) -> dict | None:
+    """Reassemble subject-wide MediaPipe arrays from per-trial npz files.
+
+    For every trial in ``build_trial_map(subject_name)`` we look for
+    ``<dlc>/<subject>/<trial_stem>/<per_trial_filename>`` and splice
+    its slice into the subject-wide output arrays.  Missing files are
+    left as NaN (matching the legacy behaviour of pre-roll trials).
+    Returns ``None`` when NO per-trial files exist (so the caller can
+    fall back to the legacy combined npz).
+    """
+    settings = get_settings()
+    try:
+        trials = build_trial_map(subject_name)
+    except Exception:
+        return None
+    if not trials:
+        return None
+    total_frames = trials[-1]["end_frame"] + 1
+    OS_lm = np.full((total_frames, N_JOINTS, 2), np.nan)
+    OD_lm = np.full((total_frames, N_JOINTS, 2), np.nan)
+    OS_all = np.full((total_frames, 2, N_JOINTS, 2), np.nan)
+    OD_all = np.full((total_frames, 2, N_JOINTS, 2), np.nan)
+    conf_OS = np.full(total_frames, np.nan)
+    conf_OD = np.full(total_frames, np.nan)
+    dist = np.full(total_frames, np.nan)
+    any_loaded = False
+    for trial in trials:
+        stem = trial["trial_name"]
+        p = settings.dlc_path / subject_name / stem / per_trial_filename
+        if not p.exists():
+            continue
+        try:
+            data = np.load(str(p))
+        except (OSError, ValueError) as e:
+            logger.warning(f"Failed to load {p}: {e}")
+            continue
+        sf = int(trial["start_frame"])
+        ef = sf + int(trial["frame_count"]) - 1
+        ef = min(ef, total_frames - 1)
+        # Slice the loaded per-trial arrays to the trial's actual
+        # length, then drop them into the subject-wide arrays.
+        for key, dst in (
+            ("OS_landmarks", OS_lm), ("OD_landmarks", OD_lm),
+            ("OS_all_tracks", OS_all), ("OD_all_tracks", OD_all),
+            ("confidence_OS", conf_OS), ("confidence_OD", conf_OD),
+            ("distances", dist),
+        ):
+            if key not in data.files:
+                continue
+            src = data[key]
+            n_dst = ef - sf + 1
+            n = min(n_dst, src.shape[0])
+            if n > 0:
+                dst[sf:sf + n] = src[:n]
+        any_loaded = True
+    if not any_loaded:
+        return None
+    return {
+        "OS_landmarks": OS_lm, "OD_landmarks": OD_lm,
+        "OS_all_tracks": OS_all, "OD_all_tracks": OD_all,
+        "confidence_OS": conf_OS, "confidence_OD": conf_OD,
+        "distances": dist, "total_frames": total_frames,
+    }
+
+
 def load_mediapipe_prelabels(subject_name: str,
                               filename: str = "mediapipe_prelabels.npz") -> dict | None:
     """Load saved MediaPipe prelabels for a subject.
 
-    Handles both new format (OS_landmarks/OD_landmarks with all 21 joints)
-    and old format (OS_thumb/OS_index/OD_thumb/OD_index with just 2 joints).
-
-    Automatically detects and compensates for frame misalignments from older
-    processing where frame offset logic wasn't applied.
-
-    ``filename`` defaults to the forward-pass output; pass
-    ``"mediapipe_reverse_prelabels.npz"`` (or use
-    :func:`load_mediapipe_reverse_prelabels`) to read the reverse pass.
+    Prefers the new per-trial layout (``<dlc>/<subject>/<trial_stem>/
+    mediapipe.npz`` / ``mediapipe_reverse.npz``); falls back to the
+    legacy combined ``mediapipe_prelabels.npz`` (or
+    ``mediapipe_reverse_prelabels.npz``) only when no per-trial files
+    exist.  The fallback path also runs the legacy pre-roll-trim
+    offset detection so combined files from older machines keep
+    working until the startup migration converts them.
 
     Returns dict with keys: OS_landmarks, OD_landmarks (N, 21, 2),
     confidence_OS, confidence_OD, distances, total_frames.
-    Returns None if file doesn't exist.
+    Returns None if neither layout has data.
     """
+    # Map combined-file name → per-trial-file name.  Forward pass:
+    # mediapipe_prelabels.npz → mediapipe.npz.  Reverse pass:
+    # mediapipe_reverse_prelabels.npz → mediapipe_reverse.npz.
+    per_trial_map = {
+        "mediapipe_prelabels.npz":         "mediapipe.npz",
+        "mediapipe_reverse_prelabels.npz": "mediapipe_reverse.npz",
+    }
+    per_trial_filename = per_trial_map.get(filename, "mediapipe.npz")
+    per_trial_result = _load_mediapipe_per_trial(subject_name, per_trial_filename)
+    if per_trial_result is not None:
+        return per_trial_result
+
+    # ── Legacy combined-file fallback ──
     settings = get_settings()
     npz_path = settings.dlc_path / subject_name / filename
     if not npz_path.exists():
@@ -748,6 +816,30 @@ def load_mediapipe_prelabels(subject_name: str,
             "distances": data.get("distances"),
             "total_frames": n,
         }
+
+
+def has_mediapipe_data(subject_name: str, reverse: bool = False) -> bool:
+    """Return True if any trial has saved MediaPipe data on disk.
+
+    Checks the per-trial layout
+    (``<dlc>/<subject>/<trial_stem>/mediapipe.npz``, or
+    ``mediapipe_reverse.npz`` when ``reverse``) and the legacy
+    combined file as a fallback.
+    """
+    settings = get_settings()
+    subj_dir = settings.dlc_path / subject_name
+    if not subj_dir.exists():
+        return False
+    per_trial_name = "mediapipe_reverse.npz" if reverse else "mediapipe.npz"
+    try:
+        for trial_dir in subj_dir.iterdir():
+            if trial_dir.is_dir() and (trial_dir / per_trial_name).exists():
+                return True
+    except OSError:
+        pass
+    legacy = "mediapipe_reverse_prelabels.npz" if reverse \
+        else "mediapipe_prelabels.npz"
+    return (subj_dir / legacy).exists()
 
 
 def load_mediapipe_reverse_prelabels(subject_name: str) -> dict | None:

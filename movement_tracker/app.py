@@ -785,6 +785,110 @@ def _migrate_mano_to_skeleton(s) -> None:
         logger.warning(f"DB job_type migration skipped: {e}")
 
 
+def _migrate_combined_mediapipe_npz(s) -> None:
+    """Split legacy combined MediaPipe npz files into per-trial files.
+
+    For every subject with ``<dlc>/<subject>/mediapipe_prelabels.npz``
+    (or ``...mediapipe_reverse_prelabels.npz``), use the trial map to
+    slice the subject-wide arrays into per-trial chunks and write each
+    to ``<dlc>/<subject>/<trial_stem>/mediapipe.npz`` (resp.
+    ``mediapipe_reverse.npz``).  The combined file is deleted only
+    after every per-trial slice writes successfully.  Idempotent: if a
+    per-trial file already exists, it's left alone and the combined
+    file is removed once all expected slices are present.
+    """
+    import numpy as np
+    from pathlib import Path
+    dlc_root = Path(s.dlc_path) if hasattr(s, "dlc_path") else None
+    if not dlc_root or not dlc_root.exists():
+        return
+    from .services.video import build_trial_map
+    # (combined_filename, per_trial_filename) pairs
+    pairs = [
+        ("mediapipe_prelabels.npz",         "mediapipe.npz"),
+        ("mediapipe_reverse_prelabels.npz", "mediapipe_reverse.npz"),
+    ]
+    n_subjects_migrated = 0
+    n_trials_written = 0
+    for subj_dir in dlc_root.iterdir():
+        if not subj_dir.is_dir():
+            continue
+        subject_name = subj_dir.name
+        for combined_name, per_trial_name in pairs:
+            combined_path = subj_dir / combined_name
+            if not combined_path.exists():
+                continue
+            try:
+                data = np.load(str(combined_path))
+            except (OSError, ValueError) as e:
+                logger.warning(f"Skipping migration of {combined_path}: {e}")
+                continue
+            try:
+                trials = build_trial_map(subject_name)
+            except Exception as e:
+                logger.warning(
+                    f"Cannot split {combined_path} — build_trial_map failed: {e}"
+                )
+                continue
+            if not trials:
+                continue
+            all_written = True
+            wrote_this_pass = 0
+            for trial in trials:
+                stem = trial["trial_name"]
+                trial_dir = subj_dir / stem
+                trial_dir.mkdir(parents=True, exist_ok=True)
+                out_path = trial_dir / per_trial_name
+                if out_path.exists():
+                    # Already migrated for this trial — count it as
+                    # success so the combined file can still be
+                    # removed once every trial is covered.
+                    continue
+                sf = int(trial["start_frame"])
+                ef = sf + int(trial["frame_count"]) - 1
+                arrays: dict = {}
+                slice_n = ef - sf + 1
+                try:
+                    for key in ("OS_landmarks", "OD_landmarks",
+                                "OS_all_tracks", "OD_all_tracks",
+                                "confidence_OS", "confidence_OD",
+                                "distances"):
+                        if key in data.files:
+                            src = data[key]
+                            end = min(sf + slice_n, src.shape[0])
+                            if end <= sf:
+                                continue
+                            arrays[key] = src[sf:end]
+                    if not arrays:
+                        continue
+                    arrays["start_frame"] = sf
+                    arrays["total_frames"] = slice_n
+                    np.savez(str(out_path), **arrays)
+                    wrote_this_pass += 1
+                    n_trials_written += 1
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to write {out_path}: {e}; leaving combined file in place"
+                    )
+                    all_written = False
+                    break
+            if all_written:
+                try:
+                    combined_path.unlink()
+                    n_subjects_migrated += 1
+                    logger.info(
+                        f"Migrated {combined_path.name} for {subject_name}: "
+                        f"{wrote_this_pass} new per-trial file(s); combined removed"
+                    )
+                except OSError as e:
+                    logger.warning(f"Could not delete {combined_path}: {e}")
+    if n_subjects_migrated or n_trials_written:
+        logger.info(
+            f"MediaPipe npz migration: split {n_subjects_migrated} combined "
+            f"file(s), wrote {n_trials_written} per-trial file(s)"
+        )
+
+
 @app.on_event("startup")
 def startup():
     """Initialize database and sync subjects from filesystem."""
@@ -798,6 +902,9 @@ def startup():
 
     # One-shot rename of legacy mano* artefacts on disk + in DB.
     _migrate_mano_to_skeleton(s)
+
+    # One-shot split of combined MediaPipe prelabels into per-trial files.
+    _migrate_combined_mediapipe_npz(s)
 
     # Handle stale jobs from prior server sessions
     _recover_stale_jobs(s)

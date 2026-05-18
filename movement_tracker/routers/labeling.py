@@ -397,8 +397,8 @@ def clear_mediapipe_history(session_id: int) -> dict:
 
     import numpy as np
     settings = get_settings()
-    npz_path = settings.dlc_path / subj["name"] / "mediapipe_prelabels.npz"
-    if not npz_path.exists():
+    from ..services.mediapipe_prelabel import has_mediapipe_data
+    if not has_mediapipe_data(subj["name"]):
         return {"status": "ok", "cleared": 0}
 
     data = dict(np.load(str(npz_path)))
