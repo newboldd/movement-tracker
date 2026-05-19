@@ -286,7 +286,13 @@ const eventsPage = (() => {
     }
 
     // ── Distance Loading ─────���───────────────────────────
-    const STAGE_CHAIN = ['corrections', 'refine', 'dlc', 'mp', 'labels'];
+    // Stage priority for the distance plot.  Only Corrected DLC
+    // (``corrections``) outranks Combined MediaPipe (``mp`` is the
+    // Combined layer via the events stage-data path).  Uncorrected
+    // DLC variants (``refine``, ``dlc``) are demoted below MP since
+    // they're typically lower quality than the Combined fusion.
+    // Manual ``labels`` stays at the tail.
+    const STAGE_CHAIN = ['corrections', 'mp', 'refine', 'dlc', 'labels'];
 
     async function loadDistances() {
         try {
