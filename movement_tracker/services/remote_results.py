@@ -79,10 +79,15 @@ def output_specs(job_type: str, subject_name: str,
         specs: list[OutputSpec] = []
         for t in trials:
             stem = t["trial_name"]
-            for fname in ("mediapipe.npz", "mediapipe_reverse.npz"):
+            for fname in ("mediapipe.npz", "mediapipe_reverse.npz",
+                          "mediapipe_cropped.npz", "mediapipe_static.npz"):
+                tag = ({"mediapipe.npz": "",
+                        "mediapipe_reverse.npz": " reverse",
+                        "mediapipe_cropped.npz": " cropped",
+                        "mediapipe_static.npz": " static"})[fname]
                 specs.append(OutputSpec(
                     job_type="mediapipe",
-                    label=f"MediaPipe npz ({stem}{' reverse' if 'reverse' in fname else ''})",
+                    label=f"MediaPipe npz ({stem}{tag})",
                     remote_path=f"{remote_output_dir}/{subject_name}/{stem}/{fname}",
                     local_path=settings.dlc_path / subject_name / stem / fname,
                 ))
@@ -123,9 +128,16 @@ def _ssh_stat_quick(cfg: RemoteConfig, remote_path: str) -> Optional[int]:
     while the file was actually present (which is what masked
     Con02's missing-MP-npz download)."""
     rp = _norm_remote_path(remote_path)
+    # Wrap the script in literal double quotes so Windows OpenSSH +
+    # PowerShell treat it as a single argument.  Without the outer
+    # ``"..."`` PowerShell splits on ``;`` and reparses the raw-string
+    # ``r'...'`` syntax, which made every probe fail silently on the
+    # ``windows-dev`` host (re-download log: "npz not found for Con02"
+    # while the file was actually there).  Mirrors the wrapping in
+    # ``remote._py_cmd``.
     script = (
-        f"import os,sys;p=r'{rp}';"
-        "print(os.path.getsize(p) if os.path.exists(p) else -1)"
+        f"\"import os,sys;p=r'{rp}';"
+        "print(os.path.getsize(p) if os.path.exists(p) else -1)\""
     )
     cmd = _ssh_base_args(cfg) + [cfg.host, cfg.python_executable, "-c", script]
     try:
