@@ -1272,13 +1272,20 @@ function renderGroupPlots() {
         Time since last levodopa dose</div>`;
     html += '<div style="overflow-x:auto;">';
     html += `<div style="display:grid;grid-template-columns:60px repeat(${visibleMetrics.length}, ${colW}px);gap:0;">`;
-    html += `<div style="display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--text-muted);writing-mode:vertical-rl;text-orientation:mixed;transform:rotate(180deg);padding:4px;">Dose response</div>`;
-    visibleMetrics.forEach(m => {
-        const divId = `grpPlotDose_${m.id}`;
-        const h = 220;
-        html += `<div style="height:${h}px;">
-            <div id="${divId}" style="height:${h}px;"></div>
-        </div>`;
+    ROW_DEFS.forEach((row, ri) => {
+        html += `<div style="display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--text-muted);writing-mode:vertical-rl;text-orientation:mixed;transform:rotate(180deg);padding:4px;">${row.label}</div>`;
+        visibleMetrics.forEach(m => {
+            const spec = m[row.field];
+            const divId = `grpPlotDose_${m.id}_${row.field}`;
+            if (spec) {
+                html += `<div style="height:${row.height}px;">
+                    ${ri === 0 ? `<div style="text-align:center;font-size:13px;font-weight:700;padding:4px 0 0;">${m.name}</div>` : ''}
+                    <div id="${divId}" style="height:${row.height - (ri === 0 ? 24 : 0)}px;"></div>
+                </div>`;
+            } else {
+                html += `<div style="height:${row.height}px;"></div>`;
+            }
+        });
     });
     html += '</div></div></div>';
 
@@ -1295,11 +1302,19 @@ function renderGroupPlots() {
         });
     });
 
-    // Dose-response scatters
-    visibleMetrics.forEach(m => {
-        if (!m.mean) return;
-        renderDoseScatter(`grpPlotDose_${m.id}`, data, m.mean.key,
-                          `${m.name}${m.mean.unit ? ' (' + m.mean.unit + ')' : ''}`);
+    // Dose-response scatters — one per (metric × row) like the bars
+    // above.  Row labels still come from ROW_DEFS so the rows stay
+    // visually aligned with the corresponding bar-chart rows.
+    ROW_DEFS.forEach((row, ri) => {
+        visibleMetrics.forEach(m => {
+            const spec = m[row.field];
+            if (!spec) return;
+            const divId = `grpPlotDose_${m.id}_${row.field}`;
+            const label = ri === 0
+                ? `${m.name}${spec.unit ? ' (' + spec.unit + ')' : ''}`
+                : '';  // title only on the top (Mean) row, matching the bar grid
+            renderDoseScatter(divId, data, spec.key, label);
+        });
     });
 }
 
