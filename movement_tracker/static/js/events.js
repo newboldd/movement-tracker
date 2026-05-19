@@ -294,16 +294,27 @@ const eventsPage = (() => {
     // Manual ``labels`` stays at the tail.
     const STAGE_CHAIN = ['corrections', 'mp', 'refine', 'dlc', 'labels'];
 
+    // Last selected distance-source override.  ``"auto"`` follows
+    // STAGE_CHAIN; anything else pins the plot to that single stage.
+    // Persisted in sessionStorage so the user's choice survives a
+    // page refresh + subject switch within the session.
+    let _sourceOverride = sessionStorage.getItem('events_sourceOverride') || 'auto';
+
     async function loadDistances() {
+        distances = null;
         try {
             const stagesResult = await API.get(`/api/labeling/sessions/${sessionId}/available_stages`);
             const available = stagesResult.stages || [];
-            const chain = STAGE_CHAIN.filter(s => available.includes(s));
+            _refreshSourceDropdown(available);
+            const chain = (_sourceOverride === 'auto')
+                ? STAGE_CHAIN.filter(s => available.includes(s))
+                : (available.includes(_sourceOverride) ? [_sourceOverride] : []);
             for (const stage of chain) {
                 try {
                     const data = await API.get(`/api/labeling/sessions/${sessionId}/stage_data?stage=${stage}`);
                     if (data && data.distances && data.distances.some(d => d !== null)) {
                         distances = data.distances;
+                        _updateSourceDropdownLabel(stage);
                         return;
                     }
                 } catch (e) {
@@ -312,6 +323,45 @@ const eventsPage = (() => {
             }
         } catch (e) {
             console.log('Could not load stages:', e);
+        }
+    }
+
+    // Disable dropdown options that the current subject doesn't
+    // actually have, so the user can't pin to a stage with no data.
+    // ``available`` is the list returned by /available_stages
+    // (corrections, mp, refine, dlc, labels in any order).
+    function _refreshSourceDropdown(available) {
+        const sel = document.getElementById('sourceSelect');
+        if (!sel) return;
+        const set = new Set(available || []);
+        for (const opt of sel.options) {
+            if (opt.value === 'auto') continue;
+            opt.disabled = !set.has(opt.value);
+        }
+        // Fall back to auto if the previously-selected stage isn't
+        // available on this subject anymore.
+        if (_sourceOverride !== 'auto' && !set.has(_sourceOverride)) {
+            _sourceOverride = 'auto';
+            sessionStorage.setItem('events_sourceOverride', _sourceOverride);
+        }
+        sel.value = _sourceOverride;
+    }
+
+    // When Auto is selected, append " → <picked_stage>" to the
+    // dropdown label so the user knows which stage actually won the
+    // chain.  Cleared on explicit overrides.
+    function _updateSourceDropdownLabel(pickedStage) {
+        const sel = document.getElementById('sourceSelect');
+        if (!sel) return;
+        const auto = sel.querySelector('option[value="auto"]');
+        if (!auto) return;
+        if (_sourceOverride === 'auto' && pickedStage) {
+            const NAMES = { corrections: 'Corrected DLC', mp: 'Combined MP',
+                            refine: 'Refined DLC', dlc: 'Raw DLC',
+                            labels: 'Manual labels' };
+            auto.textContent = `Auto → ${NAMES[pickedStage] || pickedStage}`;
+        } else {
+            auto.textContent = 'Auto';
         }
     }
 
@@ -1752,6 +1802,24 @@ const eventsPage = (() => {
             _xSlider.addEventListener('input', e => {
                 _xScaleEvents = parseFloat(e.target.value) || 1.0;
                 _applyDistViewFromScale();
+                renderDistanceTrace();
+            });
+        }
+        // Source dropdown: reload distances + redraw whenever the
+        // user pins to a different stage.  Persist to sessionStorage
+        // so the choice survives reload + subject switch.  Reset
+        // stableDistRange so the new source's value range drives the
+        // y-axis defaults.
+        const _srcSel = $('sourceSelect');
+        if (_srcSel) {
+            _srcSel.value = _sourceOverride;
+            _srcSel.addEventListener('change', async e => {
+                _sourceOverride = e.target.value || 'auto';
+                sessionStorage.setItem('events_sourceOverride', _sourceOverride);
+                await loadDistances();
+                stableDistRange = null;
+                if (distances) computeStableDistRange();
+                _resetYRangeSlidersForCurrentTrial();
                 renderDistanceTrace();
             });
         }

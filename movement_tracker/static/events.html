@@ -169,6 +169,24 @@
                            title="Distance plot X scale (1 = fit current trial, >1 zooms in)"
                            style="width:80px;cursor:pointer;height:5px;">
                 </label>
+                <!-- Source dropdown: overrides the default stage-priority
+                     chain so the user can pin the distance plot to a
+                     specific label source.  "Auto" falls through the
+                     chain (Corrected DLC > Combined MP > Refined > DLC
+                     > Labels).  Options the current subject doesn't
+                     have are disabled at load time. -->
+                <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text-muted);"
+                       title="Distance plot source. Auto follows the stage priority chain.">
+                    Source
+                    <select id="sourceSelect" style="font-size:11px;padding:1px 4px;">
+                        <option value="auto">Auto</option>
+                        <option value="corrections">Corrected DLC</option>
+                        <option value="mp">Combined MP</option>
+                        <option value="refine">Refined DLC</option>
+                        <option value="dlc">Raw DLC</option>
+                        <option value="labels">Manual labels</option>
+                    </select>
+                </label>
                 <span>Frame: <strong id="frameDisplay">0</strong> / <span id="totalFrames">0</span></span>
                 <span>Trial: <strong id="trialName">-</strong></span>
                 <span id="statusInfo" style="font-size:11px;color:var(--text-muted);"></span>
@@ -311,6 +329,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js?v=10"></script>
-    <script src="/static/js/events.js?v=4"></script>
+    <script src="/static/js/events.js?v=5"></script>
 </body>
 </html>
