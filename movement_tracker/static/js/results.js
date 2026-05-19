@@ -1261,6 +1261,27 @@ function renderGroupPlots() {
     });
 
     html += '</div></div>';
+
+    // ── Dose-response section ───────────────────────────────
+    // Same Y variables as the Mean row, plotted against time
+    // since last levodopa dose (parsed from each subject's
+    // ``last_dose`` clinical field).  Subjects without a
+    // parseable last-dose value are excluded.
+    html += `<div style="margin-top:24px;border-top:1px solid var(--border, #e0e0e0);padding-top:12px;">`;
+    html += `<div style="font-size:13px;font-weight:700;color:var(--text-muted);margin-bottom:4px;">
+        Time since last levodopa dose</div>`;
+    html += '<div style="overflow-x:auto;">';
+    html += `<div style="display:grid;grid-template-columns:60px repeat(${visibleMetrics.length}, ${colW}px);gap:0;">`;
+    html += `<div style="display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--text-muted);writing-mode:vertical-rl;text-orientation:mixed;transform:rotate(180deg);padding:4px;">Dose response</div>`;
+    visibleMetrics.forEach(m => {
+        const divId = `grpPlotDose_${m.id}`;
+        const h = 220;
+        html += `<div style="height:${h}px;">
+            <div id="${divId}" style="height:${h}px;"></div>
+        </div>`;
+    });
+    html += '</div></div></div>';
+
     container.innerHTML = html;
 
     // Render each chart
@@ -1272,6 +1293,75 @@ function renderGroupPlots() {
             const unit = spec.unit ? ` (${spec.unit})` : '';
             renderGroupBar(divId, data, spec.key, '');
         });
+    });
+
+    // Dose-response scatters
+    visibleMetrics.forEach(m => {
+        if (!m.mean) return;
+        renderDoseScatter(`grpPlotDose_${m.id}`, data, m.mean.key,
+                          `${m.name}${m.mean.unit ? ' (' + m.mean.unit + ')' : ''}`);
+    });
+}
+
+function renderDoseScatter(divId, data, paramKey, paramLabel) {
+    const groups = data.groups;
+    // Active subjects with both a parseable last-dose value AND a
+    // non-null parameter value.  Drop everyone else from the scatter
+    // so the X axis isn't padded with missing points.
+    const subjects = _activeGroupSubjects().filter(s =>
+        s.time_since_dose_min != null
+        && isFinite(s.time_since_dose_min)
+        && s[paramKey] != null
+        && isFinite(s[paramKey])
+    );
+
+    // One trace per group so the legend shows the diagnosis colors.
+    const traces = groups.map(g => {
+        const subs = subjects.filter(s => (s.diagnosis || 'Control') === g);
+        return {
+            x: subs.map(s => s.time_since_dose_min / 60.0),
+            y: subs.map(s => s[paramKey]),
+            text: subs.map(s => `${s.name}<br>${s.last_dose_raw || ''}`),
+            type: 'scatter',
+            mode: 'markers',
+            name: g,
+            marker: {
+                color: GROUP_COLORS[g] || '#999',
+                size: subs.map(s => highlightedSubject === s.name ? 10 : 7),
+                opacity: 0.8,
+                line: { color: '#333', width: 0.5 },
+            },
+            hovertemplate: '%{text}<br>%{x:.2f} h<br>%{y:.3f}<extra></extra>',
+            showlegend: false,
+        };
+    });
+
+    const layout = {
+        title: { text: paramLabel, font: { size: 11, color: '#444' } },
+        margin: { t: 28, b: 36, l: 45, r: 10 },
+        xaxis: {
+            title: { text: 'Hours since dose', font: { size: 10, color: '#666' } },
+            color: '#666', gridcolor: '#f0f0f0', tickfont: { size: 9 },
+            rangemode: 'tozero',
+        },
+        yaxis: { title: '', color: '#666', gridcolor: '#f0f0f0', tickfont: { size: 9 } },
+        plot_bgcolor: '#fff',
+        paper_bgcolor: '#fff',
+    };
+
+    Plotly.newPlot(divId, traces, layout, {
+        responsive: true,
+        displayModeBar: false,
+    });
+
+    const plotDiv = document.getElementById(divId);
+    plotDiv.on('plotly_click', (eventData) => {
+        if (eventData.points && eventData.points.length > 0) {
+            const pt = eventData.points[0];
+            if (pt.text) {
+                highlightSubject(String(pt.text).split('<br>')[0]);
+            }
+        }
     });
 }
 

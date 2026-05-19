@@ -74,6 +74,50 @@ def _get_subject(subject_id: int) -> dict:
     return dict(subj)
 
 
+_DOSE_HM_RE = __import__("re").compile(
+    r"(?:(\d+(?:\.\d+)?)\s*h(?:ours?|rs?)?)?\s*(?:(\d+(?:\.\d+)?)\s*m(?:in)?)?",
+    flags=__import__("re").IGNORECASE,
+)
+
+
+def _parse_last_dose_minutes(raw) -> float | None:
+    """Parse a free-text ``last_dose`` field into minutes since dose.
+
+    Accepts ``"5h"``, ``"30m"``, ``"5h 30m"``, ``"1h30m"``, ``"2.5h"``,
+    case-insensitive.  Bare numbers are treated as minutes.  ``"-"``,
+    empty strings, or anything that doesn't parse to a positive value
+    returns ``None`` so the subject can be excluded from time-since-
+    dose plots without polluting the axis.
+    """
+    if raw is None:
+        return None
+    s = str(raw).strip().lower()
+    if not s or s in ("-", "n/a", "na", "none", "?"):
+        return None
+    # Bare numeric → minutes.
+    try:
+        v = float(s)
+        return v if v > 0 else None
+    except ValueError:
+        pass
+    m = _DOSE_HM_RE.fullmatch(s.replace(" ", ""))
+    if not m:
+        # Try a permissive search (handles "5h 30m extra notes"
+        # mostly by ignoring the trailing junk).  Only accept when at
+        # least one of the h/m groups landed; otherwise bail.
+        m = _DOSE_HM_RE.search(s)
+        if not m or (m.group(1) is None and m.group(2) is None):
+            return None
+    h_part = m.group(1)
+    m_part = m.group(2)
+    total = 0.0
+    if h_part:
+        total += float(h_part) * 60.0
+    if m_part:
+        total += float(m_part)
+    return total if total > 0 else None
+
+
 def _read_events_csv(subject_name: str) -> dict:
     """Read events.csv → {event_type: [frame_nums]}."""
     settings = get_settings()
@@ -749,6 +793,8 @@ def get_group_comparison(include_auto: bool = Query(False),
             "diagnosis": diagnosis,
             "event_source": event_source,
             "has_saved_events": has_saved,
+            "last_dose_raw": subj.get("last_dose") or None,
+            "time_since_dose_min": _parse_last_dose_minutes(subj.get("last_dose")),
         }
 
         for key in PARAM_KEYS:
