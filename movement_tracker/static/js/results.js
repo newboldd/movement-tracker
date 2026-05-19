@@ -110,7 +110,8 @@ async function loadDistances(subjectId) {
 
     container.innerHTML = '<div class="results-no-data">Loading...</div>';
 
-    const selectedSource = document.getElementById('distSourceSelect')?.value || 'auto';
+    const selectedSource = document.getElementById('resultsSourceSelect')?.value
+        || document.getElementById('distSourceSelect')?.value || 'auto';
 
     try {
         // Load traces and movements in parallel
@@ -204,34 +205,9 @@ function getYAxisConfig() {
 }
 
 function _updateSourceSelector(availableSources, activeSource) {
-    let sel = document.getElementById('distSourceSelect');
-    if (!sel) {
-        // Create the selector above the distance plots
-        const container = document.getElementById('distancePlots');
-        if (!container) return;
-        const wrap = document.createElement('div');
-        wrap.style.cssText = 'margin-bottom:8px;display:flex;align-items:center;gap:8px;';
-        wrap.innerHTML = `<label style="font-size:12px;color:var(--text-muted);">Distance source:</label>
-            <select id="distSourceSelect" style="padding:3px 6px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:12px;"></select>`;
-        container.parentElement.insertBefore(wrap, container);
-        sel = document.getElementById('distSourceSelect');
-        sel.addEventListener('change', () => loadDistances(currentSubjectId));
-    }
-    const labels = { auto: 'Auto (best available)', mediapipe: 'MediaPipe', vision: 'Vision', skeleton_v1: 'Skeleton v1', skeleton_v2: 'Skeleton v2', skeleton_v3: 'Skeleton v3', dlc: 'DLC', corrections: 'Corrections' };
-    const prev = sel.value;
-    sel.innerHTML = '<option value="auto">Auto (best available)</option>';
-    for (const src of availableSources) {
-        const opt = document.createElement('option');
-        opt.value = src;
-        opt.textContent = labels[src] || src;
-        sel.appendChild(opt);
-    }
-    // Restore previous selection if still available
-    if (prev && [...sel.options].some(o => o.value === prev)) {
-        sel.value = prev;
-    } else if (activeSource && activeSource !== 'none') {
-        sel.value = activeSource;
-    }
+    // No-op: the page-level #resultsSourceSelect is now the single
+    // source of truth for distance source.  The per-subject auto
+    // result is surfaced via the badge in renderAllDistancePlots.
 }
 
 function renderAllDistancePlots() {
@@ -1055,7 +1031,8 @@ async function loadGroup() {
     container.innerHTML = '<div class="results-no-data" style="grid-column:1/-1;">Loading group data...</div>';
 
     try {
-        cachedGroup = await API.get(`/api/results/group?include_auto=true`);
+        const src = document.getElementById('resultsSourceSelect')?.value || 'auto';
+        cachedGroup = await API.get(`/api/results/group?include_auto=true&source=${src}`);
         _initGroupSubjectChecked();
         renderGroupPlots();
     } catch (e) {
@@ -1549,6 +1526,21 @@ document.getElementById('groupSelectAllBtn').addEventListener('click',
     () => window._groupSelectAll(true));
 document.getElementById('groupSelectNoneBtn').addEventListener('click',
     () => window._groupSelectAll(false));
+
+// Page-level distance source dropdown — applies to both Individual
+// and Group Comparison tabs.  Auto = corrections → mp_combined →
+// mp_forward (per the backend's _load_distances_and_trials).
+document.getElementById('resultsSourceSelect')?.addEventListener('change', () => {
+    cachedTraces = null;
+    cachedMovements = null;
+    cachedGroup = null;
+    const activeTab = document.querySelector('.results-tab.active')?.id;
+    if (activeTab === 'tabGroup') {
+        loadGroup();
+    } else if (currentSubjectId) {
+        loadDistances(currentSubjectId);
+    }
+});
 
 // ── Init ───────────────────────────────────────────────────────
 

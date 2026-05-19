@@ -133,7 +133,10 @@ def _load_distances_and_trials(subject_name: str, source: str | None = None) -> 
         elif src == "dlc":
             preds = get_dlc_predictions_for_session(subject_name)
             return preds.get("distances") if preds else None
-        elif src == "mediapipe":
+        elif src == "mp_combined":
+            mp = get_mediapipe_for_session(subject_name, prefer_combined=True)
+            return mp.get("distances") if mp else None
+        elif src in ("mediapipe", "mp_forward"):
             mp = get_mediapipe_for_session(subject_name)
             return mp.get("distances") if mp else None
         elif src == "vision":
@@ -192,9 +195,11 @@ def _load_distances_and_trials(subject_name: str, source: str | None = None) -> 
             return distances, trials, source
         return [], trials, "none"
 
-    # Auto: try sources in priority order
-    for src in ("corrections", "dlc", "skeleton_v3", "skeleton_v2", "skeleton_v1",
-                "vision", "mediapipe"):
+    # Auto: DLC corrected > MP combined > MP forward.  Older fallback
+    # sources (raw DLC, skeleton variants, vision) were removed from
+    # the priority list — the results page only ever picks from the
+    # three the dropdown exposes.
+    for src in ("corrections", "mp_combined", "mp_forward"):
         distances = _try_source(src)
         if distances:
             return distances, trials, src
@@ -213,9 +218,16 @@ def _try_source_quick(subject_name: str, src: str) -> bool:
                 if (settings.dlc_path / subject_name / d).is_dir():
                     return True
             return False
-        elif src == "mediapipe":
+        elif src in ("mediapipe", "mp_forward"):
             from ..services.mediapipe_prelabel import has_mediapipe_data
             return has_mediapipe_data(subject_name)
+        elif src == "mp_combined":
+            # Combined MP exists when at least one per-trial combined
+            # npz has been written by the fusion step.
+            for d in settings.dlc_path.glob(f"{subject_name}/*/mediapipe_combined.npz"):
+                if d.exists():
+                    return True
+            return False
         elif src == "vision":
             return (settings.dlc_path / subject_name / "vision_prelabels.npz").exists()
         elif src in ("skeleton_v1", "skeleton_v2", "skeleton_v3"):
@@ -664,12 +676,11 @@ def get_traces(subject_id: int, source: str = Query("auto")) -> dict:
             "vel_max": round(max(all_vels), 2) if all_vels else 0,
         }
 
-    # Check which sources are available
+    # Check which sources are available (only the three the
+    # dropdown exposes — corrections, mp_combined, mp_forward).
     available_sources = []
-    for src in ("mediapipe", "vision", "skeleton_v1", "skeleton_v2",
-                "skeleton_v3", "dlc", "corrections"):
-        d = _try_source_quick(subject_name, src)
-        if d:
+    for src in ("corrections", "mp_combined", "mp_forward"):
+        if _try_source_quick(subject_name, src):
             available_sources.append(src)
 
     return {"trials": result_trials, "subject": subject_name, "y_range": y_range, "data_source": data_source, "available_sources": available_sources}
@@ -696,7 +707,8 @@ def get_movements(subject_id: int, source: str = Query("auto")) -> dict:
 
 
 @router.get("/group")
-def get_group_comparison(include_auto: bool = Query(False)) -> dict:
+def get_group_comparison(include_auto: bool = Query(False),
+                          source: str = Query("auto")) -> dict:
     """Aggregated per-subject statistics grouped by diagnosis."""
     with get_db_ctx() as db:
         subjects = db.execute(
@@ -715,7 +727,7 @@ def get_group_comparison(include_auto: bool = Query(False)) -> dict:
         diagnosis = subj.get("group_label") or subj.get("diagnosis") or "Control"
 
         try:
-            distances, trials, _src = _load_distances_and_trials(subject_name)
+            distances, trials, _src = _load_distances_and_trials(subject_name, source)
             saved_events = _read_events_csv(subject_name)
             has_saved = any(len(v) > 0 for v in saved_events.values())
             if include_auto:

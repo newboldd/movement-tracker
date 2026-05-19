@@ -18,6 +18,15 @@
                 <button class="btn btn-sm" id="prevSubjectBtn" title="Previous subject">&larr;</button>
                 <button class="btn btn-sm" id="nextSubjectBtn" title="Next subject">&rarr;</button>
             </div>
+            <div style="display:flex;align-items:center;gap:6px;">
+                <label style="font-size:12px;color:var(--text-muted);margin:0;">Source:</label>
+                <select id="resultsSourceSelect" class="subject-select" style="min-width:140px;">
+                    <option value="auto" selected>Auto</option>
+                    <option value="corrections">DLC (corrected)</option>
+                    <option value="mp_combined">MP combined</option>
+                    <option value="mp_forward">MP forward</option>
+                </select>
+            </div>
             <!-- Tab Switcher -->
             <!-- Tab buttons hidden — navigation via Results dropdown menu -->
             <div id="tabSwitcher" style="display:none;">
@@ -172,6 +181,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=13"></script>
+    <script src="/static/js/results.js?v=14"></script>
 </body>
 </html>
