@@ -1034,11 +1034,20 @@ function exponentialFit(x, y) {
 
 let highlightedSubject = null;
 
+// Per-subject checked state for the group tab.  Map<subjectName, bool>.
+// Saved-event subjects default ON; auto-only subjects default to the
+// current state of the "Include auto-detected events" toggle.  The
+// user can override either way via the subject-list checkboxes.
+let _groupSubjectChecked = {};
+
 async function loadGroup() {
     const container = document.getElementById('groupPlots');
-    const includeAuto = document.getElementById('includeAutoToggle').checked;
 
-    if (cachedGroup && cachedGroup._includeAuto === includeAuto) {
+    // Always fetch with include_auto=true so we see the full subject
+    // list regardless of toggle state.  ``has_saved_events`` tags
+    // which ones have saved CSVs; the toggle and per-subject
+    // checkboxes decide who actually contributes to the plots.
+    if (cachedGroup) {
         renderGroupPlots();
         return;
     }
@@ -1046,13 +1055,97 @@ async function loadGroup() {
     container.innerHTML = '<div class="results-no-data" style="grid-column:1/-1;">Loading group data...</div>';
 
     try {
-        cachedGroup = await API.get(`/api/results/group?include_auto=${includeAuto}`);
-        cachedGroup._includeAuto = includeAuto;
+        cachedGroup = await API.get(`/api/results/group?include_auto=true`);
+        _initGroupSubjectChecked();
         renderGroupPlots();
     } catch (e) {
         container.innerHTML = `<div class="results-no-data" style="grid-column:1/-1;color:#d32f2f;">${e.message}</div>`;
     }
 }
+
+function _initGroupSubjectChecked() {
+    if (!cachedGroup || !cachedGroup.subjects) return;
+    const includeAuto = document.getElementById('includeAutoToggle').checked;
+    _groupSubjectChecked = {};
+    cachedGroup.subjects.forEach(s => {
+        _groupSubjectChecked[s.name] = s.has_saved_events ? true : includeAuto;
+    });
+}
+
+// Toggle handler — flip default-state of non-saved subjects to match
+// the "Include auto-detected events" toggle, without disturbing
+// saved-event subjects or explicit overrides the user made on saved
+// subjects.  Auto-only subjects always follow the toggle.
+function _onIncludeAutoChanged() {
+    const includeAuto = document.getElementById('includeAutoToggle').checked;
+    if (cachedGroup && cachedGroup.subjects) {
+        cachedGroup.subjects.forEach(s => {
+            if (!s.has_saved_events) _groupSubjectChecked[s.name] = includeAuto;
+        });
+    }
+    renderGroupPlots();
+}
+
+function _activeGroupSubjects() {
+    if (!cachedGroup || !cachedGroup.subjects) return [];
+    return cachedGroup.subjects.filter(s => _groupSubjectChecked[s.name]);
+}
+
+function _renderGroupSubjectList() {
+    const host = document.getElementById('groupSubjectList');
+    if (!host) return;
+    if (!cachedGroup || !cachedGroup.subjects) { host.innerHTML = ''; return; }
+
+    // Group subjects by diagnosis so the chips stay visually clustered.
+    const groups = cachedGroup.groups || [];
+    const byGroup = {};
+    groups.forEach(g => { byGroup[g] = []; });
+    cachedGroup.subjects.forEach(s => {
+        const g = s.diagnosis || 'Control';
+        (byGroup[g] = byGroup[g] || []).push(s);
+    });
+
+    let html = '';
+    groups.forEach(g => {
+        const color = (typeof GROUP_COLORS !== 'undefined' && GROUP_COLORS[g]) || '#999';
+        (byGroup[g] || []).forEach(s => {
+            const checked = !!_groupSubjectChecked[s.name];
+            const dim = !s.has_saved_events ? ' dim' : '';
+            const safe = s.name.replace(/"/g, '&quot;');
+            html += `<label class="${dim.trim()}" title="${s.has_saved_events ? 'Saved events' : 'Auto-detected events'} (${g})">
+                <input type="checkbox" data-subject="${safe}" ${checked ? 'checked' : ''}>
+                <span class="gsl-dot" style="background:${color};"></span>
+                ${s.name}${s.has_saved_events ? '' : ' *'}
+            </label>`;
+        });
+    });
+    host.innerHTML = html;
+
+    host.querySelectorAll('input[type=checkbox]').forEach(cb => {
+        cb.addEventListener('change', (e) => {
+            const name = e.target.getAttribute('data-subject');
+            _groupSubjectChecked[name] = e.target.checked;
+            renderGroupPlots();
+        });
+    });
+}
+
+window._groupSelectAll = function (state) {
+    if (!cachedGroup || !cachedGroup.subjects) return;
+    const includeAuto = document.getElementById('includeAutoToggle').checked;
+    cachedGroup.subjects.forEach(s => {
+        // "None" always unchecks everything.  "All" respects the
+        // include-auto toggle so auto-only subjects don't get pulled
+        // in while the toggle is off — matches the dim/deactivated
+        // semantics the user asked for.
+        if (state) {
+            _groupSubjectChecked[s.name] = s.has_saved_events ? true : includeAuto;
+        } else {
+            _groupSubjectChecked[s.name] = false;
+        }
+    });
+    renderGroupPlots();
+};
 
 // Metrics organized as columns; rows = Mean, Variance (CV), Sequence Effect
 const GROUP_METRICS = [
@@ -1139,6 +1232,8 @@ function renderGroupPlots() {
         return;
     }
 
+    _renderGroupSubjectList();
+
     // Initialize visibility from defaults
     if (Object.keys(_groupMetricVisible).length === 0) {
         GROUP_METRICS.forEach(m => { _groupMetricVisible[m.id] = m.defaultOn; });
@@ -1213,7 +1308,10 @@ window._toggleGroupMetric = _toggleGroupMetric;
 
 function renderGroupBar(divId, data, paramKey, paramLabel) {
     const groups = data.groups;
-    const subjects = data.subjects;
+    // Filter to the subjects whose checkbox is currently on.  This
+    // is what makes unchecking a noisy subject immediately drop it
+    // from every plot and re-scale the Y axes.
+    const subjects = _activeGroupSubjects();
 
     // Group subjects
     const byGroup = {};
@@ -1442,11 +1540,15 @@ document.getElementById('yAxisMax').addEventListener('change', () => {
     if (cachedTraces) renderAllDistancePlots();
 });
 
-// Group comparison: auto-detect toggle
-document.getElementById('includeAutoToggle').addEventListener('change', () => {
-    cachedGroup = null;
-    loadGroup();
-});
+// Group comparison: auto-detect toggle.  No re-fetch — the data is
+// the union of saved + auto already.  Toggle only changes the
+// default-checked state of auto-only subjects.
+document.getElementById('includeAutoToggle').addEventListener('change', _onIncludeAutoChanged);
+
+document.getElementById('groupSelectAllBtn').addEventListener('click',
+    () => window._groupSelectAll(true));
+document.getElementById('groupSelectNoneBtn').addEventListener('click',
+    () => window._groupSelectAll(false));
 
 // ── Init ───────────────────────────────────────────────────────
 

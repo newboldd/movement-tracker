@@ -716,12 +716,13 @@ def get_group_comparison(include_auto: bool = Query(False)) -> dict:
 
         try:
             distances, trials, _src = _load_distances_and_trials(subject_name)
+            saved_events = _read_events_csv(subject_name)
+            has_saved = any(len(v) > 0 for v in saved_events.values())
             if include_auto:
                 events, event_source = _load_events(subject_name, distances, trials)
             else:
-                events = _read_events_csv(subject_name)
-                has = any(len(v) > 0 for v in events.values())
-                event_source = "saved" if has else "none"
+                events = saved_events
+                event_source = "saved" if has_saved else "none"
             movements, _ = _build_movement_params(distances, events, trials)
         except Exception as exc:
             logger.warning(f"Skipping {subject_name}: {exc}")
@@ -735,6 +736,7 @@ def get_group_comparison(include_auto: bool = Query(False)) -> dict:
             "name": subject_name,
             "diagnosis": diagnosis,
             "event_source": event_source,
+            "has_saved_events": has_saved,
         }
 
         for key in PARAM_KEYS:

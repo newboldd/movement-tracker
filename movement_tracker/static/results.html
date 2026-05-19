@@ -124,17 +124,54 @@
         <div id="tabGroup" class="results-tab">
             <div class="results-controls" id="groupControls">
                 <label><input type="checkbox" id="includeAutoToggle"> Include auto-detected events</label>
+                <button class="btn btn-sm" id="groupSelectAllBtn" type="button">All</button>
+                <button class="btn btn-sm" id="groupSelectNoneBtn" type="button">None</button>
                 <span id="highlightedSubject"></span>
             </div>
+            <div id="groupSubjectList" class="group-subject-list"></div>
             <div id="groupPlots" class="results-plot-grid">
                 <div class="results-no-data" style="grid-column:1/-1;">Loading group data...</div>
             </div>
         </div>
+        <style>
+            .group-subject-list {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 4px;
+                padding: 6px;
+                margin-bottom: 8px;
+                background: var(--bg, #f5f5f5);
+                border-radius: 4px;
+                max-height: 140px;
+                overflow-y: auto;
+            }
+            .group-subject-list label {
+                display: inline-flex;
+                align-items: center;
+                gap: 3px;
+                font-size: 11px;
+                padding: 2px 6px;
+                border-radius: 3px;
+                border: 1px solid #ddd;
+                background: #fff;
+                cursor: pointer;
+                user-select: none;
+            }
+            .group-subject-list label.dim {
+                opacity: 0.45;
+            }
+            .group-subject-list label input { margin: 0; }
+            .group-subject-list .gsl-dot {
+                display: inline-block;
+                width: 8px; height: 8px;
+                border-radius: 50%;
+            }
+        </style>
     </div>
 
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=12"></script>
+    <script src="/static/js/results.js?v=13"></script>
 </body>
 </html>
