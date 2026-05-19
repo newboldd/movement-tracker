@@ -1697,6 +1697,7 @@ const eventsPage = (() => {
                 phase,
                 existing_peaks: existingPeaks,
                 enforce_sequence: enforceSequence,
+                source: _sourceOverride,
                 params,
                 steps,
                 metrics,

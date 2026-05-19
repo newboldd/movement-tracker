@@ -1460,34 +1460,50 @@ def detect_events_v2(session_id: int, body: dict = Body(...)) -> dict:
 
     min_event_gap = int(params.get("min_event_gap", 10))
 
-    # Load distance data — whole file from the first available source
+    # Distance source: ``"auto"`` (default) follows the same priority
+    # chain as the Events-page plot — corrections → mp (Combined) →
+    # refine → dlc → labels.  Anything else pins detection to that
+    # single source so it matches what the user sees on the plot.
+    source = body.get("source") or "auto"
+    if source not in ("auto", "corrections", "mp", "refine", "dlc", "labels"):
+        source = "auto"
+
+    def _load_source(stage: str):
+        if stage in ("corrections", "refine", "dlc"):
+            sd = get_dlc_predictions_for_stage(subject_name, stage)
+            return sd.get("distances") if sd else None
+        if stage == "mp":
+            md = get_mediapipe_for_session(subject_name, prefer_combined=True)
+            return md.get("distances") if md else None
+        if stage == "labels":
+            with get_db_ctx() as db2:
+                subj_row = db2.execute(
+                    "SELECT * FROM subjects WHERE name = ?", (subject_name,)
+                ).fetchone()
+            if not subj_row:
+                return None
+            ld = _committed_labels_to_array(subj_row)
+            return ld.get("distances") if ld else None
+        return None
+
     dist_raw = None
-    for stage in ("corrections", "refine", "dlc"):
-        stage_data = get_dlc_predictions_for_stage(subject_name, stage)
-        if stage_data and stage_data.get("distances"):
-            candidate = stage_data["distances"]
+    if source != "auto":
+        dist_raw = _load_source(source)
+    else:
+        for stage in ("corrections", "mp", "refine", "dlc", "labels"):
+            candidate = _load_source(stage)
+            if not candidate:
+                continue
             valid_count = sum(1 for d in candidate if d is not None)
             if valid_count > len(candidate) * 0.5:
                 dist_raw = candidate
                 break
 
     if not dist_raw:
-        mp_data = get_mediapipe_for_session(subject_name)
-        if mp_data and mp_data.get("distances"):
-            dist_raw = mp_data["distances"]
-
-    if not dist_raw:
-        with get_db_ctx() as db2:
-            subj_row = db2.execute(
-                "SELECT * FROM subjects WHERE name = ?", (subject_name,)
-            ).fetchone()
-        if subj_row:
-            labels_data = _committed_labels_to_array(subj_row)
-            if labels_data and labels_data.get("distances"):
-                dist_raw = labels_data["distances"]
-
-    if not dist_raw:
-        raise HTTPException(400, "No distance data available for auto-detection")
+        raise HTTPException(
+            400,
+            f"No distance data available for auto-detection (source={source})",
+        )
 
     # Slice to trial range (local indices for detection)
     trial_dist = dist_raw[sf:ef + 1]
