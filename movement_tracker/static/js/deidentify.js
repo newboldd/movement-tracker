@@ -195,6 +195,16 @@ const deid = (() => {
         ctx = canvas.getContext('2d');
         videoEl = document.getElementById('videoPlayer');
 
+        // Restore hand-mask source from sessionStorage so the dropdown
+        // matches what the next bulk fetch will request.
+        try {
+            const saved = sessionStorage.getItem('deid_handSourceSelect');
+            const sel = document.getElementById('handSourceSelect');
+            if (saved && sel && [...sel.options].some(o => o.value === saved)) {
+                sel.value = saved;
+            }
+        } catch {}
+
         // Load subjects
         try {
             subjects = await API.get('/api/subjects');
@@ -2567,6 +2577,19 @@ const deid = (() => {
     // (re)loading the landmarks based on whether the current frame
     // falls inside any hand-protection segment, so we don't need to
     // wipe-and-reload here.
+    async function setHandMaskSource(value) {
+        // Drop the cached bulk landmarks so the next render fetch
+        // hits the API with the new source.  Also clear the current
+        // frame's landmarks; render() will repopulate from the new
+        // bulk data on the next tick.
+        handLandmarksBulk = {};
+        handLandmarks = [];
+        try { sessionStorage.setItem('deid_handSourceSelect', value); } catch {}
+        await _loadBulkLandmarks();
+        _applyTemporalSmoothing();
+        render();
+    }
+
     async function toggleHandOverlay(enabled) {
         handOverlayEnabled = enabled;
         if (enabled && subjectId && hasMediapipe) {
@@ -2583,8 +2606,9 @@ const deid = (() => {
     async function _loadBulkLandmarks() {
         if (Object.keys(handLandmarksBulk).length > 0) return; // already loaded
         try {
+            const handSrc = (document.getElementById('handSourceSelect')?.value || 'all');
             const res = await API.get(
-                `/api/deidentify/${subjectId}/hand-landmarks-bulk?trial_idx=${currentTrialIdx}`
+                `/api/deidentify/${subjectId}/hand-landmarks-bulk?trial_idx=${currentTrialIdx}&source=${handSrc}`
             );
             handLandmarksBulk = res.landmarks || {};
             hasDlcLabels = res.has_dlc || false;
@@ -3481,6 +3505,7 @@ const deid = (() => {
         updateSpotDim,
         updateSpotFrameRange,
         toggleHandOverlay,
+        setHandMaskSource,
         updateHandRadius,
         deleteSelectedHandSeg,
         updateForearmExtent,

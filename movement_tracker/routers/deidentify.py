@@ -664,25 +664,71 @@ def get_hand_coverage(subject_id: int, trial_idx: int = Query(...)) -> dict:
 # ── Bulk hand landmarks (all frames from npz) ─────────────────────────────
 
 @router.get("/{subject_id}/hand-landmarks-bulk")
-def get_hand_landmarks_bulk(subject_id: int, trial_idx: int = Query(...)) -> dict:
-    """Return all hand landmarks for a trial from MediaPipe npz.
+def get_hand_landmarks_bulk(subject_id: int, trial_idx: int = Query(...),
+                              source: str = Query("all")) -> dict:
+    """Return all hand landmarks for a trial from MediaPipe npz(s).
+
+    ``source`` controls which MediaPipe pass(es) feed the protection
+    mask.  DLC's thumb/index tips are always added on top regardless:
+      - ``all``      → forward + reverse + static
+      - ``auto``     → combined if available, else forward
+      - ``combined`` → combined (falls back to forward if no combined)
+      - ``forward``  → forward only
 
     Returns {landmarks: {frame_num: [{x, y, side}]}} for frames with data.
     Uses stored npz data (fast), not live detection.
     """
     import numpy as np
-    from ..services.mediapipe_prelabel import load_mediapipe_prelabels, load_pose_prelabels
+    from ..services.mediapipe_prelabel import (
+        load_mediapipe_prelabels,
+        load_mediapipe_reverse_prelabels,
+        load_mediapipe_static_prelabels,
+        load_mediapipe_combined_prelabels,
+        load_pose_prelabels,
+    )
 
     with get_db_ctx() as db:
         subj = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
         if not subj:
             raise HTTPException(404, "Subject not found")
 
-    hand_data = load_mediapipe_prelabels(subj["name"])
+    # Build the list of MP sources to merge into the protection mask.
+    # Each entry contributes its own OS/OD hand landmarks; the client's
+    # morphological-close step naturally fuses overlapping circles, so
+    # duplicate joints across passes are harmless (and additive — they
+    # widen the protected region where multiple passes agree).
+    src = (source or "all").lower()
+    sources: list[dict] = []
+    if src == "all":
+        for ld in (load_mediapipe_prelabels,
+                   load_mediapipe_reverse_prelabels,
+                   load_mediapipe_static_prelabels):
+            d = ld(subj["name"])
+            if d is not None:
+                sources.append(d)
+    elif src == "combined":
+        d = load_mediapipe_combined_prelabels(subj["name"]) \
+            or load_mediapipe_prelabels(subj["name"])
+        if d is not None:
+            sources.append(d)
+    elif src == "forward":
+        d = load_mediapipe_prelabels(subj["name"])
+        if d is not None:
+            sources.append(d)
+    else:  # auto
+        d = load_mediapipe_combined_prelabels(subj["name"]) \
+            or load_mediapipe_prelabels(subj["name"])
+        if d is not None:
+            sources.append(d)
+
+    # Primary "hand_data" handle kept for downstream pose / has_pose
+    # logic and the interpolation pass.  Defaults to the first MP
+    # source we found (or None if no MP at all).
+    hand_data = sources[0] if sources else None
     pose_data = load_pose_prelabels(subj["name"])
 
     if hand_data is None and pose_data is None:
-        return {"landmarks": {}, "has_pose": False}
+        return {"landmarks": {}, "has_pose": False, "has_dlc": False}
 
     camera_mode = subj.get("camera_mode") or "stereo"
     trials = build_trial_map(subj["name"], camera_mode=camera_mode)
@@ -699,20 +745,26 @@ def get_hand_landmarks_bulk(subject_id: int, trial_idx: int = Query(...)) -> dic
     # frames where MediaPipe failed to detect.  Restricted to the trial
     # range so we don't bridge across trial boundaries.
     from ..services.deidentify import interpolate_landmarks_inplace
-    if hand_data:
-        interpolate_landmarks_inplace(hand_data.get("OS_landmarks"), start, end)
-        interpolate_landmarks_inplace(hand_data.get("OD_landmarks"), start, end)
+    for sd in sources:
+        interpolate_landmarks_inplace(sd.get("OS_landmarks"), start, end)
+        interpolate_landmarks_inplace(sd.get("OD_landmarks"), start, end)
     if pose_data:
         interpolate_landmarks_inplace(pose_data.get("OS_pose"), start, end)
         interpolate_landmarks_inplace(pose_data.get("OD_pose"), start, end)
 
     result = {}
 
-    # Hand landmarks (21 keypoints per hand)
-    if hand_data:
-        os_lm = hand_data["OS_landmarks"]
-        od_lm = hand_data["OD_landmarks"]
-        for f in range(start, min(end + 1, len(os_lm))):
+    # Hand landmarks (21 keypoints per hand).  Iterate every selected
+    # MP source and append all its keypoints — overlapping circles are
+    # fused by the morphological-close step downstream, so duplicate
+    # joints across passes just reinforce the protection region.
+    for sd in sources:
+        os_lm = sd.get("OS_landmarks")
+        od_lm = sd.get("OD_landmarks")
+        if os_lm is None or od_lm is None:
+            continue
+        last_f = min(end + 1, len(os_lm), len(od_lm))
+        for f in range(start, last_f):
             pts = result.get(str(f), [])
             if not np.all(np.isnan(os_lm[f])):
                 for j in range(os_lm.shape[1]):

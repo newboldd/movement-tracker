@@ -228,6 +228,19 @@
                         Show hand landmarks
                     </label>
 
+                    <!-- Label source for hand mask -->
+                    <div style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:12px;"
+                         title="Which MediaPipe pass(es) feed the protection mask.  DLC thumb/index tips are always added on top.">
+                        <label for="handSourceSelect" style="margin:0;color:var(--text-muted);">Source:</label>
+                        <select id="handSourceSelect" style="flex:1;padding:2px 6px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:11px;"
+                                onchange="deid.setHandMaskSource(this.value)">
+                            <option value="all" selected>All (MP + reverse + static + DLC)</option>
+                            <option value="auto">Auto (MP combined + DLC &gt; MP forward + DLC)</option>
+                            <option value="combined">MP combined (+DLC)</option>
+                            <option value="forward">MP forward (+DLC)</option>
+                        </select>
+                    </div>
+
                     <!-- MediaPipe hand-mask controls -->
                     <div id="mpHandControls">
                         <div class="slider-row" style="margin-top:6px;">
@@ -341,6 +354,6 @@
 
     <script src="/static/js/api.js"></script>
     <script src="/static/js/nav.js?v=9"></script>
-    <script src="/static/js/deidentify.js?v=56"></script>
+    <script src="/static/js/deidentify.js?v=57"></script>
 </body>
 </html>
