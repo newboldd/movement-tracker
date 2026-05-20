@@ -236,8 +236,10 @@ function renderDistMovementPlots() {
         // container, wrap in a horizontal-scroll container.
         container.style.display = 'block';
         const plotW = cellW * xs;
+        const wraps = [];
         params.forEach(param => {
             const wrap = document.createElement('div');
+            wrap.className = 'mov-scroll-wrap';
             wrap.style.cssText = 'overflow-x:auto;margin-bottom:16px;width:100%;';
             const div = document.createElement('div');
             div.id = `distMovPlot_${param}`;
@@ -245,7 +247,20 @@ function renderDistMovementPlots() {
             div.style.width = plotW + 'px';
             wrap.appendChild(div);
             container.appendChild(wrap);
+            wraps.push(wrap);
             renderMovementScatter(div.id, data, param, seqMode, plotW);
+        });
+        // Synchronize horizontal scrolling — scrolling any movement
+        // plot scrolls them all to the same offset.
+        let _syncing = false;
+        wraps.forEach(w => {
+            w.addEventListener('scroll', () => {
+                if (_syncing) return;
+                _syncing = true;
+                const sl = w.scrollLeft;
+                for (const o of wraps) { if (o !== w) o.scrollLeft = sl; }
+                _syncing = false;
+            });
         });
     }
 }
@@ -834,6 +849,19 @@ function hideSeqInfo() {
     if (el) el.textContent = '';
 }
 
+// Per-trial frame offset + fps, derived from the loaded distance
+// traces, so movement-plot times match the distance/velocity plots.
+function _trialFrameMeta() {
+    const meta = {};
+    const trials = (cachedTraces && cachedTraces.trials) || [];
+    let acc = 0;
+    trials.forEach((t, i) => {
+        meta[i] = { start: acc, fps: t.fps || 60 };
+        acc += (t.distances ? t.distances.length : 0);
+    });
+    return meta;
+}
+
 function renderMovementScatter(divId, data, param, seqMode, widthPx) {
     const movements = data.movements;
     const trialNames = data.trial_names || [];
@@ -854,12 +882,14 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
     const isFirst10 = seqMode.endsWith('_first10');
 
     // Peak velocity params are timestamped at their own velocity peak,
-    // not the distance peak, so their sequence-effect fits use the
-    // correct time axis.  Everything else stays on the distance-peak
-    // time (``peak_time``).
-    const xField = param === 'peak_open_vel' ? 'peak_open_vel_time'
-                 : param === 'peak_close_vel' ? 'peak_close_vel_time'
-                 : 'peak_time';
+    // not the distance peak.  Use the FRAME fields and convert to
+    // trial-local time (frame relative to the trial's first frame /
+    // fps) — the same time values the distance/velocity plots use, so
+    // the markers line up.  No per-trial first-movement offset.
+    const frameField = param === 'peak_open_vel' ? 'peak_open_vel_frame'
+                     : param === 'peak_close_vel' ? 'peak_close_vel_frame'
+                     : 'peak_frame';
+    const frameMeta = _trialFrameMeta();
 
     // Same color for every trial — trial identity is shown by the
     // labels above each trial's segment instead of a color key.
@@ -871,11 +901,16 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
     const trialKeys = Object.keys(byTrial).sort((a, b) => +a - +b);
     const trialInfo = trialKeys.map(ti => {
         const ms = byTrial[ti];
-        const rawX = ms.map(m => (m[xField] != null ? m[xField] : m.peak_time));
+        const meta = frameMeta[ti] || { start: 0, fps: 60 };
+        const rawX = ms.map(m => {
+            const f = (m[frameField] != null ? m[frameField] : m.peak_frame);
+            return (f != null && isFinite(f)) ? (f - meta.start) / meta.fps : null;
+        });
         const valid = rawX.filter(v => v != null && isFinite(v));
-        const t0 = valid.length ? Math.min(...valid) : 0;
-        const span = valid.length ? (Math.max(...valid) - t0) : 0;
-        return { ti, ms, rawX, t0, span };
+        // Local time is measured from the trial's first frame (0), so
+        // the span runs up to the last movement's time.
+        const span = valid.length ? Math.max(...valid) : 0;
+        return { ti, ms, rawX, span };
     });
     const N = trialInfo.length;
     const maxSpan = Math.max(1, ...trialInfo.map(t => t.span));
@@ -893,9 +928,10 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
         t.axKey = i === 0 ? 'xaxis' : 'xaxis' + (i + 1);
     });
 
-    trialInfo.forEach(({ ti, ms, rawX, t0, axId, domain }) => {
-        // Local time restarts at 0 for every trial (its own X axis).
-        const x = rawX.map(v => (v != null && isFinite(v)) ? (v - t0) : v);
+    trialInfo.forEach(({ ti, ms, rawX, axId, domain }) => {
+        // Trial-local time (frame-from-trial-start / fps), same values
+        // as the distance/velocity plots.
+        const x = rawX;
         const y = ms.map(m => m[param]);
         const trialLabel = trialNames[ti] || `Trial ${+ti + 1}`;
 
