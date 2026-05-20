@@ -584,8 +584,14 @@ function renderDistancePlot(divId, trial, yRange, width, overlayTraces, shapes) 
     const traces = [distTrace, ...(overlayTraces || [])];
     const hasOverlays = (overlayTraces || []).length > 0;
 
+    // Trial part only (e.g. "R1" from "PD03_R1").
+    const trialPart = String(trial.name || '').split('_').pop();
     const layout = {
-        title: { text: trial.name, font: { size: 13, color: '#666' } },
+        title: {
+            text: `Trial: ${trialPart}`,
+            x: 0, xanchor: 'left',
+            font: { size: 13, color: '#666' },
+        },
         margin: { t: 30, b: 5, l: 55, r: 20 },
         xaxis: { showticklabels: false, color: '#666', gridcolor: '#eee' },
         yaxis: {
