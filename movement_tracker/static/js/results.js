@@ -10,6 +10,21 @@ let cachedMovements = null;
 let cachedGroup = null;
 let cachedSequenceAssignments = null; // { byTrial: { trialIdx: {sequences, seq_r2} }, totalSeqs, totalR2 }
 
+// Y-range slider state for the distance/velocity trace plots.
+//   _yFull[kind]       → [min, max] data extent (slider bounds)
+//   _yLocked[kind]     → {min, max} shared range when Lock Y-axis is on
+//   _yTrial[kind][idx] → {min, max} per-trial range when unlocked
+// kind ∈ {'dist','vel'}.  Reset whenever new traces are fetched.
+let _yFull = { dist: null, vel: null };
+let _yLocked = { dist: null, vel: null };
+let _yTrial = { dist: {}, vel: {} };
+
+function _resetYOverrides() {
+    _yFull = { dist: null, vel: null };
+    _yLocked = { dist: null, vel: null };
+    _yTrial = { dist: {}, vel: {} };
+}
+
 const PARAM_LABELS = {
     peak_dist: 'Peak Distance (mm)',
     amplitude: 'Amplitude (mm)',
@@ -121,6 +136,7 @@ async function loadDistances(subjectId) {
         ]);
 
         cachedTraces = traceData;
+        _resetYOverrides();   // new subject/source → fresh full-range sliders
 
         // Update source selector with available sources
         _updateSourceSelector(traceData.available_sources || [], traceData.data_source);
@@ -195,15 +211,6 @@ function renderDistMovementPlots() {
     });
 }
 
-function getYAxisConfig() {
-    const locked = document.getElementById('lockYAxis').checked;
-    const minInput = document.getElementById('yAxisMin');
-    const maxInput = document.getElementById('yAxisMax');
-    const customMin = minInput.value !== '' ? parseFloat(minInput.value) : null;
-    const customMax = maxInput.value !== '' ? parseFloat(maxInput.value) : null;
-    return { locked, customMin, customMax };
-}
-
 function _updateSourceSelector(availableSources, activeSource) {
     // No-op: the page-level #resultsSourceSelect is now the single
     // source of truth for distance source.  The per-subject auto
@@ -226,20 +233,15 @@ function renderAllDistancePlots() {
         container.appendChild(badge);
     }
 
-    const yConfig = getYAxisConfig();
     const yRange = data.y_range;
 
-    // Determine y-axis ranges
-    let distRange = null;
-    let velRange = null;
-    if (yConfig.locked && yRange) {
-        const dMin = yConfig.customMin !== null ? yConfig.customMin : yRange.dist_min;
-        const dMax = yConfig.customMax !== null ? yConfig.customMax : yRange.dist_max;
-        const pad = (dMax - dMin) * 0.05;
-        distRange = [dMin - pad, dMax + pad];
-
-        const vPad = (yRange.vel_max - yRange.vel_min) * 0.05;
-        velRange = [yRange.vel_min - vPad, yRange.vel_max + vPad];
+    // Establish full data extents (slider bounds) once per dataset.
+    // A 5% pad keeps the trace off the very edge at full range.
+    if (yRange && _yFull.dist === null) {
+        const dPad = (yRange.dist_max - yRange.dist_min) * 0.05 || 1;
+        _yFull.dist = [yRange.dist_min - dPad, yRange.dist_max + dPad];
+        const vPad = (yRange.vel_max - yRange.vel_min) * 0.05 || 1;
+        _yFull.vel = [yRange.vel_min - vPad, yRange.vel_max + vPad];
     }
 
     // Build per-trial overlay data from movements
@@ -279,25 +281,47 @@ function renderAllDistancePlots() {
     // Ensure container has a valid width before rendering
     const containerWidth = container.clientWidth || container.parentElement?.clientWidth || 1200;
 
+    // Plot heights + Plotly margins, kept in sync with the layout
+    // objects in renderDistancePlot / renderVelocityPlot so the
+    // slider travel lines up with the y-axis data area.
+    const DIST_H = 220, DIST_MT = 30, DIST_MB = 5;
+    const VEL_H = 150, VEL_MT = 5, VEL_MB = 35;
+
     data.trials.forEach((trial, idx) => {
-        // Wrapper for each trial (enables horizontal scrolling)
+        // Trial block: fixed slider column + horizontally-scrolling plots.
+        const block = document.createElement('div');
+        block.style.display = 'flex';
+        block.style.alignItems = 'flex-start';
+        block.style.marginBottom = '16px';
+
+        // Slider column (does NOT scroll with the plots)
+        const sliderCol = document.createElement('div');
+        sliderCol.style.display = 'flex';
+        sliderCol.style.flexDirection = 'column';
+        sliderCol.style.flex = '0 0 auto';
+        sliderCol.appendChild(_buildYSliderCol('dist', idx, DIST_H, DIST_MT, DIST_MB));
+        sliderCol.appendChild(_buildYSliderCol('vel', idx, VEL_H, VEL_MT, VEL_MB));
+        block.appendChild(sliderCol);
+
+        // Scrolling wrapper holds both plots
         const wrapper = document.createElement('div');
-        wrapper.style.marginBottom = '16px';
         wrapper.style.overflowX = 'auto';
+        wrapper.style.flex = '1 1 auto';
 
         // Distance plot
         const distDiv = document.createElement('div');
         distDiv.id = `distPlot_${idx}`;
-        distDiv.style.height = '220px';
+        distDiv.style.height = DIST_H + 'px';
         wrapper.appendChild(distDiv);
 
         // Velocity plot
         const velDiv = document.createElement('div');
         velDiv.id = `velPlot_${idx}`;
-        velDiv.style.height = '150px';
+        velDiv.style.height = VEL_H + 'px';
         wrapper.appendChild(velDiv);
 
-        container.appendChild(wrapper);
+        block.appendChild(wrapper);
+        container.appendChild(block);
 
         // Compute plot width based on 20s per screen width
         const fps = trial.fps || 60;
@@ -393,9 +417,100 @@ function renderAllDistancePlots() {
             }
         }
 
-        renderDistancePlot(distDiv.id, trial, distRange, plotWidth, distOverlays, distShapes);
-        renderVelocityPlot(velDiv.id, trial, velRange, plotWidth, velOverlays, distShapes);
+        renderDistancePlot(distDiv.id, trial, _effYRange('dist', idx), plotWidth, distOverlays, distShapes);
+        renderVelocityPlot(velDiv.id, trial, _effYRange('vel', idx), plotWidth, velOverlays, distShapes);
     });
+}
+
+// ── Y-range slider helpers ─────────────────────────────────────
+
+// Effective [min,max] for a plot: the locked shared range, the
+// per-trial range, or the full data extent when nothing's been
+// adjusted yet.
+function _effYRange(kind, idx) {
+    if (!_yFull[kind]) return null;
+    const locked = document.getElementById('lockYAxis').checked;
+    const ov = locked ? _yLocked[kind] : _yTrial[kind][idx];
+    if (ov && ov.min != null && ov.max != null) return [ov.min, ov.max];
+    return _yFull[kind].slice();
+}
+
+// Build the two-vertical-slider column (max + min) for one plot.
+// ``mTop``/``mBot`` are the Plotly plot margins so the slider travel
+// aligns with the y-axis data area.
+function _buildYSliderCol(kind, idx, h, mTop, mBot) {
+    const full = _yFull[kind];
+    const col = document.createElement('div');
+    col.className = 'yslider-col';
+    col.style.height = h + 'px';
+    col.style.paddingTop = mTop + 'px';
+    col.style.paddingBottom = mBot + 'px';
+    col.style.boxSizing = 'border-box';
+    if (!full) return col;  // no data extent yet
+
+    const eff = _effYRange(kind, idx) || full;
+    const step = ((full[1] - full[0]) / 1000) || 0.1;
+    const mk = (bound, val) => {
+        const s = document.createElement('input');
+        s.type = 'range';
+        s.className = 'yslider-vert' + (kind === 'vel' ? ' vel' : '');
+        s.min = full[0]; s.max = full[1]; s.step = step; s.value = val;
+        s.dataset.kind = kind; s.dataset.bound = bound; s.dataset.trial = idx;
+        s.title = bound === 'max' ? 'Y max' : 'Y min';
+        s.style.height = '100%';
+        s.addEventListener('input', () => _onYSlider(s));
+        return s;
+    };
+    col.appendChild(mk('max', eff[1]));
+    col.appendChild(mk('min', eff[0]));
+    return col;
+}
+
+function _onYSlider(el) {
+    const kind = el.dataset.kind;
+    const idx = +el.dataset.trial;
+    const bound = el.dataset.bound;
+    const locked = document.getElementById('lockYAxis').checked;
+    const full = _yFull[kind];
+    if (!full) return;
+
+    let cur = locked ? _yLocked[kind] : _yTrial[kind][idx];
+    if (!cur) cur = { min: full[0], max: full[1] };
+
+    const minGap = (full[1] - full[0]) * 0.02 || 0.1;
+    let v = parseFloat(el.value);
+    if (bound === 'max') {
+        if (v < cur.min + minGap) v = cur.min + minGap;
+        cur.max = v;
+    } else {
+        if (v > cur.max - minGap) v = cur.max - minGap;
+        cur.min = v;
+    }
+    el.value = (bound === 'max') ? cur.max : cur.min;  // reflect clamp
+
+    if (locked) _yLocked[kind] = cur; else _yTrial[kind][idx] = cur;
+    _applyYRange(kind, locked ? null : idx);
+}
+
+// Push the chosen range to the plot(s) via Plotly.relayout (no full
+// re-render, so it's instant).  When locked (idx === null) it hits
+// every plot of this kind and syncs all sibling sliders.
+function _applyYRange(kind, idx) {
+    const prefix = kind === 'dist' ? 'distPlot_' : 'velPlot_';
+    if (idx === null) {
+        const range = _yLocked[kind];
+        const r = [range.min, range.max];
+        document.querySelectorAll(`[id^="${prefix}"]`).forEach(div => {
+            if (window.Plotly) { try { Plotly.relayout(div, { 'yaxis.range': r }); } catch {} }
+        });
+        document.querySelectorAll(`.yslider-vert[data-kind="${kind}"]`).forEach(s => {
+            s.value = (s.dataset.bound === 'max') ? range.max : range.min;
+        });
+    } else {
+        const range = _yTrial[kind][idx];
+        const div = document.getElementById(`${prefix}${idx}`);
+        if (div && window.Plotly) { try { Plotly.relayout(div, { 'yaxis.range': [range.min, range.max] }); } catch {} }
+    }
 }
 
 function renderDistancePlot(divId, trial, yRange, width, overlayTraces, shapes) {
@@ -1609,16 +1724,28 @@ document.getElementById('distSequenceMode').addEventListener('change', () => {
     });
 });
 
-// Distance controls: re-render on y-axis changes
+// Lock Y-axis toggle: switch between shared (locked) and per-trial
+// (unlocked) Y-range sliders.  Seed the shared range from trial 0's
+// current per-trial range when locking, and vice-versa, so the view
+// doesn't jump.  Then re-render to rebuild sliders in the new mode.
 document.getElementById('lockYAxis').addEventListener('change', () => {
     const locked = document.getElementById('lockYAxis').checked;
-    document.getElementById('yAxisInputs').style.display = locked ? '' : 'none';
-    if (cachedTraces) renderAllDistancePlots();
-});
-document.getElementById('yAxisMin').addEventListener('change', () => {
-    if (cachedTraces) renderAllDistancePlots();
-});
-document.getElementById('yAxisMax').addEventListener('change', () => {
+    if (locked) {
+        // Adopt trial 0's range (or full) as the new shared range.
+        ['dist', 'vel'].forEach(kind => {
+            const t0 = _yTrial[kind][0];
+            _yLocked[kind] = t0 ? { ...t0 }
+                : (_yFull[kind] ? { min: _yFull[kind][0], max: _yFull[kind][1] } : null);
+        });
+    } else {
+        // Seed every trial's range from the shared one so unlocking
+        // keeps the current view until the user diverges them.
+        ['dist', 'vel'].forEach(kind => {
+            if (!_yLocked[kind]) return;
+            const n = (cachedTraces && cachedTraces.trials) ? cachedTraces.trials.length : 0;
+            for (let i = 0; i < n; i++) _yTrial[kind][i] = { ..._yLocked[kind] };
+        });
+    }
     if (cachedTraces) renderAllDistancePlots();
 });
 

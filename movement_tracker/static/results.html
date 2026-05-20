@@ -69,11 +69,7 @@
                     </select>
                 </label>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
-                <label><input type="checkbox" id="lockYAxis" checked> Lock Y-axis</label>
-                <span id="yAxisInputs">
-                    <label style="margin:0;">Min: <input type="number" id="yAxisMin" step="1" placeholder="auto"></label>
-                    <label style="margin:0;">Max: <input type="number" id="yAxisMax" step="1" placeholder="auto"></label>
-                </span>
+                <label title="When checked, the Y-range sliders on any trial control every trial's plots of the same type."><input type="checkbox" id="lockYAxis" checked> Lock Y-axis</label>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
                 <label><input type="checkbox" id="overlayPeakDist"> Peak Distance</label>
                 <label><input type="checkbox" id="overlayPeakOpenVel"> Peak Open Vel</label>
@@ -175,12 +171,32 @@
                 width: 8px; height: 8px;
                 border-radius: 50%;
             }
+            /* Vertical Y-range sliders to the left of each trace plot. */
+            .yslider-col {
+                display: flex;
+                flex-direction: row;
+                gap: 1px;
+                flex: 0 0 auto;
+                padding-right: 2px;
+            }
+            .yslider-vert {
+                -webkit-appearance: slider-vertical;
+                appearance: slider-vertical;
+                writing-mode: vertical-lr;
+                direction: rtl;        /* min at bottom, max at top */
+                width: 16px;
+                padding: 0;
+                margin: 0;
+                cursor: ns-resize;
+                accent-color: #2196F3;
+            }
+            .yslider-vert.vel { accent-color: #4CAF50; }
         </style>
     </div>
 
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=19"></script>
+    <script src="/static/js/results.js?v=20"></script>
 </body>
 </html>
