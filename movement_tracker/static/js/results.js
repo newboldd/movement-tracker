@@ -253,16 +253,9 @@ function renderAllDistancePlots() {
     container.innerHTML = '';
 
     // Reflect the auto-resolved source in the dropdown's Auto label.
+    // (The standalone "Source: …" badge was removed as redundant — the
+    // dropdown already shows the resolved source.)
     _updateAutoSourceLabel(data.data_source);
-
-    // Show active source badge
-    if (data.data_source && data.data_source !== 'none') {
-        const badge = document.createElement('div');
-        badge.style.cssText = 'padding:4px 10px;margin-bottom:8px;border-radius:4px;font-size:11px;display:inline-block;background:rgba(100,180,255,0.15);color:var(--accent);';
-        const labels = { mediapipe: 'MediaPipe', vision: 'Vision', skeleton_v1: 'Skeleton v1', skeleton_v2: 'Skeleton v2', skeleton_v3: 'Skeleton v3', dlc: 'DLC', corrections: 'Corrections' };
-        badge.textContent = `Source: ${labels[data.data_source] || data.data_source}`;
-        container.appendChild(badge);
-    }
 
     const yRange = data.y_range;
 
