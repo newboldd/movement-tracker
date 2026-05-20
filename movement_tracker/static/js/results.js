@@ -200,20 +200,13 @@ function renderDistMovementPlots() {
 
     const seqMode = document.getElementById('distSequenceMode').value;
 
-    // Pre-compute sequence assignments if multi-seq mode
+    // Pre-compute sequence assignments if multi-seq mode.  (The
+    // summary text after the dropdown was removed as redundant \u2014 the
+    // per-fit R\u00b2 is shown on each plot.)
     if (seqMode.endsWith('_multi') && data.movements.length > 0) {
         if (!cachedSequenceAssignments) {
             cachedSequenceAssignments = computeSequenceAssignments(data);
         }
-        const el = document.getElementById('distSeqInfo');
-        if (el && cachedSequenceAssignments.totalSeqs > 0) {
-            el.textContent = `${cachedSequenceAssignments.totalSeqs} sequence${cachedSequenceAssignments.totalSeqs !== 1 ? 's' : ''} | R\u00b2 = ${cachedSequenceAssignments.totalR2.toFixed(3)}`;
-        } else if (el) {
-            el.textContent = 'No sequences detected';
-        }
-    } else {
-        const el = document.getElementById('distSeqInfo');
-        if (el) el.textContent = '';
     }
 
     container.innerHTML = '';
