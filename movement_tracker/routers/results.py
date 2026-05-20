@@ -822,6 +822,9 @@ def get_group_comparison(include_auto: bool = Query(False),
             distances, trials, _src = _load_distances_and_trials(subject_name, source)
             saved_events = _read_events_csv(subject_name)
             has_saved = any(len(v) > 0 for v in saved_events.values())
+            # "Complete" = at least one open, peak, AND close saved.
+            has_complete = all(len(saved_events.get(t, [])) > 0
+                               for t in ("open", "peak", "close"))
             if include_auto:
                 events, event_source = _load_events(subject_name, distances, trials)
             else:
@@ -841,6 +844,7 @@ def get_group_comparison(include_auto: bool = Query(False),
             "diagnosis": diagnosis,
             "event_source": event_source,
             "has_saved_events": has_saved,
+            "has_complete_events": has_complete,
             "last_dose_raw": subj.get("last_dose") or None,
             "time_since_dose_min": _parse_last_dose_minutes(subj.get("last_dose")),
             "levodopa_off": _is_levodopa_off(subj.get("levodopa")),

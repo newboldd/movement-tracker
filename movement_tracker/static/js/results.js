@@ -1539,7 +1539,7 @@ function _initGroupSubjectChecked() {
     const includeAuto = document.getElementById('includeAutoToggle').checked;
     _groupSubjectChecked = {};
     cachedGroup.subjects.forEach(s => {
-        _groupSubjectChecked[s.name] = s.has_saved_events ? true : includeAuto;
+        _groupSubjectChecked[s.name] = s.has_complete_events ? true : includeAuto;
     });
 }
 
@@ -1551,7 +1551,7 @@ function _onIncludeAutoChanged() {
     const includeAuto = document.getElementById('includeAutoToggle').checked;
     if (cachedGroup && cachedGroup.subjects) {
         cachedGroup.subjects.forEach(s => {
-            if (!s.has_saved_events) _groupSubjectChecked[s.name] = includeAuto;
+            if (!s.has_complete_events) _groupSubjectChecked[s.name] = includeAuto;
         });
     }
     renderGroupPlots();
@@ -1580,15 +1580,23 @@ function _renderGroupSubjectList() {
     groups.forEach(g => {
         const subs = byGroup[g] || [];
         if (subs.length === 0) return;
+        const color = (typeof GROUP_COLORS !== 'undefined' && GROUP_COLORS[g]) || '#999';
         // Each diagnosis group on its own row, led by a group label.
         html += `<div class="gsl-group"><span class="gsl-group-label">${g}</span>`;
         subs.forEach(s => {
             const checked = !!_groupSubjectChecked[s.name];
-            const dim = !s.has_saved_events ? ' dim' : '';
+            // Dim subjects without a complete saved event set (must
+            // have ≥1 open, peak, and close).
+            const complete = !!s.has_complete_events;
+            const dim = complete ? '' : ' dim';
+            const title = complete ? 'Saved events (open/peak/close)'
+                : (s.has_saved_events ? 'Incomplete saved events' : 'No saved events');
             const safe = s.name.replace(/"/g, '&quot;');
-            html += `<label class="${dim.trim()}" title="${s.has_saved_events ? 'Saved events' : 'Auto-detected events'} (${g})">
+            // Tab background = group color, black text for readability.
+            html += `<label class="${dim.trim()}" style="background:${color};color:#000;border-color:${color};"
+                title="${title} (${g})">
                 <input type="checkbox" data-subject="${safe}" ${checked ? 'checked' : ''}>
-                ${s.name}${s.has_saved_events ? '' : ' *'}
+                ${s.name}${complete ? '' : ' *'}
             </label>`;
         });
         html += '</div>';
@@ -1613,7 +1621,7 @@ window._groupSelectAll = function (state) {
         // in while the toggle is off — matches the dim/deactivated
         // semantics the user asked for.
         if (state) {
-            _groupSubjectChecked[s.name] = s.has_saved_events ? true : includeAuto;
+            _groupSubjectChecked[s.name] = s.has_complete_events ? true : includeAuto;
         } else {
             _groupSubjectChecked[s.name] = false;
         }
