@@ -31,3 +31,10 @@ calibration/camera1_recalibrated.yaml
 
 # Runtime cache (recomputed per machine)
 .preview_distances.json
+
+# Stray / local-only artifacts
+.fuse_hidden*
+*.db-wal
+*.db-shm
+methods.pages
+methods_draft.docx
