@@ -36,7 +36,7 @@ async function loadSubjects() {
         subjects.forEach(s => {
             const opt = document.createElement('option');
             opt.value = s.id;
-            opt.textContent = `${s.name} (${s.diagnosis || 'Control'})`;
+            opt.textContent = s.name;
             sel.appendChild(opt);
         });
     } catch (e) {
