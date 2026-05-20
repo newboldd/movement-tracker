@@ -60,6 +60,13 @@
         <!-- Distances Tab -->
         <div id="tabDistances" class="results-tab active">
             <div class="distance-controls" id="distanceControls">
+                <label title="Seconds of trace shown per screen width — lower = more stretched out."
+                       style="display:flex;align-items:center;gap:6px;margin:0;">
+                    X scale:
+                    <input type="range" id="xScaleSlider" min="5" max="60" step="1" value="20" style="width:120px;">
+                    <span id="xScaleVal" style="font-size:11px;color:#666;min-width:34px;">20 s</span>
+                </label>
+                <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
                 <label style="display:flex;align-items:center;gap:6px;margin:0;">Source:
                     <select id="resultsSourceSelect" style="min-width:140px;">
                         <option value="auto" selected>Auto</option>
@@ -75,12 +82,6 @@
                 <label><input type="checkbox" id="overlayPeakOpenVel"> Peak Open Vel</label>
                 <label><input type="checkbox" id="overlayPeakCloseVel"> Peak Close Vel</label>
                 <span id="overlayR2" style="font-size:11px;color:#666;font-weight:600;"></span>
-                <label title="Seconds of trace shown per screen width — lower = more stretched out."
-                       style="display:flex;align-items:center;gap:6px;margin:0 0 0 auto;">
-                    X scale:
-                    <input type="range" id="xScaleSlider" min="5" max="60" step="1" value="20" style="width:120px;">
-                    <span id="xScaleVal" style="font-size:11px;color:#666;min-width:34px;">20 s</span>
-                </label>
             </div>
             <div id="distancePlots">
                 <div class="results-no-data">Select a subject to view distance traces</div>
@@ -88,7 +89,13 @@
 
             <!-- Movement parameters (plotted below distance traces) -->
             <div class="results-controls" id="distMovementControls" style="margin-top:12px;display:none;flex-wrap:wrap;">
-                <span style="font-weight:600;font-size:12px;margin-right:8px;">Movements:</span>
+                <label title="Horizontal scale of the movement plots."
+                       style="display:flex;align-items:center;gap:6px;margin:0;">
+                    X scale:
+                    <input type="range" id="movXScaleSlider" min="1" max="4" step="0.25" value="1" style="width:110px;">
+                    <span id="movXScaleVal" style="font-size:11px;color:#666;min-width:30px;">1.0×</span>
+                </label>
+                <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
                 <label><input type="checkbox" data-dparam="amplitude" checked> Amplitude</label>
                 <label><input type="checkbox" data-dparam="imi" checked> IMI</label>
                 <label><input type="checkbox" data-dparam="peak_open_vel" checked> Peak Opening Vel.</label>
@@ -109,9 +116,17 @@
                         <option value="exp_multi" selected>Exponential (multi-seq)</option>
                     </select>
                 </label>
-                <!-- Second row: less-common parameters -->
+                <!-- Second row: less-common parameters (indented to align
+                     under the first-row checkboxes via a hidden copy of
+                     the X-scale control). -->
                 <div style="flex-basis:100%;height:0;"></div>
-                <span style="font-weight:600;font-size:12px;margin-right:8px;visibility:hidden;">Movements:</span>
+                <label aria-hidden="true"
+                       style="display:flex;align-items:center;gap:6px;margin:0;visibility:hidden;">
+                    X scale:
+                    <input type="range" min="1" max="4" step="0.25" value="1" style="width:110px;" tabindex="-1">
+                    <span style="font-size:11px;min-width:30px;">1.0×</span>
+                </label>
+                <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;visibility:hidden;"></span>
                 <label><input type="checkbox" data-dparam="peak_dist"> Peak Distance</label>
                 <label><input type="checkbox" data-dparam="rel_amplitude"> Relative Amplitude</label>
                 <label><input type="checkbox" data-dparam="mean_open_vel"> Mean Opening Vel.</label>
@@ -203,6 +218,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=32"></script>
+    <script src="/static/js/results.js?v=33"></script>
 </body>
 </html>

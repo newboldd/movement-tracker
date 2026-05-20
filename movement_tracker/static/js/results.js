@@ -211,13 +211,43 @@ function renderDistMovementPlots() {
 
     container.innerHTML = '';
 
-    params.forEach(param => {
-        const div = document.createElement('div');
-        div.id = `distMovPlot_${param}`;
-        div.style.height = '320px';
-        container.appendChild(div);
-        renderMovementScatter(div.id, data, param, seqMode);
-    });
+    // X-scale multiplier (1 = current 2-column grid).  Wider than the
+    // current per-plot width → one plot per row; ≥ full container width
+    // (≈ 2× the grid-cell width) → fixed width with horizontal scroll,
+    // matching the distance/velocity plots.
+    const xs = parseFloat(document.getElementById('movXScaleSlider')?.value) || 1;
+    const containerW = container.clientWidth || container.parentElement?.clientWidth || 1000;
+    const GAP = 16;
+    const cellW = (containerW - GAP) / 2;   // current 2-col cell width
+
+    if (xs <= 1) {
+        // Default: 2-column responsive grid.
+        container.style.display = '';
+        container.style.gridTemplateColumns = '';
+        params.forEach(param => {
+            const div = document.createElement('div');
+            div.id = `distMovPlot_${param}`;
+            div.style.height = '320px';
+            container.appendChild(div);
+            renderMovementScatter(div.id, data, param, seqMode, null);
+        });
+    } else {
+        // One plot per row; scale width by xs.  When that exceeds the
+        // container, wrap in a horizontal-scroll container.
+        container.style.display = 'block';
+        const plotW = cellW * xs;
+        params.forEach(param => {
+            const wrap = document.createElement('div');
+            wrap.style.cssText = 'overflow-x:auto;margin-bottom:16px;width:100%;';
+            const div = document.createElement('div');
+            div.id = `distMovPlot_${param}`;
+            div.style.height = '320px';
+            div.style.width = plotW + 'px';
+            wrap.appendChild(div);
+            container.appendChild(wrap);
+            renderMovementScatter(div.id, data, param, seqMode, plotW);
+        });
+    }
 }
 
 function _updateSourceSelector(availableSources, activeSource) {
@@ -802,7 +832,7 @@ function hideSeqInfo() {
     if (el) el.textContent = '';
 }
 
-function renderMovementScatter(divId, data, param, seqMode) {
+function renderMovementScatter(divId, data, param, seqMode, widthPx) {
     const movements = data.movements;
     const trialNames = data.trial_names || [];
 
@@ -1199,7 +1229,14 @@ function renderMovementScatter(divId, data, param, seqMode) {
         };
     });
 
-    Plotly.newPlot(divId, traces, layout, { responsive: true, displayModeBar: false });
+    // When an explicit width is given (X-scale > 1) the plot is fixed
+    // and the wrapper scrolls; otherwise it stays responsive to its
+    // grid cell.
+    const config = { displayModeBar: false };
+    if (widthPx) { layout.width = widthPx; config.responsive = false; }
+    else { config.responsive = true; }
+
+    Plotly.newPlot(divId, traces, layout, config);
 }
 
 function linearRegression(x, y) {
@@ -1977,6 +2014,17 @@ document.getElementById('distSequenceMode').addEventListener('change', () => {
     sl.addEventListener('input', () => {
         if (val) val.textContent = `${sl.value} s`;
         if (cachedTraces) renderAllDistancePlots();
+    });
+})();
+
+// X-scale slider for the movement plots (width multiplier).
+(() => {
+    const sl = document.getElementById('movXScaleSlider');
+    const val = document.getElementById('movXScaleVal');
+    if (!sl) return;
+    sl.addEventListener('input', () => {
+        if (val) val.textContent = `${parseFloat(sl.value).toFixed(1)}×`;
+        if (cachedMovements) renderDistMovementPlots();
     });
 })();
 
