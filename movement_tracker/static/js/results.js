@@ -824,8 +824,9 @@ function renderMovementScatter(divId, data, param, seqMode) {
     // labels above each trial's segment instead of a color key.
     const color = MOVEMENT_DOT_COLOR;
 
-    // Pre-compute each trial's local time span so trials can be laid
-    // out left-to-right, each restarting at t=0, with a small gap.
+    // Each trial becomes its own subplot (own X axis restarting at 0),
+    // all sharing the single Y axis.  Domains are sized in proportion
+    // to each trial's time span, separated by a small gap.
     const trialKeys = Object.keys(byTrial).sort((a, b) => +a - +b);
     const trialInfo = trialKeys.map(ti => {
         const ms = byTrial[ti];
@@ -835,17 +836,25 @@ function renderMovementScatter(divId, data, param, seqMode) {
         const span = valid.length ? (Math.max(...valid) - t0) : 0;
         return { ti, ms, rawX, t0, span };
     });
+    const N = trialInfo.length;
     const maxSpan = Math.max(1, ...trialInfo.map(t => t.span));
-    const gap = maxSpan * 0.08;
-    // Cumulative left-edge offset per trial (precomputed so the early
-    // returns in the fit branches below can't skip the bookkeeping).
-    let _acc = 0;
-    trialInfo.forEach(t => { t.offset = _acc; _acc += t.span + gap; });
+    const gapFrac = N > 1 ? 0.04 : 0;
+    // Single-movement trials get a minimum width so they're visible.
+    const weights = trialInfo.map(t => Math.max(t.span, maxSpan * 0.15));
+    const wsum = weights.reduce((a, b) => a + b, 0) || 1;
+    const avail = 1 - gapFrac * (N - 1);
+    let _dcur = 0;
+    trialInfo.forEach((t, i) => {
+        const w = avail * (weights[i] / wsum);
+        t.domain = [_dcur, Math.min(1, _dcur + w)];
+        _dcur += w + gapFrac;
+        t.axId = i === 0 ? 'x' : 'x' + (i + 1);
+        t.axKey = i === 0 ? 'xaxis' : 'xaxis' + (i + 1);
+    });
 
-    trialInfo.forEach(({ ti, ms, rawX, t0, offset: xOffset }) => {
-        // Local time restarts at 0 per trial; shift by the running
-        // offset so trials sit side-by-side without overlapping.
-        const x = rawX.map(v => (v != null && isFinite(v)) ? (v - t0 + xOffset) : v);
+    trialInfo.forEach(({ ti, ms, rawX, t0, axId, domain }) => {
+        // Local time restarts at 0 for every trial (its own X axis).
+        const x = rawX.map(v => (v != null && isFinite(v)) ? (v - t0) : v);
         const y = ms.map(m => m[param]);
         const trialLabel = trialNames[ti] || `Trial ${+ti + 1}`;
 
@@ -854,26 +863,27 @@ function renderMovementScatter(divId, data, param, seqMode) {
             type: 'scatter',
             mode: 'markers',
             name: trialLabel,
+            xaxis: axId, yaxis: 'y',
             marker: { color, size: 7, opacity: 0.8 },
             hovertemplate: `${trialLabel}<br>t=%{x:.2f}s<br>${PARAM_LABELS[param]}: %{y:.2f}<extra></extra>`,
             showlegend: false,
         });
 
-        // Trial label above the plot, left-aligned with the trial start.
+        // Trial label above this subplot, left-aligned with its start.
         annotations.push({
-            x: xOffset, y: 1.0,
-            xref: 'x', yref: 'paper',
+            x: domain[0], y: 1.0,
+            xref: 'paper', yref: 'paper',
             xanchor: 'left', yanchor: 'bottom',
             text: trialLabel,
             showarrow: false,
             font: { size: 11, color: '#444' },
         });
 
-        // Vertical line marking t=0 for this trial, matching the y-axis
-        // line drawn at t=0 of the first trial.
+        // Vertical line at this trial's t=0 (its subplot's left edge),
+        // matching the y-axis line at the first trial's start.
         shapes.push({
-            type: 'line', xref: 'x', yref: 'paper',
-            x0: xOffset, x1: xOffset, y0: 0, y1: 1,
+            type: 'line', xref: axId, yref: 'paper',
+            x0: 0, x1: 0, y0: 0, y1: 1,
             line: { color: '#888', width: 1 },
             layer: 'below',
         });
@@ -935,7 +945,7 @@ function renderMovementScatter(divId, data, param, seqMode) {
 
                 // Background span — use trial color so shading matches the dots
                 shapes.push({
-                    type: 'rect', xref: 'x', yref: 'paper',
+                    type: 'rect', xref: axId, yref: 'paper',
                     x0: xMin, x1: xMax, y0: 0, y1: 1,
                     fillcolor: color, opacity: 0.07,
                     line: { width: 0 },
@@ -960,6 +970,7 @@ function renderMovementScatter(divId, data, param, seqMode) {
                         x: curveX, y: curveY,
                         type: 'scatter', mode: 'lines',
                         name: `Seq ${si + 1}`,
+                        xaxis: axId, yaxis: 'y',
                         line: { color, width: 2.5 },
                         showlegend: false, hoverinfo: 'skip',
                     });
@@ -968,6 +979,7 @@ function renderMovementScatter(divId, data, param, seqMode) {
                     const midY = sign * fit.predict(midX);
                     annotations.push({
                         x: midX, y: midY,
+                        xref: axId, yref: 'y',
                         text: `R\u00b2=${fit.r2.toFixed(2)}`,
                         showarrow: false,
                         font: { size: 9, color },
@@ -986,6 +998,7 @@ function renderMovementScatter(divId, data, param, seqMode) {
                         y: [sign * (reg.slope * xMin + reg.intercept), sign * (reg.slope * xMax + reg.intercept)],
                         type: 'scatter', mode: 'lines',
                         name: `Seq ${si + 1}`,
+                        xaxis: axId, yaxis: 'y',
                         line: { color, width: 2.5 },
                         showlegend: false, hoverinfo: 'skip',
                     });
@@ -994,6 +1007,7 @@ function renderMovementScatter(divId, data, param, seqMode) {
                     const midY = sign * (reg.slope * midX + reg.intercept);
                     annotations.push({
                         x: midX, y: midY,
+                        xref: axId, yref: 'y',
                         text: `R\u00b2=${reg.r2.toFixed(2)}`,
                         showarrow: false,
                         font: { size: 9, color },
@@ -1054,6 +1068,7 @@ function renderMovementScatter(divId, data, param, seqMode) {
                             x: cx, y: cy,
                             type: 'scatter', mode: 'lines',
                             name: 'Baseline (non-seq)',
+                            xaxis: axId, yaxis: 'y',
                             line: { color, width: 2, dash: 'dot' },
                             showlegend: false, hoverinfo: 'skip',
                         });
@@ -1091,12 +1106,14 @@ function renderMovementScatter(divId, data, param, seqMode) {
                     x: curveX, y: curveY,
                     type: 'scatter', mode: 'lines',
                     name: `Exp. fit (Trial ${+ti + 1})`,
+                    xaxis: axId, yaxis: 'y',
                     line: { color, width: 2, dash: 'dash' },
                     showlegend: false, hoverinfo: 'skip',
                 });
                 // R² annotation
                 annotations.push({
                     x: (xMin + xMax) / 2, y: sign * fit.predict((xMin + xMax) / 2),
+                    xref: axId, yref: 'y',
                     text: `R\u00b2=${fit.r2.toFixed(2)}`,
                     showarrow: false,
                     font: { size: 9, color },
@@ -1117,6 +1134,7 @@ function renderMovementScatter(divId, data, param, seqMode) {
                     y: [sign * (slope * xMin + intercept), sign * (slope * xMax + intercept)],
                     type: 'scatter', mode: 'lines',
                     name: `Trend (Trial ${+ti + 1})`,
+                    xaxis: axId, yaxis: 'y',
                     line: { color, width: 2, dash: 'dash' },
                     showlegend: false, hoverinfo: 'skip',
                 });
@@ -1124,6 +1142,7 @@ function renderMovementScatter(divId, data, param, seqMode) {
                 const midX = (xMin + xMax) / 2;
                 annotations.push({
                     x: midX, y: sign * (slope * midX + intercept),
+                    xref: axId, yref: 'y',
                     text: `R²=${reg.r2.toFixed(2)}`,
                     showarrow: false,
                     font: { size: 9, color },
@@ -1144,11 +1163,12 @@ function renderMovementScatter(divId, data, param, seqMode) {
     const layout = {
         title: { text: PARAM_LABELS[param], font: { size: 13, color: '#444' } },
         margin: { t: 35, b: 40, l: 60, r: 20 },
-        xaxis: { title: { text: 'Time (s)', font: { size: 11 } }, color: '#666', gridcolor: '#eee' },
+        // Single shared Y axis (anchored to the first subplot's X axis).
         yaxis: {
             title: { text: PARAM_YLABELS[param] || '', font: { size: 11 } },
             color: '#666', gridcolor: '#f0f0f0',
             autorange: reverseY ? 'reversed' : true,
+            anchor: 'x',
         },
         plot_bgcolor: '#fff',
         paper_bgcolor: '#fff',
@@ -1156,6 +1176,19 @@ function renderMovementScatter(divId, data, param, seqMode) {
         shapes,
         annotations,
     };
+
+    // One X axis per trial, each restarting at 0, sharing the Y axis.
+    trialInfo.forEach((t, i) => {
+        layout[t.axKey] = {
+            domain: t.domain,
+            anchor: 'y',
+            color: '#666',
+            gridcolor: '#eee',
+            rangemode: 'tozero',
+            zeroline: false,
+            title: (i === 0) ? { text: 'Time (s)', font: { size: 11 } } : undefined,
+        };
+    });
 
     Plotly.newPlot(divId, traces, layout, { responsive: true, displayModeBar: false });
 }
