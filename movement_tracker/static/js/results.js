@@ -366,11 +366,13 @@ function renderAllDistancePlots() {
         container.appendChild(block);
 
         // Compute plot width based on the X-scale slider (seconds shown
-        // per container width; default 20).
+        // per container width; default 20).  When the trial is shorter
+        // than the chosen scale it occupies only a fraction of the
+        // window rather than being stretched to the full width.
         const secPerWidth = parseFloat(document.getElementById('xScaleSlider')?.value) || 20;
         const fps = trial.fps || 60;
         const durationSec = trial.distances.length / fps;
-        const plotWidth = Math.max(containerWidth, (durationSec / secPerWidth) * containerWidth);
+        const plotWidth = Math.max(120, (durationSec / secPerWidth) * containerWidth);
 
         // Set wrapper width to enable scrolling
         distDiv.style.width = plotWidth + 'px';
