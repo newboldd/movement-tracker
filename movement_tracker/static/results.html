@@ -74,7 +74,6 @@
                 <label><input type="checkbox" id="overlayPeakDist"> Peak Distance</label>
                 <label><input type="checkbox" id="overlayPeakOpenVel"> Peak Open Vel</label>
                 <label><input type="checkbox" id="overlayPeakCloseVel"> Peak Close Vel</label>
-                <label><input type="checkbox" id="overlaySequences"> Sequences</label>
                 <span id="overlayR2" style="font-size:11px;color:#666;font-weight:600;"></span>
             </div>
             <div id="distancePlots">
@@ -82,20 +81,16 @@
             </div>
 
             <!-- Movement parameters (plotted below distance traces) -->
-            <div class="results-controls" id="distMovementControls" style="margin-top:12px;display:none;">
+            <div class="results-controls" id="distMovementControls" style="margin-top:12px;display:none;flex-wrap:wrap;">
                 <span style="font-weight:600;font-size:12px;margin-right:8px;">Movements:</span>
-                <label><input type="checkbox" data-dparam="peak_dist"> Peak Distance</label>
                 <label><input type="checkbox" data-dparam="amplitude" checked> Amplitude</label>
                 <label><input type="checkbox" data-dparam="imi" checked> IMI</label>
                 <label><input type="checkbox" data-dparam="peak_open_vel" checked> Peak Opening Vel.</label>
                 <label><input type="checkbox" data-dparam="peak_close_vel" checked> Peak Closing Vel.</label>
-                <label><input type="checkbox" data-dparam="rel_amplitude"> Relative Amplitude</label>
                 <label><input type="checkbox" data-dparam="power"> Power</label>
-                <label><input type="checkbox" data-dparam="mean_open_vel"> Mean Opening Vel.</label>
-                <label><input type="checkbox" data-dparam="mean_close_vel"> Mean Closing Vel.</label>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
                 <label style="display:flex;align-items:center;gap:4px;">
-                    Fit:
+                    Sequence Calculation:
                     <select id="distSequenceMode"
                         style="padding:3px 8px;background:#f0f0f0;border:1px solid #ccc;
                                border-radius:4px;color:#444;font-size:12px;">
@@ -109,6 +104,13 @@
                     </select>
                 </label>
                 <span id="distSeqInfo" style="font-size:11px;color:#666;"></span>
+                <!-- Second row: less-common parameters -->
+                <div style="flex-basis:100%;height:0;"></div>
+                <span style="font-weight:600;font-size:12px;margin-right:8px;visibility:hidden;">Movements:</span>
+                <label><input type="checkbox" data-dparam="peak_dist"> Peak Distance</label>
+                <label><input type="checkbox" data-dparam="rel_amplitude"> Relative Amplitude</label>
+                <label><input type="checkbox" data-dparam="mean_open_vel"> Mean Opening Vel.</label>
+                <label><input type="checkbox" data-dparam="mean_close_vel"> Mean Closing Vel.</label>
             </div>
             <div id="distMovementPlots" class="results-plot-grid"></div>
         </div>
@@ -197,6 +199,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=21"></script>
+    <script src="/static/js/results.js?v=22"></script>
 </body>
 </html>

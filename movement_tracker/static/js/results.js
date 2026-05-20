@@ -248,25 +248,13 @@ function renderAllDistancePlots() {
     const overlayPeakDist = document.getElementById('overlayPeakDist').checked;
     const overlayPeakOpenVel = document.getElementById('overlayPeakOpenVel').checked;
     const overlayPeakCloseVel = document.getElementById('overlayPeakCloseVel').checked;
-    const showSequences = document.getElementById('overlaySequences').checked;
-
-    // Compute sequence assignments if needed
+    // Sequence shading on the distance/velocity traces was removed with
+    // the "Sequences" checkbox; sequence fits now live only in the
+    // Movement-plot scatters below.
+    const showSequences = false;
     let seqAssignments = null;
-    if (showSequences && cachedMovements && cachedMovements.movements && cachedMovements.movements.length > 0) {
-        if (!cachedSequenceAssignments) {
-            cachedSequenceAssignments = computeSequenceAssignments(cachedMovements);
-        }
-        seqAssignments = cachedSequenceAssignments;
-        const r2El = document.getElementById('overlayR2');
-        if (r2El && seqAssignments.totalSeqs > 0) {
-            r2El.textContent = `R\u00b2 = ${seqAssignments.totalR2.toFixed(3)}`;
-        } else if (r2El) {
-            r2El.textContent = '';
-        }
-    } else {
-        const r2El = document.getElementById('overlayR2');
-        if (r2El) r2El.textContent = '';
-    }
+    const _r2El = document.getElementById('overlayR2');
+    if (_r2El) _r2El.textContent = '';
 
     // Group movements by trial
     const movByTrial = {};
@@ -873,7 +861,10 @@ function renderMovementScatter(divId, data, param, seqMode) {
                         text: `R\u00b2=${fit.r2.toFixed(2)}`,
                         showarrow: false,
                         font: { size: 9, color },
-                        yshift: 12,
+                        yshift: 18,
+                        bgcolor: 'rgba(255,255,255,0.8)',
+                        bordercolor: color,
+                        borderpad: 2,
                     });
                 } else {
                     // Linear fit within sequence
@@ -895,7 +886,10 @@ function renderMovementScatter(divId, data, param, seqMode) {
                         text: `R\u00b2=${reg.r2.toFixed(2)}`,
                         showarrow: false,
                         font: { size: 9, color },
-                        yshift: 12,
+                        yshift: 18,
+                        bgcolor: 'rgba(255,255,255,0.8)',
+                        bordercolor: color,
+                        borderpad: 2,
                     });
                 }
             });
@@ -939,11 +933,18 @@ function renderMovementScatter(divId, data, param, seqMode) {
                     text: `R\u00b2=${fit.r2.toFixed(2)}`,
                     showarrow: false,
                     font: { size: 9, color },
-                    yshift: 12,
+                    yshift: 18,
+                    bgcolor: 'rgba(255,255,255,0.8)',
+                    bordercolor: color,
+                    borderpad: 2,
                 });
             } else {
-                // Linear fit
-                const { slope, intercept } = linearRegression(fitX, fitY);
+                // Linear fit (full or first-10) — use the R²-bearing
+                // regression so we can annotate the fit like the other
+                // modes.
+                const reg = linearRegressionFull(fitX, fitY);
+                if (!reg) return;
+                const { slope, intercept } = reg;
                 traces.push({
                     x: [xMin, xMax],
                     y: [sign * (slope * xMin + intercept), sign * (slope * xMax + intercept)],
@@ -951,6 +952,18 @@ function renderMovementScatter(divId, data, param, seqMode) {
                     name: `Trend (Trial ${+ti + 1})`,
                     line: { color, width: 2, dash: 'dash' },
                     showlegend: false, hoverinfo: 'skip',
+                });
+                // R² annotation
+                const midX = (xMin + xMax) / 2;
+                annotations.push({
+                    x: midX, y: sign * (slope * midX + intercept),
+                    text: `R²=${reg.r2.toFixed(2)}`,
+                    showarrow: false,
+                    font: { size: 9, color },
+                    yshift: 18,
+                    bgcolor: 'rgba(255,255,255,0.8)',
+                    bordercolor: color,
+                    borderpad: 2,
                 });
             }
         }
@@ -1732,7 +1745,7 @@ document.getElementById('distSequenceMode').addEventListener('change', () => {
 });
 
 // Overlay controls: re-render distance/velocity plots
-['overlayPeakDist', 'overlayPeakOpenVel', 'overlayPeakCloseVel', 'overlaySequences'].forEach(id => {
+['overlayPeakDist', 'overlayPeakOpenVel', 'overlayPeakCloseVel'].forEach(id => {
     document.getElementById(id).addEventListener('change', () => {
         if (cachedTraces) renderAllDistancePlots();
     });
