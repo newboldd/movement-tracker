@@ -1504,8 +1504,10 @@ async function loadGroup() {
     container.innerHTML = '<div class="results-no-data" style="grid-column:1/-1;">Loading group data...</div>';
 
     try {
-        const src = document.getElementById('resultsSourceSelect')?.value || 'auto';
-        cachedGroup = await API.get(`/api/results/group?include_auto=true&source=${src}`);
+        const src = document.getElementById('groupSourceSelect')?.value || 'auto';
+        const seqMode = document.getElementById('groupSeqModeSelect')?.value || 'linear_full';
+        cachedGroup = await API.get(
+            `/api/results/group?include_auto=true&source=${src}&seq_mode=${seqMode}`);
         _initGroupSubjectChecked();
         renderGroupPlots();
     } catch (e) {
@@ -1557,17 +1559,20 @@ function _renderGroupSubjectList() {
 
     let html = '';
     groups.forEach(g => {
-        const color = (typeof GROUP_COLORS !== 'undefined' && GROUP_COLORS[g]) || '#999';
-        (byGroup[g] || []).forEach(s => {
+        const subs = byGroup[g] || [];
+        if (subs.length === 0) return;
+        // Each diagnosis group on its own row, led by a group label.
+        html += `<div class="gsl-group"><span class="gsl-group-label">${g}</span>`;
+        subs.forEach(s => {
             const checked = !!_groupSubjectChecked[s.name];
             const dim = !s.has_saved_events ? ' dim' : '';
             const safe = s.name.replace(/"/g, '&quot;');
             html += `<label class="${dim.trim()}" title="${s.has_saved_events ? 'Saved events' : 'Auto-detected events'} (${g})">
                 <input type="checkbox" data-subject="${safe}" ${checked ? 'checked' : ''}>
-                <span class="gsl-dot" style="background:${color};"></span>
                 ${s.name}${s.has_saved_events ? '' : ' *'}
             </label>`;
         });
+        html += '</div>';
     });
     host.innerHTML = html;
 
@@ -1724,7 +1729,7 @@ function renderGroupPlots() {
             const divId = `grpPlot_${m.id}_${row.field}`;
             if (spec) {
                 html += `<div style="height:${row.height}px;">
-                    ${ri === 0 ? `<div style="text-align:center;font-size:13px;font-weight:700;padding:4px 0 0;">${m.name}</div>` : ''}
+                    ${ri === 0 ? `<div style="text-align:center;font-size:13px;font-weight:700;padding:4px 0 0;">${m.name}${m.mean && m.mean.unit ? ' (' + m.mean.unit + ')' : ''}</div>` : ''}
                     <div id="${divId}" style="height:${row.height - (ri === 0 ? 24 : 0)}px;"></div>
                 </div>`;
             } else {
@@ -1742,7 +1747,7 @@ function renderGroupPlots() {
     // parseable last-dose value are excluded.
     html += `<div style="margin-top:24px;border-top:1px solid var(--border, #e0e0e0);padding-top:12px;">`;
     html += `<div style="font-size:13px;font-weight:700;color:var(--text-muted);margin-bottom:4px;">
-        Time since last levodopa dose</div>`;
+        Levodopa motor response</div>`;
     html += '<div style="overflow-x:auto;">';
     html += `<div style="display:grid;grid-template-columns:60px repeat(${visibleMetrics.length}, ${colW}px);gap:0;">`;
     ROW_DEFS.forEach((row, ri) => {
@@ -1752,7 +1757,7 @@ function renderGroupPlots() {
             const divId = `grpPlotDose_${m.id}_${row.field}`;
             if (spec) {
                 html += `<div style="height:${row.height}px;">
-                    ${ri === 0 ? `<div style="text-align:center;font-size:13px;font-weight:700;padding:4px 0 0;">${m.name}</div>` : ''}
+                    ${ri === 0 ? `<div style="text-align:center;font-size:13px;font-weight:700;padding:4px 0 0;">${m.name}${m.mean && m.mean.unit ? ' (' + m.mean.unit + ')' : ''}</div>` : ''}
                     <div id="${divId}" style="height:${row.height - (ri === 0 ? 24 : 0)}px;"></div>
                 </div>`;
             } else {
@@ -1764,34 +1769,35 @@ function renderGroupPlots() {
 
     container.innerHTML = html;
 
-    // Render each chart
+    // Closing-velocity mean values are negative; reverse that row's Y
+    // axis so the bars/points point up like the opening-velocity plots.
+    const _reverseY = (m, row) =>
+        row.field === 'mean' && (m.id === 'peak_close_vel' || m.id === 'mean_close_vel');
+
+    // Render each chart.  Titles live in the column headers (with
+    // units), so the plots themselves carry no in-plot title.
     ROW_DEFS.forEach(row => {
         visibleMetrics.forEach(m => {
             const spec = m[row.field];
             if (!spec) return;
             const divId = `grpPlot_${m.id}_${row.field}`;
-            const unit = spec.unit ? ` (${spec.unit})` : '';
-            renderGroupBar(divId, data, spec.key, '');
+            renderGroupBar(divId, data, spec.key, _reverseY(m, row));
         });
     });
 
-    // Dose-response scatters — one per (metric × row) like the bars
-    // above.  Row labels still come from ROW_DEFS so the rows stay
-    // visually aligned with the corresponding bar-chart rows.
-    ROW_DEFS.forEach((row, ri) => {
+    // Dose-response scatters — one per (metric × row), aligned with the
+    // bar grid.  No in-plot titles (column headers carry the name+unit).
+    ROW_DEFS.forEach((row) => {
         visibleMetrics.forEach(m => {
             const spec = m[row.field];
             if (!spec) return;
             const divId = `grpPlotDose_${m.id}_${row.field}`;
-            const label = ri === 0
-                ? `${m.name}${spec.unit ? ' (' + spec.unit + ')' : ''}`
-                : '';  // title only on the top (Mean) row, matching the bar grid
-            renderDoseScatter(divId, data, spec.key, label);
+            renderDoseScatter(divId, data, spec.key, _reverseY(m, row));
         });
     });
 }
 
-function renderDoseScatter(divId, data, paramKey, paramLabel) {
+function renderDoseScatter(divId, data, paramKey, reverseY) {
     const groups = data.groups;
     // Active subjects with both a parseable last-dose value AND a
     // non-null parameter value.  Drop everyone else from the scatter
@@ -1825,14 +1831,16 @@ function renderDoseScatter(divId, data, paramKey, paramLabel) {
     });
 
     const layout = {
-        title: { text: paramLabel, font: { size: 11, color: '#444' } },
-        margin: { t: 28, b: 36, l: 45, r: 10 },
+        margin: { t: 12, b: 40, l: 45, r: 10 },
         xaxis: {
-            title: { text: 'Hours since dose', font: { size: 10, color: '#666' } },
+            title: { text: 'Time since last dose (h)', font: { size: 10, color: '#666' } },
             color: '#666', gridcolor: '#f0f0f0', tickfont: { size: 9 },
             rangemode: 'tozero',
         },
-        yaxis: { title: '', color: '#666', gridcolor: '#f0f0f0', tickfont: { size: 9 } },
+        yaxis: {
+            title: '', color: '#666', gridcolor: '#f0f0f0', tickfont: { size: 9 },
+            autorange: reverseY ? 'reversed' : true,
+        },
         plot_bgcolor: '#fff',
         paper_bgcolor: '#fff',
     };
@@ -1861,7 +1869,7 @@ function _toggleGroupMetric(id, checked) {
 // Expose for inline onclick
 window._toggleGroupMetric = _toggleGroupMetric;
 
-function renderGroupBar(divId, data, paramKey, paramLabel) {
+function renderGroupBar(divId, data, paramKey, reverseY) {
     const groups = data.groups;
     // Filter to the subjects whose checkbox is currently on.  This
     // is what makes unchecking a noisy subject immediately drop it
@@ -1963,15 +1971,17 @@ function renderGroupBar(divId, data, paramKey, paramLabel) {
     };
 
     const layout = {
-        title: { text: paramLabel, font: { size: 11, color: '#444' } },
-        margin: { t: 28, b: 30, l: 45, r: 10 },
+        margin: { t: 12, b: 30, l: 45, r: 10 },
         xaxis: {
             tickvals: groups.map((_, i) => i),
             ticktext: groups,
             color: '#666',
             tickfont: { size: 10 },
         },
-        yaxis: { title: '', color: '#666', gridcolor: '#f0f0f0', tickfont: { size: 9 } },
+        yaxis: {
+            title: '', color: '#666', gridcolor: '#f0f0f0', tickfont: { size: 9 },
+            autorange: reverseY ? 'reversed' : true,
+        },
         plot_bgcolor: '#fff',
         paper_bgcolor: '#fff',
         bargap: 0.5,
@@ -2133,16 +2143,24 @@ document.getElementById('includeAutoToggle').addEventListener('change', _onInclu
 
 document.getElementById('groupSelectAllBtn').addEventListener('click',
     () => window._groupSelectAll(true));
-document.getElementById('groupSelectNoneBtn').addEventListener('click',
-    () => window._groupSelectAll(false));
 
-// Page-level distance source dropdown — applies to both Individual
-// and Group Comparison tabs.  Auto = corrections → mp_combined →
-// mp_forward (per the backend's _load_distances_and_trials).
+// Group-tab source + sequence-effect dropdowns — re-fetch the group
+// data with the new parameters.
+document.getElementById('groupSourceSelect')?.addEventListener('change', () => {
+    cachedGroup = null;
+    loadGroup();
+});
+document.getElementById('groupSeqModeSelect')?.addEventListener('change', () => {
+    cachedGroup = null;
+    loadGroup();
+});
+
+// Page-level distance source dropdown — applies to the Individual tab.
+// Auto = corrections → mp_combined → mp_forward (per the backend's
+// _load_distances_and_trials).
 document.getElementById('resultsSourceSelect')?.addEventListener('change', () => {
     cachedTraces = null;
     cachedMovements = null;
-    cachedGroup = null;
     const activeTab = document.querySelector('.results-tab.active')?.id;
     if (activeTab === 'tabGroup') {
         loadGroup();

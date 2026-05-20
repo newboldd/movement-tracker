@@ -780,8 +780,14 @@ def get_movements(subject_id: int, source: str = Query("auto")) -> dict:
 
 @router.get("/group")
 def get_group_comparison(include_auto: bool = Query(False),
-                          source: str = Query("auto")) -> dict:
-    """Aggregated per-subject statistics grouped by diagnosis."""
+                          source: str = Query("auto"),
+                          seq_mode: str = Query("linear_full")) -> dict:
+    """Aggregated per-subject statistics grouped by diagnosis.
+
+    ``seq_mode`` controls the sequence-effect slope:
+      - ``linear_full``    — slope across all movements (default)
+      - ``linear_first10`` — slope across the first 10 movements
+    """
     with get_db_ctx() as db:
         subjects = db.execute(
             "SELECT * FROM subjects ORDER BY group_label, name"
@@ -838,6 +844,9 @@ def get_group_comparison(include_auto: bool = Query(False),
                 # sequence-effect slope reflects changes in magnitude.
                 seq_vals = [-v for v in vals] if key in ("peak_close_vel", "mean_close_vel") else vals
                 indices = [float(i) for i, m in enumerate(movements) if m[key] is not None]
+                if seq_mode == "linear_first10":
+                    seq_vals = seq_vals[:10]
+                    indices = indices[:10]
                 slope = _linreg_slope(indices, seq_vals)
                 entry[f"seq_{key}"] = slope
             else:

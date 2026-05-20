@@ -147,9 +147,23 @@
         <!-- Group Comparison Tab -->
         <div id="tabGroup" class="results-tab">
             <div class="results-controls" id="groupControls">
+                <label style="display:flex;align-items:center;gap:6px;margin:0;">Source:
+                    <select id="groupSourceSelect" style="min-width:140px;">
+                        <option value="auto" selected>Auto</option>
+                        <option value="corrections">DLC (corrected)</option>
+                        <option value="mp_combined">MP combined</option>
+                        <option value="mp_forward">MP forward</option>
+                    </select>
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;margin:0;">Sequence effect:
+                    <select id="groupSeqModeSelect" style="min-width:130px;">
+                        <option value="linear_full" selected>Linear (full)</option>
+                        <option value="linear_first10">Linear (first 10)</option>
+                    </select>
+                </label>
+                <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
                 <label><input type="checkbox" id="includeAutoToggle"> Include auto-detected events</label>
                 <button class="btn btn-sm" id="groupSelectAllBtn" type="button">All</button>
-                <button class="btn btn-sm" id="groupSelectNoneBtn" type="button">None</button>
                 <span id="highlightedSubject"></span>
             </div>
             <div id="groupSubjectList" class="group-subject-list"></div>
@@ -161,14 +175,16 @@
             .group-subject-list {
                 display: flex;
                 flex-wrap: wrap;
-                gap: 4px;
-                padding: 6px;
+                gap: 4px 6px;
+                padding: 6px 0;
                 margin-bottom: 8px;
-                background: var(--bg, #f5f5f5);
-                border-radius: 4px;
-                max-height: 140px;
+                background: transparent;
+                max-height: 200px;
                 overflow-y: auto;
             }
+            /* Force each diagnosis group onto its own row. */
+            .group-subject-list .gsl-group { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+            .group-subject-list .gsl-group-label { font-size: 11px; font-weight: 600; color: var(--text-muted); min-width: 64px; }
             .group-subject-list label {
                 display: inline-flex;
                 align-items: center;
@@ -176,8 +192,8 @@
                 font-size: 11px;
                 padding: 2px 6px;
                 border-radius: 3px;
-                border: 1px solid #ddd;
-                background: #fff;
+                border: 1px solid var(--border, #ddd);
+                background: var(--bg-card, #fff);
                 cursor: pointer;
                 user-select: none;
             }
@@ -185,11 +201,6 @@
                 opacity: 0.45;
             }
             .group-subject-list label input { margin: 0; }
-            .group-subject-list .gsl-dot {
-                display: inline-block;
-                width: 8px; height: 8px;
-                border-radius: 50%;
-            }
             /* Dual-thumb vertical Y-range slider (shared track) — same
                pattern as the Labels page Y-lim sliders. */
             .yslider-col {
@@ -215,6 +226,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=36"></script>
+    <script src="/static/js/results.js?v=37"></script>
 </body>
 </html>
