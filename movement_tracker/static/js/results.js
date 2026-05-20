@@ -226,12 +226,34 @@ function _updateSourceSelector(availableSources, activeSource) {
     // result is surfaced via the badge in renderAllDistancePlots.
 }
 
+// When "Auto" is selected, append the actually-resolved source to the
+// dropdown's Auto option (e.g. "Auto — DLC (corrected)").  On an
+// explicit selection it reverts to plain "Auto".
+function _updateAutoSourceLabel(dataSource) {
+    const sel = document.getElementById('resultsSourceSelect');
+    if (!sel) return;
+    const autoOpt = sel.querySelector('option[value="auto"]');
+    if (!autoOpt) return;
+    const NAMES = {
+        corrections: 'DLC (corrected)',
+        mp_combined: 'MP combined',
+        mp_forward: 'MP forward',
+        mediapipe: 'MP forward',
+    };
+    autoOpt.textContent = (sel.value === 'auto' && dataSource && NAMES[dataSource])
+        ? `Auto — ${NAMES[dataSource]}`
+        : 'Auto';
+}
+
 function renderAllDistancePlots() {
     const container = document.getElementById('distancePlots');
     const data = cachedTraces;
     if (!data || !data.trials) return;
 
     container.innerHTML = '';
+
+    // Reflect the auto-resolved source in the dropdown's Auto label.
+    _updateAutoSourceLabel(data.data_source);
 
     // Show active source badge
     if (data.data_source && data.data_source !== 'none') {
@@ -845,6 +867,15 @@ function renderMovementScatter(divId, data, param, seqMode) {
             text: trialLabel,
             showarrow: false,
             font: { size: 11, color: '#444' },
+        });
+
+        // Vertical line marking t=0 for this trial, matching the y-axis
+        // line drawn at t=0 of the first trial.
+        shapes.push({
+            type: 'line', xref: 'x', yref: 'paper',
+            x0: xOffset, x1: xOffset, y0: 0, y1: 1,
+            line: { color: '#888', width: 1 },
+            layer: 'below',
         });
 
         if (seqMode === 'none') return;
