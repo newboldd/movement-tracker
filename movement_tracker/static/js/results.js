@@ -37,6 +37,22 @@ const PARAM_LABELS = {
     mean_close_vel: 'Mean Closing Velocity (mm/s)',
 };
 
+// Short Y-axis labels for the movement scatter plots.
+const PARAM_YLABELS = {
+    peak_dist: 'Distance (mm)',
+    amplitude: 'Amplitude (mm)',
+    imi: 'IMI (s)',
+    peak_open_vel: 'Velocity (mm/s)',
+    peak_close_vel: 'Velocity (mm/s)',
+    rel_amplitude: 'Relative Amplitude',
+    power: 'Power (mm\u00b2/s)',
+    mean_open_vel: 'Velocity (mm/s)',
+    mean_close_vel: 'Velocity (mm/s)',
+};
+
+// Single shared color for all trials on the movement scatters.
+const MOVEMENT_DOT_COLOR = '#2196F3';
+
 const TRIAL_COLORS = [
     '#2196F3', '#FF5722', '#4CAF50', '#9C27B0', '#FF9800', '#00BCD4',
 ];
@@ -429,66 +445,90 @@ function _effYRange(kind, idx) {
     return _yFull[kind].slice();
 }
 
-// Build the two-vertical-slider column (max + min) for one plot.
-// ``mTop``/``mBot`` are the Plotly plot margins so the slider travel
-// aligns with the y-axis data area.
+// Build one dual-thumb vertical Y-range slider (shared track with a
+// min thumb + max thumb + fill bar), matching the Labels page Y-lim
+// sliders.  ``mTop``/``mBot`` are the Plotly plot margins so the
+// slider travel lines up with the y-axis data area.
 function _buildYSliderCol(kind, idx, h, mTop, mBot) {
+    const wrap = document.createElement('div');
+    wrap.className = 'y-range-wrap' + (kind === 'vel' ? ' vel' : '');
+    wrap.style.height = Math.max(20, h - mTop - mBot) + 'px';
+    wrap.style.marginTop = mTop + 'px';
+    wrap.style.marginBottom = mBot + 'px';
+    wrap.dataset.kind = kind; wrap.dataset.trial = idx;
+
     const full = _yFull[kind];
-    const col = document.createElement('div');
-    col.className = 'yslider-col';
-    col.style.height = h + 'px';
-    col.style.paddingTop = mTop + 'px';
-    col.style.paddingBottom = mBot + 'px';
-    col.style.boxSizing = 'border-box';
-    if (!full) return col;  // no data extent yet
+    if (!full) return wrap;
 
     const eff = _effYRange(kind, idx) || full;
     const step = ((full[1] - full[0]) / 1000) || 0.1;
+
+    const track = document.createElement('div'); track.className = 'y-track';
+    const fill = document.createElement('div'); fill.className = 'y-fill';
+    wrap.appendChild(track); wrap.appendChild(fill);
+
     const mk = (bound, val) => {
         const s = document.createElement('input');
         s.type = 'range';
-        s.className = 'yslider-vert' + (kind === 'vel' ? ' vel' : '');
+        s.className = 'ysl ' + bound;
         s.min = full[0]; s.max = full[1]; s.step = step; s.value = val;
         s.dataset.kind = kind; s.dataset.bound = bound; s.dataset.trial = idx;
+        s.setAttribute('orient', 'vertical');
+        s.style.cssText = 'writing-mode:vertical-lr;direction:rtl;height:100%;';
         s.title = bound === 'max' ? 'Y max' : 'Y min';
-        s.style.height = '100%';
         s.addEventListener('input', () => _onYSlider(s));
         return s;
     };
-    col.appendChild(mk('max', eff[1]));
-    col.appendChild(mk('min', eff[0]));
-    return col;
+    wrap.appendChild(mk('min', eff[0]));
+    wrap.appendChild(mk('max', eff[1]));
+
+    // Fill needs the element's measured height — update once laid out.
+    requestAnimationFrame(() => _updateYFill(wrap));
+    return wrap;
+}
+
+// Position the fill bar between the two thumbs.
+function _updateYFill(wrap) {
+    const fill = wrap.querySelector('.y-fill');
+    const mn = wrap.querySelector('.ysl.min');
+    const mx = wrap.querySelector('.ysl.max');
+    if (!fill || !mn || !mx) return;
+    const lo = parseFloat(mn.min), hi = parseFloat(mn.max), rng = hi - lo;
+    if (!(rng > 0)) return;
+    const h = wrap.clientHeight || 100;
+    const pctMin = (parseFloat(mn.value) - lo) / rng;
+    const pctMax = (parseFloat(mx.value) - lo) / rng;
+    fill.style.bottom = (pctMin * h) + 'px';
+    fill.style.height = ((pctMax - pctMin) * h) + 'px';
 }
 
 function _onYSlider(el) {
     const kind = el.dataset.kind;
     const idx = +el.dataset.trial;
     const bound = el.dataset.bound;
-    const locked = document.getElementById('lockYAxis').checked;
     const full = _yFull[kind];
     if (!full) return;
-
-    let cur = locked ? _yLocked[kind] : _yTrial[kind][idx];
-    if (!cur) cur = { min: full[0], max: full[1] };
+    const wrap = el.closest('.y-range-wrap');
+    const mn = wrap.querySelector('.ysl.min');
+    const mx = wrap.querySelector('.ysl.max');
 
     const minGap = (full[1] - full[0]) * 0.02 || 0.1;
-    let v = parseFloat(el.value);
-    if (bound === 'max') {
-        if (v < cur.min + minGap) v = cur.min + minGap;
-        cur.max = v;
-    } else {
-        if (v > cur.max - minGap) v = cur.max - minGap;
-        cur.min = v;
-    }
-    el.value = (bound === 'max') ? cur.max : cur.min;  // reflect clamp
+    let lo = parseFloat(mn.value), hi = parseFloat(mx.value);
+    // Keep the thumbs from crossing.
+    if (bound === 'min' && lo > hi - minGap) { lo = hi - minGap; mn.value = lo; }
+    if (bound === 'max' && hi < lo + minGap) { hi = lo + minGap; mx.value = hi; }
 
+    const cur = { min: lo, max: hi };
+    const locked = document.getElementById('lockYAxis').checked;
     if (locked) _yLocked[kind] = cur; else _yTrial[kind][idx] = cur;
+
+    _updateYFill(wrap);
     _applyYRange(kind, locked ? null : idx);
 }
 
 // Push the chosen range to the plot(s) via Plotly.relayout (no full
 // re-render, so it's instant).  When locked (idx === null) it hits
-// every plot of this kind and syncs all sibling sliders.
+// every plot of this kind and syncs all sibling sliders + fills.
 function _applyYRange(kind, idx) {
     const prefix = kind === 'dist' ? 'distPlot_' : 'velPlot_';
     if (idx === null) {
@@ -497,8 +537,12 @@ function _applyYRange(kind, idx) {
         document.querySelectorAll(`[id^="${prefix}"]`).forEach(div => {
             if (window.Plotly) { try { Plotly.relayout(div, { 'yaxis.range': r }); } catch {} }
         });
-        document.querySelectorAll(`.yslider-vert[data-kind="${kind}"]`).forEach(s => {
-            s.value = (s.dataset.bound === 'max') ? range.max : range.min;
+        document.querySelectorAll(`.y-range-wrap[data-kind="${kind}"]`).forEach(w => {
+            const mn = w.querySelector('.ysl.min');
+            const mx = w.querySelector('.ysl.max');
+            if (mn) mn.value = range.min;
+            if (mx) mx.value = range.max;
+            _updateYFill(w);
         });
     } else {
         const range = _yTrial[kind][idx];
@@ -761,20 +805,53 @@ function renderMovementScatter(divId, data, param, seqMode) {
                  : param === 'peak_close_vel' ? 'peak_close_vel_time'
                  : 'peak_time';
 
-    Object.keys(byTrial).sort((a, b) => +a - +b).forEach(ti => {
-        const ms = byTrial[ti];
-        const x = ms.map(m => (m[xField] != null ? m[xField] : m.peak_time));
-        const y = ms.map(m => m[param]);
+    // Same color for every trial — trial identity is shown by the
+    // labels above each trial's segment instead of a color key.
+    const color = MOVEMENT_DOT_COLOR;
 
-        const color = TRIAL_COLORS[ti % TRIAL_COLORS.length];
+    // Pre-compute each trial's local time span so trials can be laid
+    // out left-to-right, each restarting at t=0, with a small gap.
+    const trialKeys = Object.keys(byTrial).sort((a, b) => +a - +b);
+    const trialInfo = trialKeys.map(ti => {
+        const ms = byTrial[ti];
+        const rawX = ms.map(m => (m[xField] != null ? m[xField] : m.peak_time));
+        const valid = rawX.filter(v => v != null && isFinite(v));
+        const t0 = valid.length ? Math.min(...valid) : 0;
+        const span = valid.length ? (Math.max(...valid) - t0) : 0;
+        return { ti, ms, rawX, t0, span };
+    });
+    const maxSpan = Math.max(1, ...trialInfo.map(t => t.span));
+    const gap = maxSpan * 0.08;
+    // Cumulative left-edge offset per trial (precomputed so the early
+    // returns in the fit branches below can't skip the bookkeeping).
+    let _acc = 0;
+    trialInfo.forEach(t => { t.offset = _acc; _acc += t.span + gap; });
+
+    trialInfo.forEach(({ ti, ms, rawX, t0, offset: xOffset }) => {
+        // Local time restarts at 0 per trial; shift by the running
+        // offset so trials sit side-by-side without overlapping.
+        const x = rawX.map(v => (v != null && isFinite(v)) ? (v - t0 + xOffset) : v);
+        const y = ms.map(m => m[param]);
+        const trialLabel = trialNames[ti] || `Trial ${+ti + 1}`;
 
         traces.push({
             x, y,
             type: 'scatter',
             mode: 'markers',
-            name: trialNames[ti] || `Trial ${+ti + 1}`,
+            name: trialLabel,
             marker: { color, size: 7, opacity: 0.8 },
-            hovertemplate: `t=%{x:.2f}s<br>${PARAM_LABELS[param]}: %{y:.2f}<extra></extra>`,
+            hovertemplate: `${trialLabel}<br>t=%{x:.2f}s<br>${PARAM_LABELS[param]}: %{y:.2f}<extra></extra>`,
+            showlegend: false,
+        });
+
+        // Trial label above the plot, left-aligned with the trial start.
+        annotations.push({
+            x: xOffset, y: 1.0,
+            xref: 'x', yref: 'paper',
+            xanchor: 'left', yanchor: 'bottom',
+            text: trialLabel,
+            showarrow: false,
+            font: { size: 11, color: '#444' },
         });
 
         if (seqMode === 'none') return;
@@ -969,15 +1046,23 @@ function renderMovementScatter(divId, data, param, seqMode) {
         }
     });
 
+    // Closing-velocity params are negative; reverse the Y axis so the
+    // curve points up like the opening-velocity plots for easy visual
+    // comparison.
+    const reverseY = (param === 'peak_close_vel' || param === 'mean_close_vel');
+
     const layout = {
         title: { text: PARAM_LABELS[param], font: { size: 13, color: '#444' } },
-        margin: { t: 35, b: 40, l: 55, r: 20 },
+        margin: { t: 35, b: 40, l: 60, r: 20 },
         xaxis: { title: { text: 'Time (s)', font: { size: 11 } }, color: '#666', gridcolor: '#eee' },
-        yaxis: { title: '', color: '#666', gridcolor: '#f0f0f0' },
+        yaxis: {
+            title: { text: PARAM_YLABELS[param] || '', font: { size: 11 } },
+            color: '#666', gridcolor: '#f0f0f0',
+            autorange: reverseY ? 'reversed' : true,
+        },
         plot_bgcolor: '#fff',
         paper_bgcolor: '#fff',
-        showlegend: true,
-        legend: { orientation: 'h', y: -0.2, font: { size: 11 } },
+        showlegend: false,
         shapes,
         annotations,
     };

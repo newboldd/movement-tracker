@@ -173,32 +173,31 @@
                 width: 8px; height: 8px;
                 border-radius: 50%;
             }
-            /* Vertical Y-range sliders to the left of each trace plot. */
+            /* Dual-thumb vertical Y-range slider (shared track) — same
+               pattern as the Labels page Y-lim sliders. */
             .yslider-col {
                 display: flex;
-                flex-direction: row;
-                gap: 1px;
+                flex-direction: column;
                 flex: 0 0 auto;
-                padding-right: 2px;
+                padding-right: 4px;
             }
-            .yslider-vert {
-                -webkit-appearance: slider-vertical;
-                appearance: slider-vertical;
-                writing-mode: vertical-lr;
-                direction: rtl;        /* min at bottom, max at top */
-                width: 16px;
-                padding: 0;
-                margin: 0;
-                cursor: ns-resize;
-                accent-color: #2196F3;
-            }
-            .yslider-vert.vel { accent-color: #4CAF50; }
+            .y-range-wrap { position: relative; width: 16px; flex-shrink: 0; }
+            .y-range-wrap .y-track { position: absolute; left: 6px; top: 0; bottom: 0; width: 4px; background: #d0d0d0; border-radius: 2px; pointer-events: none; }
+            .y-range-wrap .y-fill { position: absolute; left: 6px; width: 4px; background: #2196F3; border-radius: 2px; pointer-events: none; }
+            .y-range-wrap.vel .y-fill { background: #4CAF50; }
+            .y-range-wrap input[type=range] { -webkit-appearance: none; appearance: none; background: transparent; position: absolute; left: 0; width: 16px; margin: 0; pointer-events: none; }
+            .y-range-wrap input[type=range]::-webkit-slider-runnable-track { width: 4px; background: transparent; }
+            .y-range-wrap input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 11px; height: 11px; border-radius: 50%; background: #2196F3; margin-left: -3px; cursor: ns-resize; pointer-events: auto; }
+            .y-range-wrap input[type=range]::-moz-range-track { width: 4px; background: transparent; }
+            .y-range-wrap input[type=range]::-moz-range-thumb { width: 11px; height: 11px; border-radius: 50%; background: #2196F3; border: none; cursor: ns-resize; pointer-events: auto; }
+            .y-range-wrap.vel input[type=range]::-webkit-slider-thumb { background: #4CAF50; }
+            .y-range-wrap.vel input[type=range]::-moz-range-thumb { background: #4CAF50; }
         </style>
     </div>
 
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=22"></script>
+    <script src="/static/js/results.js?v=23"></script>
 </body>
 </html>
