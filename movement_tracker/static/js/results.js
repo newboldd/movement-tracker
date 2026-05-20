@@ -111,11 +111,21 @@ function switchTab(tab) {
         el.classList.toggle('active', el.id === 'tab' + tab.charAt(0).toUpperCase() + tab.slice(1));
     });
 
-    // Grey out subject selector in group tab
+    // On the group tab the subject selector acts as a "jump to an
+    // individual subject" control: keep it enabled, reset it to the
+    // placeholder, and hide the prev/next buttons (they only make
+    // sense within the individual view).
     const isGroup = tab === 'group';
-    document.getElementById('subjectSelect').disabled = isGroup;
-    document.getElementById('prevSubjectBtn').disabled = isGroup;
-    document.getElementById('nextSubjectBtn').disabled = isGroup;
+    _setSubjectNavVisible(!isGroup);
+    const sel = document.getElementById('subjectSelect');
+    if (sel) {
+        sel.disabled = false;
+        if (isGroup) {
+            sel.value = '';
+            const navSel = document.getElementById('navSubjectSelect');
+            if (navSel) navSel.value = '';
+        }
+    }
 
     // Load data for the active tab
     if ((tab === 'distances' || tab === 'movements') && currentSubjectId) {
@@ -123,6 +133,15 @@ function switchTab(tab) {
     } else if (tab === 'group') {
         loadGroup();
     }
+}
+
+// Show/hide the prev/next subject buttons (both the local header copy
+// and the nav-bar copy created by nav.js).
+function _setSubjectNavVisible(visible) {
+    ['prevSubjectBtn', 'nextSubjectBtn', 'navPrevSubjectBtn', 'navNextSubjectBtn'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = visible ? '' : 'none';
+    });
 }
 
 // ── Distances Tab ──────────────────────────────────────────────
@@ -1688,6 +1707,9 @@ function renderGroupPlots() {
     }
 
     _renderGroupSubjectList();
+    // The prev/next subject buttons don't apply to the group view —
+    // hide them here too in case nav.js created them after switchTab.
+    _setSubjectNavVisible(false);
 
     // Initialize visibility from defaults
     if (Object.keys(_groupMetricVisible).length === 0) {
@@ -1798,44 +1820,75 @@ function renderGroupPlots() {
 }
 
 function renderDoseScatter(divId, data, paramKey, reverseY) {
-    const groups = data.groups;
-    // Active subjects with both a parseable last-dose value AND a
-    // non-null parameter value.  Drop everyone else from the scatter
-    // so the X axis isn't padded with missing points.
-    const subjects = _activeGroupSubjects().filter(s =>
-        s.time_since_dose_min != null
-        && isFinite(s.time_since_dose_min)
-        && s[paramKey] != null
-        && isFinite(s[paramKey])
-    );
+    // Levodopa plots include PD subjects only.
+    const color = GROUP_COLORS['PD'] || '#2196F3';
+    const pd = _activeGroupSubjects().filter(s =>
+        (s.diagnosis || 'Control') === 'PD'
+        && s[paramKey] != null && isFinite(s[paramKey]));
 
-    // One trace per group so the legend shows the diagnosis colors.
-    const traces = groups.map(g => {
-        const subs = subjects.filter(s => (s.diagnosis || 'Control') === g);
-        return {
-            x: subs.map(s => s.time_since_dose_min / 60.0),
-            y: subs.map(s => s[paramKey]),
-            text: subs.map(s => `${s.name}<br>${s.last_dose_raw || ''}`),
-            type: 'scatter',
-            mode: 'markers',
-            name: g,
-            marker: {
-                color: GROUP_COLORS[g] || '#999',
-                size: subs.map(s => highlightedSubject === s.name ? 10 : 7),
-                opacity: 0.8,
-                line: { color: '#333', width: 0.5 },
-            },
+    // On-levodopa: plotted at hours since last dose.
+    const onPD = pd.filter(s => s.time_since_dose_min != null && isFinite(s.time_since_dose_min));
+    // Off-levodopa: clustered to the right, after a gap.
+    const offPD = pd.filter(s =>
+        (s.time_since_dose_min == null || !isFinite(s.time_since_dose_min)) && s.levodopa_off);
+
+    const maxH = onPD.length ? Math.max(...onPD.map(s => s.time_since_dose_min / 60)) : 0;
+    const GAP = 2;            // hours of empty space before the Off cluster
+    const OFF_STEP = 0.6;     // spacing between off subjects
+    const offStart = (onPD.length ? maxH : 0) + GAP;
+
+    const _sz = s => (highlightedSubject === s.name ? 10 : 7);
+    const traces = [];
+    if (onPD.length) {
+        traces.push({
+            x: onPD.map(s => s.time_since_dose_min / 60.0),
+            y: onPD.map(s => s[paramKey]),
+            text: onPD.map(s => `${s.name}<br>${s.last_dose_raw || ''}`),
+            type: 'scatter', mode: 'markers',
+            marker: { color, size: onPD.map(_sz), opacity: 0.8, line: { color: '#333', width: 0.5 } },
             hovertemplate: '%{text}<br>%{x:.2f} h<br>%{y:.3f}<extra></extra>',
             showlegend: false,
-        };
-    });
+        });
+    }
+    let offCenter = null;
+    if (offPD.length) {
+        const offX = offPD.map((s, i) => offStart + i * OFF_STEP);
+        offCenter = offStart + ((offPD.length - 1) / 2) * OFF_STEP;
+        traces.push({
+            x: offX,
+            y: offPD.map(s => s[paramKey]),
+            text: offPD.map(s => `${s.name}<br>Off levodopa`),
+            type: 'scatter', mode: 'markers',
+            marker: { color, size: offPD.map(_sz), opacity: 0.8, line: { color: '#333', width: 0.5 } },
+            hovertemplate: '%{text}<br>%{y:.3f}<extra></extra>',
+            showlegend: false,
+        });
+    }
+
+    // X ticks: numeric hours (0,2,4,…) plus an "Off" tick at the cluster.
+    const tickvals = [], ticktext = [];
+    const hiHour = Math.ceil(maxH);
+    for (let h = 0; h <= hiHour; h += 2) { tickvals.push(h); ticktext.push(String(h)); }
+    const shapes = [];
+    if (offCenter != null) {
+        tickvals.push(offCenter); ticktext.push('Off');
+        // Dashed separator in the gap between on- and off-levodopa.
+        const sepX = ((onPD.length ? maxH : 0) + offStart) / 2;
+        shapes.push({
+            type: 'line', xref: 'x', yref: 'paper',
+            x0: sepX, x1: sepX, y0: 0, y1: 1,
+            line: { color: '#bbb', width: 1, dash: 'dot' },
+        });
+    }
+    const xMax = (offPD.length ? offStart + offPD.length * OFF_STEP : Math.max(1, maxH * 1.05)) + 0.3;
 
     const layout = {
         margin: { t: 12, b: 40, l: 45, r: 10 },
         xaxis: {
             title: { text: 'Time since last dose (h)', font: { size: 10, color: '#666' } },
             color: '#666', gridcolor: '#f0f0f0', tickfont: { size: 9 },
-            rangemode: 'tozero',
+            tickmode: 'array', tickvals, ticktext,
+            range: [-0.3, xMax],
         },
         yaxis: {
             title: '', color: '#666', gridcolor: '#f0f0f0', tickfont: { size: 9 },
@@ -1843,6 +1896,7 @@ function renderDoseScatter(divId, data, paramKey, reverseY) {
         },
         plot_bgcolor: '#fff',
         paper_bgcolor: '#fff',
+        shapes,
     };
 
     Plotly.newPlot(divId, traces, layout, {
@@ -2017,6 +2071,10 @@ function highlightSubject(name) {
 
 document.getElementById('subjectSelect').addEventListener('change', (e) => {
     currentSubjectId = e.target.value;
+    // Empty value = the "Select a subject" placeholder (used on the
+    // group tab); nothing to show.
+    if (!currentSubjectId) return;
+
     sessionStorage.setItem('dlc_lastSubjectId', String(currentSubjectId));
     if (typeof setLastSubject === 'function') setLastSubject(currentSubjectId);
     if (typeof setNavState === 'function') setNavState({ subjectId: parseInt(currentSubjectId) });
@@ -2040,21 +2098,9 @@ document.getElementById('subjectSelect').addEventListener('change', (e) => {
     _purge(document.getElementById('distMovementPlots'));
     _purge(document.getElementById('movementPlots'));
 
-    // Always reload distances for the new subject — regardless of which
-    // tab was last active — so switching subjects never leaves stale
-    // content behind.  Force the tab to 'distances' for the visible
-    // individual-subject view.
-    if (currentTab !== 'group') {
-        currentTab = 'distances';
-        // Update tab-button highlighting to match.
-        document.querySelectorAll('#tabSwitcher .btn').forEach(btn => {
-            btn.classList.toggle('active', btn.dataset.tab === 'distances');
-        });
-        document.querySelectorAll('.results-tab').forEach(el => {
-            el.classList.toggle('active', el.id === 'tabDistances');
-        });
-        loadDistances(currentSubjectId);
-    }
+    // Selecting a subject always switches to the individual view —
+    // including from the Group Comparison tab.
+    switchTab('distances');
 });
 
 document.getElementById('prevSubjectBtn').addEventListener('click', () => navigateSubject(-1));

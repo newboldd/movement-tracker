@@ -118,6 +118,20 @@ def _parse_last_dose_minutes(raw) -> float | None:
     return total if total > 0 else None
 
 
+def _is_levodopa_off(raw) -> bool:
+    """True when a subject is explicitly NOT taking levodopa.
+
+    The clinical ``levodopa`` field holds the regimen; a value of
+    ``"0"`` (or none/off/no) marks an off-levodopa subject.  An empty
+    field is treated as unknown (not off) so we don't lump
+    unrecorded subjects into the Off cluster.
+    """
+    if raw is None:
+        return False
+    s = str(raw).strip().lower()
+    return s in ("0", "none", "no", "off", "nil", "n")
+
+
 def _read_events_csv(subject_name: str) -> dict:
     """Read events.csv → {event_type: [frame_nums]}."""
     settings = get_settings()
@@ -829,6 +843,7 @@ def get_group_comparison(include_auto: bool = Query(False),
             "has_saved_events": has_saved,
             "last_dose_raw": subj.get("last_dose") or None,
             "time_since_dose_min": _parse_last_dose_minutes(subj.get("last_dose")),
+            "levodopa_off": _is_levodopa_off(subj.get("levodopa")),
         }
 
         for key in PARAM_KEYS:

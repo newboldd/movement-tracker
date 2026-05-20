@@ -85,12 +85,14 @@ const SUBJECT_PAGES = [
     sel.style.cssText = 'padding:2px 6px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:12px;max-width:140px;';
 
     const prevBtn = document.createElement('button');
+    prevBtn.id = 'navPrevSubjectBtn';
     prevBtn.className = 'btn btn-sm';
     prevBtn.innerHTML = '&larr;';
     prevBtn.title = 'Previous subject';
     prevBtn.style.cssText = 'padding:1px 6px;font-size:12px;';
 
     const nextBtn = document.createElement('button');
+    nextBtn.id = 'navNextSubjectBtn';
     nextBtn.className = 'btn btn-sm';
     nextBtn.innerHTML = '&rarr;';
     nextBtn.title = 'Next subject';
