@@ -34,7 +34,8 @@ sys.path.insert(0, str(REPO_ROOT))
 # Source distances/sequence modes the dropdowns expose — must match the
 # options in results.html.
 SOURCES = ["auto", "corrections", "mp_combined", "mp_forward"]
-SEQ_MODES = ["linear_full", "linear_first10"]
+SEQ_MODES = ["none", "linear_full", "linear_first10", "linear_multi",
+             "exp_full", "exp_first10", "exp_multi"]
 
 
 def _flatten(url: str) -> str:

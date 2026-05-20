@@ -156,9 +156,14 @@
                     </select>
                 </label>
                 <label style="display:flex;align-items:center;gap:6px;margin:0;">Sequence effect:
-                    <select id="groupSeqModeSelect" style="min-width:130px;">
+                    <select id="groupSeqModeSelect" style="min-width:150px;">
+                        <option value="none">None</option>
                         <option value="linear_full" selected>Linear (full)</option>
                         <option value="linear_first10">Linear (first 10)</option>
+                        <option value="linear_multi">Linear (multi-seq)</option>
+                        <option value="exp_full">Exponential (full)</option>
+                        <option value="exp_first10">Exponential (first 10)</option>
+                        <option value="exp_multi">Exponential (multi-seq)</option>
                     </select>
                 </label>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>

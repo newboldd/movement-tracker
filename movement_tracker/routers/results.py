@@ -505,6 +505,140 @@ def _linreg_slope(x: list[float], y: list[float]) -> float | None:
     return round(slope, 6)
 
 
+def _exp_rate(x: list[float], y: list[float]) -> float | None:
+    """Decay rate ``b`` of y = a·exp(b·x), via log-linear fit.
+
+    Only positive y are usable.  Returns None if < 2 valid points.
+    Mirrors the client-side ``exponentialFit`` rate parameter so the
+    group "Sequence Effect" matches the individual plots' exp fits.
+    """
+    pairs = [(xi, yi) for xi, yi in zip(x, y)
+             if xi is not None and yi is not None
+             and math.isfinite(xi) and math.isfinite(yi) and yi > 0]
+    if len(pairs) < 2:
+        return None
+    xa = np.array([p[0] for p in pairs])
+    la = np.log(np.array([p[1] for p in pairs]))
+    xa_mean = xa.mean()
+    denom = ((xa - xa_mean) ** 2).sum()
+    if denom == 0:
+        return None
+    b = float(((xa - xa_mean) * (la - la.mean())).sum() / denom)
+    return round(b, 6)
+
+
+def _optimize_sequences(amps: list[float], min_moves: int = 5,
+                        min_r2: float = 0.3) -> list[tuple[int, int]]:
+    """Port of the client ``optimizeSequences``: DP-optimal set of
+    non-overlapping decreasing windows (slope<0, R²≥min_r2, length≥
+    min_moves) on the amplitude series, maximizing total explained SS.
+
+    Returns a list of (start, end-exclusive) index windows.
+    """
+    n = len(amps)
+    if n < min_moves:
+        return []
+    am = np.asarray(amps, dtype=float)
+    if not np.all(np.isfinite(am)):
+        # Replace non-finite with interpolation-free guard: bail if any.
+        if np.isnan(am).any():
+            return []
+    total_ss = float(((am - am.mean()) ** 2).sum())
+    if total_ss == 0:
+        return []
+
+    windows = []  # (start, end, ss_reg)
+    for i in range(0, n - min_moves + 1):
+        for j in range(i + min_moves, n + 1):
+            seg = am[i:j]
+            m = j - i
+            xs = np.arange(m, dtype=float)
+            xm = xs.mean()
+            sxx = ((xs - xm) ** 2).sum()
+            if sxx == 0:
+                continue
+            slope = ((xs - xm) * (seg - seg.mean())).sum() / sxx
+            if slope >= 0:
+                continue
+            sstot = ((seg - seg.mean()) ** 2).sum()
+            ssreg = slope * slope * sxx
+            r2 = ssreg / sstot if sstot > 0 else 0
+            if r2 < min_r2:
+                continue
+            windows.append((i, j, ssreg))
+    if not windows:
+        return []
+    windows.sort(key=lambda w: w[1])
+
+    dp = [0.0] * (n + 1)
+    choice: list[list] = [[] for _ in range(n + 1)]
+    wi = 0
+    for pos in range(1, n + 1):
+        dp[pos] = dp[pos - 1]
+        choice[pos] = choice[pos - 1]
+        while wi < len(windows) and windows[wi][1] == pos:
+            w = windows[wi]
+            val = dp[w[0]] + w[2]
+            if val > dp[pos]:
+                dp[pos] = val
+                choice[pos] = choice[w[0]] + [w]
+            wi += 1
+    return [(w[0], w[1]) for w in choice[n]]
+
+
+def _sequence_effect(movements: list[dict], key: str, mode: str) -> float | None:
+    """Per-subject scalar "sequence effect" for one parameter under the
+    selected ``mode`` (matches the individual-page Sequence Calculation
+    options).  Linear modes return an OLS slope; exp modes a decay
+    rate; multi modes aggregate within amplitude-detected sequences
+    (length-weighted mean).  ``none`` → None.
+    """
+    if mode == "none":
+        return None
+    flip = key in ("peak_close_vel", "mean_close_vel")
+
+    def _series(rng=None):
+        xs, ys = [], []
+        idxs = range(len(movements)) if rng is None else rng
+        for i in idxs:
+            v = movements[i].get(key)
+            if v is None:
+                continue
+            xs.append(float(i))
+            ys.append(-v if flip else v)
+        return xs, ys
+
+    is_exp = mode.startswith("exp_")
+    fit = _exp_rate if is_exp else _linreg_slope
+
+    if mode.endswith("_multi"):
+        amps = [m.get("amplitude") for m in movements]
+        if any(a is None for a in amps):
+            # Sequence detection needs a complete amplitude series.
+            amps = [a if a is not None else float("nan") for a in amps]
+        wins = _optimize_sequences(amps)
+        if not wins:
+            return None
+        vals, weights = [], []
+        for a, b in wins:
+            xs, ys = _series(range(a, b))
+            if len(xs) < 2:
+                continue
+            r = fit(xs, ys)
+            if r is not None:
+                vals.append(r)
+                weights.append(len(xs))
+        if not vals:
+            return None
+        tot = sum(weights)
+        return round(sum(v * w for v, w in zip(vals, weights)) / tot, 6)
+
+    xs, ys = _series()
+    if mode.endswith("_first10"):
+        xs, ys = xs[:10], ys[:10]
+    return fit(xs, ys)
+
+
 # ── API endpoints ───────────────────────────────────────────────────────
 
 def _preview_cache_path():
@@ -798,9 +932,12 @@ def get_group_comparison(include_auto: bool = Query(False),
                           seq_mode: str = Query("linear_full")) -> dict:
     """Aggregated per-subject statistics grouped by diagnosis.
 
-    ``seq_mode`` controls the sequence-effect slope:
-      - ``linear_full``    — slope across all movements (default)
-      - ``linear_first10`` — slope across the first 10 movements
+    ``seq_mode`` controls the per-subject sequence-effect value (same
+    options as the individual Sequence Calculation dropdown):
+      none, linear_full, linear_first10, linear_multi,
+      exp_full, exp_first10, exp_multi.
+    Linear modes return an OLS slope; exp modes a decay rate; multi
+    modes aggregate within amplitude-detected sequences.
     """
     with get_db_ctx() as db:
         subjects = db.execute(
@@ -858,16 +995,10 @@ def get_group_comparison(include_auto: bool = Query(False),
                 entry[f"mean_{key}"] = round(float(mean_v), 4)
                 entry[f"cv_{key}"] = round(float(std_v / abs(mean_v)), 4) if mean_v != 0 else None
 
-                # Sequence effect: slope of parameter vs movement index
-                # Negate closing velocities (which are negative) so the
-                # sequence-effect slope reflects changes in magnitude.
-                seq_vals = [-v for v in vals] if key in ("peak_close_vel", "mean_close_vel") else vals
-                indices = [float(i) for i, m in enumerate(movements) if m[key] is not None]
-                if seq_mode == "linear_first10":
-                    seq_vals = seq_vals[:10]
-                    indices = indices[:10]
-                slope = _linreg_slope(indices, seq_vals)
-                entry[f"seq_{key}"] = slope
+                # Sequence effect under the selected mode (closing
+                # velocities are negated inside the helper so the effect
+                # reflects changes in magnitude).
+                entry[f"seq_{key}"] = _sequence_effect(movements, key, seq_mode)
             else:
                 entry[f"mean_{key}"] = None
                 entry[f"cv_{key}"] = None
