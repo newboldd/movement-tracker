@@ -586,7 +586,12 @@ function renderDistancePlot(divId, trial, yRange, width, overlayTraces, shapes) 
             font: { size: 13, color: '#666' },
         },
         margin: { t: 30, b: 5, l: 55, r: 20 },
-        xaxis: { showticklabels: false, color: '#666', gridcolor: '#eee' },
+        // Pin the X range to the trace extent so toggling the peak
+        // overlays (which adds marker traces) can't rescale the axis.
+        xaxis: {
+            showticklabels: false, color: '#666', gridcolor: '#eee',
+            range: [times[0] || 0, times[n - 1] || 0], autorange: false,
+        },
         yaxis: {
             title: { text: 'Distance (mm)', font: { size: 11, color: '#2196F3' } },
             color: '#2196F3',
@@ -629,7 +634,12 @@ function renderVelocityPlot(divId, trial, yRange, width, overlayTraces, shapes) 
 
     const layout = {
         margin: { t: 5, b: 35, l: 55, r: 20 },
-        xaxis: { title: { text: 'Time (s)', font: { size: 11 } }, color: '#666', gridcolor: '#eee' },
+        // Pin the X range to the trace extent so toggling the peak
+        // overlays can't rescale the axis.
+        xaxis: {
+            title: { text: 'Time (s)', font: { size: 11 } }, color: '#666', gridcolor: '#eee',
+            range: [times[0] || 0, times[n - 1] || 0], autorange: false,
+        },
         yaxis: {
             title: { text: 'Velocity (mm/s)', font: { size: 11, color: '#4CAF50' } },
             color: '#4CAF50',
