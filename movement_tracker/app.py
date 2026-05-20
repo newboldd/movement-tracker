@@ -45,7 +45,7 @@ class NoCacheMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
         if request.url.path.startswith("/static") or request.url.path in (
-            "/", "/labeling", "/labeling-select", "/mediapipe", "/deidentify", "/labels", "/preproc", "/oscillations", "/results", "/settings", "/onboarding", "/remote", "/videos", "/calibration", "/tutorials", "/tutorial", "/events"
+            "/", "/labeling", "/labeling-select", "/mediapipe", "/deidentify", "/labels", "/preproc", "/oscillations", "/results", "/explore", "/settings", "/onboarding", "/remote", "/videos", "/calibration", "/tutorials", "/tutorial", "/events"
         ):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return response
@@ -1202,6 +1202,12 @@ def mediapipe_select_page(subject: Optional[int] = None):
 def results_page():
     """Serve the results page."""
     return FileResponse(str(STATIC_DIR / "results.html"))
+
+
+@app.get("/explore")
+def explore_page():
+    """Serve the variable-explorer page."""
+    return FileResponse(str(STATIC_DIR / "explore.html"))
 
 
 @app.get("/settings")

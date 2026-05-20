@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Movement Tracker — Explore</title>
+    <link rel="stylesheet" href="/static/css/main.css?v=3">
+</head>
+<body class="results-page">
+    <div class="header">
+        <div style="display:flex;align-items:center;gap:16px;">
+            <h1 style="margin:0;"><a href="/" style="font-size:18px;">Movement Tracker</a></h1>
+            <span style="font-size:13px;color:var(--text-muted);">Variable Explorer</span>
+        </div>
+        <nav>
+            <a href="/videos" class="nav-browse">Browse Videos</a>
+            <a href="/subjects">Subjects</a>
+            <span class="nav-dropdown">
+                <a href="/labels">Analyze</a>
+                <div class="nav-dropdown-menu">
+                    <a href="/preproc">Pre-proc</a>
+                    <a href="/labels">Labels</a>
+                    <a href="/labeling-select">DLC</a>
+                    <a href="/events">Events</a>
+                    <a href="/deidentify">Deidentify</a>
+                </div>
+            </span>
+            <span class="nav-dropdown">
+                <a href="/results" class="active">Results</a>
+                <div class="nav-dropdown-menu">
+                    <a href="/results">Individual</a>
+                    <a href="/results?tab=group">Group Comparison</a>
+                    <a href="/explore" class="active">Explore</a>
+                    <a href="/oscillations">Oscillations</a>
+                </div>
+            </span>
+            <span class="nav-dropdown" id="navJobQueue">
+                <a href="/remote"><span id="navJobDot" class="nav-job-dot" style="display:none;"></span>Jobs</a>
+                <div class="nav-dropdown-menu nav-jobs-dropdown" id="navJobsPanel">
+                    <div style="padding:8px 12px;font-size:11px;color:var(--text-muted);">Loading...</div>
+                </div>
+            </span>
+            <a href="/settings">Settings</a>
+        </nav>
+    </div>
+
+    <div class="results-container">
+        <!-- Data-source controls (movement variables depend on these) -->
+        <div class="results-controls" id="exploreControls">
+            <label style="display:flex;align-items:center;gap:6px;margin:0;">Source:
+                <select id="exSourceSelect" style="min-width:140px;">
+                    <option value="auto" selected>Auto</option>
+                    <option value="corrections">DLC (corrected)</option>
+                    <option value="mp_combined">MP combined</option>
+                    <option value="mp_forward">MP forward</option>
+                </select>
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;margin:0;">Sequence effect:
+                <select id="exSeqModeSelect" style="min-width:150px;">
+                    <option value="none">None</option>
+                    <option value="linear_full" selected>Linear (full)</option>
+                    <option value="linear_first10">Linear (first 10)</option>
+                    <option value="linear_multi">Linear (multi-seq)</option>
+                    <option value="exp_full">Exponential (full)</option>
+                    <option value="exp_first10">Exponential (first 10)</option>
+                    <option value="exp_multi">Exponential (multi-seq)</option>
+                </select>
+            </label>
+            <label><input type="checkbox" id="exIncludeAuto"> Include auto-detected events</label>
+        </div>
+
+        <!-- Plot-type + variable controls -->
+        <div class="results-controls" id="explorePlotControls" style="margin-top:8px;">
+            <label style="display:flex;align-items:center;gap:6px;margin:0;">Plot:
+                <select id="exPlotType" style="min-width:150px;">
+                    <option value="scatter" selected>Scatter (X vs Y)</option>
+                    <option value="bar">Bar by group</option>
+                </select>
+            </label>
+            <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
+            <label id="exXLabel" style="display:flex;align-items:center;gap:6px;margin:0;">X:
+                <select id="exVarX" style="min-width:220px;"></select>
+            </label>
+            <label id="exYLabel" style="display:flex;align-items:center;gap:6px;margin:0;">Y:
+                <select id="exVarY" style="min-width:220px;"></select>
+            </label>
+            <span id="exInfo" style="font-size:11px;color:var(--text-muted);"></span>
+        </div>
+
+        <div id="explorePlot" style="height:520px;margin-top:12px;">
+            <div class="results-no-data">Loading…</div>
+        </div>
+    </div>
+
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+    <script src="/static/js/nav.js?v=10"></script>
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/explore.js?v=1"></script>
+</body>
+</html>

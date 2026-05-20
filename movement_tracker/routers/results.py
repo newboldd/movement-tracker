@@ -1014,3 +1014,86 @@ def get_group_comparison(include_auto: bool = Query(False),
     groups = sorted(set(r["diagnosis"] for r in results))
 
     return {"subjects": results, "groups": groups}
+
+
+# Numeric clinical variables exposed by the explore tool.
+_CLINICAL_VARS = [
+    ("age", "Age (years)"),
+    ("disease_duration", "Disease Duration (years)"),
+    ("time_since_dose_min", "Time Since Dose (min)"),
+]
+
+# Per-movement parameter base labels (units in parentheses).
+_MOVE_PARAM_LABELS = {
+    "imi": "IMI (s)",
+    "amplitude": "Amplitude (mm)",
+    "rel_amplitude": "Rel. Amplitude",
+    "power": "Power (mm²/s)",
+    "peak_open_vel": "Peak Open Vel (mm/s)",
+    "peak_close_vel": "Peak Close Vel (mm/s)",
+    "mean_open_vel": "Mean Open Vel (mm/s)",
+    "mean_close_vel": "Mean Close Vel (mm/s)",
+}
+
+
+def _explore_variable_catalog() -> list[dict]:
+    """List of {key, label, category} for every plottable variable."""
+    out = [{"key": k, "label": lbl, "category": "clinical"}
+           for k, lbl in _CLINICAL_VARS]
+    for k, lbl in _MOVE_PARAM_LABELS.items():
+        out.append({"key": f"mean_{k}", "label": f"Mean {lbl}", "category": "movement"})
+        out.append({"key": f"cv_{k}", "label": f"CV {lbl}", "category": "movement"})
+        out.append({"key": f"seq_{k}", "label": f"Seq. Effect {lbl}", "category": "movement"})
+    out.append({"key": "frequency", "label": "Frequency (Hz)", "category": "movement"})
+    return out
+
+
+@router.get("/explore")
+def get_explore_variables(include_auto: bool = Query(False),
+                           source: str = Query("auto"),
+                           seq_mode: str = Query("linear_full")) -> dict:
+    """Per-subject clinical + movement variables for the explore tool.
+
+    Reuses the group aggregation for movement variables and merges in
+    numeric clinical fields, returning a flat ``vars`` dict per subject
+    plus a variable catalog the UI builds its dropdowns from.
+    """
+    grp = get_group_comparison(include_auto=include_auto, source=source,
+                               seq_mode=seq_mode)
+    catalog = _explore_variable_catalog()
+    var_keys = [v["key"] for v in catalog]
+
+    # Numeric clinical fields by subject name.
+    with get_db_ctx() as db:
+        rows = db.execute(
+            "SELECT name, age, disease_duration FROM subjects"
+        ).fetchall()
+    clinical = {}
+    for r in rows:
+        def _num(x):
+            try:
+                return float(x) if x is not None and str(x).strip() != "" else None
+            except (ValueError, TypeError):
+                return None
+        clinical[r["name"]] = {
+            "age": _num(r["age"]),
+            "disease_duration": _num(r["disease_duration"]),
+        }
+
+    subjects = []
+    for s in grp["subjects"]:
+        cl = clinical.get(s["name"], {})
+        vars_ = {}
+        for k in var_keys:
+            if k in ("age", "disease_duration"):
+                vars_[k] = cl.get(k)
+            else:
+                v = s.get(k)
+                vars_[k] = v if isinstance(v, (int, float)) else None
+        subjects.append({
+            "name": s["name"],
+            "group": s.get("diagnosis") or "Control",
+            "vars": vars_,
+        })
+
+    return {"groups": grp["groups"], "subjects": subjects, "variables": catalog}
