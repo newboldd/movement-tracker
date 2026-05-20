@@ -1,7 +1,18 @@
 /* Shared fetch wrappers for DLC Pipeline API */
 
+// Static-export mode: when ``window.STATIC_RESULTS`` is set (the
+// GitHub-Pages build), GET requests to ``/api/...`` are redirected to
+// pre-exported JSON files under ``data/`` (path+query flattened to a
+// filename — must match scripts/export_results_static.py).
+function _staticApiUrl(url) {
+    const base = window.STATIC_DATA_BASE || 'data';
+    const key = String(url).replace(/^\//, '').replace(/[^a-zA-Z0-9]+/g, '_');
+    return `${base}/${key}.json`;
+}
+
 const API = {
     async get(url) {
+        if (window.STATIC_RESULTS) url = _staticApiUrl(url);
         const resp = await fetch(url);
         if (!resp.ok) {
             const err = await resp.json().catch(() => ({ detail: resp.statusText }));

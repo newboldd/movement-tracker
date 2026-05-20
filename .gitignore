@@ -38,3 +38,6 @@ calibration/camera1_recalibrated.yaml
 *.db-shm
 methods.pages
 methods_draft.docx
+
+# Static results export (publish separately to GitHub Pages)
+/site/
