@@ -383,8 +383,11 @@ function renderAllDistancePlots() {
         if (overlayPeakOpenVel && trialMovs.length > 0) {
             const ts = [], vs = [];
             trialMovs.forEach(m => {
-                if (m.peak_open_vel != null && m.peak_frame != null) {
-                    ts.push(+((m.peak_frame - trialStart) / fps).toFixed(3));
+                // Position the marker at the opening-velocity peak frame
+                // (falls back to the distance-peak frame if absent).
+                const vf = m.peak_open_vel_frame != null ? m.peak_open_vel_frame : m.peak_frame;
+                if (m.peak_open_vel != null && vf != null) {
+                    ts.push(+((vf - trialStart) / fps).toFixed(3));
                     vs.push(m.peak_open_vel);
                 }
             });
@@ -401,8 +404,11 @@ function renderAllDistancePlots() {
         if (overlayPeakCloseVel && trialMovs.length > 0) {
             const ts = [], vs = [];
             trialMovs.forEach(m => {
-                if (m.peak_close_vel != null && m.peak_frame != null) {
-                    ts.push(+((m.peak_frame - trialStart) / fps).toFixed(3));
+                // Position the marker at the closing-velocity peak frame
+                // (falls back to the distance-peak frame if absent).
+                const vf = m.peak_close_vel_frame != null ? m.peak_close_vel_frame : m.peak_frame;
+                if (m.peak_close_vel != null && vf != null) {
+                    ts.push(+((vf - trialStart) / fps).toFixed(3));
                     vs.push(m.peak_close_vel);
                 }
             });
@@ -759,9 +765,17 @@ function renderMovementScatter(divId, data, param, seqMode) {
     const isExp = seqMode.startsWith('exp_');
     const isFirst10 = seqMode.endsWith('_first10');
 
+    // Peak velocity params are timestamped at their own velocity peak,
+    // not the distance peak, so their sequence-effect fits use the
+    // correct time axis.  Everything else stays on the distance-peak
+    // time (``peak_time``).
+    const xField = param === 'peak_open_vel' ? 'peak_open_vel_time'
+                 : param === 'peak_close_vel' ? 'peak_close_vel_time'
+                 : 'peak_time';
+
     Object.keys(byTrial).sort((a, b) => +a - +b).forEach(ti => {
         const ms = byTrial[ti];
-        const x = ms.map(m => m.peak_time);
+        const x = ms.map(m => (m[xField] != null ? m[xField] : m.peak_time));
         const y = ms.map(m => m[param]);
 
         const color = TRIAL_COLORS[ti % TRIAL_COLORS.length];

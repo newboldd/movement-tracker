@@ -394,15 +394,24 @@ def _build_movement_params(
                 rel_amplitude = round(amplitude / prev_amp, 4)
             prev_amp_by_trial[ti] = amplitude
 
-        # Velocities
+        # Velocities.  Track the FRAME where each peak velocity occurs
+        # (not the distance-peak frame) so the velocity-plot markers and
+        # the velocity sequence-effect fits use the correct time axis.
         peak_open_vel = None
+        peak_open_vel_frame = None
         mean_open_vel = None
         if open_f is not None and pk_dist is not None:
-            # Peak opening velocity: max velocity between open and peak
-            v_slice = vel[open_f:pk + 1]
-            valid_v = [v for v in v_slice if v is not None]
-            if valid_v:
-                peak_open_vel = round(max(valid_v), 2)
+            # Peak opening velocity: max velocity between open and peak.
+            best_v, best_f = None, None
+            for fi in range(open_f, min(pk + 1, len(vel))):
+                v = vel[fi]
+                if v is None:
+                    continue
+                if best_v is None or v > best_v:
+                    best_v, best_f = v, fi
+            if best_v is not None:
+                peak_open_vel = round(best_v, 2)
+                peak_open_vel_frame = best_f
 
             # Mean opening velocity: amplitude / duration
             dur_open = (pk - open_f) / fps
@@ -410,18 +419,33 @@ def _build_movement_params(
                 mean_open_vel = round(amplitude / dur_open, 2)
 
         peak_close_vel = None
+        peak_close_vel_frame = None
         mean_close_vel = None
         if close_f is not None and pk_dist is not None:
-            # Peak closing velocity: min velocity between peak and close (negative)
-            v_slice = vel[pk:close_f + 1]
-            valid_v = [v for v in v_slice if v is not None]
-            if valid_v:
-                peak_close_vel = round(min(valid_v), 2)
+            # Peak closing velocity: min velocity between peak and close (negative).
+            best_v, best_f = None, None
+            for fi in range(pk, min(close_f + 1, len(vel))):
+                v = vel[fi]
+                if v is None:
+                    continue
+                if best_v is None or v < best_v:
+                    best_v, best_f = v, fi
+            if best_v is not None:
+                peak_close_vel = round(best_v, 2)
+                peak_close_vel_frame = best_f
 
             # Mean closing velocity: amplitude / duration (negative)
             dur_close = (close_f - pk) / fps
             if dur_close > 0 and amplitude is not None:
                 mean_close_vel = round(-amplitude / dur_close, 2)
+
+        # Times of the velocity peaks, relative to the first distance
+        # peak (same reference as ``peak_time``) so the sequence-effect
+        # fits stay on a common axis.
+        peak_open_vel_time = (round((peak_open_vel_frame - first_peak) / fps, 4)
+                              if peak_open_vel_frame is not None else None)
+        peak_close_vel_time = (round((peak_close_vel_frame - first_peak) / fps, 4)
+                               if peak_close_vel_frame is not None else None)
 
         # Power: velocity × amplitude (fast-small ≈ slow-large)
         power = None
@@ -437,6 +461,10 @@ def _build_movement_params(
             "rel_amplitude": rel_amplitude,
             "peak_open_vel": peak_open_vel,
             "peak_close_vel": peak_close_vel,
+            "peak_open_vel_frame": peak_open_vel_frame,
+            "peak_close_vel_frame": peak_close_vel_frame,
+            "peak_open_vel_time": peak_open_vel_time,
+            "peak_close_vel_time": peak_close_vel_time,
             "mean_open_vel": mean_open_vel,
             "mean_close_vel": mean_close_vel,
             "power": power,
