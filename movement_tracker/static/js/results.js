@@ -866,18 +866,25 @@ function renderMovementScatter(divId, data, param, seqMode) {
             const trialSeqs = cachedSequenceAssignments && cachedSequenceAssignments.byTrial[ti];
             if (!trialSeqs || trialSeqs.sequences.length === 0) return;
 
+            const sign = flipSign ? -1 : 1;
+
+            // Map the trial's valid-amplitude indices to movement indices
+            // (seq.start/end index into the amplitude array).
+            const ampValid = [];
+            for (let i = 0; i < ms.length; i++) {
+                if (ms[i].amplitude != null && isFinite(ms[i].amplitude)) {
+                    ampValid.push(i);
+                }
+            }
+
+            // Collected per sequence so the leftover (non-sequence)
+            // movements can be modeled afterwards.
+            const seqWindows = [];   // {xMin, xMax, baselineMag}
+            const coveredIdx = new Set();
+
             // For each sequence window (start/end are indices into the trial's amplitude array,
             // but we need to filter for valid param values within those windows)
             trialSeqs.sequences.forEach((seq, si) => {
-                // seq.start and seq.end are indices into the trial's valid amplitude array
-                // Map to the trial's movement indices (ms[])
-                // The amplitude array was built from ms.filter(valid amplitude) — need same mapping
-                const ampValid = [];
-                for (let i = 0; i < ms.length; i++) {
-                    if (ms[i].amplitude != null && isFinite(ms[i].amplitude)) {
-                        ampValid.push(i);
-                    }
-                }
                 const seqMsIndices = ampValid.slice(seq.start, seq.end);
 
                 // Get x, y for this param within the sequence window
@@ -887,13 +894,13 @@ function renderMovementScatter(divId, data, param, seqMode) {
                     if (x[mi] != null && y[mi] != null && isFinite(x[mi]) && isFinite(y[mi])) {
                         seqX.push(x[mi]);
                         seqY.push(flipSign ? -y[mi] : y[mi]);
+                        coveredIdx.add(mi);
                     }
                 }
                 if (seqX.length < 2) return;
 
                 const xMin = Math.min(...seqX);
                 const xMax = Math.max(...seqX);
-                const sign = flipSign ? -1 : 1;
 
                 // Background span — use trial color so shading matches the dots
                 shapes.push({
@@ -904,10 +911,12 @@ function renderMovementScatter(divId, data, param, seqMode) {
                     layer: 'below',
                 });
 
+                let baselineMag;
                 if (isExp) {
                     // Exponential fit within sequence
                     const fit = exponentialFit(seqX, seqY);
                     if (!fit) return;
+                    baselineMag = fit.predict(xMin);
                     const nPts = 50;
                     const step = (xMax - xMin) / (nPts - 1);
                     const curveX = [], curveY = [];
@@ -940,6 +949,7 @@ function renderMovementScatter(divId, data, param, seqMode) {
                     // Linear fit within sequence
                     const reg = linearRegressionFull(seqX, seqY);
                     if (!reg) return;
+                    baselineMag = reg.slope * xMin + reg.intercept;
                     traces.push({
                         x: [xMin, xMax],
                         y: [sign * (reg.slope * xMin + reg.intercept), sign * (reg.slope * xMax + reg.intercept)],
@@ -962,7 +972,63 @@ function renderMovementScatter(divId, data, param, seqMode) {
                         borderpad: 2,
                     });
                 }
+                seqWindows.push({ xMin, xMax, baselineMag });
             });
+
+            // Model every movement NOT in a sequence as a constant equal
+            // to the largest sequence baseline (the fit value at a
+            // sequence start).  Drawn as a flat dotted line over the
+            // non-sequence regions so trailing low movements aren't left
+            // unmodeled / cut off the ends of the sequences.
+            if (seqWindows.length > 0) {
+                const maxBaselineMag = Math.max(...seqWindows.map(w => w.baselineMag));
+                const constY = sign * maxBaselineMag;
+
+                const allX = [], nonSeqX = [];
+                for (let i = 0; i < x.length; i++) {
+                    if (x[i] == null || !isFinite(x[i]) || y[i] == null || !isFinite(y[i])) continue;
+                    allX.push(x[i]);
+                    if (!coveredIdx.has(i)) nonSeqX.push(x[i]);
+                }
+
+                if (nonSeqX.length > 0 && allX.length > 0) {
+                    const trialXmin = Math.min(...allX);
+                    const trialXmax = Math.max(...allX);
+                    // Merged sequence coverage, ascending.
+                    const cov = seqWindows
+                        .map(w => [w.xMin, w.xMax])
+                        .sort((a, b) => a[0] - b[0]);
+                    // Complement intervals within [trialXmin, trialXmax].
+                    const segs = [];
+                    let cursor = trialXmin;
+                    for (const [a, b] of cov) {
+                        if (a > cursor) segs.push([cursor, Math.min(a, trialXmax)]);
+                        cursor = Math.max(cursor, b);
+                    }
+                    if (cursor < trialXmax) segs.push([cursor, trialXmax]);
+
+                    // Keep only gap segments that actually contain a
+                    // non-sequence movement; draw one broken polyline.
+                    const cx = [], cy = [];
+                    let firstSeg = true;
+                    for (const [a, b] of segs) {
+                        if (b <= a) continue;
+                        if (!nonSeqX.some(xv => xv >= a - 1e-6 && xv <= b + 1e-6)) continue;
+                        if (!firstSeg) { cx.push(null); cy.push(null); }
+                        cx.push(a, b); cy.push(constY, constY);
+                        firstSeg = false;
+                    }
+                    if (cx.length > 0) {
+                        traces.push({
+                            x: cx, y: cy,
+                            type: 'scatter', mode: 'lines',
+                            name: 'Baseline (non-seq)',
+                            line: { color, width: 2, dash: 'dot' },
+                            showlegend: false, hoverinfo: 'skip',
+                        });
+                    }
+                }
+            }
 
         } else {
             // Full or first-10 modes
