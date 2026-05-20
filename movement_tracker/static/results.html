@@ -75,6 +75,12 @@
                 <label><input type="checkbox" id="overlayPeakOpenVel"> Peak Open Vel</label>
                 <label><input type="checkbox" id="overlayPeakCloseVel"> Peak Close Vel</label>
                 <span id="overlayR2" style="font-size:11px;color:#666;font-weight:600;"></span>
+                <label title="Seconds of trace shown per screen width — lower = more stretched out."
+                       style="display:flex;align-items:center;gap:6px;margin:0 0 0 auto;">
+                    X scale:
+                    <input type="range" id="xScaleSlider" min="5" max="60" step="1" value="20" style="width:120px;">
+                    <span id="xScaleVal" style="font-size:11px;color:#666;min-width:34px;">20 s</span>
+                </label>
             </div>
             <div id="distancePlots">
                 <div class="results-no-data">Select a subject to view distance traces</div>
@@ -197,6 +203,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=31"></script>
+    <script src="/static/js/results.js?v=32"></script>
 </body>
 </html>

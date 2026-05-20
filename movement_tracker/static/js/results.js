@@ -335,10 +335,12 @@ function renderAllDistancePlots() {
         block.appendChild(wrapper);
         container.appendChild(block);
 
-        // Compute plot width based on 20s per screen width
+        // Compute plot width based on the X-scale slider (seconds shown
+        // per container width; default 20).
+        const secPerWidth = parseFloat(document.getElementById('xScaleSlider')?.value) || 20;
         const fps = trial.fps || 60;
         const durationSec = trial.distances.length / fps;
-        const plotWidth = Math.max(containerWidth, (durationSec / 20) * containerWidth);
+        const plotWidth = Math.max(containerWidth, (durationSec / secPerWidth) * containerWidth);
 
         // Set wrapper width to enable scrolling
         distDiv.style.width = plotWidth + 'px';
@@ -1965,6 +1967,18 @@ document.getElementById('distSequenceMode').addEventListener('change', () => {
         if (cachedTraces) renderAllDistancePlots();
     });
 });
+
+// X-scale slider: seconds of trace shown per screen width, applied to
+// every distance/velocity plot.
+(() => {
+    const sl = document.getElementById('xScaleSlider');
+    const val = document.getElementById('xScaleVal');
+    if (!sl) return;
+    sl.addEventListener('input', () => {
+        if (val) val.textContent = `${sl.value} s`;
+        if (cachedTraces) renderAllDistancePlots();
+    });
+})();
 
 // Lock Y-axis toggle: switch between shared (locked) and per-trial
 // (unlocked) Y-range sliders.  Seed the shared range from trial 0's
