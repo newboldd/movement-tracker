@@ -1683,9 +1683,16 @@ loadSubjects().then(() => {
         // No subject param and no source context → group comparison
         switchTab('group');
     } else if (currentSubjectId) {
-        // Have a subject — check for a remembered tab
+        // Have a subject — check for a remembered tab.  The legacy
+        // 'movements' tab is hidden (display:none) so never restore it;
+        // map it (and any unknown value) to the visible 'distances'
+        // tab.  Restoring 'movements' rendered a blank page when
+        // arriving via the nav prev/next buttons (full reload to
+        // /results?subject=X with no tab param).
         const lastTab = sessionStorage.getItem(`dlc_resultsTab_${currentSubjectId}`);
-        switchTab(lastTab || 'movements');
+        const restoreTab = (lastTab === 'distances' || lastTab === 'group')
+            ? lastTab : 'distances';
+        switchTab(restoreTab);
     } else {
         // No subject at all → group comparison
         switchTab('group');
