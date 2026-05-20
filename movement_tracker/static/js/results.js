@@ -220,15 +220,28 @@ function renderDistMovementPlots() {
     const GAP = 16;
     const cellW = (containerW - GAP) / 2;   // current 2-col cell width
 
+    // Left-aligned title rendered as an HTML header above each plot so
+    // it stays anchored (doesn't scroll away) and is consistently
+    // left-aligned.
+    const _titleHeader = (param) => {
+        const h = document.createElement('div');
+        h.textContent = PARAM_LABELS[param] || param;
+        h.style.cssText = 'font-size:13px;font-weight:600;color:#444;text-align:left;padding:2px 0 2px 4px;';
+        return h;
+    };
+
     if (xs <= 1) {
         // Default: 2-column responsive grid.
         container.style.display = '';
         container.style.gridTemplateColumns = '';
         params.forEach(param => {
+            const cell = document.createElement('div');
+            cell.appendChild(_titleHeader(param));
             const div = document.createElement('div');
             div.id = `distMovPlot_${param}`;
-            div.style.height = '320px';
-            container.appendChild(div);
+            div.style.height = '300px';
+            cell.appendChild(div);
+            container.appendChild(cell);
             renderMovementScatter(div.id, data, param, seqMode, null);
         });
     } else {
@@ -238,15 +251,19 @@ function renderDistMovementPlots() {
         const plotW = cellW * xs;
         const wraps = [];
         params.forEach(param => {
+            const block = document.createElement('div');
+            block.style.marginBottom = '16px';
+            block.appendChild(_titleHeader(param));   // anchored title
             const wrap = document.createElement('div');
             wrap.className = 'mov-scroll-wrap';
-            wrap.style.cssText = 'overflow-x:auto;margin-bottom:16px;width:100%;';
+            wrap.style.cssText = 'overflow-x:auto;width:100%;';
             const div = document.createElement('div');
             div.id = `distMovPlot_${param}`;
-            div.style.height = '320px';
+            div.style.height = '300px';
             div.style.width = plotW + 'px';
             wrap.appendChild(div);
-            container.appendChild(wrap);
+            block.appendChild(wrap);
+            container.appendChild(block);
             wraps.push(wrap);
             renderMovementScatter(div.id, data, param, seqMode, plotW);
         });
@@ -934,6 +951,8 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
         const x = rawX;
         const y = ms.map(m => m[param]);
         const trialLabel = trialNames[ti] || `Trial ${+ti + 1}`;
+        // Short label: just the trial suffix (e.g. "R1" from "PD03_R1").
+        const trialShort = String(trialLabel).split('_').pop();
 
         traces.push({
             x, y,
@@ -942,19 +961,38 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
             name: trialLabel,
             xaxis: axId, yaxis: 'y',
             marker: { color, size: 7, opacity: 0.8 },
-            hovertemplate: `${trialLabel}<br>t=%{x:.2f}s<br>${PARAM_LABELS[param]}: %{y:.2f}<extra></extra>`,
+            hovertemplate: `${trialShort}<br>t=%{x:.2f}s<br>${PARAM_LABELS[param]}: %{y:.2f}<extra></extra>`,
             showlegend: false,
         });
 
         // Trial label above this subplot, left-aligned with its start.
+        // The total segmentation R² for this trial gets appended once
+        // the fits below are computed (patched via labelAnnIdx).
+        const labelAnnIdx = annotations.length;
         annotations.push({
             x: domain[0], y: 1.0,
             xref: 'paper', yref: 'paper',
             xanchor: 'left', yanchor: 'bottom',
-            text: trialLabel,
+            text: trialShort,
             showarrow: false,
             font: { size: 11, color: '#444' },
         });
+
+        // Accumulate explained / total variance for this trial's total R².
+        let trialSSReg = 0;
+        const _ssTot = (arr) => {
+            const v = arr.filter(a => a != null && isFinite(a));
+            if (v.length < 2) return 0;
+            const m = v.reduce((a, b) => a + b, 0) / v.length;
+            return v.reduce((a, b) => a + (b - m) ** 2, 0);
+        };
+        const trialSSTot = _ssTot(y);
+        const _finishTrialR2 = () => {
+            if (seqMode !== 'none' && trialSSTot > 0 && trialSSReg > 0) {
+                const r2 = Math.min(1, trialSSReg / trialSSTot);
+                annotations[labelAnnIdx].text = `${trialShort}  (R²=${r2.toFixed(2)})`;
+            }
+        };
 
         // Vertical line at this trial's t=0 (its subplot's left edge),
         // matching the y-axis line at the first trial's start.
@@ -1035,6 +1073,7 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
                     const fit = exponentialFit(seqX, seqY);
                     if (!fit) return;
                     baselineMag = fit.predict(xMin);
+                    trialSSReg += fit.r2 * _ssTot(seqY);
                     const nPts = 50;
                     const step = (xMax - xMin) / (nPts - 1);
                     const curveX = [], curveY = [];
@@ -1053,14 +1092,12 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
                     });
                     // R² annotation
                     const midX = seqX[Math.floor(seqX.length / 2)];
-                    const midY = sign * fit.predict(midX);
                     annotations.push({
-                        x: midX, y: midY,
-                        xref: axId, yref: 'y',
+                        x: midX, y: 0.98,
+                        xref: axId, yref: 'paper', yanchor: 'top',
                         text: `R\u00b2=${fit.r2.toFixed(2)}`,
                         showarrow: false,
                         font: { size: 9, color },
-                        yshift: 18,
                         bgcolor: 'rgba(255,255,255,0.8)',
                         bordercolor: color,
                         borderpad: 2,
@@ -1070,6 +1107,7 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
                     const reg = linearRegressionFull(seqX, seqY);
                     if (!reg) return;
                     baselineMag = reg.slope * xMin + reg.intercept;
+                    trialSSReg += reg.ss_reg;
                     traces.push({
                         x: [xMin, xMax],
                         y: [sign * (reg.slope * xMin + reg.intercept), sign * (reg.slope * xMax + reg.intercept)],
@@ -1081,14 +1119,12 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
                     });
                     // R² annotation
                     const midX = (xMin + xMax) / 2;
-                    const midY = sign * (reg.slope * midX + reg.intercept);
                     annotations.push({
-                        x: midX, y: midY,
-                        xref: axId, yref: 'y',
+                        x: midX, y: 0.98,
+                        xref: axId, yref: 'paper', yanchor: 'top',
                         text: `R\u00b2=${reg.r2.toFixed(2)}`,
                         showarrow: false,
                         font: { size: 9, color },
-                        yshift: 18,
                         bgcolor: 'rgba(255,255,255,0.8)',
                         bordercolor: color,
                         borderpad: 2,
@@ -1171,6 +1207,7 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
                 // Exponential fit
                 const fit = exponentialFit(fitX, fitY);
                 if (!fit) return;
+                trialSSReg += fit.r2 * _ssTot(fitY);
                 const nPts = 80;
                 const step = (xMax - xMin) / (nPts - 1);
                 const curveX = [], curveY = [];
@@ -1189,12 +1226,11 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
                 });
                 // R² annotation
                 annotations.push({
-                    x: (xMin + xMax) / 2, y: sign * fit.predict((xMin + xMax) / 2),
-                    xref: axId, yref: 'y',
+                    x: (xMin + xMax) / 2, y: 0.98,
+                    xref: axId, yref: 'paper', yanchor: 'top',
                     text: `R\u00b2=${fit.r2.toFixed(2)}`,
                     showarrow: false,
                     font: { size: 9, color },
-                    yshift: 18,
                     bgcolor: 'rgba(255,255,255,0.8)',
                     bordercolor: color,
                     borderpad: 2,
@@ -1205,6 +1241,7 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
                 // modes.
                 const reg = linearRegressionFull(fitX, fitY);
                 if (!reg) return;
+                trialSSReg += reg.ss_reg;
                 const { slope, intercept } = reg;
                 traces.push({
                     x: [xMin, xMax],
@@ -1215,21 +1252,22 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
                     line: { color, width: 2, dash: 'dash' },
                     showlegend: false, hoverinfo: 'skip',
                 });
-                // R² annotation
+                // R² label at the top of the plot.
                 const midX = (xMin + xMax) / 2;
                 annotations.push({
-                    x: midX, y: sign * (slope * midX + intercept),
-                    xref: axId, yref: 'y',
+                    x: midX, y: 0.98,
+                    xref: axId, yref: 'paper', yanchor: 'top',
                     text: `R²=${reg.r2.toFixed(2)}`,
                     showarrow: false,
                     font: { size: 9, color },
-                    yshift: 18,
                     bgcolor: 'rgba(255,255,255,0.8)',
                     bordercolor: color,
                     borderpad: 2,
                 });
             }
         }
+
+        _finishTrialR2();   // append the trial's total R² to its label
     });
 
     // Closing-velocity params are negative; reverse the Y axis so the
@@ -1238,8 +1276,9 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
     const reverseY = (param === 'peak_close_vel' || param === 'mean_close_vel');
 
     const layout = {
-        title: { text: PARAM_LABELS[param], font: { size: 13, color: '#444' } },
-        margin: { t: 35, b: 40, l: 60, r: 20 },
+        // Title rendered as an external HTML header (left-aligned and
+        // anchored during horizontal scroll), so none here.
+        margin: { t: 24, b: 40, l: 60, r: 20 },
         // Single shared Y axis (anchored to the first subplot's X axis).
         yaxis: {
             title: { text: PARAM_YLABELS[param] || '', font: { size: 11 } },
@@ -2047,10 +2086,8 @@ document.getElementById('distSequenceMode').addEventListener('change', () => {
 // every distance/velocity plot.
 (() => {
     const sl = document.getElementById('xScaleSlider');
-    const val = document.getElementById('xScaleVal');
     if (!sl) return;
     sl.addEventListener('input', () => {
-        if (val) val.textContent = `${sl.value} s`;
         if (cachedTraces) renderAllDistancePlots();
     });
 })();
@@ -2058,10 +2095,8 @@ document.getElementById('distSequenceMode').addEventListener('change', () => {
 // X-scale slider for the movement plots (width multiplier).
 (() => {
     const sl = document.getElementById('movXScaleSlider');
-    const val = document.getElementById('movXScaleVal');
     if (!sl) return;
     sl.addEventListener('input', () => {
-        if (val) val.textContent = `${parseFloat(sl.value).toFixed(1)}×`;
         if (cachedMovements) renderDistMovementPlots();
     });
 })();
