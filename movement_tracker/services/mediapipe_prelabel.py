@@ -1312,6 +1312,14 @@ def build_combined_mp_npz_for_trial(subject_name: str, trial_stem: str) -> str |
         f"bone-stats {'on' if have_bone_stats else 'off'} "
         f"(stable_n={int(np.sum(stable))}/{int(np.sum(~np.isnan(first_dist)))})"
     )
+
+    # Keep the subject's median hand sizes current — Combined-MP just
+    # changed for this trial's hand.
+    try:
+        update_hand_sizes(subject_name)
+    except Exception as e:
+        logger.warning(f"Hand-size update failed for {subject_name}: {e}")
+
     return str(out_path)
 
 
@@ -1343,6 +1351,105 @@ def maybe_rebuild_combined_for_subject(subject_name: str) -> int:
                     f"Combined rebuild failed for "
                     f"{subject_name}/{trial_dir.name}: {e}")
     return n_built
+
+
+# MediaPipe hand skeleton (21 landmarks) — the bones whose median
+# lengths sum to "hand size".
+HAND_CONNECTIONS = [
+    (0, 1), (1, 2), (2, 3), (3, 4),          # thumb
+    (0, 5), (5, 6), (6, 7), (7, 8),          # index
+    (5, 9), (9, 10), (10, 11), (11, 12),     # middle
+    (9, 13), (13, 14), (14, 15), (15, 16),   # ring
+    (13, 17), (17, 18), (18, 19), (19, 20),  # pinky
+    (0, 17),                                  # palm base → pinky MCP
+]
+
+
+def _hand_letter(trial_name: str) -> str | None:
+    """'L'/'R' from a trial name like 'Con03_L1' → 'L'."""
+    suffix = str(trial_name).split("_")[-1]
+    if suffix[:1].upper() in ("L", "R"):
+        return suffix[:1].upper()
+    return None
+
+
+def compute_hand_sizes_for_subject(subject_name: str) -> dict:
+    """Median hand size (mm) per hand from the Combined-MP 3D skeleton.
+
+    For each hand (L/R), triangulates all 21 joints on every frame of
+    that hand's trials (Combined OS+OD landmarks + stereo calibration),
+    takes the median length of each bone across frames, and sums them.
+    Returns ``{"left": float|None, "right": float|None}``.  Requires
+    calibration (3D); returns None for a hand with no usable frames.
+    """
+    settings = get_settings()
+    out = {"left": None, "right": None}
+    calib = get_calibration_for_subject(subject_name)
+    if calib is None:
+        return out
+    try:
+        from .video import build_trial_map
+        trials = build_trial_map(subject_name)
+    except Exception:
+        return out
+
+    # Per-hand: list of per-bone length samples across all frames.
+    per_hand_bones = {"L": [[] for _ in HAND_CONNECTIONS],
+                      "R": [[] for _ in HAND_CONNECTIONS]}
+    subj_dir = settings.dlc_path / subject_name
+
+    for t in trials:
+        stem = t["trial_name"]
+        hand = _hand_letter(stem)
+        if hand is None:
+            continue
+        npz = subj_dir / stem / "mediapipe_combined.npz"
+        if not npz.exists():
+            continue
+        try:
+            data = np.load(str(npz))
+            os_lm = data["OS_landmarks"]   # (n,21,2)
+            od_lm = data["OD_landmarks"]
+        except Exception:
+            continue
+        n = min(len(os_lm), len(od_lm))
+        for i in range(n):
+            # Triangulate all 21 joints; missing 2D points come back as
+            # NaN 3D, so we just skip individual bones rather than the
+            # whole frame.
+            pts3d = triangulate_points(os_lm[i], od_lm[i], calib)   # (21,3)
+            if pts3d is None:
+                continue
+            for bi, (a, b) in enumerate(HAND_CONNECTIONS):
+                if np.isnan(pts3d[a]).any() or np.isnan(pts3d[b]).any():
+                    continue
+                per_hand_bones[hand][bi].append(
+                    float(np.linalg.norm(pts3d[a] - pts3d[b])))
+
+    for hand, key in (("L", "left"), ("R", "right")):
+        bones = per_hand_bones[hand]
+        if all(len(s) == 0 for s in bones):
+            continue
+        medians = [float(np.median(s)) for s in bones if len(s) > 0]
+        if medians:
+            out[key] = round(sum(medians), 3)
+    return out
+
+
+def update_hand_sizes(subject_name: str) -> dict:
+    """Recompute and persist a subject's median hand sizes (mm)."""
+    sizes = compute_hand_sizes_for_subject(subject_name)
+    try:
+        from ..db import get_db_ctx
+        with get_db_ctx() as db:
+            db.execute(
+                "UPDATE subjects SET hand_size_left = ?, hand_size_right = ? "
+                "WHERE name = ?",
+                (sizes["left"], sizes["right"], subject_name),
+            )
+    except Exception as e:
+        logger.warning(f"Failed to store hand sizes for {subject_name}: {e}")
+    return sizes
 
 
 def load_mediapipe_combined_prelabels(subject_name: str) -> dict | None:

@@ -1021,6 +1021,8 @@ _CLINICAL_VARS = [
     ("age", "Age (years)"),
     ("disease_duration", "Disease Duration (years)"),
     ("time_since_dose_min", "Time Since Dose (min)"),
+    ("hand_size_left", "Hand Size — Left (mm)"),
+    ("hand_size_right", "Hand Size — Right (mm)"),
 ]
 
 # Per-movement parameter base labels (units in parentheses).
@@ -1063,10 +1065,12 @@ def get_explore_variables(include_auto: bool = Query(False),
     catalog = _explore_variable_catalog()
     var_keys = [v["key"] for v in catalog]
 
-    # Numeric clinical fields by subject name.
+    # Numeric clinical fields by subject name (incl. median hand sizes).
+    _DB_CLINICAL = ("age", "disease_duration", "hand_size_left", "hand_size_right")
     with get_db_ctx() as db:
         rows = db.execute(
-            "SELECT name, age, disease_duration FROM subjects"
+            "SELECT name, age, disease_duration, hand_size_left, hand_size_right "
+            "FROM subjects"
         ).fetchall()
     clinical = {}
     for r in rows:
@@ -1075,17 +1079,14 @@ def get_explore_variables(include_auto: bool = Query(False),
                 return float(x) if x is not None and str(x).strip() != "" else None
             except (ValueError, TypeError):
                 return None
-        clinical[r["name"]] = {
-            "age": _num(r["age"]),
-            "disease_duration": _num(r["disease_duration"]),
-        }
+        clinical[r["name"]] = {c: _num(r[c]) for c in _DB_CLINICAL}
 
     subjects = []
     for s in grp["subjects"]:
         cl = clinical.get(s["name"], {})
         vars_ = {}
         for k in var_keys:
-            if k in ("age", "disease_duration"):
+            if k in _DB_CLINICAL:
                 vars_[k] = cl.get(k)
             else:
                 v = s.get(k)

@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS subjects (
     skin_biopsy_flag INTEGER DEFAULT 0,
     sinemet_schedule TEXT,
     group_label TEXT DEFAULT 'Other',
+    hand_size_left REAL,
+    hand_size_right REAL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -419,6 +421,16 @@ def _migrate_add_clinical_fields(conn):
         logger.info("Added clinical data columns to subjects table")
 
 
+def _migrate_add_hand_size(conn):
+    """Add median hand-size columns (mm) to subjects table if missing."""
+    columns = _get_table_columns(conn, "subjects")
+    for col in ("hand_size_left", "hand_size_right"):
+        if col not in columns:
+            conn.execute(f"ALTER TABLE subjects ADD COLUMN {col} REAL")
+    if any(c not in columns for c in ("hand_size_left", "hand_size_right")):
+        logger.info("Added hand-size columns to subjects table")
+
+
 def _migrate_add_frame_offset(conn):
     """Add frame_offset column to segments table if missing."""
     tables = [r["name"] for r in conn.execute(
@@ -688,6 +700,7 @@ def init_db():
         _migrate_add_diagnosis(conn)
         _migrate_add_camera_mode(conn)
         _migrate_add_clinical_fields(conn)
+        _migrate_add_hand_size(conn)
         conn.commit()
 
     if "job_queue" in tables:
