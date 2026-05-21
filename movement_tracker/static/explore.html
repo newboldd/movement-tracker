@@ -5,6 +5,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Movement Tracker — Explore</title>
     <link rel="stylesheet" href="/static/css/main.css?v=3">
+    <style>
+        /* Subject checkbox list (same look as the Group Comparison page). */
+        .ex-subject-list {
+            display: flex; flex-wrap: wrap; gap: 4px 6px;
+            padding: 6px 0; margin-top: 8px;
+            background: transparent; max-height: 200px; overflow-y: auto;
+        }
+        .ex-subject-list .gsl-group { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+        .ex-subject-list .gsl-group-label { font-size: 11px; font-weight: 600; color: var(--text-muted); min-width: 64px; }
+        .ex-subject-list label {
+            display: inline-flex; align-items: center; gap: 3px;
+            font-size: 11px; padding: 2px 6px; border-radius: 3px;
+            border: 1px solid var(--border, #ddd); background: var(--bg-card, #fff);
+            cursor: pointer; user-select: none;
+        }
+        .ex-subject-list label.dim { opacity: 0.45; }
+        .ex-subject-list label input { margin: 0; }
+    </style>
 </head>
 <body class="results-page">
     <div class="header">
@@ -67,7 +85,11 @@
                 </select>
             </label>
             <label><input type="checkbox" id="exIncludeAuto"> Include auto-detected events</label>
+            <button class="btn btn-sm" id="exSelectAllBtn" type="button">All</button>
         </div>
+
+        <!-- Subject selection (color-coded by group, like Group Comparison) -->
+        <div id="exSubjectList" class="ex-subject-list"></div>
 
         <!-- Plot-type + variable controls -->
         <div class="results-controls" id="explorePlotControls" style="margin-top:8px;">
@@ -97,6 +119,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=10"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/explore.js?v=2"></script>
+    <script src="/static/js/explore.js?v=3"></script>
 </body>
 </html>

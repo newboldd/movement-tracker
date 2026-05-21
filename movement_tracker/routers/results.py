@@ -1107,6 +1107,8 @@ def get_explore_variables(include_auto: bool = Query(False),
         subjects.append({
             "name": s["name"],
             "group": s.get("diagnosis") or "Control",
+            "has_saved_events": s.get("has_saved_events", False),
+            "has_complete_events": s.get("has_complete_events", False),
             "vars": vars_,
         })
 

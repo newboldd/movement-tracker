@@ -11,6 +11,7 @@ const GROUP_COLORS = {
 
 let _data = null;        // { groups, subjects, variables }
 let _varMeta = {};       // base key -> { label, aggregatable }
+let _subjChecked = {};   // subject name -> bool
 
 const AGGS = [
     { v: 'mean', label: 'Mean' },
@@ -25,15 +26,18 @@ async function loadExplore() {
     const plot = $('explorePlot');
     const src = $('exSourceSelect').value || 'auto';
     const sm = $('exSeqModeSelect').value || 'linear_full';
-    const inc = $('exIncludeAuto').checked ? 'true' : 'false';
+    // Always fetch with auto events available; the include-auto toggle
+    // only controls which subjects are checked by default (matches the
+    // Group Comparison page).
     plot.innerHTML = '<div class="results-no-data">Loading…</div>';
     try {
         _data = await API.get(
-            `/api/results/explore?include_auto=${inc}&source=${src}&seq_mode=${sm}`);
+            `/api/results/explore?include_auto=true&source=${src}&seq_mode=${sm}`);
         _varMeta = {};
         _data.variables.forEach(v => {
             _varMeta[v.key] = { label: v.label, aggregatable: !!v.aggregatable };
         });
+        _initSubjChecked();
         _populateVarSelectors();
         render();
     } catch (e) {
@@ -96,8 +100,62 @@ function _resolve(prefix) {
     return { key: `${agg}_${base}`, label: `${AGG_PREFIX[agg]}${meta.label}` };
 }
 
+// ── Subject selection (group-colored checkboxes) ───────────────
+function _initSubjChecked() {
+    if (!_data || !_data.subjects) return;
+    const inc = $('exIncludeAuto').checked;
+    _subjChecked = {};
+    _data.subjects.forEach(s => {
+        // Complete-event subjects on by default; others follow the
+        // include-auto toggle.
+        _subjChecked[s.name] = s.has_complete_events ? true : inc;
+    });
+}
+
+function _renderSubjectList() {
+    const host = $('exSubjectList');
+    if (!host || !_data || !_data.subjects) { if (host) host.innerHTML = ''; return; }
+    const byGroup = {};
+    (_data.groups || []).forEach(g => { byGroup[g] = []; });
+    _data.subjects.forEach(s => { (byGroup[s.group] = byGroup[s.group] || []).push(s); });
+
+    let html = '';
+    (_data.groups || []).forEach(g => {
+        const subs = byGroup[g] || [];
+        if (!subs.length) return;
+        const color = GROUP_COLORS[g] || '#999';
+        html += `<div class="gsl-group"><span class="gsl-group-label">${g}</span>`;
+        subs.forEach(s => {
+            const checked = !!_subjChecked[s.name];
+            const complete = !!s.has_complete_events;
+            const dim = complete ? '' : ' dim';
+            const title = complete ? 'Saved events (open/peak/close)'
+                : (s.has_saved_events ? 'Incomplete saved events' : 'No saved events');
+            const safe = s.name.replace(/"/g, '&quot;');
+            html += `<label class="${dim.trim()}" style="background:${color};color:#000;border-color:${color};" title="${title} (${g})">
+                <input type="checkbox" data-subject="${safe}" ${checked ? 'checked' : ''}>
+                ${s.name}${complete ? '' : ' *'}
+            </label>`;
+        });
+        html += '</div>';
+    });
+    host.innerHTML = html;
+    host.querySelectorAll('input[type=checkbox]').forEach(cb => {
+        cb.addEventListener('change', (e) => {
+            _subjChecked[e.target.getAttribute('data-subject')] = e.target.checked;
+            render();
+        });
+    });
+}
+
+function _activeSubjects() {
+    if (!_data || !_data.subjects) return [];
+    return _data.subjects.filter(s => _subjChecked[s.name]);
+}
+
 function render() {
     if (!_data) return;
+    _renderSubjectList();
     const mode = $('exPlotType').value;
     $('exYLabel').style.display = (mode === 'scatter') ? '' : 'none';
     $('exXLabel').childNodes[0].textContent = (mode === 'scatter') ? 'X: ' : 'Variable: ';
@@ -115,8 +173,9 @@ function renderScatter() {
     const X = _resolve('X'), Y = _resolve('Y');
     const groups = _data.groups;
     let n = 0;
+    const active = _activeSubjects();
     const traces = groups.map(g => {
-        const subs = _data.subjects.filter(s =>
+        const subs = active.filter(s =>
             s.group === g && _val(s, X.key) != null && _val(s, Y.key) != null);
         n += subs.length;
         return {
@@ -147,7 +206,7 @@ function renderBar() {
     const groups = _data.groups;
     const byGroup = {};
     groups.forEach(g => { byGroup[g] = []; });
-    _data.subjects.forEach(s => {
+    _activeSubjects().forEach(s => {
         if (byGroup[s.group] && _val(s, key) != null) byGroup[s.group].push(s);
     });
 
@@ -200,7 +259,26 @@ function renderBar() {
 // ── Listeners ──────────────────────────────────────────────────
 ['exSourceSelect', 'exSeqModeSelect'].forEach(id =>
     $(id).addEventListener('change', loadExplore));
-$('exIncludeAuto').addEventListener('change', loadExplore);
+
+// Include-auto: toggle only the default-checked state of subjects
+// without complete saved events (no re-fetch — auto data is already
+// loaded).  Matches the Group Comparison page.
+$('exIncludeAuto').addEventListener('change', () => {
+    const inc = $('exIncludeAuto').checked;
+    (_data?.subjects || []).forEach(s => {
+        if (!s.has_complete_events) _subjChecked[s.name] = inc;
+    });
+    render();
+});
+
+$('exSelectAllBtn').addEventListener('click', () => {
+    const inc = $('exIncludeAuto').checked;
+    (_data?.subjects || []).forEach(s => {
+        _subjChecked[s.name] = s.has_complete_events ? true : inc;
+    });
+    render();
+});
+
 ['exPlotType', 'exVarX', 'exVarY'].forEach(id =>
     $(id).addEventListener('change', render));
 
