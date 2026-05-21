@@ -1039,15 +1039,28 @@ _MOVE_PARAM_LABELS = {
 
 
 def _explore_variable_catalog() -> list[dict]:
-    """List of {key, label, category} for every plottable variable."""
-    out = [{"key": k, "label": lbl, "category": "clinical"}
+    """Catalog of plottable variables, one entry per base variable.
+
+    Movement parameters are listed once with ``aggregatable: True``;
+    the UI adds Mean/CV/Sequence-effect radios and forms the data key
+    as ``{agg}_{key}``.  Clinical fields and frequency are scalar.
+    """
+    out = [{"key": k, "label": lbl, "category": "clinical", "aggregatable": False}
            for k, lbl in _CLINICAL_VARS]
     for k, lbl in _MOVE_PARAM_LABELS.items():
-        out.append({"key": f"mean_{k}", "label": f"Mean {lbl}", "category": "movement"})
-        out.append({"key": f"cv_{k}", "label": f"CV {lbl}", "category": "movement"})
-        out.append({"key": f"seq_{k}", "label": f"Seq. Effect {lbl}", "category": "movement"})
-    out.append({"key": "frequency", "label": "Frequency (Hz)", "category": "movement"})
+        out.append({"key": k, "label": lbl, "category": "movement",
+                    "aggregatable": True})
+    out.append({"key": "frequency", "label": "Frequency (Hz)",
+                "category": "movement", "aggregatable": False})
     return out
+
+
+def _explore_value_keys() -> list[str]:
+    """Underlying per-subject value keys the UI looks up."""
+    keys = [k for k, _ in _CLINICAL_VARS] + ["frequency"]
+    for k in _MOVE_PARAM_LABELS:
+        keys += [f"mean_{k}", f"cv_{k}", f"seq_{k}"]
+    return keys
 
 
 @router.get("/explore")
@@ -1063,7 +1076,7 @@ def get_explore_variables(include_auto: bool = Query(False),
     grp = get_group_comparison(include_auto=include_auto, source=source,
                                seq_mode=seq_mode)
     catalog = _explore_variable_catalog()
-    var_keys = [v["key"] for v in catalog]
+    var_keys = _explore_value_keys()
 
     # Numeric clinical fields by subject name (incl. median hand sizes).
     _DB_CLINICAL = ("age", "disease_duration", "hand_size_left", "hand_size_right")

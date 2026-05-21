@@ -10,7 +10,14 @@ const GROUP_COLORS = {
 };
 
 let _data = null;        // { groups, subjects, variables }
-let _varLabel = {};      // key -> label
+let _varMeta = {};       // base key -> { label, aggregatable }
+
+const AGGS = [
+    { v: 'mean', label: 'Mean' },
+    { v: 'cv', label: 'CV' },
+    { v: 'seq', label: 'Sequence effect' },
+];
+const AGG_PREFIX = { mean: 'Mean ', cv: 'CV ', seq: 'Seq. Effect ' };
 
 const $ = (id) => document.getElementById(id);
 
@@ -23,8 +30,10 @@ async function loadExplore() {
     try {
         _data = await API.get(
             `/api/results/explore?include_auto=${inc}&source=${src}&seq_mode=${sm}`);
-        _varLabel = {};
-        _data.variables.forEach(v => { _varLabel[v.key] = v.label; });
+        _varMeta = {};
+        _data.variables.forEach(v => {
+            _varMeta[v.key] = { label: v.label, aggregatable: !!v.aggregatable };
+        });
         _populateVarSelectors();
         render();
     } catch (e) {
@@ -46,25 +55,55 @@ function _optionsHtml(selectedKey) {
 
 function _populateVarSelectors() {
     const xSel = $('exVarX'), ySel = $('exVarY');
-    // Preserve current selections if still valid; else sensible defaults.
     const keys = _data.variables.map(v => v.key);
     const curX = keys.includes(xSel.value) ? xSel.value
-        : (keys.includes('mean_amplitude') ? 'mean_amplitude' : keys[0]);
+        : (keys.includes('amplitude') ? 'amplitude' : keys[0]);
     const curY = keys.includes(ySel.value) ? ySel.value
-        : (keys.includes('mean_peak_open_vel') ? 'mean_peak_open_vel' : keys[Math.min(1, keys.length - 1)]);
+        : (keys.includes('peak_open_vel') ? 'peak_open_vel' : keys[Math.min(1, keys.length - 1)]);
     xSel.innerHTML = _optionsHtml(curX);
     ySel.innerHTML = _optionsHtml(curY);
+}
+
+// Render the Mean/CV/Sequence-effect radios for a select, only when the
+// selected variable is aggregatable (a movement parameter).
+function _renderAggRadios(prefix) {
+    const sel = $(prefix === 'X' ? 'exVarX' : 'exVarY');
+    const host = $(prefix === 'X' ? 'exXAgg' : 'exYAgg');
+    const meta = _varMeta[sel.value];
+    if (!meta || !meta.aggregatable) { host.innerHTML = ''; return; }
+    const name = `agg${prefix}`;
+    const cur = host.querySelector('input:checked')?.value || 'mean';
+    host.innerHTML = AGGS.map(a =>
+        `<label style="display:inline-flex;align-items:center;gap:2px;cursor:pointer;">
+            <input type="radio" name="${name}" value="${a.v}" ${a.v === cur ? 'checked' : ''}> ${a.label}
+        </label>`).join('');
+    host.querySelectorAll('input').forEach(r => r.addEventListener('change', render));
+}
+
+function _agg(prefix) {
+    const host = $(prefix === 'X' ? 'exXAgg' : 'exYAgg');
+    return host.querySelector('input:checked')?.value || 'mean';
+}
+
+// Effective data key + display label for a select, applying the
+// aggregate radio when the variable is aggregatable.
+function _resolve(prefix) {
+    const sel = $(prefix === 'X' ? 'exVarX' : 'exVarY');
+    const base = sel.value;
+    const meta = _varMeta[base] || { label: base, aggregatable: false };
+    if (!meta.aggregatable) return { key: base, label: meta.label };
+    const agg = _agg(prefix);
+    return { key: `${agg}_${base}`, label: `${AGG_PREFIX[agg]}${meta.label}` };
 }
 
 function render() {
     if (!_data) return;
     const mode = $('exPlotType').value;
-    // Show/hide the Y selector for bar mode.
     $('exYLabel').style.display = (mode === 'scatter') ? '' : 'none';
-    $('exXLabel').querySelector('select').previousSibling; // no-op
     $('exXLabel').childNodes[0].textContent = (mode === 'scatter') ? 'X: ' : 'Variable: ';
-    if (mode === 'scatter') renderScatter();
-    else renderBar();
+    _renderAggRadios('X');
+    if (mode === 'scatter') { _renderAggRadios('Y'); renderScatter(); }
+    else { $('exYAgg').innerHTML = ''; renderBar(); }
 }
 
 function _val(s, key) {
@@ -73,28 +112,28 @@ function _val(s, key) {
 }
 
 function renderScatter() {
-    const xKey = $('exVarX').value, yKey = $('exVarY').value;
+    const X = _resolve('X'), Y = _resolve('Y');
     const groups = _data.groups;
     let n = 0;
     const traces = groups.map(g => {
         const subs = _data.subjects.filter(s =>
-            s.group === g && _val(s, xKey) != null && _val(s, yKey) != null);
+            s.group === g && _val(s, X.key) != null && _val(s, Y.key) != null);
         n += subs.length;
         return {
-            x: subs.map(s => _val(s, xKey)),
-            y: subs.map(s => _val(s, yKey)),
+            x: subs.map(s => _val(s, X.key)),
+            y: subs.map(s => _val(s, Y.key)),
             text: subs.map(s => s.name),
             type: 'scatter', mode: 'markers', name: g,
             marker: { color: GROUP_COLORS[g] || '#999', size: 9, opacity: 0.8,
                       line: { color: '#333', width: 0.5 } },
-            hovertemplate: `%{text}<br>${_varLabel[xKey]}: %{x:.3f}<br>${_varLabel[yKey]}: %{y:.3f}<extra>${g}</extra>`,
+            hovertemplate: `%{text}<br>${X.label}: %{x:.3f}<br>${Y.label}: %{y:.3f}<extra>${g}</extra>`,
         };
     });
     $('exInfo').textContent = `${n} subjects plotted (missing either variable excluded)`;
     const layout = {
         margin: { t: 20, b: 50, l: 60, r: 20 },
-        xaxis: { title: { text: _varLabel[xKey], font: { size: 12 } }, color: '#666', gridcolor: '#f0f0f0' },
-        yaxis: { title: { text: _varLabel[yKey], font: { size: 12 } }, color: '#666', gridcolor: '#f0f0f0' },
+        xaxis: { title: { text: X.label, font: { size: 12 } }, color: '#666', gridcolor: '#f0f0f0' },
+        yaxis: { title: { text: Y.label, font: { size: 12 } }, color: '#666', gridcolor: '#f0f0f0' },
         plot_bgcolor: '#fff', paper_bgcolor: '#fff',
         legend: { orientation: 'h', y: 1.08, font: { size: 11 } },
         hovermode: 'closest',
@@ -103,7 +142,8 @@ function renderScatter() {
 }
 
 function renderBar() {
-    const key = $('exVarX').value;
+    const X = _resolve('X');
+    const key = X.key;
     const groups = _data.groups;
     const byGroup = {};
     groups.forEach(g => { byGroup[g] = []; });
@@ -151,7 +191,7 @@ function renderBar() {
     const layout = {
         margin: { t: 20, b: 40, l: 60, r: 20 },
         xaxis: { tickvals: groups.map((_, i) => i), ticktext: groups, color: '#666' },
-        yaxis: { title: { text: _varLabel[key], font: { size: 12 } }, color: '#666', gridcolor: '#f0f0f0' },
+        yaxis: { title: { text: X.label, font: { size: 12 } }, color: '#666', gridcolor: '#f0f0f0' },
         plot_bgcolor: '#fff', paper_bgcolor: '#fff', bargap: 0.5,
     };
     Plotly.newPlot('explorePlot', [barTrace, dotTrace], layout, { responsive: true, displayModeBar: false });
