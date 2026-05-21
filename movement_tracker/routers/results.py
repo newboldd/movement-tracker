@@ -488,8 +488,8 @@ def _build_movement_params(
     return movements, trial_names
 
 
-def _linreg_slope(x: list[float], y: list[float]) -> float | None:
-    """Simple OLS slope. Returns None if < 2 points."""
+def _linreg_r2(x: list[float], y: list[float]) -> float | None:
+    """R² (coefficient of determination) of an OLS fit of y on x."""
     pairs = [(xi, yi) for xi, yi in zip(x, y)
              if xi is not None and yi is not None
              and math.isfinite(xi) and math.isfinite(yi)]
@@ -497,34 +497,38 @@ def _linreg_slope(x: list[float], y: list[float]) -> float | None:
         return None
     xa = np.array([p[0] for p in pairs])
     ya = np.array([p[1] for p in pairs])
-    xa_mean = xa.mean()
-    denom = ((xa - xa_mean) ** 2).sum()
-    if denom == 0:
+    xm, ym = xa.mean(), ya.mean()
+    sxx = ((xa - xm) ** 2).sum()
+    sstot = ((ya - ym) ** 2).sum()
+    if sxx == 0 or sstot == 0:
         return None
-    slope = float(((xa - xa_mean) * (ya - ya.mean())).sum() / denom)
-    return round(slope, 6)
+    slope = ((xa - xm) * (ya - ym)).sum() / sxx
+    r2 = float((slope * slope * sxx) / sstot)
+    return round(r2, 6)
 
 
-def _exp_rate(x: list[float], y: list[float]) -> float | None:
-    """Decay rate ``b`` of y = a·exp(b·x), via log-linear fit.
-
-    Only positive y are usable.  Returns None if < 2 valid points.
-    Mirrors the client-side ``exponentialFit`` rate parameter so the
-    group "Sequence Effect" matches the individual plots' exp fits.
-    """
+def _exp_r2(x: list[float], y: list[float]) -> float | None:
+    """R² (original scale) of an exponential fit y = a·exp(b·x)."""
     pairs = [(xi, yi) for xi, yi in zip(x, y)
              if xi is not None and yi is not None
              and math.isfinite(xi) and math.isfinite(yi) and yi > 0]
     if len(pairs) < 2:
         return None
     xa = np.array([p[0] for p in pairs])
-    la = np.log(np.array([p[1] for p in pairs]))
-    xa_mean = xa.mean()
-    denom = ((xa - xa_mean) ** 2).sum()
+    ya = np.array([p[1] for p in pairs])
+    la = np.log(ya)
+    xm = xa.mean()
+    denom = ((xa - xm) ** 2).sum()
     if denom == 0:
         return None
-    b = float(((xa - xa_mean) * (la - la.mean())).sum() / denom)
-    return round(b, 6)
+    b = ((xa - xm) * (la - la.mean())).sum() / denom
+    a = np.exp(la.mean() - b * xm)
+    pred = a * np.exp(b * xa)
+    sstot = ((ya - ya.mean()) ** 2).sum()
+    if sstot == 0:
+        return None
+    r2 = float(1.0 - ((ya - pred) ** 2).sum() / sstot)
+    return round(r2, 6)
 
 
 def _optimize_sequences(amps: list[float], min_moves: int = 5,
@@ -587,11 +591,12 @@ def _optimize_sequences(amps: list[float], min_moves: int = 5,
 
 
 def _sequence_effect(movements: list[dict], key: str, mode: str) -> float | None:
-    """Per-subject scalar "sequence effect" for one parameter under the
-    selected ``mode`` (matches the individual-page Sequence Calculation
-    options).  Linear modes return an OLS slope; exp modes a decay
-    rate; multi modes aggregate within amplitude-detected sequences
-    (length-weighted mean).  ``none`` → None.
+    """Per-subject "sequence effect" for one parameter — the R² of the
+    decrement fit under the selected ``mode`` (matches the individual-
+    page Sequence Calculation options).  Linear modes use a linear-fit
+    R²; exp modes an exponential-fit R²; multi modes aggregate the
+    per-sequence R² across amplitude-detected sequences (length-
+    weighted mean).  ``none`` → None.
     """
     if mode == "none":
         return None
@@ -608,8 +613,10 @@ def _sequence_effect(movements: list[dict], key: str, mode: str) -> float | None
             ys.append(-v if flip else v)
         return xs, ys
 
+    # The sequence-effect value is the goodness-of-fit (R²) of the
+    # decrement model, not its slope/rate.
     is_exp = mode.startswith("exp_")
-    fit = _exp_rate if is_exp else _linreg_slope
+    fit = _exp_r2 if is_exp else _linreg_r2
 
     if mode.endswith("_multi"):
         amps = [m.get("amplitude") for m in movements]
@@ -936,8 +943,8 @@ def get_group_comparison(include_auto: bool = Query(False),
     options as the individual Sequence Calculation dropdown):
       none, linear_full, linear_first10, linear_multi,
       exp_full, exp_first10, exp_multi.
-    Linear modes return an OLS slope; exp modes a decay rate; multi
-    modes aggregate within amplitude-detected sequences.
+    The value is the R² (goodness of fit) of the decrement model;
+    multi modes aggregate the per-sequence R² (length-weighted mean).
     """
     with get_db_ctx() as db:
         subjects = db.execute(
