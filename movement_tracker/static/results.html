@@ -168,6 +168,23 @@
                     </select>
                 </label>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
+                <label style="display:flex;align-items:center;gap:6px;margin:0;">Hand:
+                    <select id="groupHandSelect" style="min-width:130px;">
+                        <option value="more" selected>More affected</option>
+                        <option value="less">Less affected</option>
+                        <option value="L">Left</option>
+                        <option value="R">Right</option>
+                        <option value="average">Average</option>
+                    </select>
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;margin:0;">Trial:
+                    <select id="groupTrialSelect" style="min-width:90px;">
+                        <option value="first">First</option>
+                        <option value="last" selected>Last</option>
+                        <option value="average">Average</option>
+                    </select>
+                </label>
+                <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
                 <label><input type="checkbox" id="includeAutoToggle"> Include auto-detected events</label>
                 <button class="btn btn-sm" id="groupSelectAllBtn" type="button">All</button>
                 <span id="highlightedSubject"></span>
@@ -232,6 +249,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=10"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=39"></script>
+    <script src="/static/js/results.js?v=40"></script>
 </body>
 </html>

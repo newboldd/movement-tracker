@@ -132,6 +132,71 @@ def _is_levodopa_off(raw) -> bool:
     return s in ("0", "none", "no", "off", "nil", "n")
 
 
+def _laterality_more_side(lat) -> str | None:
+    """More-affected side ('L'/'R') from a clinical laterality value.
+
+    Handles 'L', 'R', 'left', 'right', and 'L>R' / 'R>L' (more-affected
+    side listed first).  Bilateral / none / blank → None (unknown).
+    """
+    if lat is None:
+        return None
+    s = str(lat).strip().lower()
+    if not s or s in ("none", "b/l", "bilateral", "n/a", "na"):
+        return None
+    if ">" in s:
+        s = s.split(">")[0].strip()
+    if s.startswith("l"):
+        return "L"
+    if s.startswith("r"):
+        return "R"
+    return None
+
+
+def _hand_of_trial(trial_name: str) -> str | None:
+    """'L'/'R' from a trial name like 'Con03_L1'."""
+    suffix = str(trial_name).split("_")[-1]
+    c = suffix[:1].upper()
+    return c if c in ("L", "R") else None
+
+
+def _select_trial_indices(trials: list[dict], hand: str, trial_sel: str,
+                          laterality) -> set[int]:
+    """Which trial indices to include for the chosen hand + trial mode.
+
+    hand ∈ {more, less, L, R, average};
+    trial_sel ∈ {first, last, average}.  Returns an empty set when the
+    selection can't be resolved (e.g. unknown more-affected side).
+    """
+    by_hand: dict[str, list[int]] = {"L": [], "R": []}
+    for i, t in enumerate(trials):
+        h = _hand_of_trial(t.get("trial_name", ""))
+        if h:
+            by_hand[h].append(i)
+
+    more = _laterality_more_side(laterality)
+    if hand == "more":
+        hands = [more] if more else []
+    elif hand == "less":
+        hands = [("R" if more == "L" else "L")] if more else []
+    elif hand in ("L", "R"):
+        hands = [hand]
+    else:  # average → both hands
+        hands = ["L", "R"]
+
+    sel: set[int] = set()
+    for h in hands:
+        idxs = by_hand.get(h, [])
+        if not idxs:
+            continue
+        if trial_sel == "first":
+            sel.add(idxs[0])
+        elif trial_sel == "last":
+            sel.add(idxs[-1])
+        else:  # average → all trials of this hand
+            sel.update(idxs)
+    return sel
+
+
 def _read_events_csv(subject_name: str) -> dict:
     """Read events.csv → {event_type: [frame_nums]}."""
     settings = get_settings()
@@ -936,7 +1001,9 @@ def get_movements(subject_id: int, source: str = Query("auto")) -> dict:
 @router.get("/group")
 def get_group_comparison(include_auto: bool = Query(False),
                           source: str = Query("auto"),
-                          seq_mode: str = Query("linear_full")) -> dict:
+                          seq_mode: str = Query("linear_full"),
+                          hand: str = Query("more"),
+                          trial: str = Query("last")) -> dict:
     """Aggregated per-subject statistics grouped by diagnosis.
 
     ``seq_mode`` controls the per-subject sequence-effect value (same
@@ -945,6 +1012,10 @@ def get_group_comparison(include_auto: bool = Query(False),
       exp_full, exp_first10, exp_multi.
     The value is the R² (goodness of fit) of the decrement model;
     multi modes aggregate the per-sequence R² (length-weighted mean).
+
+    ``hand`` ∈ {more, less, L, R, average} selects which hand's trials
+    contribute; ``trial`` ∈ {first, last, average} selects which
+    trial(s) within each chosen hand.
     """
     with get_db_ctx() as db:
         subjects = db.execute(
@@ -975,6 +1046,14 @@ def get_group_comparison(include_auto: bool = Query(False),
                 events = saved_events
                 event_source = "saved" if has_saved else "none"
             movements, _ = _build_movement_params(distances, events, trials)
+            # Restrict to the selected hand + trial(s).
+            sel_idx = _select_trial_indices(trials, hand, trial,
+                                            subj.get("laterality"))
+            if sel_idx:
+                movements = [m for m in movements if m.get("trial_idx") in sel_idx]
+            elif hand in ("more", "less"):
+                # Can't resolve the affected side for this subject.
+                movements = []
         except Exception as exc:
             logger.warning(f"Skipping {subject_name}: {exc}")
             continue
@@ -992,6 +1071,8 @@ def get_group_comparison(include_auto: bool = Query(False),
             "last_dose_raw": subj.get("last_dose") or None,
             "time_since_dose_min": _parse_last_dose_minutes(subj.get("last_dose")),
             "levodopa_off": _is_levodopa_off(subj.get("levodopa")),
+            "laterality_raw": subj.get("laterality") or None,
+            "laterality_side": _laterality_more_side(subj.get("laterality")),
         }
 
         for key in PARAM_KEYS:
@@ -1073,15 +1154,18 @@ def _explore_value_keys() -> list[str]:
 @router.get("/explore")
 def get_explore_variables(include_auto: bool = Query(False),
                            source: str = Query("auto"),
-                           seq_mode: str = Query("linear_full")) -> dict:
+                           seq_mode: str = Query("linear_full"),
+                           hand: str = Query("more"),
+                           trial: str = Query("last")) -> dict:
     """Per-subject clinical + movement variables for the explore tool.
 
-    Reuses the group aggregation for movement variables and merges in
-    numeric clinical fields, returning a flat ``vars`` dict per subject
-    plus a variable catalog the UI builds its dropdowns from.
+    Reuses the group aggregation for movement variables (honoring the
+    same hand/trial selection) and merges in numeric clinical fields,
+    returning a flat ``vars`` dict per subject plus a variable catalog
+    the UI builds its dropdowns from.
     """
     grp = get_group_comparison(include_auto=include_auto, source=source,
-                               seq_mode=seq_mode)
+                               seq_mode=seq_mode, hand=hand, trial=trial)
     catalog = _explore_variable_catalog()
     var_keys = _explore_value_keys()
 
@@ -1116,6 +1200,7 @@ def get_explore_variables(include_auto: bool = Query(False),
             "group": s.get("diagnosis") or "Control",
             "has_saved_events": s.get("has_saved_events", False),
             "has_complete_events": s.get("has_complete_events", False),
+            "laterality_side": s.get("laterality_side"),
             "vars": vars_,
         })
 

@@ -26,13 +26,16 @@ async function loadExplore() {
     const plot = $('explorePlot');
     const src = $('exSourceSelect').value || 'auto';
     const sm = $('exSeqModeSelect').value || 'linear_full';
+    const hand = $('exHandSelect')?.value || 'more';
+    const trial = $('exTrialSelect')?.value || 'last';
     // Always fetch with auto events available; the include-auto toggle
     // only controls which subjects are checked by default (matches the
     // Group Comparison page).
     plot.innerHTML = '<div class="results-no-data">Loading…</div>';
     try {
         _data = await API.get(
-            `/api/results/explore?include_auto=true&source=${src}&seq_mode=${sm}`);
+            `/api/results/explore?include_auto=true&source=${src}&seq_mode=${sm}` +
+            `&hand=${hand}&trial=${trial}`);
         _varMeta = {};
         _data.variables.forEach(v => {
             _varMeta[v.key] = { label: v.label, aggregatable: !!v.aggregatable };
@@ -132,9 +135,13 @@ function _renderSubjectList() {
             const title = complete ? 'Saved events (open/peak/close)'
                 : (s.has_saved_events ? 'Incomplete saved events' : 'No saved events');
             const safe = s.name.replace(/"/g, '&quot;');
-            html += `<label class="${dim.trim()}" style="background:${color};color:#000;border-color:${color};" title="${title} (${g})">
+            const tag = s.laterality_side
+                ? ` <span style="font-weight:700;font-size:9px;opacity:0.75;">${s.laterality_side}</span>`
+                : '';
+            html += `<label class="${dim.trim()}" style="background:${color};color:#000;border-color:${color};"
+                title="${title} (${g})${s.laterality_side ? ' · more-affected ' + s.laterality_side : ''}">
                 <input type="checkbox" data-subject="${safe}" ${checked ? 'checked' : ''}>
-                ${s.name}${complete ? '' : ' *'}
+                ${s.name}${complete ? '' : ' *'}${tag}
             </label>`;
         });
         html += '</div>';
@@ -257,7 +264,7 @@ function renderBar() {
 }
 
 // ── Listeners ──────────────────────────────────────────────────
-['exSourceSelect', 'exSeqModeSelect'].forEach(id =>
+['exSourceSelect', 'exSeqModeSelect', 'exHandSelect', 'exTrialSelect'].forEach(id =>
     $(id).addEventListener('change', loadExplore));
 
 // Include-auto: toggle only the default-checked state of subjects

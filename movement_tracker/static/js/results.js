@@ -1525,8 +1525,11 @@ async function loadGroup() {
     try {
         const src = document.getElementById('groupSourceSelect')?.value || 'auto';
         const seqMode = document.getElementById('groupSeqModeSelect')?.value || 'linear_full';
+        const hand = document.getElementById('groupHandSelect')?.value || 'more';
+        const trial = document.getElementById('groupTrialSelect')?.value || 'last';
         cachedGroup = await API.get(
-            `/api/results/group?include_auto=true&source=${src}&seq_mode=${seqMode}`);
+            `/api/results/group?include_auto=true&source=${src}&seq_mode=${seqMode}` +
+            `&hand=${hand}&trial=${trial}`);
         _initGroupSubjectChecked();
         renderGroupPlots();
     } catch (e) {
@@ -1592,11 +1595,15 @@ function _renderGroupSubjectList() {
             const title = complete ? 'Saved events (open/peak/close)'
                 : (s.has_saved_events ? 'Incomplete saved events' : 'No saved events');
             const safe = s.name.replace(/"/g, '&quot;');
+            // Laterality (more-affected side) tag, when known.
+            const tag = s.laterality_side
+                ? ` <span style="font-weight:700;font-size:9px;opacity:0.75;">${s.laterality_side}</span>`
+                : '';
             // Tab background = group color, black text for readability.
             html += `<label class="${dim.trim()}" style="background:${color};color:#000;border-color:${color};"
-                title="${title} (${g})">
+                title="${title} (${g})${s.laterality_side ? ' · more-affected ' + s.laterality_side : ''}">
                 <input type="checkbox" data-subject="${safe}" ${checked ? 'checked' : ''}>
-                ${s.name}${complete ? '' : ' *'}
+                ${s.name}${complete ? '' : ' *'}${tag}
             </label>`;
         });
         html += '</div>';
@@ -2208,6 +2215,11 @@ document.getElementById('groupSeqModeSelect')?.addEventListener('change', () => 
     cachedGroup = null;
     loadGroup();
 });
+['groupHandSelect', 'groupTrialSelect'].forEach(id =>
+    document.getElementById(id)?.addEventListener('change', () => {
+        cachedGroup = null;
+        loadGroup();
+    }));
 
 // Page-level distance source dropdown — applies to the Individual tab.
 // Auto = corrections → mp_combined → mp_forward (per the backend's
