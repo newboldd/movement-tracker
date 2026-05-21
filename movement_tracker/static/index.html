@@ -89,7 +89,11 @@
         <div id="detailOverlay" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeDetail()">
             <div id="detailPanel" class="card" style="max-width:1000px;width:90%;max-height:85vh;overflow-y:auto;margin:5vh auto;padding:20px;">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <h2 id="detailName">Subject Detail</h2>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <h2 id="detailName" style="margin:0;">Subject Detail</h2>
+                        <button class="btn btn-sm" id="detailPrevBtn" title="Previous subject" onclick="navigateDetail(-1)">&larr;</button>
+                        <button class="btn btn-sm" id="detailNextBtn" title="Next subject" onclick="navigateDetail(1)">&rarr;</button>
+                    </div>
                     <button class="btn btn-sm" onclick="closeDetail()">Close</button>
                 </div>
                 <div class="detail-grid" id="detailContent"></div>
@@ -141,6 +145,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js?v=12"></script>
-    <script src="/static/js/dashboard.js?v=19"></script>
+    <script src="/static/js/dashboard.js?v=20"></script>
 </body>
 </html>

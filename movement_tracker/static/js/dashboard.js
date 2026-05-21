@@ -407,11 +407,31 @@ async function updateNoFaceVideos(subjectId) {
 }
 
 // ── Detail panel ─────────────────────────────────────
+let _currentDetailId = null;
+
+// Jump to the previous/next subject (in the loaded subject order)
+// while the detail panel is open.
+function navigateDetail(delta) {
+    if (!Array.isArray(subjects) || _currentDetailId == null) return;
+    const idx = subjects.findIndex(s => s.id === _currentDetailId);
+    if (idx < 0) return;
+    const ni = idx + delta;
+    if (ni < 0 || ni >= subjects.length) return;
+    showDetail(subjects[ni].id);
+}
+
 async function showDetail(subjectId) {
     try {
         const detail = await API.get(`/api/subjects/${subjectId}`);
+        _currentDetailId = detail.id;
         const panel = document.getElementById('detailPanel');
         document.getElementById('detailName').textContent = detail.name;
+        // Disable arrows at the ends of the subject list.
+        const idx = Array.isArray(subjects) ? subjects.findIndex(s => s.id === detail.id) : -1;
+        const prevBtn = document.getElementById('detailPrevBtn');
+        const nextBtn = document.getElementById('detailNextBtn');
+        if (prevBtn) prevBtn.disabled = idx <= 0;
+        if (nextBtn) nextBtn.disabled = idx < 0 || idx >= subjects.length - 1;
 
         const selStyle = 'padding:2px 6px;font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);width:100%;';
         const inputStyle = 'padding:2px 6px;font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);width:60px;';
