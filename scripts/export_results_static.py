@@ -57,15 +57,27 @@ def main() -> None:
 
     client = TestClient(app)
     written = 0
+    resumed = 0
+    # Resume support: skip URLs already exported (lets the run pick up
+    # where it left off if interrupted, e.g. the laptop sleeping).  The
+    # subjects list is always re-fetched (cheap) so we can enumerate.
+    resume = "--fresh" not in sys.argv
 
-    def dump(url: str) -> dict | list | None:
-        nonlocal written
+    def dump(url: str, *, always: bool = False) -> dict | list | None:
+        nonlocal written, resumed
+        out_file = data_dir / _flatten(url)
+        if resume and not always and out_file.exists() and out_file.stat().st_size > 0:
+            resumed += 1
+            try:
+                return json.loads(out_file.read_text())
+            except Exception:
+                pass  # corrupt → re-fetch below
         resp = client.get(url)
         if resp.status_code != 200:
             print(f"  ! {url} -> HTTP {resp.status_code} (skipped)")
             return None
         payload = resp.json()
-        (data_dir / _flatten(url)).write_text(json.dumps(payload))
+        out_file.write_text(json.dumps(payload))
         written += 1
         return payload
 
@@ -93,7 +105,7 @@ def main() -> None:
         # Legacy no-source movements call (hidden tab) — alias to auto.
         dump(f"/api/results/{sid}/movements")
 
-    print(f"  wrote {written} JSON files to {data_dir}")
+    print(f"  wrote {written} new JSON files ({resumed} already present) to {data_dir}")
 
     # ── Static assets ──────────────────────────────────────────────
     print("Copying static assets…")
