@@ -36,6 +36,9 @@ sys.path.insert(0, str(REPO_ROOT))
 SOURCES = ["auto", "corrections", "mp_combined", "mp_forward"]
 SEQ_MODES = ["none", "linear_full", "linear_first10", "linear_multi",
              "exp_full", "exp_first10", "exp_multi"]
+# Group-page hand + trial selectors.
+HANDS = ["more", "less", "L", "R", "average"]
+TRIALS = ["first", "last", "average"]
 
 
 def _flatten(url: str) -> str:
@@ -70,11 +73,14 @@ def main() -> None:
     subjects = dump("/api/subjects") or []
     print(f"  {len(subjects)} subjects")
 
-    # Group comparison: source × seq_mode (include_auto always true on
-    # the group page).
+    # Group comparison: source × seq_mode × hand × trial (include_auto
+    # always true on the group page).
     for src in SOURCES:
         for sm in SEQ_MODES:
-            dump(f"/api/results/group?include_auto=true&source={src}&seq_mode={sm}")
+            for hd in HANDS:
+                for tr in TRIALS:
+                    dump(f"/api/results/group?include_auto=true&source={src}"
+                         f"&seq_mode={sm}&hand={hd}&trial={tr}")
 
     # Per-subject traces + movements for every source.
     for subj in subjects:

@@ -553,8 +553,8 @@ def _build_movement_params(
     return movements, trial_names
 
 
-def _linreg_r2(x: list[float], y: list[float]) -> float | None:
-    """R² (coefficient of determination) of an OLS fit of y on x."""
+def _linreg_fit(x: list[float], y: list[float]) -> tuple[float, float] | None:
+    """OLS fit of y on x → (slope, R²).  None if < 2 valid points."""
     pairs = [(xi, yi) for xi, yi in zip(x, y)
              if xi is not None and yi is not None
              and math.isfinite(xi) and math.isfinite(yi)]
@@ -564,16 +564,16 @@ def _linreg_r2(x: list[float], y: list[float]) -> float | None:
     ya = np.array([p[1] for p in pairs])
     xm, ym = xa.mean(), ya.mean()
     sxx = ((xa - xm) ** 2).sum()
-    sstot = ((ya - ym) ** 2).sum()
-    if sxx == 0 or sstot == 0:
+    if sxx == 0:
         return None
-    slope = ((xa - xm) * (ya - ym)).sum() / sxx
-    r2 = float((slope * slope * sxx) / sstot)
-    return round(r2, 6)
+    slope = float(((xa - xm) * (ya - ym)).sum() / sxx)
+    sstot = ((ya - ym) ** 2).sum()
+    r2 = float((slope * slope * sxx) / sstot) if sstot > 0 else 0.0
+    return slope, r2
 
 
-def _exp_r2(x: list[float], y: list[float]) -> float | None:
-    """R² (original scale) of an exponential fit y = a·exp(b·x)."""
+def _exp_fit(x: list[float], y: list[float]) -> tuple[float, float] | None:
+    """Exponential fit y = a·exp(b·x) → (rate b, R² on original scale)."""
     pairs = [(xi, yi) for xi, yi in zip(x, y)
              if xi is not None and yi is not None
              and math.isfinite(xi) and math.isfinite(yi) and yi > 0]
@@ -586,14 +586,12 @@ def _exp_r2(x: list[float], y: list[float]) -> float | None:
     denom = ((xa - xm) ** 2).sum()
     if denom == 0:
         return None
-    b = ((xa - xm) * (la - la.mean())).sum() / denom
+    b = float(((xa - xm) * (la - la.mean())).sum() / denom)
     a = np.exp(la.mean() - b * xm)
     pred = a * np.exp(b * xa)
     sstot = ((ya - ya.mean()) ** 2).sum()
-    if sstot == 0:
-        return None
-    r2 = float(1.0 - ((ya - pred) ** 2).sum() / sstot)
-    return round(r2, 6)
+    r2 = float(1.0 - ((ya - pred) ** 2).sum() / sstot) if sstot > 0 else 0.0
+    return b, r2
 
 
 def _optimize_sequences(amps: list[float], min_moves: int = 5,
@@ -655,13 +653,13 @@ def _optimize_sequences(amps: list[float], min_moves: int = 5,
     return [(w[0], w[1]) for w in choice[n]]
 
 
-def _sequence_effect(movements: list[dict], key: str, mode: str) -> float | None:
-    """Per-subject "sequence effect" for one parameter — the R² of the
-    decrement fit under the selected ``mode`` (matches the individual-
-    page Sequence Calculation options).  Linear modes use a linear-fit
-    R²; exp modes an exponential-fit R²; multi modes aggregate the
-    per-sequence R² across amplitude-detected sequences (length-
-    weighted mean).  ``none`` → None.
+def _sequence_effect(movements: list[dict], key: str, mode: str) -> dict | None:
+    """Per-subject "sequence effect" for one parameter under the
+    selected ``mode`` (matches the individual-page Sequence Calculation
+    options).  Returns ``{"r2": …, "slope": …}`` where slope is the
+    linear slope (linear modes) or exponential rate (exp modes); multi
+    modes aggregate both across amplitude-detected sequences
+    (length-weighted mean).  ``none`` / no data → None.
     """
     if mode == "none":
         return None
@@ -678,37 +676,41 @@ def _sequence_effect(movements: list[dict], key: str, mode: str) -> float | None
             ys.append(-v if flip else v)
         return xs, ys
 
-    # The sequence-effect value is the goodness-of-fit (R²) of the
-    # decrement model, not its slope/rate.
     is_exp = mode.startswith("exp_")
-    fit = _exp_r2 if is_exp else _linreg_r2
+    fit = _exp_fit if is_exp else _linreg_fit  # → (slope_or_rate, r2)
 
     if mode.endswith("_multi"):
         amps = [m.get("amplitude") for m in movements]
         if any(a is None for a in amps):
-            # Sequence detection needs a complete amplitude series.
             amps = [a if a is not None else float("nan") for a in amps]
         wins = _optimize_sequences(amps)
         if not wins:
             return None
-        vals, weights = [], []
+        s_acc = r_acc = w_acc = 0.0
         for a, b in wins:
             xs, ys = _series(range(a, b))
             if len(xs) < 2:
                 continue
-            r = fit(xs, ys)
-            if r is not None:
-                vals.append(r)
-                weights.append(len(xs))
-        if not vals:
+            res = fit(xs, ys)
+            if res is None:
+                continue
+            s, r = res
+            w = len(xs)
+            s_acc += s * w
+            r_acc += r * w
+            w_acc += w
+        if w_acc == 0:
             return None
-        tot = sum(weights)
-        return round(sum(v * w for v, w in zip(vals, weights)) / tot, 6)
+        return {"slope": round(s_acc / w_acc, 6), "r2": round(r_acc / w_acc, 6)}
 
     xs, ys = _series()
     if mode.endswith("_first10"):
         xs, ys = xs[:10], ys[:10]
-    return fit(xs, ys)
+    res = fit(xs, ys)
+    if res is None:
+        return None
+    s, r = res
+    return {"slope": round(s, 6), "r2": round(r, 6)}
 
 
 # ── API endpoints ───────────────────────────────────────────────────────
@@ -1085,12 +1087,16 @@ def get_group_comparison(include_auto: bool = Query(False),
 
                 # Sequence effect under the selected mode (closing
                 # velocities are negated inside the helper so the effect
-                # reflects changes in magnitude).
-                entry[f"seq_{key}"] = _sequence_effect(movements, key, seq_mode)
+                # reflects changes in magnitude).  Expose both R² (the
+                # group "Sequence Effect" row) and slope (explore page).
+                se = _sequence_effect(movements, key, seq_mode)
+                entry[f"seq_{key}"] = se["r2"] if se else None
+                entry[f"seqslope_{key}"] = se["slope"] if se else None
             else:
                 entry[f"mean_{key}"] = None
                 entry[f"cv_{key}"] = None
                 entry[f"seq_{key}"] = None
+                entry[f"seqslope_{key}"] = None
 
         # Frequency = 1 / mean IMI
         mean_imi = entry.get("mean_imi")
@@ -1147,7 +1153,7 @@ def _explore_value_keys() -> list[str]:
     """Underlying per-subject value keys the UI looks up."""
     keys = [k for k, _ in _CLINICAL_VARS] + ["frequency"]
     for k in _MOVE_PARAM_LABELS:
-        keys += [f"mean_{k}", f"cv_{k}", f"seq_{k}"]
+        keys += [f"mean_{k}", f"cv_{k}", f"seq_{k}", f"seqslope_{k}"]
     return keys
 
 

@@ -79,17 +79,33 @@ function _renderAggRadios(prefix) {
     const meta = _varMeta[sel.value];
     if (!meta || !meta.aggregatable) { host.innerHTML = ''; return; }
     const name = `agg${prefix}`;
-    const cur = host.querySelector('input:checked')?.value || 'mean';
-    host.innerHTML = AGGS.map(a =>
+    const cur = host.querySelector(`input[name="${name}"]:checked`)?.value || 'mean';
+    const mname = `seqm${prefix}`;
+    const curM = host.querySelector(`input[name="${mname}"]:checked`)?.value || 'r2';
+    let html = AGGS.map(a =>
         `<label style="display:inline-flex;align-items:center;gap:2px;cursor:pointer;">
             <input type="radio" name="${name}" value="${a.v}" ${a.v === cur ? 'checked' : ''}> ${a.label}
         </label>`).join('');
+    // When "Sequence effect" is chosen, offer R² vs Slope.
+    if (cur === 'seq') {
+        html += `<span style="opacity:0.5;">|</span>` +
+            [{ v: 'r2', label: 'R²' }, { v: 'slope', label: 'Slope' }].map(m =>
+            `<label style="display:inline-flex;align-items:center;gap:2px;cursor:pointer;">
+                <input type="radio" name="${mname}" value="${m.v}" ${m.v === curM ? 'checked' : ''}> ${m.label}
+            </label>`).join('');
+    }
+    host.innerHTML = html;
     host.querySelectorAll('input').forEach(r => r.addEventListener('change', render));
 }
 
 function _agg(prefix) {
     const host = $(prefix === 'X' ? 'exXAgg' : 'exYAgg');
-    return host.querySelector('input:checked')?.value || 'mean';
+    return host.querySelector(`input[name="agg${prefix}"]:checked`)?.value || 'mean';
+}
+
+function _seqMetric(prefix) {
+    const host = $(prefix === 'X' ? 'exXAgg' : 'exYAgg');
+    return host.querySelector(`input[name="seqm${prefix}"]:checked`)?.value || 'r2';
 }
 
 // Effective data key + display label for a select, applying the
@@ -100,6 +116,12 @@ function _resolve(prefix) {
     const meta = _varMeta[base] || { label: base, aggregatable: false };
     if (!meta.aggregatable) return { key: base, label: meta.label };
     const agg = _agg(prefix);
+    if (agg === 'seq') {
+        const m = _seqMetric(prefix);
+        const key = m === 'slope' ? `seqslope_${base}` : `seq_${base}`;
+        const tag = m === 'slope' ? '(slope)' : '(R²)';
+        return { key, label: `Seq. Effect ${tag} ${meta.label}` };
+    }
     return { key: `${agg}_${base}`, label: `${AGG_PREFIX[agg]}${meta.label}` };
 }
 
