@@ -1256,4 +1256,7 @@ def tutorial_page():
 if __name__ == "__main__":
     import uvicorn
     s = get_settings()
-    uvicorn.run("movement_tracker.app:app", host=s.host, port=s.port, reload=True)
+    # Cap graceful-shutdown so --reload restarts don't hang waiting for
+    # open SSE/keep-alive connections or background tasks to drain.
+    uvicorn.run("movement_tracker.app:app", host=s.host, port=s.port,
+                reload=True, timeout_graceful_shutdown=3)

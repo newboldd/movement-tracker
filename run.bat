@@ -340,7 +340,7 @@ start "" cmd /c "timeout /t 2 /nobreak >nul & start http://localhost:8080"
 
 :: ── Launch with restart loop (exit code 42 = restart after update) ──
 :launch
-%PYTHON% -m uvicorn movement_tracker.app:app --host 127.0.0.1 --port 8080
+%PYTHON% -m uvicorn movement_tracker.app:app --host 127.0.0.1 --port 8080 --timeout-graceful-shutdown 3
 if %errorlevel%==42 (
     echo.
     echo Restarting after update...
