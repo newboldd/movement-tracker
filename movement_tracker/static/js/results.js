@@ -1811,6 +1811,14 @@ function renderGroupPlots() {
     const _reverseY = (m, row) =>
         row.field === 'mean' && (m.id === 'peak_close_vel' || m.id === 'mean_close_vel');
 
+    // Sequence-Effect row uses R² (seq_*) or slope (seqslope_*) per the
+    // radio next to the Sequence-effect dropdown.
+    const seqMetric = document.querySelector('#groupSeqMetric input:checked')?.value || 'r2';
+    const _key = (spec, row) =>
+        (row.field === 'seq' && seqMetric === 'slope')
+            ? spec.key.replace(/^seq_/, 'seqslope_')
+            : spec.key;
+
     // Render each chart.  Titles live in the column headers (with
     // units), so the plots themselves carry no in-plot title.
     ROW_DEFS.forEach(row => {
@@ -1818,7 +1826,7 @@ function renderGroupPlots() {
             const spec = m[row.field];
             if (!spec) return;
             const divId = `grpPlot_${m.id}_${row.field}`;
-            renderGroupBar(divId, data, spec.key, _reverseY(m, row));
+            renderGroupBar(divId, data, _key(spec, row), _reverseY(m, row));
         });
     });
 
@@ -1829,7 +1837,7 @@ function renderGroupPlots() {
             const spec = m[row.field];
             if (!spec) return;
             const divId = `grpPlotDose_${m.id}_${row.field}`;
-            renderDoseScatter(divId, data, spec.key, _reverseY(m, row));
+            renderDoseScatter(divId, data, _key(spec, row), _reverseY(m, row));
         });
     });
 }
@@ -2220,6 +2228,10 @@ document.getElementById('groupSeqModeSelect')?.addEventListener('change', () => 
         cachedGroup = null;
         loadGroup();
     }));
+// R²/Slope for the Sequence-Effect row — both values are already in the
+// loaded data, so just re-render (no re-fetch).
+document.querySelectorAll('#groupSeqMetric input').forEach(r =>
+    r.addEventListener('change', () => { if (cachedGroup) renderGroupPlots(); }));
 
 // Page-level distance source dropdown — applies to the Individual tab.
 // Auto = corrections → mp_combined → mp_forward (per the backend's
