@@ -17,6 +17,15 @@ from ..services.mediapipe_prelabel import get_mediapipe_for_session
 from ..services.metrics import auto_detect_from_distance
 from ..services.video import build_trial_map
 
+import os as _os
+
+# Static-export movement cache: when MT_EXPORT_CACHE is set, the group
+# endpoint caches each (subject, source, include_auto) movement build so
+# the many seq_mode/hand/trial combos don't recompute it.  Off (empty)
+# in the live app, so behavior there is unchanged.
+_EXPORT_CACHE_ON = bool(_os.environ.get("MT_EXPORT_CACHE"))
+_EXPORT_MOVE_CACHE: dict = {}
+
 
 def _mp_newest_mtime(settings, subject_name: str) -> float:
     """Return the newest mtime across this subject's MediaPipe outputs.
@@ -1036,26 +1045,35 @@ def get_group_comparison(include_auto: bool = Query(False),
         diagnosis = subj.get("group_label") or subj.get("diagnosis") or "Control"
 
         try:
-            distances, trials, _src = _load_distances_and_trials(subject_name, source)
             saved_events = _read_events_csv(subject_name)
             has_saved = any(len(v) > 0 for v in saved_events.values())
             # "Complete" = at least one open, peak, AND close saved.
             has_complete = all(len(saved_events.get(t, [])) > 0
                                for t in ("open", "peak", "close"))
-            if include_auto:
-                events, event_source = _load_events(subject_name, distances, trials)
+            # Per-(subject, source, include_auto) movements are
+            # independent of seq_mode/hand/trial; cache them during a
+            # static export so the many combos don't rebuild every time.
+            # Gated by MT_EXPORT_CACHE so the live app is unaffected.
+            ckey = (subject_name, source, bool(include_auto))
+            cached = _EXPORT_MOVE_CACHE.get(ckey) if _EXPORT_CACHE_ON else None
+            if cached is not None:
+                trials, all_movements, event_source = cached
             else:
-                events = saved_events
-                event_source = "saved" if has_saved else "none"
-            movements, _ = _build_movement_params(distances, events, trials)
-            # Restrict to the selected hand + trial(s).
+                distances, trials, _src = _load_distances_and_trials(subject_name, source)
+                if include_auto:
+                    events, event_source = _load_events(subject_name, distances, trials)
+                else:
+                    events = saved_events
+                    event_source = "saved" if has_saved else "none"
+                all_movements, _ = _build_movement_params(distances, events, trials)
+                if _EXPORT_CACHE_ON:
+                    _EXPORT_MOVE_CACHE[ckey] = (trials, all_movements, event_source)
+            # Restrict to the selected hand + trial(s).  An empty
+            # selection (unknown affected side, or no trials for the
+            # chosen hand) excludes the subject via the len<2 check.
             sel_idx = _select_trial_indices(trials, hand, trial,
                                             subj.get("laterality"))
-            if sel_idx:
-                movements = [m for m in movements if m.get("trial_idx") in sel_idx]
-            elif hand in ("more", "less"):
-                # Can't resolve the affected side for this subject.
-                movements = []
+            movements = [m for m in all_movements if m.get("trial_idx") in sel_idx]
         except Exception as exc:
             logger.warning(f"Skipping {subject_name}: {exc}")
             continue
