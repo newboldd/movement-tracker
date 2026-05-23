@@ -528,27 +528,32 @@
         }
     }
 
+    // On-page debug overlay (no DevTools needed).
+    let _dbgLastEvent = '';
+    function dbg(label) {
+        if (label) _dbgLastEvent = label;
+        const o = document.getElementById('debugOverlay');
+        if (!o) return;
+        o.textContent =
+            `canvas buf: ${canvas ? canvas.width : '?'}×${canvas ? canvas.height : '?'}\n` +
+            `viewport:   ${canvas && canvas.parentElement ? canvas.parentElement.clientWidth : '?'}×${canvas && canvas.parentElement ? canvas.parentElement.clientHeight : '?'}\n` +
+            `vid: ${vidW}×${vidH}  rs=${videoEl ? videoEl.readyState : '?'}\n` +
+            `scale=${scale.toFixed(3)}  off=(${offsetX.toFixed(1)},${offsetY.toFixed(1)})\n` +
+            `drag=${dragging}  last=${_dbgLastEvent}`;
+    }
     function setupCanvasEvents() {
         canvas.style.cursor = 'grab';
-
-        // Diagnostic: prove the listeners attached.  Logs once on init so the
-        // user can confirm in DevTools that this code path ran.
-        console.log('[videos] setupCanvasEvents attached', {
-            canvas, parent: canvas.parentElement,
-            w: canvas.width, h: canvas.height,
-            clientW: canvas.parentElement && canvas.parentElement.clientWidth,
-        });
+        dbg('init');
 
         // Document-level mousedown catches clicks even if something is layered
-        // over the canvas — we log the target so we can see what's eating them.
+        // over the canvas — we record the target so we can see what's eating them.
         document.addEventListener('mousedown', e => {
-            console.log('[videos] doc mousedown target=', e.target,
-                        'matches canvas?', e.target === canvas);
+            dbg('docDown:' + (e.target === canvas ? 'CANVAS' : (e.target.tagName + (e.target.id ? '#'+e.target.id : ''))));
         }, true);
 
         // Wheel = zoom around the cursor.
         canvas.addEventListener('wheel', e => {
-            console.log('[videos] wheel', e.deltaY);
+            dbg('wheel:' + (e.deltaY < 0 ? 'in' : 'out'));
             e.preventDefault();
             ensureCanvasSized();
             const rect = canvas.getBoundingClientRect();
@@ -572,7 +577,7 @@
         // Pan = left-mouse drag.  Down on canvas, move/up on window so the
         // drag continues even if the cursor leaves the canvas.
         canvas.addEventListener('mousedown', e => {
-            console.log('[videos] canvas mousedown button=', e.button);
+            dbg('canvasDown b=' + e.button);
             if (e.button !== 0 && e.button !== 1) return;
             ensureCanvasSized();
             dragging = true;
@@ -586,6 +591,7 @@
             offsetX = panStartOX + (e.clientX - dragStartX);
             offsetY = panStartOY + (e.clientY - dragStartY);
             render();
+            dbg('pan');
         });
         window.addEventListener('mouseup', () => {
             if (!dragging) return;
@@ -610,6 +616,7 @@
 
     // ── Rendering ────────────────────────────────────────────
     function render() {
+        dbg();
         if (!ctx) return;
         const w = canvas.width, h = canvas.height;
         ctx.clearRect(0, 0, w, h);
