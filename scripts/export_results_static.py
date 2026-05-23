@@ -40,6 +40,16 @@ SEQ_MODES = ["none", "linear_full", "linear_first10", "linear_multi",
 HANDS = ["more", "less", "L", "R", "average"]
 TRIALS = ["first", "last", "average"]
 
+# Explore-page combos.  Much smaller subset:
+#   - source locked to "auto"
+#   - drop seq_mode "none"
+#   - drop hand options L and R
+EXPLORE_SOURCES   = ["auto"]
+EXPLORE_SEQ_MODES = ["linear_full", "linear_first10", "linear_multi",
+                     "exp_full",    "exp_first10",    "exp_multi"]
+EXPLORE_HANDS     = ["more", "less", "average"]
+EXPLORE_TRIALS    = ["first", "last", "average"]
+
 
 def _flatten(url: str) -> str:
     """Path+query → flat filename.  Mirrors _staticApiUrl in api.js."""
@@ -94,6 +104,15 @@ def main() -> None:
                     dump(f"/api/results/group?include_auto=true&source={src}"
                          f"&seq_mode={sm}&hand={hd}&trial={tr}")
 
+    # Explore (Variable Explorer) — source=auto only, no seq=none,
+    # drop L/R hands.  1 × 6 × 3 × 3 = 54 files.
+    for src in EXPLORE_SOURCES:
+        for sm in EXPLORE_SEQ_MODES:
+            for hd in EXPLORE_HANDS:
+                for tr in EXPLORE_TRIALS:
+                    dump(f"/api/results/explore?include_auto=true&source={src}"
+                         f"&seq_mode={sm}&hand={hd}&trial={tr}")
+
     # Per-subject traces + movements for every source.
     for subj in subjects:
         sid = subj.get("id")
@@ -114,31 +133,38 @@ def main() -> None:
         shutil.rmtree(dest_static)
     shutil.copytree(static_src, dest_static)
 
-    # ── index.html (transformed results.html) ──────────────────────
-    print("Building index.html…")
-    html = (static_src / "results.html").read_text()
+    # ── Page HTMLs (results → index.html, plus explore.html) ────────
+    def _transform(src_html: str, page: str) -> str:
+        """Apply the common HTML transforms used by both static pages."""
+        h = src_html
+        # Absolute → relative asset paths.
+        h = h.replace('href="/static/', 'href="static/')
+        h = h.replace('src="/static/', 'src="static/')
+        # Drop nav.js + the <nav> block (cross-page links don't apply).
+        h = re.sub(r'\s*<script src="static/js/nav\.js[^"]*"></script>', "", h)
+        h = re.sub(r"<nav>.*?</nav>", "", h, flags=re.DOTALL)
+        # Title → relative link to results.
+        h = h.replace('href="/" style="font-size:18px;"',
+                      'href="index.html" style="font-size:18px;"')
+        # results.html has a hidden tab switcher — surface it on the static site.
+        if page == "results":
+            h = h.replace('id="tabSwitcher" style="display:none;"',
+                          'id="tabSwitcher" style="display:flex;gap:6px;"')
+        # Small fixed-position cross-page link.
+        link = ('<a href="explore.html"', '→ Explore') if page == "results" \
+            else ('<a href="index.html"', '← Results')
+        cross = (link[0] + ' style="position:fixed;top:10px;right:14px;z-index:99;'
+                 'background:#fff;padding:4px 10px;border:1px solid #ddd;'
+                 'border-radius:4px;text-decoration:none;color:#444;'
+                 'font-size:13px;">' + link[1] + '</a>')
+        h = re.sub(r'(<body[^>]*>)', r'\1' + cross, h, count=1)
+        # Turn on static mode before any app script runs.
+        h = h.replace("</head>",
+                      "    <script>window.STATIC_RESULTS = true;</script>\n</head>")
+        return h
 
-    # Absolute asset paths → relative (GitHub project pages live under
-    # /<repo>/, so absolute /static/... would break).
-    html = html.replace('href="/static/', 'href="static/')
-    html = html.replace('src="/static/', 'src="static/')
-    # Drop nav.js — its cross-page links and job polling don't apply to
-    # the static results-only site.
-    html = re.sub(r'\s*<script src="static/js/nav\.js[^"]*"></script>', "", html)
-    # Strip the cross-page <nav> block (dead links on the static site).
-    html = re.sub(r"<nav>.*?</nav>", "", html, flags=re.DOTALL)
-    # Make the tab switcher visible so Individual/Group toggle without
-    # the nav dropdown.
-    html = html.replace('id="tabSwitcher" style="display:none;"',
-                        'id="tabSwitcher" style="display:flex;gap:6px;"')
-    # Title link → relative.
-    html = html.replace('href="/" style="font-size:18px;"',
-                        'href="index.html" style="font-size:18px;"')
-    # Turn on static mode before any app script runs.
-    html = html.replace(
-        "</head>",
-        "    <script>window.STATIC_RESULTS = true;</script>\n</head>",
-    )
+    print("Building index.html…")
+    html = _transform((static_src / "results.html").read_text(), "results")
 
     # Simple client-side password gate.  SHA-256 of the password is
     # hardcoded; the user types it once per tab (sessionStorage).  Not
@@ -179,8 +205,13 @@ def main() -> None:
         "g.querySelector('input').select();}});});})();</script>"
     )
     html = html.replace("</head>", gate + "\n</head>")
-
     (out_dir / "index.html").write_text(html)
+
+    # Explore page: same transforms + same gate.
+    print("Building explore.html…")
+    explore_html = _transform((static_src / "explore.html").read_text(), "explore")
+    explore_html = explore_html.replace("</head>", gate + "\n</head>")
+    (out_dir / "explore.html").write_text(explore_html)
 
     # GitHub Pages: disable Jekyll so files/folders are served verbatim.
     (out_dir / ".nojekyll").write_text("")

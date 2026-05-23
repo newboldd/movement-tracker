@@ -18,6 +18,7 @@ from ..services.metrics import auto_detect_from_distance
 from ..services.video import build_trial_map
 
 import os as _os
+import json as _json
 
 # Static-export movement cache: when MT_EXPORT_CACHE is set, the group
 # endpoint caches each (subject, source, include_auto) movement build so
@@ -1175,6 +1176,30 @@ def _explore_value_keys() -> list[str]:
     return keys
 
 
+# Combinations exported to the static site (see scripts/export_results_static.py).
+# When the live request matches one of these, the endpoint returns the cached
+# JSON instead of recomputing — same trade-off the static site makes.
+_EXPLORE_STATIC_SOURCES   = {"auto"}
+_EXPLORE_STATIC_SEQ_MODES = {"linear_full", "linear_first10", "linear_multi",
+                              "exp_full",    "exp_first10",    "exp_multi"}
+_EXPLORE_STATIC_HANDS     = {"more", "less", "average"}
+_EXPLORE_STATIC_TRIALS    = {"first", "last", "average"}
+_SITE_DATA_DIR = Path(__file__).resolve().parents[2] / "site" / "data"
+
+
+def _explore_cache_path(include_auto: bool, source: str, seq_mode: str,
+                         hand: str, trial: str) -> "Path | None":
+    if not include_auto:
+        return None
+    if source not in _EXPLORE_STATIC_SOURCES: return None
+    if seq_mode not in _EXPLORE_STATIC_SEQ_MODES: return None
+    if hand not in _EXPLORE_STATIC_HANDS: return None
+    if trial not in _EXPLORE_STATIC_TRIALS: return None
+    name = (f"api_results_explore_include_auto_true_source_{source}_"
+            f"seq_mode_{seq_mode}_hand_{hand}_trial_{trial}.json")
+    return _SITE_DATA_DIR / name
+
+
 @router.get("/explore")
 def get_explore_variables(include_auto: bool = Query(False),
                            source: str = Query("auto"),
@@ -1188,6 +1213,17 @@ def get_explore_variables(include_auto: bool = Query(False),
     returning a flat ``vars`` dict per subject plus a variable catalog
     the UI builds its dropdowns from.
     """
+    # Cache check: for the small subset of (source × seq_mode × hand ×
+    # trial) combinations that the static-site exporter writes out, just
+    # return the pre-computed JSON.  Everything else falls through to
+    # live computation below.
+    cache = _explore_cache_path(include_auto, source, seq_mode, hand, trial)
+    if cache is not None and cache.is_file():
+        try:
+            return _json.loads(cache.read_text())
+        except Exception:
+            pass    # corrupt cache → recompute
+
     grp = get_group_comparison(include_auto=include_auto, source=source,
                                seq_mode=seq_mode, hand=hand, trial=trial)
     catalog = _explore_variable_catalog()

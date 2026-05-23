@@ -22,6 +22,28 @@ const AGG_PREFIX = { mean: 'Mean ', cv: 'CV ', seq: 'Seq. Effect ' };
 
 const $ = (id) => document.getElementById(id);
 
+// Static-site mode (GitHub Pages export): only a subset of source ×
+// seq_mode × hand × trial combinations is exported as JSON, so hide
+// the unsupported choices from the UI.
+(function _trimStaticControls() {
+    if (!window.STATIC_RESULTS) return;
+    const drop = (selectId, values) => {
+        const el = document.getElementById(selectId);
+        if (!el) return;
+        Array.from(el.options).forEach(opt => {
+            if (values.includes(opt.value)) opt.remove();
+        });
+    };
+    // Source locked to "auto" — hide the whole control.
+    const srcSel = document.getElementById('exSourceSelect');
+    if (srcSel) {
+        srcSel.value = 'auto';
+        if (srcSel.parentElement) srcSel.parentElement.style.display = 'none';
+    }
+    drop('exSeqModeSelect', ['none']);
+    drop('exHandSelect',    ['L', 'R']);
+})();
+
 async function loadExplore() {
     const plot = $('explorePlot');
     const src = $('exSourceSelect').value || 'auto';
