@@ -530,18 +530,18 @@
 
     function setupCanvasEvents() {
         canvas.style.cursor = 'grab';
-        canvas.style.touchAction = 'none';
 
+        // Wheel = zoom around the cursor.
         canvas.addEventListener('wheel', e => {
             e.preventDefault();
             ensureCanvasSized();
             const rect = canvas.getBoundingClientRect();
             // Convert CSS-px mouse coords into canvas-pixel-buffer coords
             // (defends against any CSS-vs-buffer-size mismatch).
-            const sx = canvas.width / rect.width;
-            const sy = canvas.height / rect.height;
-            const mx = (e.clientX - rect.left) * sx;
-            const my = (e.clientY - rect.top) * sy;
+            const csx = canvas.width / rect.width;
+            const csy = canvas.height / rect.height;
+            const mx = (e.clientX - rect.left) * csx;
+            const my = (e.clientY - rect.top) * csy;
             const { baseOX, baseOY } = getBaseMetrics();
             const lx = mx - baseOX;
             const ly = my - baseOY;
@@ -553,32 +553,28 @@
             render();
         }, { passive: false });
 
-        // Pointer events — more reliable than mouse* (capture stays with the
-        // canvas during drag even if the cursor leaves it).
-        canvas.addEventListener('pointerdown', e => {
+        // Pan = left-mouse drag.  Down on canvas, move/up on window so the
+        // drag continues even if the cursor leaves the canvas.
+        canvas.addEventListener('mousedown', e => {
             if (e.button !== 0 && e.button !== 1) return;
+            ensureCanvasSized();
             dragging = true;
             canvas.style.cursor = 'grabbing';
             dragStartX = e.clientX; dragStartY = e.clientY;
             panStartOX = offsetX;   panStartOY = offsetY;
-            try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
             e.preventDefault();
         });
-        canvas.addEventListener('pointermove', e => {
+        window.addEventListener('mousemove', e => {
             if (!dragging) return;
             offsetX = panStartOX + (e.clientX - dragStartX);
             offsetY = panStartOY + (e.clientY - dragStartY);
             render();
         });
-        const endDrag = (e) => {
+        window.addEventListener('mouseup', () => {
             if (!dragging) return;
             dragging = false;
             canvas.style.cursor = 'grab';
-            try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
-        };
-        canvas.addEventListener('pointerup', endDrag);
-        canvas.addEventListener('pointercancel', endDrag);
-        canvas.addEventListener('pointerleave', endDrag);
+        });
 
         // Resize
         const ro = new ResizeObserver(() => { sizeCanvas(); render(); });
@@ -626,11 +622,12 @@
         const b = Math.max(parseInt(tStart.value), parseInt(tEnd.value));
         const aP = (a / max) * 100;
         const bP = (b / max) * 100;
+        // Orange outside the trim range, blue inside.
         track.style.background =
             `linear-gradient(to right,
-                #FFD600 0%, #FFD600 ${aP}%,
+                #FF9800 0%, #FF9800 ${aP}%,
                 #2196f3 ${aP}%, #2196f3 ${bP}%,
-                #FFD600 ${bP}%, #FFD600 100%)`;
+                #FF9800 ${bP}%, #FF9800 100%)`;
     }
 
     function enterExportMode() {
@@ -783,16 +780,15 @@
     function _wireTrimHandles() {
         const tStart = $('trimStart'), tEnd = $('trimEnd');
         if (!tStart || !tEnd) return;
-        const onInput = () => {
-            // Keep start <= end but allow either handle to "push" the other.
+        const onInput = (e) => {
+            // Keep start ≤ end by pushing the other handle out of the way.
             let a = parseInt(tStart.value), b = parseInt(tEnd.value);
             if (a > b) {
-                if (document.activeElement === tStart) tEnd.value = a;
-                else tStart.value = b;
+                if (e.target === tStart) tEnd.value = a;
+                else                     tStart.value = b;
             }
-            // Live-preview the frame at whichever handle is being dragged.
-            const f = parseInt((document.activeElement === tEnd ? tEnd : tStart).value);
-            goToFrame(f);
+            // Live-preview the frame at the handle being dragged.
+            goToFrame(parseInt(e.target.value));
             _updateTrimTrack();
         };
         tStart.addEventListener('input', onInput);
