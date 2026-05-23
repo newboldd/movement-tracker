@@ -188,9 +188,78 @@ function render() {
     const mode = $('exPlotType').value;
     $('exYLabel').style.display = (mode === 'scatter') ? '' : 'none';
     $('exXLabel').childNodes[0].textContent = (mode === 'scatter') ? 'X: ' : 'Variable: ';
+    // "Best fit" only applies to scatter.
+    const bestFitLbl = $('exBestFitLabel');
+    if (bestFitLbl) bestFitLbl.style.display = (mode === 'scatter') ? '' : 'none';
     _renderAggRadios('X');
     if (mode === 'scatter') { _renderAggRadios('Y'); renderScatter(); }
     else { $('exYAgg').innerHTML = ''; renderBar(); }
+}
+
+// ── Linear regression + p-value helpers ───────────────────────
+function _linRegStats(xs, ys) {
+    const n = xs.length;
+    if (n < 3) return null;
+    let mx = 0, my = 0;
+    for (let i = 0; i < n; i++) { mx += xs[i]; my += ys[i]; }
+    mx /= n; my /= n;
+    let sxx = 0, syy = 0, sxy = 0;
+    for (let i = 0; i < n; i++) {
+        const dx = xs[i] - mx, dy = ys[i] - my;
+        sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+    }
+    if (sxx <= 0 || syy <= 0) return null;
+    const slope = sxy / sxx;
+    const intercept = my - slope * mx;
+    const r = sxy / Math.sqrt(sxx * syy);
+    const r2 = r * r;
+    const df = n - 2;
+    const denom = Math.max(1 - r2, 1e-300);
+    const t = r * Math.sqrt(df / denom);
+    return { slope, intercept, r2, t, df, p: _studentT2Tail(t, df), n };
+}
+function _studentT2Tail(t, df) {
+    const x = df / (df + t * t);
+    return _betai(df / 2, 0.5, x);
+}
+function _betai(a, b, x) {
+    if (x <= 0 || x >= 1) return x <= 0 ? 0 : 1;
+    const bt = Math.exp(_lnGamma(a + b) - _lnGamma(a) - _lnGamma(b)
+                       + a * Math.log(x) + b * Math.log(1 - x));
+    return (x < (a + 1) / (a + b + 2))
+        ? bt * _betacf(a, b, x) / a
+        : 1 - bt * _betacf(b, a, 1 - x) / b;
+}
+function _betacf(a, b, x) {
+    const FPMIN = 1e-300, MAXIT = 200, EPS = 3e-7;
+    const qab = a + b, qap = a + 1, qam = a - 1;
+    let c = 1, d = 1 - qab * x / qap;
+    if (Math.abs(d) < FPMIN) d = FPMIN;
+    d = 1 / d;
+    let h = d;
+    for (let m = 1; m <= MAXIT; m++) {
+        const m2 = 2 * m;
+        let aa = m * (b - m) * x / ((qam + m2) * (a + m2));
+        d = 1 + aa * d; if (Math.abs(d) < FPMIN) d = FPMIN;
+        c = 1 + aa / c; if (Math.abs(c) < FPMIN) c = FPMIN;
+        d = 1 / d; h *= d * c;
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2));
+        d = 1 + aa * d; if (Math.abs(d) < FPMIN) d = FPMIN;
+        c = 1 + aa / c; if (Math.abs(c) < FPMIN) c = FPMIN;
+        d = 1 / d;
+        const del = d * c; h *= del;
+        if (Math.abs(del - 1) < EPS) break;
+    }
+    return h;
+}
+function _lnGamma(x) {
+    const cof = [76.18009172947146, -86.50532032941677, 24.01409824083091,
+                 -1.231739572450155, 0.1208650973866179e-2, -0.5395239384953e-5];
+    let y = x, tmp = x + 5.5;
+    tmp -= (x + 0.5) * Math.log(tmp);
+    let ser = 1.000000000190015;
+    for (let j = 0; j < 6; j++) { y += 1; ser += cof[j] / y; }
+    return -tmp + Math.log(2.5066282746310005 * ser / x);
 }
 
 function _val(s, key) {
@@ -217,7 +286,33 @@ function renderScatter() {
             hovertemplate: `%{text}<br>${X.label}: %{x:.3f}<br>${Y.label}: %{y:.3f}<extra>${g}</extra>`,
         };
     });
-    $('exInfo').textContent = `${n} subjects plotted (missing either variable excluded)`;
+    let infoText = `${n} subjects plotted (missing either variable excluded)`;
+    // Optional linear best-fit line across all visible points.
+    if ($('exBestFit') && $('exBestFit').checked) {
+        const allX = [], allY = [];
+        traces.forEach(t => { for (let i = 0; i < t.x.length; i++) {
+            allX.push(t.x[i]); allY.push(t.y[i]);
+        }});
+        const stats = _linRegStats(allX, allY);
+        if (stats) {
+            const xMin = Math.min(...allX), xMax = Math.max(...allX);
+            traces.push({
+                x: [xMin, xMax],
+                y: [stats.intercept + stats.slope * xMin,
+                    stats.intercept + stats.slope * xMax],
+                type: 'scatter', mode: 'lines', name: 'Best fit',
+                line: { color: '#000', width: 1.5 },
+                hoverinfo: 'skip', showlegend: false,
+            });
+            const pStr = (stats.p < 1e-4)
+                ? stats.p.toExponential(2)
+                : stats.p.toFixed(4);
+            infoText += `  ·  slope=${stats.slope.toPrecision(3)},`
+                     + `  R²=${stats.r2.toFixed(3)},`
+                     + `  p=${pStr}`;
+        }
+    }
+    $('exInfo').textContent = infoText;
     const layout = {
         margin: { t: 20, b: 50, l: 60, r: 20 },
         xaxis: {
@@ -322,7 +417,7 @@ $('exSelectAllBtn').addEventListener('click', () => {
     render();
 });
 
-['exPlotType', 'exVarX', 'exVarY'].forEach(id =>
+['exPlotType', 'exVarX', 'exVarY', 'exBestFit'].forEach(id =>
     $(id).addEventListener('change', render));
 
 // ── Copy to clipboard ─────────────────────────────────────────
