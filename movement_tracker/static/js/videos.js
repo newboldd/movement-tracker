@@ -633,6 +633,15 @@
         ctx.translate(baseOX + offsetX, baseOY + offsetY);
         ctx.scale(scale, scale);
         ctx.drawImage(videoEl, sx, 0, sw, vidH, 0, 0, sw * bps, vidH * bps);
+        // DEBUG: red outline + diagonal so we can see if the transform actually
+        // applies.  Should move with pan and grow with zoom.
+        ctx.strokeStyle = 'red';
+        ctx.lineWidth = 4 / scale;
+        ctx.strokeRect(0, 0, sw * bps, vidH * bps);
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(sw * bps, vidH * bps);
+        ctx.stroke();
         ctx.restore();
     }
 
