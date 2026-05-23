@@ -574,7 +574,7 @@
             const { baseOX, baseOY } = getBaseMetrics();
             const lx = mx - baseOX;
             const ly = my - baseOY;
-            const factor = e.deltaY < 0 ? 1.015 : 1 / 1.015;
+            const factor = e.deltaY < 0 ? 1.025 : 1 / 1.025;
             const ns = Math.max(0.1, Math.min(scale * factor, 50));
             offsetX = lx - (lx - offsetX) * (ns / scale);
             offsetY = ly - (ly - offsetY) * (ns / scale);
