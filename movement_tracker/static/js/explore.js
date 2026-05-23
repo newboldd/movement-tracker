@@ -434,7 +434,15 @@ $('exCopyBtn').addEventListener('click', async () => {
 
     try {
         const SCALE = 2;
-        const url = await Plotly.toImage(div, {
+        const includeLegend = !!($('exCopyIncludeLegend') && $('exCopyIncludeLegend').checked);
+        // Passing {data, layout} (instead of the div) lets us override
+        // `showlegend` for the export without disturbing the displayed
+        // plot.  Same is true for the plot data — we copy the live
+        // arrays so the snapshot reflects the current selection.
+        const source = (!includeLegend && div.data && div.layout)
+            ? { data: div.data, layout: { ...div.layout, showlegend: false } }
+            : div;
+        const url = await Plotly.toImage(source, {
             format: 'png',
             width:  div.clientWidth  || 900,
             height: div.clientHeight || 520,
