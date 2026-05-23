@@ -61,10 +61,10 @@
         <!-- Distances Tab -->
         <div id="tabDistances" class="results-tab active">
             <div class="distance-controls" id="distanceControls">
-                <label title="Seconds of trace shown per screen width — lower = more stretched out."
+                <label title="Drag right to stretch the traces out (fewer seconds per screen width)."
                        style="display:flex;align-items:center;gap:6px;margin:0;">
                     X scale:
-                    <input type="range" id="xScaleSlider" min="5" max="60" step="1" value="20" style="width:120px;">
+                    <input type="range" id="xScaleSlider" min="5" max="60" step="1" value="50" style="width:120px;">
                 </label>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
                 <label style="display:flex;align-items:center;gap:6px;margin:0;">Source:
@@ -253,6 +253,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=10"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=42"></script>
+    <script src="/static/js/results.js?v=43"></script>
 </body>
 </html>

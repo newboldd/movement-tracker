@@ -420,7 +420,9 @@ function renderAllDistancePlots() {
         // per container width; default 20).  When the trial is shorter
         // than the chosen scale it occupies only a fraction of the
         // window rather than being stretched to the full width.
-        const secPerWidth = parseFloat(document.getElementById('xScaleSlider')?.value) || 20;
+        // Slider is reversed (right = stretched): raw 5..60 maps to secPerWidth = 65 - raw (60..5).
+        const _xRaw = parseFloat(document.getElementById('xScaleSlider')?.value);
+        const secPerWidth = isFinite(_xRaw) ? (65 - _xRaw) : 15;
         const fps = trial.fps || 60;
         const durationSec = trial.distances.length / fps;
         const plotWidth = Math.max(120, (durationSec / secPerWidth) * containerWidth);
