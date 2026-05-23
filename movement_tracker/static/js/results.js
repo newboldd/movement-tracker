@@ -406,10 +406,17 @@ function renderAllDistancePlots() {
         titleSpan.style.cssText = 'font-size:13px;color:#666;font-weight:600;';
         const copyBtn = document.createElement('button');
         copyBtn.className = 'btn btn-sm';
-        copyBtn.textContent = 'Copy';
-        copyBtn.title = 'Copy distance + velocity plots to clipboard';
-        copyBtn.addEventListener('click',
-            () => _copyTrialPlots(idx, _trialPartOf(trial), copyBtn));
+        copyBtn.innerHTML =
+            `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" ` +
+            `stroke="currentColor" stroke-width="2" stroke-linecap="round" ` +
+            `stroke-linejoin="round" style="display:block;">` +
+            `<rect x="9" y="9" width="13" height="13" rx="2"/>` +
+            `<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>` +
+            `</svg>`;
+        copyBtn.title = 'Copy to clipboard';
+        copyBtn.style.padding = '4px 6px';
+        copyBtn.style.lineHeight = '0';
+        copyBtn.addEventListener('click', () => _copyTrialPlots(idx, copyBtn));
         header.appendChild(titleSpan);
         header.appendChild(copyBtn);
         block.appendChild(header);
@@ -687,22 +694,29 @@ function _loadImg(src) {
 
 /** Copy the distance + velocity plots of one trial to the clipboard
  *  as a single composed PNG (full plot width, with all axis, grid, and
- *  tick decorations baked in by Plotly). */
-async function _copyTrialPlots(idx, trialLabel, btn) {
+ *  tick decorations baked in by Plotly).  Darkens and disables the
+ *  button for at least 1 s so the user gets visible feedback. */
+async function _copyTrialPlots(idx, btn) {
     const distDiv = document.getElementById(`distPlot_${idx}`);
     const velDiv  = document.getElementById(`velPlot_${idx}`);
     if (!distDiv || !velDiv || !window.Plotly) return;
+    if (btn && btn.disabled) return;
 
-    const origText = btn ? btn.textContent : null;
-    if (btn) { btn.textContent = 'Copying…'; btn.disabled = true; }
+    // Visual feedback: darken + disable for ≥ 1 s (or until the copy
+    // finishes, whichever is later).
+    if (btn) {
+        btn.disabled = true;
+        btn.style.opacity = '0.4';
+        btn.style.filter = 'brightness(0.7)';
+    }
+    const minHold = new Promise(r => setTimeout(r, 1000));
 
     try {
-        // Full plot widths (not just the visible portion).
         const dw = distDiv.clientWidth  || 800;
         const dh = distDiv.clientHeight || 220;
         const vw = velDiv.clientWidth   || dw;
         const vh = velDiv.clientHeight  || 150;
-        const SCALE = 2;        // 2× for crisp output
+        const SCALE = 2;
 
         const [distUrl, velUrl] = await Promise.all([
             Plotly.toImage(distDiv, { format: 'png', width: dw, height: dh, scale: SCALE }),
@@ -724,15 +738,14 @@ async function _copyTrialPlots(idx, trialLabel, btn) {
         await navigator.clipboard.write([
             new ClipboardItem({ 'image/png': blob }),
         ]);
-        if (btn) {
-            btn.textContent = 'Copied';
-            setTimeout(() => { btn.textContent = origText; btn.disabled = false; }, 1200);
-        }
     } catch (err) {
         console.error('Copy failed:', err);
+    } finally {
+        await minHold;
         if (btn) {
-            btn.textContent = 'Copy failed';
-            setTimeout(() => { btn.textContent = origText; btn.disabled = false; }, 1800);
+            btn.disabled = false;
+            btn.style.opacity = '';
+            btn.style.filter = '';
         }
     }
 }
