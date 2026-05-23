@@ -188,9 +188,11 @@ function render() {
     const mode = $('exPlotType').value;
     $('exYLabel').style.display = (mode === 'scatter') ? '' : 'none';
     $('exXLabel').childNodes[0].textContent = (mode === 'scatter') ? 'X: ' : 'Variable: ';
-    // "Best fit" only applies to scatter.
+    // "Slope" + "Legend" only apply to scatter.
     const bestFitLbl = $('exBestFitLabel');
     if (bestFitLbl) bestFitLbl.style.display = (mode === 'scatter') ? '' : 'none';
+    const legendLbl  = $('exLegendLabel');
+    if (legendLbl)  legendLbl.style.display  = (mode === 'scatter') ? '' : 'none';
     _renderAggRadios('X');
     if (mode === 'scatter') { _renderAggRadios('Y'); renderScatter(); }
     else { $('exYAgg').innerHTML = ''; renderBar(); }
@@ -310,6 +312,7 @@ function renderScatter() {
         },
         plot_bgcolor: '#fff', paper_bgcolor: '#fff',
         legend: { orientation: 'h', y: 1.08, font: { size: 11 } },
+        showlegend: $('exLegend') ? $('exLegend').checked : true,
         hovermode: 'closest',
     };
     Plotly.newPlot('explorePlot', traces, layout, { responsive: true, displayModeBar: false })
@@ -486,6 +489,16 @@ $('exSelectAllBtn').addEventListener('click', () => {
 // Toggling Slope doesn't change the underlying data — just restyle
 // the already-present best-fit trace in place so axes don't re-fit.
 $('exBestFit').addEventListener('change', _refitBestFitFromVisible);
+// Legend visibility — show/hide live on the existing plot.  Same
+// flag is read at copy time, so the exported PNG matches the screen.
+$('exLegend').addEventListener('change', () => {
+    const div = $('explorePlot');
+    if (div && window.Plotly && div._fullLayout) {
+        try {
+            Plotly.relayout(div, { showlegend: $('exLegend').checked });
+        } catch (_) {}
+    }
+});
 
 // ── Copy to clipboard ─────────────────────────────────────────
 $('exCopyBtn').addEventListener('click', async () => {
@@ -501,15 +514,10 @@ $('exCopyBtn').addEventListener('click', async () => {
 
     try {
         const SCALE = 2;
-        const includeLegend = !!($('exCopyIncludeLegend') && $('exCopyIncludeLegend').checked);
-        // Passing {data, layout} (instead of the div) lets us override
-        // `showlegend` for the export without disturbing the displayed
-        // plot.  Same is true for the plot data — we copy the live
-        // arrays so the snapshot reflects the current selection.
-        const source = (!includeLegend && div.data && div.layout)
-            ? { data: div.data, layout: { ...div.layout, showlegend: false } }
-            : div;
-        const url = await Plotly.toImage(source, {
+        // The Legend checkbox controls both the on-screen plot and the
+        // copied image, so the live div already reflects the user's
+        // chosen view — no layout overrides needed.
+        const url = await Plotly.toImage(div, {
             format: 'png',
             width:  div.clientWidth  || 900,
             height: div.clientHeight || 520,
