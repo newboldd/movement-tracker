@@ -1754,7 +1754,7 @@ function _renderGroupSubjectList() {
         if (subs.length === 0) return;
         const color = (typeof GROUP_COLORS !== 'undefined' && GROUP_COLORS[g]) || '#999';
         // Each diagnosis group on its own row, led by a group label.
-        html += `<div class="gsl-group"><span class="gsl-group-label">${g}</span>`;
+        html += `<div class="gsl-group"><span class="gsl-group-label">${g}</span><div class="gsl-tags">`;
         subs.forEach(s => {
             const checked = !!_groupSubjectChecked[s.name];
             // Dim subjects without a complete saved event set (must
@@ -1775,7 +1775,7 @@ function _renderGroupSubjectList() {
                 ${s.name}${complete ? '' : ' *'}${tag}
             </label>`;
         });
-        html += '</div>';
+        html += '</div></div>';
     });
     host.innerHTML = html;
 

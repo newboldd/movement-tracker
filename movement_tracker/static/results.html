@@ -209,8 +209,11 @@
                 overflow-y: auto;
             }
             /* Force each diagnosis group onto its own row. */
-            .group-subject-list .gsl-group { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
-            .group-subject-list .gsl-group-label { font-size: 11px; font-weight: 600; color: var(--text-muted); min-width: 64px; }
+            .group-subject-list .gsl-group { flex-basis: 100%; display: flex; gap: 4px; align-items: flex-start; }
+            .group-subject-list .gsl-group-label { font-size: 11px; font-weight: 600; color: var(--text-muted);
+                                                    flex: 0 0 auto; min-width: 64px; padding-top: 3px; }
+            .group-subject-list .gsl-tags { display: flex; flex-wrap: wrap; gap: 4px;
+                                             flex: 1 1 auto; min-width: 0; }
             .group-subject-list label {
                 display: inline-flex;
                 align-items: center;
@@ -252,6 +255,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=10"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=49"></script>
+    <script src="/static/js/results.js?v=50"></script>
 </body>
 </html>
