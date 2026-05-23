@@ -136,6 +136,82 @@
             min-width: 28px;
         }
         .spacer { flex: 1; }
+
+        /* ── Export-mode trim UI ── */
+        .timeline-wrap {
+            position: relative;
+            flex: 1;
+            height: 24px;
+        }
+        .timeline-wrap > input#timelineSlider {
+            position: absolute;
+            left: 0; right: 0;
+            width: 100%;
+            top: 50%;
+            transform: translateY(-50%);
+            margin: 0;
+        }
+        #trimUI {
+            position: absolute;
+            inset: 0;
+        }
+        #trimTrack {
+            position: absolute;
+            left: 0; right: 0;
+            top: 50%;
+            transform: translateY(-50%);
+            height: 6px;
+            border-radius: 3px;
+            background: #2196f3;
+            pointer-events: none;
+        }
+        .trim-slider {
+            position: absolute;
+            left: 0; right: 0;
+            width: 100%;
+            top: 50%;
+            transform: translateY(-50%);
+            -webkit-appearance: none;
+            appearance: none;
+            background: transparent;
+            pointer-events: none;
+            height: 24px;
+            margin: 0;
+        }
+        .trim-slider::-webkit-slider-runnable-track { background: transparent; }
+        .trim-slider::-moz-range-track { background: transparent; }
+        .trim-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            pointer-events: auto;
+            width: 14px; height: 20px;
+            background: #FFD600;
+            border: 1px solid #8a7400;
+            border-radius: 3px;
+            cursor: ew-resize;
+            margin-top: 0;
+        }
+        .trim-slider::-moz-range-thumb {
+            pointer-events: auto;
+            width: 14px; height: 20px;
+            background: #FFD600;
+            border: 1px solid #8a7400;
+            border-radius: 3px;
+            cursor: ew-resize;
+        }
+        body.export-mode #speedSlider { accent-color: #FFD600; }
+        body.export-mode #speedDisplay { color: #FFD600; }
+        body.export-mode .speed-wrap label { color: #FFD600; }
+        body.export-mode #exportBtn { background: var(--blue); color:#fff; border-color: var(--blue); }
+        /* Make the default Export Video button match the other (darker) toolbar buttons */
+        #exportBtn { /* same as .btn.btn-sm default */ }
+
+        #exportStatus {
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-left: 8px;
+            white-space: nowrap;
+        }
+        #exportStatus a { color: var(--blue); margin-left: 6px; }
     </style>
 </head>
 <body>
@@ -192,7 +268,14 @@
         <div class="videos-controls">
             <!-- Timeline -->
             <div class="timeline-row">
-                <input type="range" id="timelineSlider" min="0" max="1000" value="0">
+                <div class="timeline-wrap" id="timelineWrap">
+                    <input type="range" id="timelineSlider" min="0" max="1000" value="0">
+                    <div id="trimUI" style="display:none;">
+                        <div id="trimTrack"></div>
+                        <input type="range" id="trimStart" class="trim-slider" min="0" max="1000" value="0">
+                        <input type="range" id="trimEnd"   class="trim-slider" min="0" max="1000" value="1000">
+                    </div>
+                </div>
                 <span class="frame-counter">
                     Frame <strong id="frameDisplay">0</strong> / <strong id="totalFramesDisplay">0</strong>
                 </span>
@@ -218,7 +301,9 @@
 
                 <div class="spacer"></div>
 
-                <button class="btn btn-sm btn-primary" id="exportBtn" onclick="openExportModal()">Export Video</button>
+                <button class="btn btn-sm" id="exportBtn" onclick="toggleExportMode()">Export Video</button>
+                <button class="btn btn-sm" id="exportCancelBtn" style="display:none;" onclick="exitExportMode()">Cancel</button>
+                <span id="exportStatus"></span>
             </div>
         </div>
 
@@ -227,6 +312,6 @@
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js?v=12"></script>
     <script src="/static/js/video-export.js?v=3"></script>
-    <script src="/static/js/videos.js?v=3"></script>
+    <script src="/static/js/videos.js?v=4"></script>
 </body>
 </html>

@@ -8,7 +8,10 @@
 (function () {
     'use strict';
 
-    const SPEED_PRESETS = [0.1, 0.25, 0.5, 1, 2, 4, 8, 16, 30, 60, 120];
+    const SPEED_PRESETS = [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 4, 8, 16, 30, 60, 120];
+    const SPEED_DEFAULT_IDX = SPEED_PRESETS.indexOf(1);    // == 6
+    let exportMode = false;
+    let exportRunning = false;
 
     // ── State ────────────────────────────────────────────────
     let allSubjects = [];
@@ -107,6 +110,7 @@
 
         setupControls();
         setupCanvasEvents();
+        _wireTrimHandles();
 
         if (sel.value) {
             await loadSubject(parseInt(sel.value));
@@ -326,14 +330,20 @@
             e.target.value = '';  // allow re-selecting same file
         });
 
-        // Speed slider — start at index 3 = 1x
+        // Speed slider — range covers SPEED_PRESETS; default to 1x.
         const speedSlider = $('speedSlider');
-        speedSlider.value = 3;
+        speedSlider.min = 0;
+        speedSlider.max = SPEED_PRESETS.length - 1;
+        speedSlider.value = SPEED_DEFAULT_IDX;
+        playbackRate = SPEED_PRESETS[SPEED_DEFAULT_IDX];
+        $('speedDisplay').textContent = playbackRate + 'x';
         speedSlider.addEventListener('input', () => {
             playbackRate = SPEED_PRESETS[parseInt(speedSlider.value)];
             $('speedDisplay').textContent = playbackRate + 'x';
             if (playing) {
-                videoEl.playbackRate = Math.min(playbackRate, 16);
+                // <video> requires playbackRate in [0.0625, 16]; below that we
+                // step manually in playLoop.
+                videoEl.playbackRate = Math.max(0.0625, Math.min(playbackRate, 16));
             }
         });
         speedSlider.addEventListener('change', () => {
@@ -450,15 +460,36 @@
         if (playing) {
             playing = false;
             videoEl.pause();
-            if (playTimer) { cancelAnimationFrame(playTimer); playTimer = null; }
+            if (playTimer) {
+                if (typeof playTimer === 'number') clearTimeout(playTimer);
+                else cancelAnimationFrame(playTimer);
+                playTimer = null;
+            }
             $('playBtn').innerHTML = '&#9654;';
         } else {
             playing = true;
             $('playBtn').innerHTML = '&#9646;&#9646;';
-            videoEl.playbackRate = Math.min(playbackRate, 16);
-            videoEl.play().catch(() => {});
-            playLoop();
+            // <video> only supports playbackRate >= ~0.0625x.  Below that
+            // we pause the native player and step frame-by-frame on a
+            // timer so the user gets true ultra-slow playback.
+            if (playbackRate >= 0.0625) {
+                videoEl.playbackRate = Math.min(playbackRate, 16);
+                videoEl.play().catch(() => {});
+                playLoop();
+            } else {
+                videoEl.pause();
+                playStepManual();
+            }
         }
+    }
+
+    function playStepManual() {
+        if (!playing || !trialMeta) return;
+        if (currentFrame >= trialMeta.n_frames - 1) { togglePlay(); return; }
+        goToFrame(currentFrame + 1);
+        const fps = trialMeta.fps || 30;
+        const ms = 1000 / Math.max(fps * playbackRate, 0.1);
+        playTimer = setTimeout(playStepManual, ms);
     }
 
     function playLoop() {
@@ -484,14 +515,34 @@
         render();
     }
 
+    /** Ensure the canvas pixel buffer matches the displayed CSS size.
+     *  Without this guard the first wheel/click can fire while the
+     *  buffer is still 300×150 (the <canvas> default), which makes
+     *  baseOX/Y and the zoom pivot use wildly wrong units → the image
+     *  appears to "jump" in size on the first scroll event. */
+    function ensureCanvasSized() {
+        const vp = canvas.parentElement;
+        if (!vp) return;
+        if (canvas.width !== vp.clientWidth || canvas.height !== vp.clientHeight) {
+            sizeCanvas();
+        }
+    }
+
     function setupCanvasEvents() {
+        canvas.style.cursor = 'grab';
+        canvas.style.touchAction = 'none';
+
         canvas.addEventListener('wheel', e => {
             e.preventDefault();
+            ensureCanvasSized();
             const rect = canvas.getBoundingClientRect();
-            const mx = e.clientX - rect.left;
-            const my = e.clientY - rect.top;
+            // Convert CSS-px mouse coords into canvas-pixel-buffer coords
+            // (defends against any CSS-vs-buffer-size mismatch).
+            const sx = canvas.width / rect.width;
+            const sy = canvas.height / rect.height;
+            const mx = (e.clientX - rect.left) * sx;
+            const my = (e.clientY - rect.top) * sy;
             const { baseOX, baseOY } = getBaseMetrics();
-            // Zoom pivot relative to the base-centered origin
             const lx = mx - baseOX;
             const ly = my - baseOY;
             const factor = e.deltaY < 0 ? 1.05 : 1 / 1.05;
@@ -502,25 +553,39 @@
             render();
         }, { passive: false });
 
-        canvas.addEventListener('mousedown', e => {
-            if (e.button === 0 || e.button === 1) {
-                dragging = true;
-                dragStartX = e.clientX; dragStartY = e.clientY;
-                panStartOX = offsetX;   panStartOY = offsetY;
-                e.preventDefault();
-            }
+        // Pointer events — more reliable than mouse* (capture stays with the
+        // canvas during drag even if the cursor leaves it).
+        canvas.addEventListener('pointerdown', e => {
+            if (e.button !== 0 && e.button !== 1) return;
+            dragging = true;
+            canvas.style.cursor = 'grabbing';
+            dragStartX = e.clientX; dragStartY = e.clientY;
+            panStartOX = offsetX;   panStartOY = offsetY;
+            try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+            e.preventDefault();
         });
-        document.addEventListener('mousemove', e => {
+        canvas.addEventListener('pointermove', e => {
             if (!dragging) return;
             offsetX = panStartOX + (e.clientX - dragStartX);
             offsetY = panStartOY + (e.clientY - dragStartY);
             render();
         });
-        document.addEventListener('mouseup', () => { dragging = false; });
+        const endDrag = (e) => {
+            if (!dragging) return;
+            dragging = false;
+            canvas.style.cursor = 'grab';
+            try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+        };
+        canvas.addEventListener('pointerup', endDrag);
+        canvas.addEventListener('pointercancel', endDrag);
+        canvas.addEventListener('pointerleave', endDrag);
 
         // Resize
         const ro = new ResizeObserver(() => { sizeCanvas(); render(); });
         ro.observe(canvas.parentElement);
+        // Defensive: ensure pixel buffer matches displayed size at init time
+        // (ResizeObserver fires async; the first user interaction may beat it).
+        sizeCanvas();
     }
 
     // ── Canvas sizing ────────────────────────────────────────
@@ -552,11 +617,190 @@
     }
 
     // ── Export ───────────────────────────────────────────────
-    function openExportModal() {
-        if (!trialMeta) { alert('No video loaded'); return; }
-        if (window.VideoExport) window.VideoExport.open(getExportContext());
-        else alert('Export module not loaded');
+
+    function _updateTrimTrack() {
+        const tStart = $('trimStart'), tEnd = $('trimEnd'), track = $('trimTrack');
+        if (!tStart || !tEnd || !track) return;
+        const max = parseInt(tStart.max) || 1;
+        const a = Math.min(parseInt(tStart.value), parseInt(tEnd.value));
+        const b = Math.max(parseInt(tStart.value), parseInt(tEnd.value));
+        const aP = (a / max) * 100;
+        const bP = (b / max) * 100;
+        track.style.background =
+            `linear-gradient(to right,
+                #FFD600 0%, #FFD600 ${aP}%,
+                #2196f3 ${aP}%, #2196f3 ${bP}%,
+                #FFD600 ${bP}%, #FFD600 100%)`;
     }
+
+    function enterExportMode() {
+        if (!trialMeta) { alert('No video loaded'); return; }
+        if (playing) togglePlay();
+        exportMode = true;
+        document.body.classList.add('export-mode');
+        const N = trialMeta.n_frames;
+        const tStart = $('trimStart'), tEnd = $('trimEnd');
+        tStart.min = tEnd.min = 0;
+        tStart.max = tEnd.max = Math.max(0, N - 1);
+        tStart.value = 0;
+        tEnd.value = Math.max(0, N - 1);
+        $('timelineSlider').style.display = 'none';
+        $('trimUI').style.display = '';
+        _updateTrimTrack();
+        const btn = $('exportBtn');
+        btn.textContent = 'Export';
+        btn.classList.add('btn-primary');
+        $('exportCancelBtn').style.display = '';
+        $('exportStatus').textContent = '';
+    }
+
+    function exitExportMode() {
+        if (exportRunning) return;          // don't bail out mid-export
+        exportMode = false;
+        document.body.classList.remove('export-mode');
+        $('timelineSlider').style.display = '';
+        $('trimUI').style.display = 'none';
+        const btn = $('exportBtn');
+        btn.textContent = 'Export Video';
+        btn.classList.remove('btn-primary');
+        btn.disabled = false;
+        $('exportCancelBtn').style.display = 'none';
+        $('exportStatus').textContent = '';
+    }
+
+    function toggleExportMode() {
+        if (!exportMode) enterExportMode();
+        else runExport();
+    }
+
+    // Run the export in-page (no modal), using the trim handles + speed.
+    async function runExport() {
+        if (exportRunning) return;
+        const tA = parseInt($('trimStart').value);
+        const tB = parseInt($('trimEnd').value);
+        const startFrame = Math.min(tA, tB);
+        const endFrame   = Math.max(tA, tB);
+        if (endFrame <= startFrame) { alert('Trim range is empty'); return; }
+        const totalFrames = endFrame - startFrame + 1;
+
+        const status = $('exportStatus');
+        const btn = $('exportBtn');
+        const cancelBtn = $('exportCancelBtn');
+        exportRunning = true;
+        btn.disabled = true;
+        cancelBtn.disabled = true;
+        status.textContent = 'Starting…';
+
+        const savedFrame = currentFrame;
+        let exportId = null;
+        try {
+            // Always use the on-canvas size so the output matches what the
+            // user sees (including any zoom/pan crop).
+            const outW = canvas.width, outH = canvas.height;
+            const outFps = (trialMeta.fps || 30) * (playbackRate || 1);
+
+            const startResp = await fetch('/api/export-video/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    fps: outFps,
+                    width: outW,
+                    height: outH,
+                    total_frames: totalFrames,
+                }),
+            });
+            if (!startResp.ok) throw new Error('start session failed');
+            exportId = (await startResp.json()).export_id;
+
+            const offscreen = document.createElement('canvas');
+            offscreen.width = outW;
+            offscreen.height = outH;
+            const offCtx = offscreen.getContext('2d');
+            const BATCH = 100;
+
+            for (let batchStart = startFrame; batchStart <= endFrame; batchStart += BATCH) {
+                const batchEnd = Math.min(batchStart + BATCH - 1, endFrame);
+                const fd = new FormData();
+                fd.append('start_index', batchStart - startFrame);
+                for (let f = batchStart; f <= batchEnd; f++) {
+                    await seekAndRenderFrame(f);
+                    offCtx.fillStyle = '#000';
+                    offCtx.fillRect(0, 0, outW, outH);
+                    offCtx.drawImage(canvas, 0, 0, outW, outH);
+                    const blob = await new Promise(r => offscreen.toBlob(r, 'image/jpeg', 0.92));
+                    const globalIdx = f - startFrame;
+                    fd.append(`frame_${f - batchStart}`, blob,
+                              `frame_${String(globalIdx).padStart(6, '0')}.jpg`);
+                    status.textContent = `Capturing ${f - startFrame + 1} / ${totalFrames}`;
+                }
+                status.textContent = `Uploading batch…`;
+                const upResp = await fetch(`/api/export-video/${exportId}/frames`, {
+                    method: 'POST', body: fd,
+                });
+                if (!upResp.ok) throw new Error('frame upload failed');
+            }
+
+            status.textContent = 'Encoding…';
+            const encResp = await fetch(`/api/export-video/${exportId}/encode`, { method: 'POST' });
+            if (!encResp.ok) throw new Error('encoding failed');
+            const mp4Blob = await encResp.blob();
+            const url = URL.createObjectURL(mp4Blob);
+            const a = document.createElement('a');
+            const stem = (trialMeta.trial_name || 'export').replace(/\.\w+$/, '');
+            a.href = url;
+            a.download = `${stem}_trim.mp4`;
+            a.textContent = 'Download MP4';
+            status.textContent = 'Done.';
+            status.appendChild(a);
+            exportId = null;
+        } catch (err) {
+            console.error(err);
+            status.textContent = 'Error: ' + err.message;
+        } finally {
+            exportRunning = false;
+            btn.disabled = false;
+            cancelBtn.disabled = false;
+            // Restore playback position
+            goToFrame(savedFrame);
+        }
+    }
+
+    function seekAndRenderFrame(f) {
+        return new Promise(resolve => {
+            currentFrame = Math.max(0, Math.min(f, trialMeta.n_frames - 1));
+            $('frameDisplay').textContent = currentFrame;
+            if (videoEl.readyState >= 2 && trialMeta && trialMeta.fps) {
+                const t = (currentFrame + 0.5) / trialMeta.fps;
+                videoEl.currentTime = t;
+                videoEl.addEventListener('seeked', () => { render(); resolve(); }, { once: true });
+            } else {
+                resolve();
+            }
+        });
+    }
+
+    // Wire trim slider events once the DOM is ready.
+    function _wireTrimHandles() {
+        const tStart = $('trimStart'), tEnd = $('trimEnd');
+        if (!tStart || !tEnd) return;
+        const onInput = () => {
+            // Keep start <= end but allow either handle to "push" the other.
+            let a = parseInt(tStart.value), b = parseInt(tEnd.value);
+            if (a > b) {
+                if (document.activeElement === tStart) tEnd.value = a;
+                else tStart.value = b;
+            }
+            // Live-preview the frame at whichever handle is being dragged.
+            const f = parseInt((document.activeElement === tEnd ? tEnd : tStart).value);
+            goToFrame(f);
+            _updateTrimTrack();
+        };
+        tStart.addEventListener('input', onInput);
+        tEnd.addEventListener('input', onInput);
+    }
+
+    // Legacy alias (other code may still reference openExportModal).
+    function openExportModal() { toggleExportMode(); }
 
     function getExportContext() {
         return {
@@ -586,8 +830,10 @@
         };
     }
 
-    window.videosViewer = { getExportContext, openExportModal };
+    window.videosViewer = { getExportContext, openExportModal, toggleExportMode, exitExportMode };
     window.openExportModal = openExportModal;
+    window.toggleExportMode = toggleExportMode;
+    window.exitExportMode = exitExportMode;
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
