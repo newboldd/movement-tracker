@@ -570,27 +570,51 @@
 
     // ── Export-mode crop box ─────────────────────────────────
 
-    /** Reset crop to the current visible video rectangle (clipped to canvas). */
-    function _resetCropToView() {
+    /** Visible video rectangle in canvas-buffer coords, clipped to canvas. */
+    function _visibleVideoRect() {
         const { bps, baseOX, baseOY, sw } = getBaseMetrics();
         if (!(bps > 0) || !canvas) {
-            cropX = 0; cropY = 0;
-            cropW = canvas ? canvas.width : 0;
-            cropH = canvas ? canvas.height : 0;
-            return;
+            return { left: 0, top: 0,
+                     right: canvas ? canvas.width  : 0,
+                     bot:   canvas ? canvas.height : 0,
+                     bps, sw };
         }
         const imgX = baseOX + offsetX;
         const imgY = baseOY + offsetY;
         const imgW = sw * bps * scale;
         const imgH = vidH * bps * scale;
-        const left  = Math.max(0, imgX);
-        const top   = Math.max(0, imgY);
-        const right = Math.min(canvas.width,  imgX + imgW);
-        const bot   = Math.min(canvas.height, imgY + imgH);
-        cropX = left;
-        cropY = top;
-        cropW = Math.max(20, right - left);
-        cropH = Math.max(20, bot - top);
+        return {
+            left:  Math.max(0, imgX),
+            top:   Math.max(0, imgY),
+            right: Math.min(canvas.width,  imgX + imgW),
+            bot:   Math.min(canvas.height, imgY + imgH),
+            bps, sw,
+        };
+    }
+
+    /** Reset crop to the visible video rect, then trim one edge so its
+     *  aspect matches the source video's (sw / vidH). */
+    function _resetCropToView() {
+        const r = _visibleVideoRect();
+        let w = r.right - r.left;
+        let h = r.bot - r.top;
+        if (!(w > 0) || !(h > 0) || !(vidH > 0) || !(r.sw > 0)) {
+            cropX = r.left; cropY = r.top;
+            cropW = Math.max(20, w);
+            cropH = Math.max(20, h);
+            return;
+        }
+        const targetAspect = r.sw / vidH;  // video's own aspect ratio
+        // Trim one edge: shrink whichever dimension is too generous.
+        if (w / h > targetAspect) {
+            w = h * targetAspect;          // too wide → trim width
+        } else {
+            h = w / targetAspect;          // too tall → trim height
+        }
+        cropX = r.left;
+        cropY = r.top;
+        cropW = Math.max(20, w);
+        cropH = Math.max(20, h);
     }
 
     function _cropHandles() {
@@ -649,10 +673,18 @@
         ctx.strokeStyle = CROP_COLOR;
         ctx.lineWidth = 2;
         ctx.strokeRect(cropX + 1, cropY + 1, cropW - 2, cropH - 2);
-        ctx.fillStyle = CROP_COLOR;
         const s = CROP_HANDLE_DRAW;
         for (const h of _cropHandles()) {
-            ctx.fillRect(h.x - s / 2, h.y - s / 2, s, s);
+            // If a handle sits on the canvas edge it would be half-clipped
+            // and hard to see — nudge it inward so the full square shows.
+            const hx = Math.max(s / 2, Math.min(canvas.width  - s / 2, h.x));
+            const hy = Math.max(s / 2, Math.min(canvas.height - s / 2, h.y));
+            ctx.fillStyle = CROP_COLOR;
+            ctx.fillRect(hx - s / 2, hy - s / 2, s, s);
+            // White outline gives contrast against any video background.
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(hx - s / 2 + 0.5, hy - s / 2 + 0.5, s - 1, s - 1);
         }
         ctx.restore();
     }
@@ -738,30 +770,48 @@
             if (!cropDragMode && !dragging) canvas.style.cursor = '';
         });
 
+        // Double-click inside the crop box → reset to default (full visible
+        // video, aspect-trimmed to match the source).
+        canvas.addEventListener('dblclick', e => {
+            if (!exportMode) return;
+            const { mx, my } = _bufXY(e);
+            if (mx >= cropX && mx <= cropX + cropW &&
+                my >= cropY && my <= cropY + cropH) {
+                _resetCropToView();
+                render();
+                e.preventDefault();
+            }
+        });
+
         window.addEventListener('mousemove', e => {
             if (cropDragMode) {
                 const { mx, my } = _bufXY(e);
                 const s = cropDragStart;
                 const dx = mx - s.mx, dy = my - s.my;
                 const minSize = 20;
+                // Constrain to the *currently visible video rectangle*, not
+                // the whole canvas — the crop must stay over actual content.
+                const r = _visibleVideoRect();
                 if (cropDragMode === 'move') {
-                    cropX = Math.max(0, Math.min(canvas.width  - s.w, s.x + dx));
-                    cropY = Math.max(0, Math.min(canvas.height - s.h, s.y + dy));
+                    const maxX = (r.right - r.left) - s.w;
+                    const maxY = (r.bot   - r.top)  - s.h;
+                    cropX = r.left + Math.max(0, Math.min(maxX, (s.x - r.left) + dx));
+                    cropY = r.top  + Math.max(0, Math.min(maxY, (s.y - r.top)  + dy));
                 } else {
                     let nx = s.x, ny = s.y, nw = s.w, nh = s.h;
                     if (cropDragMode.includes('w')) {
-                        nx = Math.max(0, Math.min(s.x + s.w - minSize, s.x + dx));
+                        nx = Math.max(r.left, Math.min(s.x + s.w - minSize, s.x + dx));
                         nw = s.x + s.w - nx;
                     }
                     if (cropDragMode.includes('e')) {
-                        nw = Math.max(minSize, Math.min(canvas.width - s.x, s.w + dx));
+                        nw = Math.max(minSize, Math.min(r.right - s.x, s.w + dx));
                     }
                     if (cropDragMode.includes('n')) {
-                        ny = Math.max(0, Math.min(s.y + s.h - minSize, s.y + dy));
+                        ny = Math.max(r.top, Math.min(s.y + s.h - minSize, s.y + dy));
                         nh = s.y + s.h - ny;
                     }
                     if (cropDragMode.includes('s')) {
-                        nh = Math.max(minSize, Math.min(canvas.height - s.y, s.h + dy));
+                        nh = Math.max(minSize, Math.min(r.bot - s.y, s.h + dy));
                     }
                     cropX = nx; cropY = ny; cropW = nw; cropH = nh;
                 }
