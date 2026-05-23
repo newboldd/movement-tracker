@@ -311,4 +311,50 @@ $('exSelectAllBtn').addEventListener('click', () => {
 ['exPlotType', 'exVarX', 'exVarY'].forEach(id =>
     $(id).addEventListener('change', render));
 
+// ── Copy to clipboard ─────────────────────────────────────────
+$('exCopyBtn').addEventListener('click', async () => {
+    const btn = $('exCopyBtn');
+    const div = $('explorePlot');
+    if (!div || !window.Plotly || btn.disabled) return;
+
+    // Visual feedback: darken + disable for ≥ 1 s.
+    btn.disabled = true;
+    btn.style.opacity = '0.4';
+    btn.style.filter = 'brightness(0.7)';
+    const minHold = new Promise(r => setTimeout(r, 1000));
+
+    try {
+        const SCALE = 2;
+        const url = await Plotly.toImage(div, {
+            format: 'png',
+            width:  div.clientWidth  || 900,
+            height: div.clientHeight || 520,
+            scale:  SCALE,
+        });
+        // Build a File with a sensible name so Finder paste names the
+        // file something useful.  Pattern: explore_<kind>_<labels>.png
+        const plotType = $('exPlotType').value;
+        const xVar = $('exVarX').value || 'x';
+        const yVar = $('exVarY').value || 'y';
+        const stemRaw = (plotType === 'scatter')
+            ? `explore_${xVar}_vs_${yVar}`
+            : `explore_${xVar}_by_group`;
+        const stem = stemRaw.replace(/[^A-Za-z0-9_-]+/g, '_');
+
+        // toImage returns a data URL — convert to blob via fetch().
+        const blob = await (await fetch(url)).blob();
+        const file = new File([blob], stem + '.png', { type: 'image/png' });
+        await navigator.clipboard.write([
+            new ClipboardItem({ 'image/png': file }),
+        ]);
+    } catch (err) {
+        console.error('Copy failed:', err);
+    } finally {
+        await minHold;
+        btn.disabled = false;
+        btn.style.opacity = '';
+        btn.style.filter = '';
+    }
+});
+
 loadExplore();
