@@ -147,15 +147,20 @@
             </button>
         </div>
 
-        <div id="explorePlot"
-             style="height:520px;width:100%;margin-top:12px;resize:both;overflow:hidden;min-width:360px;min-height:240px;">
-            <div class="results-no-data">Loading…</div>
+        <div style="display:flex;align-items:flex-start;gap:12px;margin-top:12px;">
+            <div id="explorePlot"
+                 style="height:520px;flex:1 1 auto;resize:both;overflow:hidden;min-width:360px;min-height:240px;">
+                <div class="results-no-data">Loading…</div>
+            </div>
+            <!-- Fit-stats text box: selectable HTML, never copied with the plot. -->
+            <div id="exFitBox"
+                 style="display:none;flex:0 0 auto;font:30px/1.25 system-ui,-apple-system,'Segoe UI',sans-serif;color:#000;white-space:pre;padding:14px 18px;background:#fff;border:1px solid #888;border-radius:6px;user-select:text;cursor:text;"></div>
         </div>
     </div>
 
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=10"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/explore.js?v=15"></script>
+    <script src="/static/js/explore.js?v=16"></script>
 </body>
 </html>
