@@ -249,13 +249,18 @@ function renderDistMovementPlots() {
     if (totalSec <= 0) totalSec = 1;
     const plotW = Math.max(containerW, (totalSec / secPerWidth) * containerW);
 
-    // Left-aligned title rendered as an HTML header above each plot so
-    // it stays anchored (doesn't scroll away) and is consistently
-    // left-aligned.
+    // Header row above each plot: label on the left, copy-to-clipboard
+    // button on the right.  Anchored above the scroll wrapper so neither
+    // moves with horizontal scrolling.
     const _titleHeader = (param) => {
         const h = document.createElement('div');
-        h.textContent = PARAM_LABELS[param] || param;
-        h.style.cssText = 'font-size:13px;font-weight:600;color:#444;text-align:left;padding:2px 0 2px 4px;';
+        h.style.cssText = 'display:flex;align-items:center;justify-content:space-between;'
+                        + 'padding:2px 8px 2px 4px;';
+        const label = document.createElement('span');
+        label.textContent = PARAM_LABELS[param] || param;
+        label.style.cssText = 'font-size:13px;font-weight:600;color:#444;';
+        h.appendChild(label);
+        h.appendChild(_makeCopyBtn(btn => _copyMovementPlot(param, btn)));
         return h;
     };
 
@@ -404,20 +409,7 @@ function renderAllDistancePlots() {
         const titleSpan = document.createElement('span');
         titleSpan.textContent = `Trial: ${_trialPartOf(trial)}`;
         titleSpan.style.cssText = 'font-size:13px;color:#666;font-weight:600;';
-        const copyBtn = document.createElement('button');
-        copyBtn.className = 'btn btn-sm';
-        copyBtn.innerHTML =
-            `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" ` +
-            `stroke="currentColor" stroke-width="2" stroke-linecap="round" ` +
-            `stroke-linejoin="round" style="display:block;">` +
-            `<rect x="9" y="9" width="13" height="13" rx="2"/>` +
-            `<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>` +
-            `</svg>`;
-        copyBtn.title = 'Copy to clipboard';
-        copyBtn.style.padding = '4px 6px';
-        copyBtn.style.lineHeight = '0';
-        copyBtn.addEventListener('click',
-            () => _copyTrialPlots(idx, trial.name || '', copyBtn));
+        const copyBtn = _makeCopyBtn(b => _copyTrialPlots(idx, trial.name || '', b));
         header.appendChild(titleSpan);
         header.appendChild(copyBtn);
         block.appendChild(header);
@@ -693,56 +685,64 @@ function _loadImg(src) {
     });
 }
 
-/** Copy the distance + velocity plots of one trial to the clipboard
- *  as a single composed PNG (full plot width, with all axis, grid, and
- *  tick decorations baked in by Plotly).  Darkens and disables the
- *  button for at least 1 s so the user gets visible feedback. */
-async function _copyTrialPlots(idx, trialFullName, btn) {
-    const distDiv = document.getElementById(`distPlot_${idx}`);
-    const velDiv  = document.getElementById(`velPlot_${idx}`);
-    if (!distDiv || !velDiv || !window.Plotly) return;
-    if (btn && btn.disabled) return;
+/** Inline SVG for the copy-to-clipboard icon (two rounded rects, offset). */
+const COPY_ICON_HTML =
+    `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" ` +
+    `stroke="currentColor" stroke-width="2" stroke-linecap="round" ` +
+    `stroke-linejoin="round" style="display:block;">` +
+    `<rect x="9" y="9" width="13" height="13" rx="2"/>` +
+    `<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>` +
+    `</svg>`;
 
-    // Visual feedback: darken + disable for ≥ 1 s (or until the copy
-    // finishes, whichever is later).
+/** Build a "copy to clipboard" icon-button.  onClick receives the
+ *  button so the click handler can show feedback on it. */
+function _makeCopyBtn(onClick) {
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-sm';
+    btn.innerHTML = COPY_ICON_HTML;
+    btn.title = 'Copy to clipboard';
+    btn.style.padding = '4px 6px';
+    btn.style.lineHeight = '0';
+    btn.addEventListener('click', () => onClick(btn));
+    return btn;
+}
+
+/** Copy a vertical stack of Plotly plot divs to the clipboard as one
+ *  composed PNG.  Each plot's full content (with axes, grid, tick
+ *  labels, axis titles) is captured at 2× scale via Plotly.toImage.
+ *  The clipboard entry is a File so its `name` carries the suggested
+ *  filename through to Finder paste on macOS. */
+async function _copyPlotsAsPng(plotDivs, filename, btn) {
+    if (!plotDivs.length || !window.Plotly) return;
+    if (btn && btn.disabled) return;
     if (btn) {
         btn.disabled = true;
         btn.style.opacity = '0.4';
         btn.style.filter = 'brightness(0.7)';
     }
     const minHold = new Promise(r => setTimeout(r, 1000));
-
     try {
-        const dw = distDiv.clientWidth  || 800;
-        const dh = distDiv.clientHeight || 220;
-        const vw = velDiv.clientWidth   || dw;
-        const vh = velDiv.clientHeight  || 150;
         const SCALE = 2;
-
-        const [distUrl, velUrl] = await Promise.all([
-            Plotly.toImage(distDiv, { format: 'png', width: dw, height: dh, scale: SCALE }),
-            Plotly.toImage(velDiv,  { format: 'png', width: vw, height: vh, scale: SCALE }),
-        ]);
-        const [distImg, velImg] = await Promise.all([_loadImg(distUrl), _loadImg(velUrl)]);
-
-        const W = Math.max(distImg.width, velImg.width);
-        const H = distImg.height + velImg.height;
+        const urls = await Promise.all(plotDivs.map(d =>
+            Plotly.toImage(d, {
+                format: 'png',
+                width:  d.clientWidth  || 800,
+                height: d.clientHeight || 220,
+                scale:  SCALE,
+            })));
+        const imgs = await Promise.all(urls.map(_loadImg));
+        const W = Math.max(...imgs.map(i => i.width));
+        const H = imgs.reduce((s, i) => s + i.height, 0);
         const cv = document.createElement('canvas');
         cv.width = W; cv.height = H;
         const ctx = cv.getContext('2d');
         ctx.fillStyle = '#fff';
         ctx.fillRect(0, 0, W, H);
-        ctx.drawImage(distImg, 0, 0);
-        ctx.drawImage(velImg,  0, distImg.height);
-
+        let y = 0;
+        for (const img of imgs) { ctx.drawImage(img, 0, y); y += img.height; }
         const blob = await new Promise(r => cv.toBlob(r, 'image/png'));
-        // Wrap the blob in a File (a Blob subclass) so the clipboard
-        // entry carries a filename — Chrome on macOS forwards that to
-        // NSPasteboard, which lets Finder/Desktop paste an actual
-        // .png file with this name.  Apps that paste raw image bytes
-        // (Word, Slack, etc.) just see the PNG data either way.
-        const stem = (trialFullName || `trial${idx}`).replace(/[^A-Za-z0-9_-]+/g, '_');
-        const file = new File([blob], `${stem}_trace.png`, { type: 'image/png' });
+        const stem = (filename || 'plot').replace(/[^A-Za-z0-9_-]+/g, '_');
+        const file = new File([blob], `${stem}.png`, { type: 'image/png' });
         await navigator.clipboard.write([
             new ClipboardItem({ 'image/png': file }),
         ]);
@@ -756,6 +756,34 @@ async function _copyTrialPlots(idx, trialFullName, btn) {
             btn.style.filter = '';
         }
     }
+}
+
+/** Copy the distance + velocity plots for one trial.  Filename
+ *  pattern: {subject}_{trial}_trace.png (trial.name already includes
+ *  the subject prefix, e.g. "PD03_R1"). */
+async function _copyTrialPlots(idx, trialFullName, btn) {
+    const dist = document.getElementById(`distPlot_${idx}`);
+    const vel  = document.getElementById(`velPlot_${idx}`);
+    if (!dist || !vel) return;
+    const stem = trialFullName || `trial${idx}`;
+    return _copyPlotsAsPng([dist, vel], `${stem}_trace`, btn);
+}
+
+/** Currently loaded subject's name, for movement-plot filenames. */
+function _currentSubjectName() {
+    if (Array.isArray(subjects) && currentSubjectId != null) {
+        const s = subjects.find(s => s.id === currentSubjectId);
+        if (s && s.name) return s.name;
+    }
+    return 'subject';
+}
+
+/** Copy a single movement-parameter plot (all trials laid out
+ *  side-by-side).  Filename pattern: {subject}_{param}.png. */
+async function _copyMovementPlot(param, btn) {
+    const div = document.getElementById(`distMovPlot_${param}`);
+    if (!div) return;
+    return _copyPlotsAsPng([div], `${_currentSubjectName()}_${param}`, btn);
 }
 
 function renderDistancePlot(divId, trial, yRange, width, overlayTraces, shapes) {
