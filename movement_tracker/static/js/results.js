@@ -416,7 +416,8 @@ function renderAllDistancePlots() {
         copyBtn.title = 'Copy to clipboard';
         copyBtn.style.padding = '4px 6px';
         copyBtn.style.lineHeight = '0';
-        copyBtn.addEventListener('click', () => _copyTrialPlots(idx, copyBtn));
+        copyBtn.addEventListener('click',
+            () => _copyTrialPlots(idx, trial.name || '', copyBtn));
         header.appendChild(titleSpan);
         header.appendChild(copyBtn);
         block.appendChild(header);
@@ -696,7 +697,7 @@ function _loadImg(src) {
  *  as a single composed PNG (full plot width, with all axis, grid, and
  *  tick decorations baked in by Plotly).  Darkens and disables the
  *  button for at least 1 s so the user gets visible feedback. */
-async function _copyTrialPlots(idx, btn) {
+async function _copyTrialPlots(idx, trialFullName, btn) {
     const distDiv = document.getElementById(`distPlot_${idx}`);
     const velDiv  = document.getElementById(`velPlot_${idx}`);
     if (!distDiv || !velDiv || !window.Plotly) return;
@@ -735,8 +736,15 @@ async function _copyTrialPlots(idx, btn) {
         ctx.drawImage(velImg,  0, distImg.height);
 
         const blob = await new Promise(r => cv.toBlob(r, 'image/png'));
+        // Wrap the blob in a File (a Blob subclass) so the clipboard
+        // entry carries a filename — Chrome on macOS forwards that to
+        // NSPasteboard, which lets Finder/Desktop paste an actual
+        // .png file with this name.  Apps that paste raw image bytes
+        // (Word, Slack, etc.) just see the PNG data either way.
+        const stem = (trialFullName || `trial${idx}`).replace(/[^A-Za-z0-9_-]+/g, '_');
+        const file = new File([blob], `${stem}_trace.png`, { type: 'image/png' });
         await navigator.clipboard.write([
-            new ClipboardItem({ 'image/png': blob }),
+            new ClipboardItem({ 'image/png': file }),
         ]);
     } catch (err) {
         console.error('Copy failed:', err);
