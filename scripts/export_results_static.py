@@ -169,7 +169,7 @@ def main() -> None:
         "g.innerHTML='<form><div>Password required</div>"
         "<input type=password autofocus autocomplete=off>"
         "<button type=submit>Unlock</button><div class=err></div></form>';"
-        "document.body.appendChild(g);"
+        "document.documentElement.appendChild(g);"
         "g.querySelector('form').addEventListener('submit',async function(e){"
         "e.preventDefault();var v=g.querySelector('input').value;"
         "var h=await sha(v);"
