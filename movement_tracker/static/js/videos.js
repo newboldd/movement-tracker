@@ -12,6 +12,8 @@
     const SPEED_DEFAULT_IDX = SPEED_PRESETS.indexOf(1);    // == 6
     let exportMode = false;
     let exportRunning = false;
+    let exportAbort = null;          // AbortController for the running export
+    let exportAbortRequested = false;
 
     // ── State ────────────────────────────────────────────────
     let allSubjects = [];
@@ -912,7 +914,10 @@
     }
 
     function exitExportMode() {
-        if (exportRunning) return;          // don't bail out mid-export
+        // While an export is running, the Cancel button instead requests an
+        // abort — the export's finally{} block will call us again to actually
+        // tear down the UI.
+        if (exportRunning) { _cancelRunningExport(); return; }
         exportMode = false;
         document.body.classList.remove('export-mode');
         $('timelineSlider').style.display = '';
@@ -934,6 +939,18 @@
         else runExport();
     }
 
+    function _cancelRunningExport() {
+        if (!exportRunning) return;
+        exportAbortRequested = true;
+        if (exportAbort) {
+            try { exportAbort.abort(); } catch (_) {}
+        }
+        const status = $('exportStatus');
+        if (status) status.textContent = 'Cancelling…';
+        const cancelBtn = $('exportCancelBtn');
+        if (cancelBtn) cancelBtn.disabled = true;
+    }
+
     // Run the export in-page (no modal), using the trim handles + speed.
     async function runExport() {
         if (exportRunning) return;
@@ -948,9 +965,14 @@
         const btn = $('exportBtn');
         const cancelBtn = $('exportCancelBtn');
         exportRunning = true;
+        exportAbortRequested = false;
+        exportAbort = new AbortController();
         btn.disabled = true;
-        cancelBtn.disabled = true;
+        cancelBtn.disabled = false;     // Cancel stays clickable during export
         status.textContent = 'Starting…';
+        const _checkAbort = () => {
+            if (exportAbortRequested) throw new DOMException('Cancelled', 'AbortError');
+        };
 
         const savedFrame = currentFrame;
         let exportId = null;
@@ -968,6 +990,7 @@
             const outH = ch;
             const outFps = (trialMeta.fps || 30) * (playbackRate || 1);
 
+            _checkAbort();
             const startResp = await fetch('/api/export-video/start', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -977,6 +1000,7 @@
                     height: outH,
                     total_frames: totalFrames,
                 }),
+                signal: exportAbort.signal,
             });
             if (!startResp.ok) throw new Error('start session failed');
             exportId = (await startResp.json()).export_id;
@@ -988,10 +1012,12 @@
             const BATCH = 100;
 
             for (let batchStart = startFrame; batchStart <= endFrame; batchStart += BATCH) {
+                _checkAbort();
                 const batchEnd = Math.min(batchStart + BATCH - 1, endFrame);
                 const fd = new FormData();
                 fd.append('start_index', batchStart - startFrame);
                 for (let f = batchStart; f <= batchEnd; f++) {
+                    _checkAbort();
                     await seekAndRenderFrame(f);
                     offCtx.fillStyle = '#000';
                     offCtx.fillRect(0, 0, outW, outH);
@@ -1004,15 +1030,19 @@
                               `frame_${String(globalIdx).padStart(6, '0')}.jpg`);
                     status.textContent = `Capturing ${f - startFrame + 1} / ${totalFrames}`;
                 }
+                _checkAbort();
                 status.textContent = `Uploading batch…`;
                 const upResp = await fetch(`/api/export-video/${exportId}/frames`, {
-                    method: 'POST', body: fd,
+                    method: 'POST', body: fd, signal: exportAbort.signal,
                 });
                 if (!upResp.ok) throw new Error('frame upload failed');
             }
 
+            _checkAbort();
             status.textContent = 'Encoding…';
-            const encResp = await fetch(`/api/export-video/${exportId}/encode`, { method: 'POST' });
+            const encResp = await fetch(`/api/export-video/${exportId}/encode`, {
+                method: 'POST', signal: exportAbort.signal,
+            });
             if (!encResp.ok) throw new Error('encoding failed');
             const mp4Blob = await encResp.blob();
             const url = URL.createObjectURL(mp4Blob);
@@ -1025,14 +1055,30 @@
             status.appendChild(a);
             exportId = null;
         } catch (err) {
-            console.error(err);
-            status.textContent = 'Error: ' + err.message;
+            if (err && err.name === 'AbortError') {
+                status.textContent = 'Cancelled.';
+                // Best-effort server cleanup for the half-uploaded session.
+                if (exportId) {
+                    fetch(`/api/export-video/${exportId}`, { method: 'DELETE' })
+                        .catch(() => {});
+                }
+            } else {
+                console.error(err);
+                status.textContent = 'Error: ' + err.message;
+            }
         } finally {
             exportRunning = false;
+            exportAbort = null;
+            const wasAborted = exportAbortRequested;
+            exportAbortRequested = false;
             btn.disabled = false;
             cancelBtn.disabled = false;
             // Restore playback position
             goToFrame(savedFrame);
+            // If the user clicked Cancel during the export, also drop them
+            // out of export mode (matches the "Cancel button = exit" behaviour
+            // when not exporting).
+            if (wasAborted) exitExportMode();
         }
     }
 
