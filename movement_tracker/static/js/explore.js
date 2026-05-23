@@ -366,7 +366,21 @@ function _refitBestFitFromVisible() {
     const updates = lineX
         ? { x: [lineX], y: [lineY], visible: true }
         : { visible: false };
+    // Snapshot current axis ranges so we can restore them — flipping
+    // the best-fit visibility (or its endpoints) shouldn't cause the
+    // axes to re-fit.
+    const fl = div._fullLayout || {};
+    const xRange = fl.xaxis && fl.xaxis.range ? fl.xaxis.range.slice() : null;
+    const yRange = fl.yaxis && fl.yaxis.range ? fl.yaxis.range.slice() : null;
     Promise.resolve(Plotly.restyle(div, updates, [bfIdx]))
+        .then(() => {
+            if (xRange && yRange) {
+                return Plotly.relayout(div, {
+                    'xaxis.range': xRange, 'xaxis.autorange': false,
+                    'yaxis.range': yRange, 'yaxis.autorange': false,
+                });
+            }
+        })
         .then(() => { _refittingBF = false; })
         .catch(() => { _refittingBF = false; });
     $('exInfo').textContent = baseText + fitText;
@@ -467,8 +481,11 @@ $('exSelectAllBtn').addEventListener('click', () => {
     render();
 });
 
-['exPlotType', 'exVarX', 'exVarY', 'exBestFit'].forEach(id =>
+['exPlotType', 'exVarX', 'exVarY'].forEach(id =>
     $(id).addEventListener('change', render));
+// Toggling Slope doesn't change the underlying data — just restyle
+// the already-present best-fit trace in place so axes don't re-fit.
+$('exBestFit').addEventListener('change', _refitBestFitFromVisible);
 
 // ── Copy to clipboard ─────────────────────────────────────────
 $('exCopyBtn').addEventListener('click', async () => {
