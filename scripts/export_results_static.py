@@ -140,45 +140,6 @@ def main() -> None:
         "    <script>window.STATIC_RESULTS = true;</script>\n</head>",
     )
 
-    # Simple client-side password gate.  SHA-256 of the password is
-    # hardcoded; the user types it once per tab (sessionStorage).  Not
-    # cryptographically strong — anyone can view-source and brute-force
-    # — but it's a low-friction "are you supposed to be here" barrier in
-    # front of non-identifying research data.
-    gate = (
-        "<style>#__gate{position:fixed;inset:0;background:#0b1220;"
-        "display:flex;align-items:center;justify-content:center;z-index:99999;"
-        "font:14px system-ui,sans-serif;color:#e7eaf0;}"
-        "#__gate form{background:#141c2e;padding:24px 28px;border-radius:8px;"
-        "box-shadow:0 6px 24px rgba(0,0,0,.4);display:flex;flex-direction:column;gap:10px;min-width:260px;}"
-        "#__gate input{padding:8px 10px;border:1px solid #2a3550;border-radius:4px;"
-        "background:#0b1220;color:#e7eaf0;font-size:14px;}"
-        "#__gate button{padding:8px 12px;border:0;border-radius:4px;background:#3b82f6;"
-        "color:#fff;font-size:14px;cursor:pointer;}"
-        "#__gate .err{color:#f87171;min-height:1em;font-size:12px;}"
-        "html.__locked body{visibility:hidden;}</style>"
-        "<script>(function(){"
-        "var H='bf37c7c208717d6de100ce851b48273f8d5d945c8dc64fc64372087ffcf88ba9';"
-        "if(sessionStorage.getItem('__unlocked')==='1')return;"
-        "document.documentElement.classList.add('__locked');"
-        "async function sha(s){var b=new TextEncoder().encode(s);"
-        "var h=await crypto.subtle.digest('SHA-256',b);"
-        "return Array.from(new Uint8Array(h)).map(x=>x.toString(16).padStart(2,'0')).join('');}"
-        "document.addEventListener('DOMContentLoaded',function(){"
-        "var g=document.createElement('div');g.id='__gate';"
-        "g.innerHTML='<form><div>Password required</div>"
-        "<input type=password autofocus autocomplete=off>"
-        "<button type=submit>Unlock</button><div class=err></div></form>';"
-        "document.body.appendChild(g);"
-        "g.querySelector('form').addEventListener('submit',async function(e){"
-        "e.preventDefault();var v=g.querySelector('input').value;"
-        "var h=await sha(v);"
-        "if(h===H){sessionStorage.setItem('__unlocked','1');"
-        "document.documentElement.classList.remove('__locked');g.remove();}"
-        "else{g.querySelector('.err').textContent='Incorrect';"
-        "g.querySelector('input').select();}});});})();</script>"
-    )
-    html = html.replace("</head>", gate + "\n</head>")
 
     (out_dir / "index.html").write_text(html)
 
