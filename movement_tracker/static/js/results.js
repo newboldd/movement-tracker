@@ -712,7 +712,8 @@ function _makeCopyBtn(onClick) {
  *  labels, axis titles) is captured at 2× scale via Plotly.toImage.
  *  The clipboard entry is a File so its `name` carries the suggested
  *  filename through to Finder paste on macOS. */
-async function _copyPlotsAsPng(plotDivs, filename, btn) {
+async function _copyPlotsAsPng(plotDivs, filename, btn, opts) {
+    plotDivs = plotDivs.filter(Boolean);
     if (!plotDivs.length || !window.Plotly) return;
     if (btn && btn.disabled) return;
     if (btn) {
@@ -720,6 +721,7 @@ async function _copyPlotsAsPng(plotDivs, filename, btn) {
         btn.style.opacity = '0.4';
         btn.style.filter = 'brightness(0.7)';
     }
+    const title = (opts && opts.title) || '';
     const minHold = new Promise(r => setTimeout(r, 1000));
     try {
         const SCALE = 2;
@@ -732,14 +734,26 @@ async function _copyPlotsAsPng(plotDivs, filename, btn) {
             })));
         const imgs = await Promise.all(urls.map(_loadImg));
         const W = Math.max(...imgs.map(i => i.width));
-        const H = imgs.reduce((s, i) => s + i.height, 0);
+        // Optional header band with the column title.
+        const TITLE_H = title ? 32 * SCALE : 0;
+        const H = TITLE_H + imgs.reduce((s, i) => s + i.height, 0);
         const cv = document.createElement('canvas');
         cv.width = W; cv.height = H;
         const ctx = cv.getContext('2d');
         ctx.fillStyle = '#fff';
         ctx.fillRect(0, 0, W, H);
-        let y = 0;
-        for (const img of imgs) { ctx.drawImage(img, 0, y); y += img.height; }
+        if (title) {
+            ctx.fillStyle = '#222';
+            ctx.font = `700 ${16 * SCALE}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(title, W / 2, TITLE_H / 2);
+        }
+        let y = TITLE_H;
+        for (const img of imgs) {
+            ctx.drawImage(img, Math.round((W - img.width) / 2), y);
+            y += img.height;
+        }
         const blob = await new Promise(r => cv.toBlob(r, 'image/png'));
         const stem = (filename || 'plot').replace(/[^A-Za-z0-9_-]+/g, '_');
         const file = new File([blob], `${stem}.png`, { type: 'image/png' });
@@ -757,6 +771,23 @@ async function _copyPlotsAsPng(plotDivs, filename, btn) {
         }
     }
 }
+
+/** Copy one whole column on the Group Comparison page (title + Mean
+ *  + Variance + Sequence-Effect plots).  Called from inline onclick
+ *  handlers attached to the per-column copy buttons. */
+window._copyGroupColumn = function(paramId, kind, btn) {
+    const prefix = kind === 'dose' ? 'grpPlotDose_' : 'grpPlot_';
+    const divs = ['mean', 'cv', 'seq']
+        .map(f => document.getElementById(prefix + paramId + '_' + f))
+        .filter(Boolean);
+    const m = (typeof GROUP_METRICS !== 'undefined')
+        ? GROUP_METRICS.find(x => x.id === paramId) : null;
+    const titleText = m
+        ? m.name + (m.mean && m.mean.unit ? ' (' + m.mean.unit + ')' : '')
+        : paramId;
+    const stem = (kind === 'dose' ? 'levodopa_' : 'group_') + paramId;
+    return _copyPlotsAsPng(divs, stem, btn, { title: titleText });
+};
 
 /** Copy the distance + velocity plots for one trial.  Filename
  *  pattern: {subject}_{trial}_trace.png (trial.name already includes
@@ -1890,22 +1921,31 @@ function renderGroupPlots() {
         { label: 'Sequence Effect', field: 'seq', height: 180 },
     ];
 
-    const colW = Math.max(200, Math.min(280, (container.clientWidth - 80) / visibleMetrics.length));
+    const colW = Math.max(200, Math.min(280, container.clientWidth / visibleMetrics.length));
+
+    // Row labels now live on each plot's Y axis (see renderGroupBar's
+    // yLabel arg) — no left label column needed.
+    const _columnTitle = (m, kind) => {
+        const titleText = m.name + (m.mean && m.mean.unit ? ' (' + m.mean.unit + ')' : '');
+        return `<div style="display:flex;align-items:center;justify-content:center;gap:6px;padding:4px 0 0;">
+            <span style="font-size:13px;font-weight:700;">${titleText}</span>
+            <button class="btn btn-sm" title="Copy to clipboard"
+                style="padding:2px 5px;line-height:0;"
+                onclick="_copyGroupColumn('${m.id}', '${kind}', this)">${COPY_ICON_HTML}</button>
+        </div>`;
+    };
 
     html += '<div style="overflow-x:auto;">';
-    html += `<div style="display:grid;grid-template-columns:60px repeat(${visibleMetrics.length}, ${colW}px);gap:0;">`;
+    html += `<div style="display:grid;grid-template-columns:repeat(${visibleMetrics.length}, ${colW}px);gap:0;">`;
 
     ROW_DEFS.forEach((row, ri) => {
-        // Row label (first column)
-        html += `<div style="display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--text-muted);writing-mode:vertical-rl;text-orientation:mixed;transform:rotate(180deg);padding:4px;">${row.label}</div>`;
-
-        visibleMetrics.forEach((m, ci) => {
+        visibleMetrics.forEach((m) => {
             const spec = m[row.field];
             const divId = `grpPlot_${m.id}_${row.field}`;
             if (spec) {
                 html += `<div style="height:${row.height}px;">
-                    ${ri === 0 ? `<div style="text-align:center;font-size:13px;font-weight:700;padding:4px 0 0;">${m.name}${m.mean && m.mean.unit ? ' (' + m.mean.unit + ')' : ''}</div>` : ''}
-                    <div id="${divId}" style="height:${row.height - (ri === 0 ? 24 : 0)}px;"></div>
+                    ${ri === 0 ? _columnTitle(m, 'bar') : ''}
+                    <div id="${divId}" style="height:${row.height - (ri === 0 ? 28 : 0)}px;"></div>
                 </div>`;
             } else {
                 html += `<div style="height:${row.height}px;"></div>`;
@@ -1924,16 +1964,15 @@ function renderGroupPlots() {
     html += `<div style="font-size:13px;font-weight:700;color:var(--text-muted);margin-bottom:4px;">
         Levodopa motor response</div>`;
     html += '<div style="overflow-x:auto;">';
-    html += `<div style="display:grid;grid-template-columns:60px repeat(${visibleMetrics.length}, ${colW}px);gap:0;">`;
+    html += `<div style="display:grid;grid-template-columns:repeat(${visibleMetrics.length}, ${colW}px);gap:0;">`;
     ROW_DEFS.forEach((row, ri) => {
-        html += `<div style="display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--text-muted);writing-mode:vertical-rl;text-orientation:mixed;transform:rotate(180deg);padding:4px;">${row.label}</div>`;
         visibleMetrics.forEach(m => {
             const spec = m[row.field];
             const divId = `grpPlotDose_${m.id}_${row.field}`;
             if (spec) {
                 html += `<div style="height:${row.height}px;">
-                    ${ri === 0 ? `<div style="text-align:center;font-size:13px;font-weight:700;padding:4px 0 0;">${m.name}${m.mean && m.mean.unit ? ' (' + m.mean.unit + ')' : ''}</div>` : ''}
-                    <div id="${divId}" style="height:${row.height - (ri === 0 ? 24 : 0)}px;"></div>
+                    ${ri === 0 ? _columnTitle(m, 'dose') : ''}
+                    <div id="${divId}" style="height:${row.height - (ri === 0 ? 28 : 0)}px;"></div>
                 </div>`;
             } else {
                 html += `<div style="height:${row.height}px;"></div>`;
@@ -1957,30 +1996,40 @@ function renderGroupPlots() {
             ? spec.key.replace(/^seq_/, 'seqslope_')
             : spec.key;
 
-    // Render each chart.  Titles live in the column headers (with
-    // units), so the plots themselves carry no in-plot title.
+    // Per-row Y-axis label.  Sequence Effect row picks up "(R²)" or
+    // "(slope)" depending on the radio next to the seq-effect dropdown.
+    const _yLabelFor = (row) => {
+        if (row.field === 'seq') {
+            return 'Sequence Effect (' + (seqMetric === 'slope' ? 'slope' : 'R²') + ')';
+        }
+        return row.label;       // 'Mean' or 'Variance'
+    };
+
+    // Render each chart.  Column titles live in the HTML header above
+    // each column; per-plot Y-axis labels tell which row (Mean / Var /
+    // Sequence Effect) the chart belongs to.
     ROW_DEFS.forEach(row => {
         visibleMetrics.forEach(m => {
             const spec = m[row.field];
             if (!spec) return;
             const divId = `grpPlot_${m.id}_${row.field}`;
-            renderGroupBar(divId, data, _key(spec, row), _reverseY(m, row));
+            renderGroupBar(divId, data, _key(spec, row), _reverseY(m, row), _yLabelFor(row));
         });
     });
 
     // Dose-response scatters — one per (metric × row), aligned with the
-    // bar grid.  No in-plot titles (column headers carry the name+unit).
+    // bar grid.
     ROW_DEFS.forEach((row) => {
         visibleMetrics.forEach(m => {
             const spec = m[row.field];
             if (!spec) return;
             const divId = `grpPlotDose_${m.id}_${row.field}`;
-            renderDoseScatter(divId, data, _key(spec, row), _reverseY(m, row));
+            renderDoseScatter(divId, data, _key(spec, row), _reverseY(m, row), _yLabelFor(row));
         });
     });
 }
 
-function renderDoseScatter(divId, data, paramKey, reverseY) {
+function renderDoseScatter(divId, data, paramKey, reverseY, yLabel) {
     // Levodopa plots include PD subjects only.
     const color = GROUP_COLORS['PD'] || '#2196F3';
     const pd = _activeGroupSubjects().filter(s =>
@@ -2044,7 +2093,7 @@ function renderDoseScatter(divId, data, paramKey, reverseY) {
     const xMax = (offPD.length ? offStart + offPD.length * OFF_STEP : Math.max(1, maxH * 1.05)) + 0.3;
 
     const layout = {
-        margin: { t: 12, b: 40, l: 45, r: 10 },
+        margin: { t: 12, b: 40, l: 60, r: 10 },
         xaxis: {
             title: { text: 'Time since last dose (h)', font: { size: 10, color: '#666' } },
             color: '#666', gridcolor: '#f0f0f0', tickfont: { size: 9 },
@@ -2052,7 +2101,8 @@ function renderDoseScatter(divId, data, paramKey, reverseY) {
             range: [-0.3, xMax],
         },
         yaxis: {
-            title: '', color: '#666', gridcolor: '#f0f0f0', tickfont: { size: 9 },
+            title: { text: yLabel || '', font: { size: 11, color: '#444' }, standoff: 8 },
+            color: '#666', gridcolor: '#f0f0f0', tickfont: { size: 9 },
             autorange: reverseY ? 'reversed' : true,
         },
         plot_bgcolor: '#fff',
@@ -2084,7 +2134,7 @@ function _toggleGroupMetric(id, checked) {
 // Expose for inline onclick
 window._toggleGroupMetric = _toggleGroupMetric;
 
-function renderGroupBar(divId, data, paramKey, reverseY) {
+function renderGroupBar(divId, data, paramKey, reverseY, yLabel) {
     const groups = data.groups;
     // Filter to the subjects whose checkbox is currently on.  This
     // is what makes unchecking a noisy subject immediately drop it
@@ -2186,7 +2236,7 @@ function renderGroupBar(divId, data, paramKey, reverseY) {
     };
 
     const layout = {
-        margin: { t: 12, b: 30, l: 45, r: 10 },
+        margin: { t: 12, b: 30, l: 60, r: 10 },
         xaxis: {
             tickvals: groups.map((_, i) => i),
             ticktext: groups,
@@ -2194,7 +2244,8 @@ function renderGroupBar(divId, data, paramKey, reverseY) {
             tickfont: { size: 10 },
         },
         yaxis: {
-            title: '', color: '#666', gridcolor: '#f0f0f0', tickfont: { size: 9 },
+            title: { text: yLabel || '', font: { size: 11, color: '#444' }, standoff: 8 },
+            color: '#666', gridcolor: '#f0f0f0', tickfont: { size: 9 },
             autorange: reverseY ? 'reversed' : true,
         },
         plot_bgcolor: '#fff',
