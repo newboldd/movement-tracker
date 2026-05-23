@@ -220,8 +220,16 @@ function renderScatter() {
     $('exInfo').textContent = `${n} subjects plotted (missing either variable excluded)`;
     const layout = {
         margin: { t: 20, b: 50, l: 60, r: 20 },
-        xaxis: { title: { text: X.label, font: { size: 12 } }, color: '#666', gridcolor: '#f0f0f0' },
-        yaxis: { title: { text: Y.label, font: { size: 12 } }, color: '#666', gridcolor: '#f0f0f0' },
+        xaxis: {
+            title: { text: X.label, font: { size: 12 } },
+            color: '#666', gridcolor: '#f0f0f0',
+            showline: true, linecolor: '#666', linewidth: 1, mirror: false, zeroline: false,
+        },
+        yaxis: {
+            title: { text: Y.label, font: { size: 12 } },
+            color: '#666', gridcolor: '#f0f0f0',
+            showline: true, linecolor: '#666', linewidth: 1, mirror: false, zeroline: false,
+        },
         plot_bgcolor: '#fff', paper_bgcolor: '#fff',
         legend: { orientation: 'h', y: 1.08, font: { size: 11 } },
         hovermode: 'closest',
@@ -278,8 +286,14 @@ function renderBar() {
     $('exInfo').textContent = `${n} subjects (missing variable excluded)`;
     const layout = {
         margin: { t: 20, b: 40, l: 60, r: 20 },
-        xaxis: { tickvals: groups.map((_, i) => i), ticktext: groups, color: '#666' },
-        yaxis: { title: { text: X.label, font: { size: 12 } }, color: '#666', gridcolor: '#f0f0f0' },
+        xaxis: {
+            tickvals: groups.map((_, i) => i), ticktext: groups, color: '#666',
+            showline: true, linecolor: '#666', linewidth: 1, zeroline: false,
+        },
+        yaxis: {
+            title: { text: X.label, font: { size: 12 } }, color: '#666', gridcolor: '#f0f0f0',
+            showline: true, linecolor: '#666', linewidth: 1, zeroline: false,
+        },
         plot_bgcolor: '#fff', paper_bgcolor: '#fff', bargap: 0.5,
     };
     Plotly.newPlot('explorePlot', [barTrace, dotTrace], layout, { responsive: true, displayModeBar: false });
