@@ -544,21 +544,9 @@
         }
     }
 
-    // On-page debug overlay (no DevTools needed).
-    let _dbgLastEvent = '';
-    function dbg(label) {
-        if (label) _dbgLastEvent = label;
-        const o = document.getElementById('debugOverlay');
-        if (!o) return;
-        o.textContent =
-            `canvas buf: ${canvas ? canvas.width : '?'}×${canvas ? canvas.height : '?'}\n` +
-            `viewport:   ${canvas && canvas.parentElement ? canvas.parentElement.clientWidth : '?'}×${canvas && canvas.parentElement ? canvas.parentElement.clientHeight : '?'}\n` +
-            `vid: ${vidW}×${vidH}  rs=${videoEl ? videoEl.readyState : '?'}\n` +
-            `scale=${scale.toFixed(3)}  off=(${offsetX.toFixed(1)},${offsetY.toFixed(1)})\n` +
-            `drag=${dragging}  last=${_dbgLastEvent}`;
-    }
+    // No-op (the on-page debug overlay was removed once pan/zoom worked).
+    function dbg() {}
     function setupCanvasEvents() {
-        canvas.style.cursor = 'grab';
         dbg('init');
 
         // Document-level mousedown catches clicks even if something is layered
@@ -586,7 +574,7 @@
             const { baseOX, baseOY } = getBaseMetrics();
             const lx = mx - baseOX;
             const ly = my - baseOY;
-            const factor = e.deltaY < 0 ? 1.05 : 1 / 1.05;
+            const factor = e.deltaY < 0 ? 1.015 : 1 / 1.015;
             const ns = Math.max(0.1, Math.min(scale * factor, 50));
             offsetX = lx - (lx - offsetX) * (ns / scale);
             offsetY = ly - (ly - offsetY) * (ns / scale);
@@ -606,7 +594,6 @@
                 scale = 1; offsetX = 0; offsetY = 0;
             }
             dragging = true;
-            canvas.style.cursor = 'grabbing';
             dragStartX = e.clientX; dragStartY = e.clientY;
             panStartOX = offsetX;   panStartOY = offsetY;
             e.preventDefault();
@@ -621,7 +608,6 @@
         window.addEventListener('mouseup', () => {
             if (!dragging) return;
             dragging = false;
-            canvas.style.cursor = 'grab';
         });
 
         // Resize
@@ -658,15 +644,6 @@
         ctx.translate(baseOX + offsetX, baseOY + offsetY);
         ctx.scale(scale, scale);
         ctx.drawImage(videoEl, sx, 0, sw, vidH, 0, 0, sw * bps, vidH * bps);
-        // DEBUG: red outline + diagonal so we can see if the transform actually
-        // applies.  Should move with pan and grow with zoom.
-        ctx.strokeStyle = 'red';
-        ctx.lineWidth = 4 / scale;
-        ctx.strokeRect(0, 0, sw * bps, vidH * bps);
-        ctx.beginPath();
-        ctx.moveTo(0, 0);
-        ctx.lineTo(sw * bps, vidH * bps);
-        ctx.stroke();
         ctx.restore();
     }
 
