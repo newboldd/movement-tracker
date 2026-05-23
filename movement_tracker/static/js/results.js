@@ -373,29 +373,63 @@ function renderAllDistancePlots() {
     // Plot heights + Plotly margins, kept in sync with the layout
     // objects in renderDistancePlot / renderVelocityPlot so the
     // slider travel lines up with the y-axis data area.
-    const DIST_H = 220, DIST_MT = 30, DIST_MB = 5;
+    // Reduced top margin (was 30) — the trial title used to sit in
+    // Plotly's title space; it's now rendered in an HTML header above
+    // the scrolling wrapper instead.
+    const DIST_H = 220, DIST_MT = 10, DIST_MB = 5;
     const VEL_H = 150, VEL_MT = 5, VEL_MB = 35;
 
+    // Short trial label (e.g. "R1" from "PD03_R1").
+    const _trialPartOf = t => String(t.name || '').split('_').pop();
+
     data.trials.forEach((trial, idx) => {
-        // Trial block: fixed slider column + horizontally-scrolling plots.
+        // Trial block: fixed slider column on the left + a horizontally-
+        // scrolling area on the right.  Both the trial-name header and
+        // the copy button live in a NON-scrolling row above the wrapper
+        // so they stay anchored when the user scrolls long plots.
         const block = document.createElement('div');
-        block.style.display = 'flex';
+        block.style.display = 'grid';
+        block.style.gridTemplateColumns = 'auto 1fr';
+        block.style.gridTemplateAreas = '"_ header" "slider wrapper"';
         block.style.alignItems = 'flex-start';
         block.style.marginBottom = '16px';
 
+        // Locked header: trial name (left) + Copy button (right).
+        const header = document.createElement('div');
+        header.style.gridArea = 'header';
+        header.style.display = 'flex';
+        header.style.alignItems = 'center';
+        header.style.justifyContent = 'space-between';
+        header.style.padding = '2px 8px 4px';
+        const titleSpan = document.createElement('span');
+        titleSpan.textContent = `Trial: ${_trialPartOf(trial)}`;
+        titleSpan.style.cssText = 'font-size:13px;color:#666;font-weight:600;';
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'btn btn-sm';
+        copyBtn.textContent = 'Copy';
+        copyBtn.title = 'Copy distance + velocity plots to clipboard';
+        copyBtn.addEventListener('click',
+            () => _copyTrialPlots(idx, _trialPartOf(trial), copyBtn));
+        header.appendChild(titleSpan);
+        header.appendChild(copyBtn);
+        block.appendChild(header);
+
         // Slider column (does NOT scroll with the plots)
         const sliderCol = document.createElement('div');
+        sliderCol.style.gridArea = 'slider';
         sliderCol.style.display = 'flex';
         sliderCol.style.flexDirection = 'column';
-        sliderCol.style.flex = '0 0 auto';
         sliderCol.appendChild(_buildYSliderCol('dist', idx, DIST_H, DIST_MT, DIST_MB));
         sliderCol.appendChild(_buildYSliderCol('vel', idx, VEL_H, VEL_MT, VEL_MB));
         block.appendChild(sliderCol);
 
         // Scrolling wrapper holds both plots
         const wrapper = document.createElement('div');
+        wrapper.style.gridArea = 'wrapper';
         wrapper.style.overflowX = 'auto';
-        wrapper.style.flex = '1 1 auto';
+        // CSS grid would otherwise let the wrapper grow to fit its
+        // content; min-width:0 lets the 1fr track stay 1fr.
+        wrapper.style.minWidth = '0';
 
         // Distance plot
         const distDiv = document.createElement('div');
@@ -642,6 +676,67 @@ function _applyYRange(kind, idx) {
     }
 }
 
+function _loadImg(src) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = reject;
+        img.src = src;
+    });
+}
+
+/** Copy the distance + velocity plots of one trial to the clipboard
+ *  as a single composed PNG (full plot width, with all axis, grid, and
+ *  tick decorations baked in by Plotly). */
+async function _copyTrialPlots(idx, trialLabel, btn) {
+    const distDiv = document.getElementById(`distPlot_${idx}`);
+    const velDiv  = document.getElementById(`velPlot_${idx}`);
+    if (!distDiv || !velDiv || !window.Plotly) return;
+
+    const origText = btn ? btn.textContent : null;
+    if (btn) { btn.textContent = 'Copying…'; btn.disabled = true; }
+
+    try {
+        // Full plot widths (not just the visible portion).
+        const dw = distDiv.clientWidth  || 800;
+        const dh = distDiv.clientHeight || 220;
+        const vw = velDiv.clientWidth   || dw;
+        const vh = velDiv.clientHeight  || 150;
+        const SCALE = 2;        // 2× for crisp output
+
+        const [distUrl, velUrl] = await Promise.all([
+            Plotly.toImage(distDiv, { format: 'png', width: dw, height: dh, scale: SCALE }),
+            Plotly.toImage(velDiv,  { format: 'png', width: vw, height: vh, scale: SCALE }),
+        ]);
+        const [distImg, velImg] = await Promise.all([_loadImg(distUrl), _loadImg(velUrl)]);
+
+        const W = Math.max(distImg.width, velImg.width);
+        const H = distImg.height + velImg.height;
+        const cv = document.createElement('canvas');
+        cv.width = W; cv.height = H;
+        const ctx = cv.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, W, H);
+        ctx.drawImage(distImg, 0, 0);
+        ctx.drawImage(velImg,  0, distImg.height);
+
+        const blob = await new Promise(r => cv.toBlob(r, 'image/png'));
+        await navigator.clipboard.write([
+            new ClipboardItem({ 'image/png': blob }),
+        ]);
+        if (btn) {
+            btn.textContent = 'Copied';
+            setTimeout(() => { btn.textContent = origText; btn.disabled = false; }, 1200);
+        }
+    } catch (err) {
+        console.error('Copy failed:', err);
+        if (btn) {
+            btn.textContent = 'Copy failed';
+            setTimeout(() => { btn.textContent = origText; btn.disabled = false; }, 1800);
+        }
+    }
+}
+
 function renderDistancePlot(divId, trial, yRange, width, overlayTraces, shapes) {
     const fps = trial.fps || 60;
     const n = trial.distances.length;
@@ -660,15 +755,11 @@ function renderDistancePlot(divId, trial, yRange, width, overlayTraces, shapes) 
     const traces = [distTrace, ...(overlayTraces || [])];
     const hasOverlays = (overlayTraces || []).length > 0;
 
-    // Trial part only (e.g. "R1" from "PD03_R1").
-    const trialPart = String(trial.name || '').split('_').pop();
+    // Trial name is rendered in an HTML header above the wrapper now
+    // (so it stays anchored when the user scrolls long plots).  No
+    // Plotly title here — top margin shrunk to reclaim the space.
     const layout = {
-        title: {
-            text: `Trial: ${trialPart}`,
-            x: 0, xanchor: 'left',
-            font: { size: 13, color: '#666' },
-        },
-        margin: { t: 30, b: 5, l: 55, r: 20 },
+        margin: { t: 10, b: 5, l: 55, r: 20 },
         // Pin the X range to the trace extent so toggling the peak
         // overlays (which adds marker traces) can't rescale the axis.
         xaxis: {
