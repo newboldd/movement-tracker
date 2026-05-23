@@ -282,10 +282,15 @@
         }, { once: true });
     }
 
-    /** Compute base pixel scale that fits the full frame in the canvas. */
+    /** Compute base pixel scale that fits the full frame in the canvas.
+     *  Returns zeros (not NaN/Infinity) when the video hasn't loaded yet so
+     *  callers can detect "not ready" without poisoning the math. */
     function getBaseMetrics() {
         const w = canvas.width, h = canvas.height;
         const sw = isStereo ? midline : vidW;
+        if (!(sw > 0) || !(vidH > 0) || !(w > 0) || !(h > 0)) {
+            return { bps: 0, baseOX: 0, baseOY: 0, sw: 0 };
+        }
         const bps = Math.min(w / sw, h / vidH);
         const baseOX = (w - sw * bps) / 2;
         const baseOY = (h - vidH * bps) / 2;
@@ -299,14 +304,25 @@
         const [minX, minY, maxX, maxY] = bbox;
         const cropW = maxX - minX;
         const cropH = maxY - minY;
-        const cropCX = minX + cropW / 2;
-        const cropCY = minY + cropH / 2;
+        // Bail out early if the bbox is degenerate or the video hasn't sized
+        // the canvas yet — otherwise bps below becomes 0 / NaN / Infinity and
+        // the resulting offset is NaN, which silently kills every later
+        // ctx.translate() (so zoom and pan appear to do nothing).
+        if (!(cropW > 0 && cropH > 0)) return;
         const cw = canvas.width, ch = canvas.height;
         const { bps, baseOX, baseOY } = getBaseMetrics();
-        scale = Math.min(cw / (cropW * bps), ch / (cropH * bps)) * 0.85;
-        // Offset is relative to the base-centered origin (render adds baseOX/baseOY)
+        if (!isFinite(bps) || bps <= 0) return;
+        const cropCX = minX + cropW / 2;
+        const cropCY = minY + cropH / 2;
+        const ns = Math.min(cw / (cropW * bps), ch / (cropH * bps)) * 0.85;
+        if (!isFinite(ns) || ns <= 0) return;
+        scale = ns;
         offsetX = cw / 2 - baseOX - scale * cropCX * bps;
         offsetY = ch / 2 - baseOY - scale * cropCY * bps;
+        // Final NaN/Inf guard.
+        if (!isFinite(offsetX) || !isFinite(offsetY)) {
+            scale = 1; offsetX = 0; offsetY = 0;
+        }
     }
 
     // ── Controls setup ───────────────────────────────────────
@@ -554,6 +570,10 @@
         // Wheel = zoom around the cursor.
         canvas.addEventListener('wheel', e => {
             dbg('wheel:' + (e.deltaY < 0 ? 'in' : 'out'));
+            // Self-heal: if a prior bad state poisoned the offsets to NaN, reset.
+            if (!isFinite(offsetX) || !isFinite(offsetY) || !isFinite(scale) || scale <= 0) {
+                scale = 1; offsetX = 0; offsetY = 0;
+            }
             e.preventDefault();
             ensureCanvasSized();
             const rect = canvas.getBoundingClientRect();
@@ -580,6 +600,11 @@
             dbg('canvasDown b=' + e.button);
             if (e.button !== 0 && e.button !== 1) return;
             ensureCanvasSized();
+            // Self-heal NaN/Inf so the very first drag works even if some
+            // earlier code (e.g. a degenerate MP-crop) poisoned the offsets.
+            if (!isFinite(offsetX) || !isFinite(offsetY) || !isFinite(scale) || scale <= 0) {
+                scale = 1; offsetX = 0; offsetY = 0;
+            }
             dragging = true;
             canvas.style.cursor = 'grabbing';
             dragStartX = e.clientX; dragStartY = e.clientY;
