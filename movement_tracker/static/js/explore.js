@@ -286,33 +286,16 @@ function renderScatter() {
             hovertemplate: `%{text}<br>${X.label}: %{x:.3f}<br>${Y.label}: %{y:.3f}<extra>${g}</extra>`,
         };
     });
-    let infoText = `${n} subjects plotted (missing either variable excluded)`;
-    // Optional linear best-fit line across all visible points.
-    if ($('exBestFit') && $('exBestFit').checked) {
-        const allX = [], allY = [];
-        traces.forEach(t => { for (let i = 0; i < t.x.length; i++) {
-            allX.push(t.x[i]); allY.push(t.y[i]);
-        }});
-        const stats = _linRegStats(allX, allY);
-        if (stats) {
-            const xMin = Math.min(...allX), xMax = Math.max(...allX);
-            traces.push({
-                x: [xMin, xMax],
-                y: [stats.intercept + stats.slope * xMin,
-                    stats.intercept + stats.slope * xMax],
-                type: 'scatter', mode: 'lines', name: 'Best fit',
-                line: { color: '#000', width: 1.5 },
-                hoverinfo: 'skip', showlegend: false,
-            });
-            const pStr = (stats.p < 1e-4)
-                ? stats.p.toExponential(2)
-                : stats.p.toFixed(4);
-            infoText += `  ·  slope=${stats.slope.toPrecision(3)},`
-                     + `  R²=${stats.r2.toFixed(3)},`
-                     + `  p=${pStr}`;
-        }
-    }
-    $('exInfo').textContent = infoText;
+    // Always include a (possibly invisible) best-fit trace so legend
+    // clicks can re-style it instead of triggering a full re-render
+    // (which would reset the user's legend selections).
+    traces.push({
+        x: [], y: [],
+        type: 'scatter', mode: 'lines', name: 'Best fit',
+        line: { color: '#000', width: 1.5 },
+        hoverinfo: 'skip', showlegend: false,
+        visible: false,
+    });
     const layout = {
         margin: { t: 20, b: 50, l: 60, r: 20 },
         xaxis: {
@@ -329,7 +312,74 @@ function renderScatter() {
         legend: { orientation: 'h', y: 1.08, font: { size: 11 } },
         hovermode: 'closest',
     };
-    Plotly.newPlot('explorePlot', traces, layout, { responsive: true, displayModeBar: false });
+    Plotly.newPlot('explorePlot', traces, layout, { responsive: true, displayModeBar: false })
+        .then(() => {
+            _refitBestFitFromVisible();
+            _wireBestFitListener();
+        });
+}
+
+// Recompute the best-fit line and the slope/R²/p annotation using
+// only the traces that aren't currently hidden by a legend click.
+// Re-styles the existing "Best fit" trace (no full re-render — that
+// would reset the user's legend selections).
+let _refittingBF = false;
+function _refitBestFitFromVisible() {
+    const div = $('explorePlot');
+    if (!div || !div.data) return;
+    const bfIdx = div.data.findIndex(t => t && t.name === 'Best fit');
+    if (bfIdx < 0) return;
+    const checked = !!($('exBestFit') && $('exBestFit').checked);
+    const allX = [], allY = [];
+    if (checked) {
+        div.data.forEach((t, i) => {
+            if (i === bfIdx) return;
+            if (t.visible === 'legendonly' || t.visible === false) return;
+            const xs = t.x || [], ys = t.y || [];
+            for (let k = 0; k < xs.length; k++) {
+                allX.push(xs[k]); allY.push(ys[k]);
+            }
+        });
+    }
+    const baseText = `${allX.length || (div.data
+        ? div.data.reduce((s, t, i) => i === bfIdx ? s
+            : s + (t.visible === 'legendonly' || t.visible === false
+                   ? 0 : (t.x || []).length), 0)
+        : 0)} subjects plotted (missing either variable excluded)`;
+    let lineX = null, lineY = null, fitText = '';
+    if (checked && allX.length >= 3) {
+        const stats = _linRegStats(allX, allY);
+        if (stats) {
+            const xMin = Math.min(...allX), xMax = Math.max(...allX);
+            lineX = [xMin, xMax];
+            lineY = [stats.intercept + stats.slope * xMin,
+                     stats.intercept + stats.slope * xMax];
+            const pStr = (stats.p < 1e-4)
+                ? stats.p.toExponential(2)
+                : stats.p.toFixed(4);
+            fitText = `  ·  slope=${stats.slope.toPrecision(3)},`
+                   + `  R²=${stats.r2.toFixed(3)},`
+                   + `  p=${pStr}`;
+        }
+    }
+    _refittingBF = true;
+    const updates = lineX
+        ? { x: [lineX], y: [lineY], visible: true }
+        : { visible: false };
+    Promise.resolve(Plotly.restyle(div, updates, [bfIdx]))
+        .then(() => { _refittingBF = false; })
+        .catch(() => { _refittingBF = false; });
+    $('exInfo').textContent = baseText + fitText;
+}
+
+function _wireBestFitListener() {
+    const div = $('explorePlot');
+    if (!div || div._bfListenerAttached) return;
+    div._bfListenerAttached = true;
+    div.on('plotly_restyle', () => {
+        if (_refittingBF) return;        // our own restyle — ignore
+        _refitBestFitFromVisible();
+    });
 }
 
 function renderBar() {
