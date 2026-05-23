@@ -299,7 +299,9 @@ function renderScatter() {
         visible: false,
     });
     const layout = {
-        margin: { t: 20, b: 50, l: 60, r: 20 },
+        // Extra right margin reserves room for the slope/R²/p text box.
+        margin: { t: 20, b: 50, l: 60, r: 280 },
+        annotations: [],
         xaxis: {
             title: { text: X.label, font: { size: 12 } },
             color: '#666', gridcolor: '#f0f0f0',
@@ -344,12 +346,13 @@ function _refitBestFitFromVisible() {
             }
         });
     }
-    const baseText = `${allX.length || (div.data
-        ? div.data.reduce((s, t, i) => i === bfIdx ? s
-            : s + (t.visible === 'legendonly' || t.visible === false
-                   ? 0 : (t.x || []).length), 0)
-        : 0)} subjects plotted (missing either variable excluded)`;
-    let lineX = null, lineY = null, fitText = '';
+    // Subject count = visible points if Slope-on, else total over the
+    // non-best-fit traces (matches the existing displayed count).
+    const visibleCount = div.data.reduce((s, t, i) => i === bfIdx ? s
+        : s + (t.visible === 'legendonly' || t.visible === false
+               ? 0 : (t.x || []).length), 0);
+    const baseText = `${checked ? allX.length : visibleCount} subjects plotted (missing either variable excluded)`;
+    let lineX = null, lineY = null, annText = null;
     if (checked && allX.length >= 3) {
         const stats = _linRegStats(allX, allY);
         if (stats) {
@@ -360,9 +363,10 @@ function _refitBestFitFromVisible() {
             const pStr = (stats.p < 1e-4)
                 ? stats.p.toExponential(2)
                 : stats.p.toFixed(4);
-            fitText = `  ·  slope=${stats.slope.toPrecision(3)},`
-                   + `  R²=${stats.r2.toFixed(3)},`
-                   + `  p=${pStr}`;
+            // <br> renders as a line break in Plotly annotations.
+            annText = `slope = ${stats.slope.toPrecision(3)}`
+                    + `<br>R² = ${stats.r2.toFixed(3)}`
+                    + `<br>p = ${pStr}`;
         }
     }
     _refittingBF = true;
@@ -375,18 +379,31 @@ function _refitBestFitFromVisible() {
     const fl = div._fullLayout || {};
     const xRange = fl.xaxis && fl.xaxis.range ? fl.xaxis.range.slice() : null;
     const yRange = fl.yaxis && fl.yaxis.range ? fl.yaxis.range.slice() : null;
+    const annotations = annText ? [{
+        xref: 'paper', yref: 'paper',
+        x: 1.03, y: 0.5,
+        xanchor: 'left', yanchor: 'middle',
+        text: annText,
+        showarrow: false,
+        align: 'left',
+        font: { family: 'system-ui, -apple-system, "Segoe UI", sans-serif',
+                size: 30, color: '#000' },
+        bgcolor: 'rgba(255,255,255,0.96)',
+        bordercolor: '#888',
+        borderwidth: 1,
+        borderpad: 12,
+    }] : [];
     Promise.resolve(Plotly.restyle(div, updates, [bfIdx]))
-        .then(() => {
-            if (xRange && yRange) {
-                return Plotly.relayout(div, {
-                    'xaxis.range': xRange, 'xaxis.autorange': false,
-                    'yaxis.range': yRange, 'yaxis.autorange': false,
-                });
-            }
-        })
+        .then(() => Plotly.relayout(div, {
+            annotations,
+            ...(xRange && yRange ? {
+                'xaxis.range': xRange, 'xaxis.autorange': false,
+                'yaxis.range': yRange, 'yaxis.autorange': false,
+            } : {}),
+        }))
         .then(() => { _refittingBF = false; })
         .catch(() => { _refittingBF = false; });
-    $('exInfo').textContent = baseText + fitText;
+    $('exInfo').textContent = baseText;
 }
 
 function _wireBestFitListener() {
