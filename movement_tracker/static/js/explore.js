@@ -357,4 +357,24 @@ $('exCopyBtn').addEventListener('click', async () => {
     }
 });
 
+// Resize the Plotly chart whenever the user drags the bottom-right
+// corner of #explorePlot (enabled via CSS `resize: both`).  Plotly's
+// fonts/markers are pixel-sized, so they stay constant — only the
+// plot area expands.
+(function _watchExplorePlotResize() {
+    const div = $('explorePlot');
+    if (!div || typeof ResizeObserver === 'undefined') return;
+    let _raf = null;
+    const ro = new ResizeObserver(() => {
+        if (_raf) cancelAnimationFrame(_raf);
+        _raf = requestAnimationFrame(() => {
+            _raf = null;
+            if (window.Plotly && div.querySelector('.plotly')) {
+                try { Plotly.Plots.resize(div); } catch (_) {}
+            }
+        });
+    });
+    ro.observe(div);
+})();
+
 loadExplore();
