@@ -388,15 +388,28 @@
 
     // ── Camera switching ─────────────────────────────────────
 
-    /** Update the camera toggle button label and visibility. */
+    /** Update the camera toggle button label and visibility.  Uses the
+     *  "OS | OD" dual-toggle style (active half bold, inactive muted) from
+     *  the labels/analyze pages. */
     function updateCameraButton() {
         const btn = $('sideToggle');
         if (cameraMode === 'single') {
             btn.style.display = 'none';
-        } else {
-            btn.style.display = '';
-            btn.textContent = currentSide;
+            return;
         }
+        btn.style.display = '';
+        // Multicam: list every camera; stereo: just the two named eyes.
+        const opts = (cameraMode === 'multicam' && multicamCameras.length > 0)
+            ? multicamCameras.map(c => c.name)
+            : [cameraNames[0], cameraNames[1] || cameraNames[0]];
+        const act = 'color:var(--text);font-weight:bold;';
+        const ina = 'color:var(--text-muted);';
+        btn.innerHTML = opts.map((name, i) => {
+            const span = `<span style="${name === currentSide ? act : ina}">${name}</span>`;
+            const sep = (i < opts.length - 1)
+                ? `<span style="opacity:0.35;margin:0 3px;">|</span>` : '';
+            return span + sep;
+        }).join('');
     }
 
     /** Cycle to the next camera view. */

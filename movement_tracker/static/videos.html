@@ -202,6 +202,11 @@
         body.export-mode #speedDisplay { color: #FF9800; }
         body.export-mode .speed-wrap label { color: #FF9800; }
         body.export-mode #exportBtn { background: var(--blue); color:#fff; border-color: var(--blue); }
+        /* OS | OD camera toggle: tint everything orange in export mode.
+           Bold vs. normal font-weight (set inline) still distinguishes the
+           active eye. */
+        body.export-mode #sideToggle { border-color: #FF9800; }
+        body.export-mode #sideToggle span { color: #FF9800 !important; }
         /* Make the default Export Video button match the other (darker) toolbar buttons */
         #exportBtn { /* same as .btn.btn-sm default */ }
 
@@ -312,6 +317,6 @@
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js?v=12"></script>
     <script src="/static/js/video-export.js?v=3"></script>
-    <script src="/static/js/videos.js?v=11"></script>
+    <script src="/static/js/videos.js?v=12"></script>
 </body>
 </html>
