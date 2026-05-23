@@ -531,8 +531,24 @@
     function setupCanvasEvents() {
         canvas.style.cursor = 'grab';
 
+        // Diagnostic: prove the listeners attached.  Logs once on init so the
+        // user can confirm in DevTools that this code path ran.
+        console.log('[videos] setupCanvasEvents attached', {
+            canvas, parent: canvas.parentElement,
+            w: canvas.width, h: canvas.height,
+            clientW: canvas.parentElement && canvas.parentElement.clientWidth,
+        });
+
+        // Document-level mousedown catches clicks even if something is layered
+        // over the canvas — we log the target so we can see what's eating them.
+        document.addEventListener('mousedown', e => {
+            console.log('[videos] doc mousedown target=', e.target,
+                        'matches canvas?', e.target === canvas);
+        }, true);
+
         // Wheel = zoom around the cursor.
         canvas.addEventListener('wheel', e => {
+            console.log('[videos] wheel', e.deltaY);
             e.preventDefault();
             ensureCanvasSized();
             const rect = canvas.getBoundingClientRect();
@@ -556,6 +572,7 @@
         // Pan = left-mouse drag.  Down on canvas, move/up on window so the
         // drag continues even if the cursor leaves the canvas.
         canvas.addEventListener('mousedown', e => {
+            console.log('[videos] canvas mousedown button=', e.button);
             if (e.button !== 0 && e.button !== 1) return;
             ensureCanvasSized();
             dragging = true;
