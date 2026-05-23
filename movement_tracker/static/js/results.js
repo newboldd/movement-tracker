@@ -1114,7 +1114,7 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
                     annotations.push({
                         x: midX, y: 0.98,
                         xref: axId, yref: 'paper', yanchor: 'top',
-                        text: `R\u00b2=${fit.r2.toFixed(2)}`,
+                        text: `R\u00b2=${fit.r2.toFixed(2)}<br>Slope=${fit.b.toFixed(3)}`,
                         showarrow: false,
                         font: { size: 9, color },
                         bgcolor: 'rgba(255,255,255,0.8)',
@@ -1141,7 +1141,7 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
                     annotations.push({
                         x: midX, y: 0.98,
                         xref: axId, yref: 'paper', yanchor: 'top',
-                        text: `R\u00b2=${reg.r2.toFixed(2)}`,
+                        text: `R\u00b2=${reg.r2.toFixed(2)}<br>Slope=${reg.slope.toFixed(3)}`,
                         showarrow: false,
                         font: { size: 9, color },
                         bgcolor: 'rgba(255,255,255,0.8)',
@@ -1247,7 +1247,7 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
                 annotations.push({
                     x: (xMin + xMax) / 2, y: 0.98,
                     xref: axId, yref: 'paper', yanchor: 'top',
-                    text: `R\u00b2=${fit.r2.toFixed(2)}`,
+                    text: `R\u00b2=${fit.r2.toFixed(2)}<br>Slope=${fit.b.toFixed(3)}`,
                     showarrow: false,
                     font: { size: 9, color },
                     bgcolor: 'rgba(255,255,255,0.8)',
@@ -1276,7 +1276,7 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
                 annotations.push({
                     x: midX, y: 0.98,
                     xref: axId, yref: 'paper', yanchor: 'top',
-                    text: `R²=${reg.r2.toFixed(2)}`,
+                    text: `R²=${reg.r2.toFixed(2)}<br>Slope=${reg.slope.toFixed(3)}`,
                     showarrow: false,
                     font: { size: 9, color },
                     bgcolor: 'rgba(255,255,255,0.8)',
@@ -1894,7 +1894,7 @@ function renderDoseScatter(divId, data, paramKey, reverseY) {
     for (let h = 0; h <= hiHour; h += 2) { tickvals.push(h); ticktext.push(String(h)); }
     const shapes = [];
     if (offCenter != null) {
-        tickvals.push(offCenter); ticktext.push('Off');
+        tickvals.push(offCenter); ticktext.push('Not taking');
         // Dashed separator in the gap between on- and off-levodopa.
         const sepX = ((onPD.length ? maxH : 0) + offStart) / 2;
         shapes.push({
