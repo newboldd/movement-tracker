@@ -230,14 +230,24 @@ function renderDistMovementPlots() {
 
     container.innerHTML = '';
 
-    // X-scale multiplier (1 = current 2-column grid).  Wider than the
-    // current per-plot width → one plot per row; ≥ full container width
-    // (≈ 2× the grid-cell width) → fixed width with horizontal scroll,
-    // matching the distance/velocity plots.
-    const xs = parseFloat(document.getElementById('movXScaleSlider')?.value) || 1;
+    // X-scale slider: seconds-of-trace-per-screen-width.  Slider is
+    // reversed (right = stretched): raw 5..120 maps to secPerWidth =
+    // 125 - raw (120..5).  Default value=95 → 30s/window.  Matches the
+    // distance/velocity slider behavior.
+    const _mxRaw = parseFloat(document.getElementById('movXScaleSlider')?.value);
+    const secPerWidth = isFinite(_mxRaw) ? (125 - _mxRaw) : 30;
     const containerW = container.clientWidth || container.parentElement?.clientWidth || 1000;
-    const GAP = 16;
-    const cellW = (containerW - GAP) / 2;   // current 2-col cell width
+
+    // Total time spanned by all trials concatenated (matches the way
+    // the movement plot lays out per-trial subplots side-by-side).
+    let totalSec = 0;
+    (data.trials || []).forEach(t => {
+        const fps = t.fps || 60;
+        const n = (t.distances && t.distances.length) || 0;
+        totalSec += n / fps;
+    });
+    if (totalSec <= 0) totalSec = 1;
+    const plotW = Math.max(containerW, (totalSec / secPerWidth) * containerW);
 
     // Left-aligned title rendered as an HTML header above each plot so
     // it stays anchored (doesn't scroll away) and is consistently
@@ -249,25 +259,11 @@ function renderDistMovementPlots() {
         return h;
     };
 
-    if (xs <= 1) {
-        // Default: 2-column responsive grid.
-        container.style.display = '';
-        container.style.gridTemplateColumns = '';
-        params.forEach(param => {
-            const cell = document.createElement('div');
-            cell.appendChild(_titleHeader(param));
-            const div = document.createElement('div');
-            div.id = `distMovPlot_${param}`;
-            div.style.height = '300px';
-            cell.appendChild(div);
-            container.appendChild(cell);
-            renderMovementScatter(div.id, data, param, seqMode, null);
-        });
-    } else {
-        // One plot per row; scale width by xs.  When that exceeds the
-        // container, wrap in a horizontal-scroll container.
+    {
+        // One plot per row; width derived from seconds/window.  Wider
+        // than the container → horizontal-scroll wrapper (scroll synced
+        // across all params).
         container.style.display = 'block';
-        const plotW = cellW * xs;
         const wraps = [];
         params.forEach(param => {
             const block = document.createElement('div');
