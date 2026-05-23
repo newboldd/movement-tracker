@@ -46,6 +46,14 @@
     let dragStartX = 0, dragStartY = 0;
     let panStartOX = 0, panStartOY = 0;
 
+    // Export-mode crop box (in canvas-buffer pixel coords).
+    let cropX = 0, cropY = 0, cropW = 0, cropH = 0;
+    let cropDragMode = null;        // 'move' | 'n','s','e','w','nw','ne','sw','se'
+    let cropDragStart = null;       // {mx,my,x,y,w,h}
+    const CROP_COLOR = '#FF9800';
+    const CROP_HANDLE = 10;         // px (canvas-buffer) on each side of a handle hit-box
+    const CROP_HANDLE_DRAW = 8;     // drawn handle size
+
     // ── Helpers ──────────────────────────────────────────────
     const $ = id => document.getElementById(id);
 
@@ -559,6 +567,95 @@
 
     // No-op (the on-page debug overlay was removed once pan/zoom worked).
     function dbg() {}
+
+    // ── Export-mode crop box ─────────────────────────────────
+
+    /** Reset crop to the current visible video rectangle (clipped to canvas). */
+    function _resetCropToView() {
+        const { bps, baseOX, baseOY, sw } = getBaseMetrics();
+        if (!(bps > 0) || !canvas) {
+            cropX = 0; cropY = 0;
+            cropW = canvas ? canvas.width : 0;
+            cropH = canvas ? canvas.height : 0;
+            return;
+        }
+        const imgX = baseOX + offsetX;
+        const imgY = baseOY + offsetY;
+        const imgW = sw * bps * scale;
+        const imgH = vidH * bps * scale;
+        const left  = Math.max(0, imgX);
+        const top   = Math.max(0, imgY);
+        const right = Math.min(canvas.width,  imgX + imgW);
+        const bot   = Math.min(canvas.height, imgY + imgH);
+        cropX = left;
+        cropY = top;
+        cropW = Math.max(20, right - left);
+        cropH = Math.max(20, bot - top);
+    }
+
+    function _cropHandles() {
+        const x = cropX, y = cropY, w = cropW, h = cropH;
+        return [
+            { name: 'nw', x: x,         y: y         },
+            { name: 'n',  x: x + w / 2, y: y         },
+            { name: 'ne', x: x + w,     y: y         },
+            { name: 'w',  x: x,         y: y + h / 2 },
+            { name: 'e',  x: x + w,     y: y + h / 2 },
+            { name: 'sw', x: x,         y: y + h     },
+            { name: 's',  x: x + w / 2, y: y + h     },
+            { name: 'se', x: x + w,     y: y + h     },
+        ];
+    }
+
+    /** Mouse → 'move' | one of the 8 handle names | null. */
+    function _cropHitTest(mx, my) {
+        if (!exportMode) return null;
+        for (const h of _cropHandles()) {
+            if (Math.abs(mx - h.x) <= CROP_HANDLE &&
+                Math.abs(my - h.y) <= CROP_HANDLE) {
+                return h.name;
+            }
+        }
+        if (mx >= cropX && mx <= cropX + cropW &&
+            my >= cropY && my <= cropY + cropH) {
+            return 'move';
+        }
+        return null;
+    }
+
+    function _cursorForCrop(hit) {
+        switch (hit) {
+            case 'move': return 'move';
+            case 'n':    case 's':  return 'ns-resize';
+            case 'e':    case 'w':  return 'ew-resize';
+            case 'nw':   case 'se': return 'nwse-resize';
+            case 'ne':   case 'sw': return 'nesw-resize';
+            default:                return '';
+        }
+    }
+
+    /** Draw the orange crop overlay (rectangle + 8 handles + dim outside). */
+    function _drawCropOverlay() {
+        if (!exportMode || exportRunning) return;
+        if (!(cropW > 0) || !(cropH > 0)) return;
+        // Dim everything outside the crop box.
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(0, 0, canvas.width, cropY);
+        ctx.fillRect(0, cropY + cropH, canvas.width, canvas.height - (cropY + cropH));
+        ctx.fillRect(0, cropY, cropX, cropH);
+        ctx.fillRect(cropX + cropW, cropY, canvas.width - (cropX + cropW), cropH);
+        // Frame + handles.
+        ctx.strokeStyle = CROP_COLOR;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(cropX + 1, cropY + 1, cropW - 2, cropH - 2);
+        ctx.fillStyle = CROP_COLOR;
+        const s = CROP_HANDLE_DRAW;
+        for (const h of _cropHandles()) {
+            ctx.fillRect(h.x - s / 2, h.y - s / 2, s, s);
+        }
+        ctx.restore();
+    }
     function setupCanvasEvents() {
         dbg('init');
 
@@ -597,21 +694,80 @@
 
         // Pan = left-mouse drag.  Down on canvas, move/up on window so the
         // drag continues even if the cursor leaves the canvas.
+        // Mouse coords helper: CSS px → canvas-buffer px.
+        const _bufXY = (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const csx = canvas.width / rect.width;
+            const csy = canvas.height / rect.height;
+            return { mx: (e.clientX - rect.left) * csx,
+                     my: (e.clientY - rect.top)  * csy };
+        };
+
         canvas.addEventListener('mousedown', e => {
             dbg('canvasDown b=' + e.button);
             if (e.button !== 0 && e.button !== 1) return;
             ensureCanvasSized();
-            // Self-heal NaN/Inf so the very first drag works even if some
-            // earlier code (e.g. a degenerate MP-crop) poisoned the offsets.
             if (!isFinite(offsetX) || !isFinite(offsetY) || !isFinite(scale) || scale <= 0) {
                 scale = 1; offsetX = 0; offsetY = 0;
             }
+            // Export-mode crop box takes priority over pan.
+            if (exportMode) {
+                const { mx, my } = _bufXY(e);
+                const hit = _cropHitTest(mx, my);
+                if (hit) {
+                    cropDragMode = hit;
+                    cropDragStart = { mx, my, x: cropX, y: cropY, w: cropW, h: cropH };
+                    e.preventDefault();
+                    return;
+                }
+            }
+            // Default: pan.
             dragging = true;
             dragStartX = e.clientX; dragStartY = e.clientY;
             panStartOX = offsetX;   panStartOY = offsetY;
             e.preventDefault();
         });
+
+        // Cursor hint when hovering the crop box / handles.
+        canvas.addEventListener('mousemove', e => {
+            if (!exportMode || cropDragMode || dragging) return;
+            const { mx, my } = _bufXY(e);
+            canvas.style.cursor = _cursorForCrop(_cropHitTest(mx, my));
+        });
+        canvas.addEventListener('mouseleave', () => {
+            if (!cropDragMode && !dragging) canvas.style.cursor = '';
+        });
+
         window.addEventListener('mousemove', e => {
+            if (cropDragMode) {
+                const { mx, my } = _bufXY(e);
+                const s = cropDragStart;
+                const dx = mx - s.mx, dy = my - s.my;
+                const minSize = 20;
+                if (cropDragMode === 'move') {
+                    cropX = Math.max(0, Math.min(canvas.width  - s.w, s.x + dx));
+                    cropY = Math.max(0, Math.min(canvas.height - s.h, s.y + dy));
+                } else {
+                    let nx = s.x, ny = s.y, nw = s.w, nh = s.h;
+                    if (cropDragMode.includes('w')) {
+                        nx = Math.max(0, Math.min(s.x + s.w - minSize, s.x + dx));
+                        nw = s.x + s.w - nx;
+                    }
+                    if (cropDragMode.includes('e')) {
+                        nw = Math.max(minSize, Math.min(canvas.width - s.x, s.w + dx));
+                    }
+                    if (cropDragMode.includes('n')) {
+                        ny = Math.max(0, Math.min(s.y + s.h - minSize, s.y + dy));
+                        nh = s.y + s.h - ny;
+                    }
+                    if (cropDragMode.includes('s')) {
+                        nh = Math.max(minSize, Math.min(canvas.height - s.y, s.h + dy));
+                    }
+                    cropX = nx; cropY = ny; cropW = nw; cropH = nh;
+                }
+                render();
+                return;
+            }
             if (!dragging) return;
             offsetX = panStartOX + (e.clientX - dragStartX);
             offsetY = panStartOY + (e.clientY - dragStartY);
@@ -619,8 +775,8 @@
             dbg('pan');
         });
         window.addEventListener('mouseup', () => {
-            if (!dragging) return;
-            dragging = false;
+            if (cropDragMode) { cropDragMode = null; cropDragStart = null; return; }
+            if (dragging) { dragging = false; }
         });
 
         // Resize
@@ -658,6 +814,9 @@
         ctx.scale(scale, scale);
         ctx.drawImage(videoEl, sx, 0, sw, vidH, 0, 0, sw * bps, vidH * bps);
         ctx.restore();
+        // Orange crop overlay sits on TOP of the video, only in export mode
+        // and only when we're not currently capturing frames for export.
+        _drawCropOverlay();
     }
 
     // ── Export ───────────────────────────────────────────────
@@ -697,6 +856,9 @@
         btn.classList.add('btn-primary');
         $('exportCancelBtn').style.display = '';
         $('exportStatus').textContent = '';
+        // Default crop box = currently-visible video rectangle.
+        _resetCropToView();
+        render();
     }
 
     function exitExportMode() {
@@ -711,6 +873,10 @@
         btn.disabled = false;
         $('exportCancelBtn').style.display = 'none';
         $('exportStatus').textContent = '';
+        cropDragMode = null;
+        cropDragStart = null;
+        canvas.style.cursor = '';
+        render();    // redraw to clear the overlay
     }
 
     function toggleExportMode() {
@@ -738,10 +904,18 @@
 
         const savedFrame = currentFrame;
         let exportId = null;
+        // Snapshot the crop in canvas-buffer pixels (round to integers — the
+        // server's ffmpeg encoder needs even dimensions; clamp to canvas).
+        const cx = Math.max(0, Math.round(cropX));
+        const cy = Math.max(0, Math.round(cropY));
+        let cw = Math.min(canvas.width  - cx, Math.round(cropW));
+        let ch = Math.min(canvas.height - cy, Math.round(cropH));
+        // Force even dimensions (libx264 yuv420p requires even W×H).
+        if (cw % 2) cw -= 1;
+        if (ch % 2) ch -= 1;
         try {
-            // Always use the on-canvas size so the output matches what the
-            // user sees (including any zoom/pan crop).
-            const outW = canvas.width, outH = canvas.height;
+            const outW = cw;
+            const outH = ch;
             const outFps = (trialMeta.fps || 30) * (playbackRate || 1);
 
             const startResp = await fetch('/api/export-video/start', {
@@ -771,7 +945,9 @@
                     await seekAndRenderFrame(f);
                     offCtx.fillStyle = '#000';
                     offCtx.fillRect(0, 0, outW, outH);
-                    offCtx.drawImage(canvas, 0, 0, outW, outH);
+                    // Capture only the crop region (overlay is suppressed
+                    // because exportRunning is true).
+                    offCtx.drawImage(canvas, cx, cy, cw, ch, 0, 0, outW, outH);
                     const blob = await new Promise(r => offscreen.toBlob(r, 'image/jpeg', 0.92));
                     const globalIdx = f - startFrame;
                     fd.append(`frame_${f - batchStart}`, blob,
