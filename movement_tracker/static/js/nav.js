@@ -25,7 +25,7 @@ function getNavState() {
 
 // ── Subject-specific pages ──
 const SUBJECT_PAGES = [
-    '/videos', '/mediapipe', '/mediapipe-select', '/deidentify',
+    '/mediapipe', '/mediapipe-select', '/deidentify',
     '/labeling', '/labeling-select', '/labels', '/results', '/oscillations',
 ];
 
@@ -249,9 +249,7 @@ const SUBJECT_PAGES = [
     }
 
     function _navigateToSubject(sid) {
-        if (path.startsWith('/videos')) {
-            window.location.href = '/videos?subject=' + sid;
-        } else if (path.startsWith('/mediapipe') || path === '/mediapipe-select') {
+        if (path.startsWith('/mediapipe') || path === '/mediapipe-select') {
             window.location.href = '/mediapipe-select?subject=' + sid;
         } else if (path.startsWith('/deidentify')) {
             window.location.href = '/deidentify?subject=' + sid;
@@ -276,7 +274,6 @@ const SUBJECT_PAGES = [
         'mediapipe-select': '/mediapipe-select?subject=' + lastSubj,
         'deidentify': '/deidentify?subject=' + lastSubj,
         'results': '/results?subject=' + lastSubj,
-        'videos': '/videos?subject=' + lastSubj,
         'skeleton': '/labels?subject=' + lastSubj,
         'labeling-select': '/labeling-select?subject=' + lastSubj,
     };

@@ -45,7 +45,7 @@ class NoCacheMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
         if request.url.path.startswith("/static") or request.url.path in (
-            "/", "/labeling", "/labeling-select", "/mediapipe", "/deidentify", "/labels", "/preproc", "/oscillations", "/results", "/explore", "/settings", "/onboarding", "/remote", "/videos", "/calibration", "/tutorials", "/tutorial", "/events"
+            "/", "/labeling", "/labeling-select", "/mediapipe", "/deidentify", "/labels", "/preproc", "/oscillations", "/results", "/explore", "/settings", "/onboarding", "/remote", "/calibration", "/tutorials", "/tutorial", "/events"
         ):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return response
@@ -65,7 +65,7 @@ app.include_router(video_tools.router)
 app.include_router(batch.router)
 app.include_router(remote_jobs.router)
 
-app.include_router(skeleton.router)  # API endpoints used by videos.js (page removed)
+app.include_router(skeleton.router)
 app.include_router(export.router)
 app.include_router(camera_setups.router)
 app.include_router(updater.router)
@@ -953,8 +953,8 @@ def index():
                 return FileResponse(str(STATIC_DIR / "index.html"))
     except Exception:
         pass
-    # No subjects (or only Example) — redirect to video browser
-    return RedirectResponse(url="/videos", status_code=302)
+    # No subjects (or only Example) — fall back to the onboarding page.
+    return RedirectResponse(url="/onboarding", status_code=302)
 
 
 @app.get("/subjects")
@@ -1226,12 +1226,6 @@ def remote_page():
 def onboarding_page():
     """Serve the subject onboarding page."""
     return FileResponse(str(STATIC_DIR / "onboarding.html"))
-
-
-@app.get("/videos")
-def videos_page():
-    """Serve the videos viewer page."""
-    return FileResponse(str(STATIC_DIR / "videos.html"))
 
 
 

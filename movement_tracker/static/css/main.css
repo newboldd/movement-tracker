@@ -77,13 +77,6 @@ body {
     border-bottom-color: var(--blue);
 }
 
-/* "Browse Videos" link — set apart with a separator after it */
-.header nav a.nav-browse {
-    margin-right: 8px;
-    padding-right: 16px;
-    border-right: 1px solid var(--border);
-}
-
 /* "Subjects" link — slightly bolder to stand out */
 .header nav a[href="/subjects"] {
     font-weight: 600;

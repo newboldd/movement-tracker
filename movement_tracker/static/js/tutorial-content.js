@@ -10,54 +10,6 @@
  *   steps     – array of { title, body (HTML string), tips[] }
  */
 window.TUTORIALS = [
-    // ── 1. Viewing a Video ──────────────────────────────────
-    {
-        id: 1,
-        title: 'Viewing a Video',
-        subtitle: 'Browse and play back videos with zoom, speed, and camera controls.',
-        time: '~3 min',
-        series: 'beginner',
-        steps: [
-            {
-                title: 'Open the Videos page',
-                body: 'Click <a href="/videos"><strong>Videos</strong></a> in the navigation bar at the top of any page.',
-                tips: [],
-            },
-            {
-                title: 'Select a subject',
-                body: 'Use the <strong>subject dropdown</strong> in the top toolbar. If the sample video has been added, select the subject that contains it (e.g.&nbsp;"Con01"). The first subject with videos is selected automatically.',
-                tips: [],
-            },
-            {
-                title: 'Choose a trial',
-                body: 'Trial buttons appear in the toolbar after selecting a subject. Click a button (e.g.&nbsp;<strong>R1</strong>) to load that trial\u2019s video.',
-                tips: [],
-            },
-            {
-                title: 'Play and navigate frames',
-                body: 'Press <kbd>Space</kbd> to play/pause. Step frame-by-frame with <kbd>\u2190</kbd> / <kbd>\u2192</kbd> (or <kbd>A</kbd> / <kbd>S</kbd>). The timeline slider at the bottom lets you scrub to any frame.',
-                tips: [],
-            },
-            {
-                title: 'Adjust playback speed',
-                body: 'Use the <strong>speed slider</strong> in the bottom toolbar. Speeds range from 0.1\u00d7 to 120\u00d7. The current speed is displayed next to the slider.',
-                tips: [],
-            },
-            {
-                title: 'Zoom and pan',
-                body: '<strong>Scroll wheel</strong> zooms in/out at the cursor position. <strong>Click and drag</strong> to pan. Press <kbd>Z</kbd> to reset the view.',
-                tips: [],
-            },
-            {
-                title: 'Toggle cameras',
-                body: 'For stereo videos, press <kbd>E</kbd> to switch between OS (left) and OD (right) camera views. The current camera is shown on the toggle button.',
-                tips: [
-                    'The <strong>Browse\u2026</strong> button lets you preview any MP4 file from disk without adding it as a subject.',
-                ],
-            },
-        ],
-    },
-
     // ── 2. Adding a Subject ─────────────────────────────────
     {
         id: 2,
