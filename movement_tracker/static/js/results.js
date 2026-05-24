@@ -1011,6 +1011,20 @@ function _redrawOneTrial(idx) {
             : align === 'close' ? 'Time from closing (s)'
             : align === 'rigid' ? 'Canonical time (s)'
                                 : 'Time from opening (s)';
+        // Pin the y-axis to the range that would be used if every
+        // movement were plotted, so the axes don't jump when the
+        // cluster filter hides some segments.
+        let yMin = Infinity, yMax = -Infinity;
+        for (const s of trial.segments) {
+            for (const v of s.ys) {
+                if (!isFinite(v)) continue;
+                if (v < yMin) yMin = v;
+                if (v > yMax) yMax = v;
+            }
+        }
+        const yRange = (isFinite(yMin) && isFinite(yMax) && yMax > yMin)
+            ? [yMin - (yMax - yMin) * 0.05, yMax + (yMax - yMin) * 0.05]
+            : null;
         const layout = {
             margin: { t: 6, b: 36, l: 48, r: 8 },
             xaxis: {
@@ -1023,6 +1037,7 @@ function _redrawOneTrial(idx) {
                 title: { text: 'Distance (mm)', font: { size: 11 } },
                 showline: true, linecolor: '#666', zeroline: false,
                 tickfont: { size: 10 }, automargin: true,
+                ...(yRange ? { range: yRange, autorange: false } : { autorange: true }),
             },
             plot_bgcolor: '#fff', paper_bgcolor: '#fff',
             hovermode: false, showlegend: false,
