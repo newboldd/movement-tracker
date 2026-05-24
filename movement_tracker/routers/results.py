@@ -1066,11 +1066,14 @@ def get_group_comparison(include_auto: bool = Query(False),
     # Cache fast path: every combination is exported to site/data/.
     # Saves the multi-second aggregation pass when the user is just
     # browsing the Group Comparison page.  Falls through if the cache
-    # file is missing or unreadable.
+    # is missing, unreadable, or stale (predates newer fields).
     cache = _group_cache_path(include_auto, source, seq_mode, hand, trial)
     if cache is not None and cache.is_file():
         try:
-            return _json.loads(cache.read_text())
+            data = _json.loads(cache.read_text())
+            subjs = data.get("subjects") or []
+            if not subjs or "variance_amplitude" in subjs[0]:
+                return data
         except Exception:
             pass
 
@@ -1294,12 +1297,18 @@ def get_explore_variables(include_auto: bool = Query(False),
     """
     # Cache check: for the small subset of (source × seq_mode × hand ×
     # trial) combinations that the static-site exporter writes out, just
-    # return the pre-computed JSON.  Everything else falls through to
-    # live computation below.
+    # return the pre-computed JSON.  Everything else (or a stale cache
+    # missing newer fields) falls through to live computation below.
     cache = _explore_cache_path(include_auto, source, seq_mode, hand, trial)
     if cache is not None and cache.is_file():
         try:
-            return _json.loads(cache.read_text())
+            data = _json.loads(cache.read_text())
+            # Sanity-check: older caches predate the `variance_*` keys.
+            # Fall through to recompute if the field is missing so the
+            # Variance radio button works without re-exporting.
+            subjs = data.get("subjects") or []
+            if not subjs or "variance_amplitude" in (subjs[0].get("vars") or {}):
+                return data
         except Exception:
             pass    # corrupt cache → recompute
 
