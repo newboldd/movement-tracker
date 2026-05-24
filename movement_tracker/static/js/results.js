@@ -976,9 +976,8 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
             [0.75, 'rgb(244,165,130)'], [1.0, 'rgb(178,24,43)'],
         ],
         hovertemplate: 'r = %{z:.2f}<extra></extra>',
-        // len:1 plus outlinewidth:0 so the bar height matches the
-        // matrix without surrounding lines/labels.
-        colorbar: { thickness: 8, len: 1, lenmode: 'fraction',
+        // Colorbar length is set later from the actual matrix height.
+        colorbar: { thickness: 8, lenmode: 'fraction',
                     y: 0.5, yanchor: 'middle', outlinewidth: 0, ypad: 0,
                     tickvals: [-1, 0, 1], tickfont: { size: 10 } },
     };
@@ -1027,9 +1026,11 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
     const xMaxDendro = Math.max(maxH * 1.05, 0.05);
     // Dendrogram sits in [0, 0.15]; row-number tick labels live in the
     // gap [0.15, 0.20]; matrix in [0.20, 1.0].  The yaxis is anchored
-    // to x2 so the labels render right next to the matrix.
+    // to x2 so the labels render right next to the matrix.  Tight
+    // bottom margin pulls the column numbers up against the matrix.
+    const MARGIN = { t: 18, b: 14, l: 8, r: 50 };
     const layout = {
-        margin: { t: 18, b: 22, l: 8, r: 50 },
+        margin: MARGIN,
         title: { text: titleText, font: { size: 11 }, x: 0, xanchor: 'left', y: 0.98 },
         xaxis: {
             domain: [0, 0.15],
@@ -1055,15 +1056,42 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
         shapes, showlegend: false,
     };
     // Keep height = width so the matrix renders square from the very
-    // first paint (instead of growing only after the cluster checkbox
-    // is toggled).  ResizeObserver also handles future width changes.
+    // first paint.  Also set the colorbar's length to match the
+    // matrix height (heatmap is square — width set by x2's domain).
     const _sizeToSquare = () => {
         const w = targetDiv.clientWidth || targetDiv.offsetWidth || 0;
-        if (w > 0 && targetDiv.style.height !== `${w}px`) {
+        if (w <= 0) return;
+        if (targetDiv.style.height !== `${w}px`) {
             targetDiv.style.height = `${w}px`;
-            if (window.Plotly && targetDiv._fullLayout) Plotly.Plots.resize(targetDiv);
+        }
+        const plotW = Math.max(1, w - MARGIN.l - MARGIN.r);
+        const plotH = Math.max(1, w - MARGIN.t - MARGIN.b);
+        const x2Frac = 1.0 - 0.20;   // matrix domain [0.20, 1.0]
+        const matrixSide = Math.min(x2Frac * plotW, plotH);
+        const cbLen = Math.max(0.1, Math.min(1, matrixSide / plotH));
+        if (window.Plotly) {
+            if (targetDiv._fullLayout) {
+                Plotly.restyle(targetDiv, { 'colorbar.len': cbLen }, [1])
+                      .catch(() => {});
+                Plotly.Plots.resize(targetDiv);
+            } else {
+                // First paint: bake the len into the next Plotly.react
+                // by mutating the trace before plot reads it.
+                if (targetDiv.data && targetDiv.data[1] && targetDiv.data[1].colorbar) {
+                    targetDiv.data[1].colorbar.len = cbLen;
+                }
+            }
         }
     };
+    // Bake the initial len into the trace passed to Plotly.react so
+    // there's no first-paint with len:1 followed by a shrink.
+    {
+        const w0 = targetDiv.clientWidth || targetDiv.offsetWidth || 380;
+        const plotW0 = Math.max(1, w0 - MARGIN.l - MARGIN.r);
+        const plotH0 = Math.max(1, w0 - MARGIN.t - MARGIN.b);
+        const matrixSide0 = Math.min((1 - 0.20) * plotW0, plotH0);
+        heatTrace.colorbar.len = Math.max(0.1, Math.min(1, matrixSide0 / plotH0));
+    }
     _sizeToSquare();
     if (!targetDiv._squareObserver && window.ResizeObserver) {
         targetDiv._squareObserver = new ResizeObserver(_sizeToSquare);
