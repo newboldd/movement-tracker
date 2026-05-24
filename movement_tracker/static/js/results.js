@@ -1025,25 +1025,27 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
         });
     }
     const xMaxDendro = Math.max(maxH * 1.05, 0.05);
+    // Dendrogram sits in [0, 0.15]; row-number tick labels live in the
+    // gap [0.15, 0.20]; matrix in [0.20, 1.0].  The yaxis is anchored
+    // to x2 so the labels render right next to the matrix.
     const layout = {
-        margin: { t: 18, b: 36, l: 8, r: 50 },
+        margin: { t: 18, b: 22, l: 8, r: 50 },
         title: { text: titleText, font: { size: 11 }, x: 0, xanchor: 'left', y: 0.98 },
         xaxis: {
-            domain: [0, 0.20],
+            domain: [0, 0.15],
             range: [xMaxDendro, 0],
             showticklabels: false, zeroline: false, showgrid: false,
-            showline: false, ticks: '', fixedrange: true,
+            showline: false, ticks: '', fixedrange: true, automargin: false,
         },
         xaxis2: {
-            domain: [0.22, 1.0], anchor: 'y',
-            title: { text: 'Movement #', font: { size: 10 } },
-            tickfont: { size: 9 }, side: 'bottom', automargin: true,
+            domain: [0.20, 1.0], anchor: 'y', automargin: false,
+            tickfont: { size: 9 }, side: 'bottom',
             tickmode: 'array', tickvals: nums, ticktext: labels,
             range: [-0.5, N - 0.5], constrain: 'domain',
             showline: false, showgrid: false, zeroline: false, ticks: '',
         },
         yaxis: {
-            tickfont: { size: 9 }, automargin: true,
+            tickfont: { size: 9 }, automargin: false, anchor: 'x2',
             tickmode: 'array', tickvals: nums, ticktext: labels,
             range: [N - 0.5, -0.5],   // reversed so movement 1 is at top
             scaleanchor: 'x2', scaleratio: 1,
@@ -1052,13 +1054,21 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
         plot_bgcolor: '#fff', paper_bgcolor: '#fff',
         shapes, showlegend: false,
     };
-    requestAnimationFrame(() => {
+    // Keep height = width so the matrix renders square from the very
+    // first paint (instead of growing only after the cluster checkbox
+    // is toggled).  ResizeObserver also handles future width changes.
+    const _sizeToSquare = () => {
         const w = targetDiv.clientWidth || targetDiv.offsetWidth || 0;
-        if (w > 0) {
+        if (w > 0 && targetDiv.style.height !== `${w}px`) {
             targetDiv.style.height = `${w}px`;
             if (window.Plotly && targetDiv._fullLayout) Plotly.Plots.resize(targetDiv);
         }
-    });
+    };
+    _sizeToSquare();
+    if (!targetDiv._squareObserver && window.ResizeObserver) {
+        targetDiv._squareObserver = new ResizeObserver(_sizeToSquare);
+        targetDiv._squareObserver.observe(targetDiv);
+    }
     // Stash the row labels so the click handler resolves a clicked
     // position (e.g. row 0 in a sorted matrix) to the original
     // movement number rather than just the row index.
