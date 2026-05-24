@@ -300,6 +300,22 @@ function _val(s, key) {
     return (v != null && isFinite(v)) ? v : null;
 }
 
+/** Compute the Plotly left-margin so the Y-axis baseline (the plot's
+ *  left edge in pixels) lands at 10% of the window width — i.e. the
+ *  plot's data area starts at a fixed horizontal position in the
+ *  browser viewport, regardless of how wide the tick labels / Y-title
+ *  end up being.  Plotly margins are measured inside the plot div, so
+ *  we subtract the div's offset from the desired window-position. */
+function _leftMarginForFixedYBaseline() {
+    const div = document.getElementById('explorePlot');
+    if (!div || !window.innerWidth) return 90;
+    const rect = div.getBoundingClientRect();
+    const desired = window.innerWidth * 0.10;
+    // Keep a sensible minimum so the y-axis title / tick numbers don't
+    // get clipped off the left edge of the plot if the window is narrow.
+    return Math.max(40, Math.round(desired - rect.left));
+}
+
 function renderScatter() {
     const X = _resolve('X'), Y = _resolve('Y');
     const groups = _data.groups;
@@ -330,7 +346,10 @@ function renderScatter() {
         visible: false,
     });
     const layout = {
-        margin: { t: 20, b: 80, l: 90, r: 20 },
+        // Pin the Y-axis baseline (= plot's left edge in pixels) to
+        // 10% of the window width so the plot doesn't shift when the
+        // tick labels or y-title get wider/narrower.  See _leftMargin().
+        margin: { t: 20, b: 80, l: _leftMarginForFixedYBaseline(), r: 20 },
         xaxis: {
             title: { text: X.label, font: { size: 24 } },
             color: '#666', gridcolor: '#f0f0f0',
@@ -338,14 +357,13 @@ function renderScatter() {
             showline: true, linecolor: '#666', linewidth: 2, mirror: false, zeroline: false,
         },
         yaxis: {
-            // automargin pushes the title left of the widest tick label
-            // automatically and grows the plot's left margin to fit, so
-            // the title can never sit on top of the numbers.
             title: { text: Y.label, font: { size: 24 }, standoff: 14 },
             color: '#666', gridcolor: '#f0f0f0',
             tickfont: { size: 22 },
             showline: true, linecolor: '#666', linewidth: 2, mirror: false, zeroline: false,
-            automargin: true,
+            // automargin OFF so the left edge stays fixed regardless of
+            // tick-label or y-title widths.
+            automargin: false,
         },
         plot_bgcolor: '#fff', paper_bgcolor: '#fff',
         legend: { orientation: 'h', y: 1.08, font: { size: 22 } },
@@ -513,10 +531,11 @@ function renderBar() {
             color: '#666', gridcolor: '#f0f0f0',
             tickfont: { size: 22 },
             showline: true, linecolor: '#666', linewidth: 2, zeroline: false,
-            automargin: true,
+            automargin: false,    // see _leftMarginForFixedYBaseline()
         },
         plot_bgcolor: '#fff', paper_bgcolor: '#fff', bargap: 0.5,
     };
+    layout.margin = { t: 20, b: 70, l: _leftMarginForFixedYBaseline(), r: 20 };
     Plotly.newPlot('explorePlot', [barTrace, dotTrace], layout, { responsive: true, displayModeBar: false });
 }
 
