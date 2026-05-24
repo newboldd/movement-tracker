@@ -421,92 +421,116 @@ function renderShapeOverlayPlots() {
     _drawShapeOverlayPlots();
 }
 
-// Cross-correlation alignment.  Resamples each segment + the
-// open-aligned mean to a fixed dt grid, then finds the lag (in
-// samples) maximizing the dot-product, refined with parabolic
-// interpolation.  Returns the per-segment shift in seconds.
+// Cross-correlation alignment, peak-aligned.  Each segment is
+// resampled onto a peak-aligned grid, a mean reference is built from
+// those peak-aligned traces, and per-segment lags maximizing the
+// cross-correlation against the mean are refined with parabolic
+// interpolation.  After the first pass, the mean is rebuilt from the
+// newly-shifted segments and a second pass refines the lags.  The
+// returned shifts are applied to the open-aligned xs, so the final
+// shift includes both the peak offset and the correlation correction.
 function _computeCorrShifts(segments, xMax) {
     const N = segments.length;
     if (!N) return [];
-    const dt = 1 / 240;  // fine-grained for sub-frame alignment
+    const dt = 1 / 240;
     const xLoRef = -xMax, xHiRef = xMax;
     const nGrid = Math.round((xHiRef - xLoRef) / dt) + 1;
-    // Build a "mean reference" from open-aligned segments.  We center
-    // each segment by subtracting its own mean before averaging to
-    // avoid baseline-dominated correlation.
-    const resampled = segments.map(s => _resampleXY(s.xs, s.ys, xLoRef, xHiRef, nGrid));
-    const sums = new Float64Array(nGrid), counts = new Float64Array(nGrid);
-    for (const arr of resampled) {
-        for (let i = 0; i < nGrid; i++) {
-            const v = arr[i];
-            if (isFinite(v)) { sums[i] += v; counts[i] += 1; }
-        }
-    }
-    const ref = new Float64Array(nGrid);
-    for (let i = 0; i < nGrid; i++) ref[i] = counts[i] >= 2 ? sums[i] / counts[i] : NaN;
 
-    // Defined extent of the mean trace, in seconds (open-aligned axis).
-    let refFirstI = -1, refLastI = -1;
-    for (let i = 0; i < nGrid; i++) {
-        if (isFinite(ref[i])) { if (refFirstI < 0) refFirstI = i; refLastI = i; }
-    }
-    const meanXmin = refFirstI >= 0 ? xLoRef + refFirstI * dt : -Infinity;
-    const meanXmax = refLastI  >= 0 ? xLoRef + refLastI  * dt :  Infinity;
+    // Peak-aligned resamples: shift each segment so its peak sits at
+    // t=0 in the reference grid.
+    const peakAligned = segments.map(s =>
+        _resampleXY(s.xs.map(x => x - s.peakT), s.ys, xLoRef, xHiRef, nGrid));
 
-    // Per-segment shift via lag-of-max-correlation + parabolic refine.
-    const maxLagSamples = Math.round(xMax / 2 / dt);   // search ±xMax/2
-    const shifts = new Array(N).fill(0);
-    for (let si = 0; si < N; si++) {
-        const seg = resampled[si];
-        // Constrain the lag search so the segment's peak, after the
-        // shift, stays inside the defined mean trace.  shift_t = -k*dt
-        // and the shifted peak time is segments[si].peakT + shift_t,
-        // which must lie in [meanXmin, meanXmax].
-        const peakT = segments[si].peakT;
-        const kLoConstr = Math.ceil((peakT - meanXmax) / dt);
-        const kHiConstr = Math.floor((peakT - meanXmin) / dt);
-        const kLo = Math.max(-maxLagSamples, kLoConstr);
-        const kHi = Math.min( maxLagSamples, kHiConstr);
-        if (kLo > kHi) { shifts[si] = 0; continue; }
-        let bestLag = 0, bestC = -Infinity;
-        const corr = new Float64Array(2 * maxLagSamples + 1);
-        for (let i = 0; i < corr.length; i++) corr[i] = -Infinity;
-        for (let k = kLo; k <= kHi; k++) {
-            let s = 0, n = 0, sx = 0, sy = 0, sxx = 0, syy = 0;
+    // Build a mean reference, optionally weighting samples by an
+    // existing per-segment correction (used on the second iteration).
+    const buildMean = (extraCorrSamples) => {
+        const sums = new Float64Array(nGrid), counts = new Float64Array(nGrid);
+        for (let si = 0; si < N; si++) {
+            const arr = peakAligned[si];
+            const k = extraCorrSamples ? extraCorrSamples[si] : 0;
+            // Shift arr by k samples (positive k → arr lands later in grid).
             for (let i = 0; i < nGrid; i++) {
-                const j = i - k;
+                const j = i - Math.round(k);
                 if (j < 0 || j >= nGrid) continue;
-                const a = seg[i], b = ref[j];
-                if (!isFinite(a) || !isFinite(b)) continue;
-                sx += a; sy += b; sxx += a * a; syy += b * b; s += a * b; n += 1;
-            }
-            if (n < 5) { corr[k + maxLagSamples] = -Infinity; continue; }
-            const mx = sx / n, my = sy / n;
-            const num = s - n * mx * my;
-            const den = Math.sqrt(Math.max(1e-12, (sxx - n * mx * mx) * (syy - n * my * my)));
-            const c = num / den;
-            corr[k + maxLagSamples] = c;
-            if (c > bestC) { bestC = c; bestLag = k; }
-        }
-        // Parabolic interpolation around the peak — only if both
-        // neighbors are also inside the constrained search window.
-        let refined = bestLag;
-        if (bestLag > kLo && bestLag < kHi) {
-            const c0 = corr[bestLag - 1 + maxLagSamples];
-            const c1 = corr[bestLag + maxLagSamples];
-            const c2 = corr[bestLag + 1 + maxLagSamples];
-            const denom = (c0 - 2 * c1 + c2);
-            if (isFinite(c0) && isFinite(c2) && denom < 0) {
-                refined = bestLag + 0.5 * (c0 - c2) / denom;
-                if (refined < kLo) refined = kLo;
-                if (refined > kHi) refined = kHi;
+                const v = arr[j];
+                if (isFinite(v)) { sums[i] += v; counts[i] += 1; }
             }
         }
-        // shift = -lag * dt (we want to subtract from segment xs so
-        // its peak in correlation lands at the reference's t=0).
-        shifts[si] = -refined * dt;
-    }
-    return shifts;
+        const ref = new Float64Array(nGrid);
+        for (let i = 0; i < nGrid; i++) ref[i] = counts[i] >= 2 ? sums[i] / counts[i] : NaN;
+        let first = -1, last = -1;
+        for (let i = 0; i < nGrid; i++) {
+            if (isFinite(ref[i])) { if (first < 0) first = i; last = i; }
+        }
+        return { ref, meanXmin: first >= 0 ? xLoRef + first * dt : -Infinity,
+                      meanXmax: last  >= 0 ? xLoRef + last  * dt :  Infinity };
+    };
+
+    const maxLagSamples = Math.round(xMax / 2 / dt);
+
+    // One pass: given a reference (and its [meanXmin, meanXmax]),
+    // return the per-segment best lags (in samples, sub-frame refined).
+    const onePass = (ref, meanXmin, meanXmax) => {
+        const lags = new Array(N).fill(0);
+        for (let si = 0; si < N; si++) {
+            const seg = peakAligned[si];
+            // Constraint: after lag k, the segment's peak (at t=0 in
+            // peak-aligned coords) lands at t = -k*dt in display coords.
+            // Require -k*dt ∈ [meanXmin, meanXmax].
+            const kLoConstr = Math.ceil(-meanXmax / dt);
+            const kHiConstr = Math.floor(-meanXmin / dt);
+            const kLo = Math.max(-maxLagSamples, kLoConstr);
+            const kHi = Math.min( maxLagSamples, kHiConstr);
+            if (kLo > kHi) { lags[si] = 0; continue; }
+            const corr = new Float64Array(2 * maxLagSamples + 1);
+            for (let i = 0; i < corr.length; i++) corr[i] = -Infinity;
+            let bestLag = 0, bestC = -Infinity;
+            for (let k = kLo; k <= kHi; k++) {
+                let s = 0, n = 0, sx = 0, sy = 0, sxx = 0, syy = 0;
+                for (let i = 0; i < nGrid; i++) {
+                    const j = i - k;
+                    if (j < 0 || j >= nGrid) continue;
+                    const a = seg[i], b = ref[j];
+                    if (!isFinite(a) || !isFinite(b)) continue;
+                    sx += a; sy += b; sxx += a * a; syy += b * b; s += a * b; n += 1;
+                }
+                if (n < 5) continue;
+                const mx = sx / n, my = sy / n;
+                const num = s - n * mx * my;
+                const den = Math.sqrt(Math.max(1e-12, (sxx - n * mx * mx) * (syy - n * my * my)));
+                const c = num / den;
+                corr[k + maxLagSamples] = c;
+                if (c > bestC) { bestC = c; bestLag = k; }
+            }
+            let refined = bestLag;
+            if (bestLag > kLo && bestLag < kHi) {
+                const c0 = corr[bestLag - 1 + maxLagSamples];
+                const c1 = corr[bestLag + maxLagSamples];
+                const c2 = corr[bestLag + 1 + maxLagSamples];
+                const denom = c0 - 2 * c1 + c2;
+                if (isFinite(c0) && isFinite(c2) && denom < 0) {
+                    refined = bestLag + 0.5 * (c0 - c2) / denom;
+                    if (refined < kLo) refined = kLo;
+                    if (refined > kHi) refined = kHi;
+                }
+            }
+            lags[si] = refined;
+        }
+        return lags;
+    };
+
+    // Pass 1 — peak-aligned mean as reference.
+    let mean1 = buildMean(null);
+    const lags1 = onePass(mean1.ref, mean1.meanXmin, mean1.meanXmax);
+
+    // Pass 2 — rebuild the mean from the corr-shifted traces, refine.
+    const lagsRounded = lags1.map(l => Math.round(l));
+    const mean2 = buildMean(lagsRounded);
+    const lags2 = onePass(mean2.ref, mean2.meanXmin, mean2.meanXmax);
+
+    // Final shift applied to open-aligned xs: align peak to 0 then
+    // apply the (sub-frame) correlation lag.  shift_t = -peakT - lag*dt.
+    return segments.map((s, si) => -s.peakT - lags2[si] * dt);
 }
 
 function _drawShapeOverlayPlots() {
