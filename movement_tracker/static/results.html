@@ -145,14 +145,6 @@
                         <span id="shapeXScaleVal" style="font-size:11px;color:var(--text-muted);min-width:40px;">2.50 s</span>
                     </label>
                     <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
-                    <label title="Highlight one movement.  0 = none."
-                           style="display:flex;align-items:center;gap:6px;margin:0;">
-                        Movement #:
-                        <input type="range" id="shapeMoveSlider"
-                               min="0" max="0" step="1" value="0" style="width:160px;">
-                        <span id="shapeMoveVal" style="font-size:11px;color:var(--text-muted);min-width:30px;">0</span>
-                    </label>
-                    <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
                     <label title="Plot the across-movement mean trace in black.">
                         <input type="checkbox" id="shapeShowMean"> Show average
                     </label>
@@ -166,6 +158,10 @@
                     </label>
                     <label style="display:flex;align-items:center;gap:3px;">
                         <input type="radio" name="shapeAlign" value="close"> Close
+                    </label>
+                    <label style="display:flex;align-items:center;gap:3px;"
+                           title="Align each movement to the trial average by max cross-correlation (parabolic interpolation).">
+                        <input type="radio" name="shapeAlign" value="corr"> Correlation
                     </label>
                 </div>
                 <div id="shapeOverlayPlots" class="results-plot-grid"></div>
@@ -297,6 +293,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=10"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=54"></script>
+    <script src="/static/js/results.js?v=55"></script>
 </body>
 </html>

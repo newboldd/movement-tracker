@@ -392,6 +392,10 @@ function _resampleXY(xs, ys, xLo, xHi, nPts) {
     return out;
 }
 
+// Per-trial highlight index (1-indexed, 0 = none).  Reset on each
+// renderShapeOverlayPlots() call.
+let _shapeHighlight = {};
+
 function renderShapeOverlayPlots() {
     const section = document.getElementById('shapeOverlaySection');
     const container = document.getElementById('shapeOverlayPlots');
@@ -403,9 +407,7 @@ function renderShapeOverlayPlots() {
     }
     section.style.display = '';
 
-    // Configure slider ranges from the data.  Preserve the user's
-    // current x-scale if they had set one; otherwise jump to the
-    // per-subject default.
+    // Configure x-scale slider from the per-subject default.
     const xSl = document.getElementById('shapeXScaleSlider');
     const xVal = document.getElementById('shapeXScaleVal');
     if (xSl) {
@@ -414,15 +416,75 @@ function renderShapeOverlayPlots() {
         xSl.value = String(_shapeData.xMaxDefault.toFixed(2));
         if (xVal) xVal.textContent = `${(+xSl.value).toFixed(2)} s`;
     }
-    const mSl = document.getElementById('shapeMoveSlider');
-    const mVal = document.getElementById('shapeMoveVal');
-    if (mSl) {
-        mSl.max = String(_shapeData.maxMov);
-        mSl.value = '0';
-        if (mVal) mVal.textContent = '0';
-    }
+    _shapeHighlight = {};
 
     _drawShapeOverlayPlots();
+}
+
+// Cross-correlation alignment.  Resamples each segment + the
+// open-aligned mean to a fixed dt grid, then finds the lag (in
+// samples) maximizing the dot-product, refined with parabolic
+// interpolation.  Returns the per-segment shift in seconds.
+function _computeCorrShifts(segments, xMax) {
+    const N = segments.length;
+    if (!N) return [];
+    const dt = 1 / 240;  // fine-grained for sub-frame alignment
+    const xLoRef = -xMax, xHiRef = xMax;
+    const nGrid = Math.round((xHiRef - xLoRef) / dt) + 1;
+    // Build a "mean reference" from open-aligned segments.  We center
+    // each segment by subtracting its own mean before averaging to
+    // avoid baseline-dominated correlation.
+    const resampled = segments.map(s => _resampleXY(s.xs, s.ys, xLoRef, xHiRef, nGrid));
+    const sums = new Float64Array(nGrid), counts = new Float64Array(nGrid);
+    for (const arr of resampled) {
+        for (let i = 0; i < nGrid; i++) {
+            const v = arr[i];
+            if (isFinite(v)) { sums[i] += v; counts[i] += 1; }
+        }
+    }
+    const ref = new Float64Array(nGrid);
+    for (let i = 0; i < nGrid; i++) ref[i] = counts[i] >= 2 ? sums[i] / counts[i] : NaN;
+
+    // Per-segment shift via lag-of-max-correlation + parabolic refine.
+    const maxLagSamples = Math.round(xMax / 2 / dt);   // search ±xMax/2
+    const shifts = new Array(N).fill(0);
+    for (let si = 0; si < N; si++) {
+        const seg = resampled[si];
+        let bestLag = 0, bestC = -Infinity;
+        const corr = new Float64Array(2 * maxLagSamples + 1);
+        for (let k = -maxLagSamples; k <= maxLagSamples; k++) {
+            let s = 0, n = 0, sx = 0, sy = 0, sxx = 0, syy = 0;
+            for (let i = 0; i < nGrid; i++) {
+                const j = i - k;
+                if (j < 0 || j >= nGrid) continue;
+                const a = seg[i], b = ref[j];
+                if (!isFinite(a) || !isFinite(b)) continue;
+                sx += a; sy += b; sxx += a * a; syy += b * b; s += a * b; n += 1;
+            }
+            if (n < 5) { corr[k + maxLagSamples] = -Infinity; continue; }
+            const mx = sx / n, my = sy / n;
+            const num = s - n * mx * my;
+            const den = Math.sqrt(Math.max(1e-12, (sxx - n * mx * mx) * (syy - n * my * my)));
+            const c = num / den;
+            corr[k + maxLagSamples] = c;
+            if (c > bestC) { bestC = c; bestLag = k; }
+        }
+        // Parabolic interpolation around the peak (if it isn't on the
+        // edge of the search range).
+        let refined = bestLag;
+        const idx = bestLag + maxLagSamples;
+        if (idx > 0 && idx < corr.length - 1) {
+            const c0 = corr[idx - 1], c1 = corr[idx], c2 = corr[idx + 1];
+            const denom = (c0 - 2 * c1 + c2);
+            if (isFinite(c0) && isFinite(c2) && denom < 0) {
+                refined = bestLag + 0.5 * (c0 - c2) / denom;
+            }
+        }
+        // shift = -lag * dt (we want to subtract from segment xs so
+        // its peak in correlation lands at the reference's t=0).
+        shifts[si] = -refined * dt;
+    }
+    return shifts;
 }
 
 function _drawShapeOverlayPlots() {
@@ -430,7 +492,6 @@ function _drawShapeOverlayPlots() {
     if (!container || !_shapeData) return;
     const xMax = parseFloat(document.getElementById('shapeXScaleSlider')?.value)
               || _shapeData.xMaxDefault;
-    const hiIdx = parseInt(document.getElementById('shapeMoveSlider')?.value || '0', 10);
     const showMean = !!document.getElementById('shapeShowMean')?.checked;
     const alignR = document.querySelector('input[name="shapeAlign"]:checked');
     const align = alignR ? alignR.value : 'open';
@@ -438,7 +499,7 @@ function _drawShapeOverlayPlots() {
     // X-axis range follows the alignment so that the alignment point
     // sits at t=0 with the chosen total width = xMax.
     let xLo, xHi;
-    if (align === 'peak') { xLo = -xMax / 2; xHi = xMax / 2; }
+    if (align === 'peak' || align === 'corr') { xLo = -xMax / 2; xHi = xMax / 2; }
     else if (align === 'close') { xLo = -xMax; xHi = 0; }
     else { xLo = 0; xHi = xMax; }
 
@@ -448,10 +509,36 @@ function _drawShapeOverlayPlots() {
         const cell = document.createElement('div');
         cell.className = 'results-plot-cell';
         cell.style.cssText = 'min-width:0;';
+
+        // Title with an inline per-trial movement-highlight slider.
         const title = document.createElement('div');
-        title.style.cssText = 'font-size:12px;font-weight:600;margin-bottom:4px;';
-        title.textContent = `${trial.name} — ${trial.segments.length} movements`;
+        title.style.cssText = 'font-size:12px;font-weight:600;margin-bottom:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
+        const tn = document.createElement('span');
+        tn.textContent = trial.name;
+        title.appendChild(tn);
+        const moveLabel = document.createElement('label');
+        moveLabel.style.cssText = 'display:flex;align-items:center;gap:4px;font-size:11px;font-weight:400;color:var(--text-muted);';
+        moveLabel.title = 'Highlight one movement.  0 = none.';
+        moveLabel.innerHTML = 'Movement #:';
+        const moveSlider = document.createElement('input');
+        moveSlider.type = 'range'; moveSlider.min = '0';
+        moveSlider.max = String(trial.segments.length);
+        moveSlider.step = '1';
+        moveSlider.value = String(_shapeHighlight[idx] || 0);
+        moveSlider.style.cssText = 'width:140px;';
+        const moveVal = document.createElement('span');
+        moveVal.style.cssText = 'min-width:28px;';
+        moveVal.textContent = moveSlider.value;
+        moveLabel.appendChild(moveSlider);
+        moveLabel.appendChild(moveVal);
+        moveSlider.addEventListener('input', () => {
+            _shapeHighlight[idx] = parseInt(moveSlider.value, 10);
+            moveVal.textContent = moveSlider.value;
+            _drawShapeOverlayPlots();
+        });
+        title.appendChild(moveLabel);
         cell.appendChild(title);
+
         const plotDiv = document.createElement('div');
         plotDiv.id = `shapeOverlayPlot_${idx}`;
         plotDiv.style.cssText = 'width:100%;height:240px;';
@@ -463,12 +550,20 @@ function _drawShapeOverlayPlots() {
             return;
         }
 
+        const hiIdx = _shapeHighlight[idx] || 0;
+
         // Per-segment alignment shift (subtracted from xs at draw
         // time so the raw segment data can stay in open-aligned form).
-        const shiftOf = s => align === 'peak' ? -s.peakT
+        // For 'corr' we precompute optimal shifts via cross-corr.
+        let corrShifts = null;
+        if (align === 'corr') {
+            corrShifts = _computeCorrShifts(trial.segments, xMax);
+        }
+        const shiftOf = (s, si) => align === 'peak' ? -s.peakT
                             : align === 'close' ? -s.closeT
+                            : align === 'corr' ? (corrShifts ? corrShifts[si] : 0)
                             : 0;
-        const shiftedX = s => s.xs.map(x => x + shiftOf(s));
+        const shiftedX = (s, si) => s.xs.map(x => x + shiftOf(s, si));
 
         // Dim the rest when a movement is highlighted.
         const dimmed = hiIdx > 0;
@@ -476,7 +571,7 @@ function _drawShapeOverlayPlots() {
             ? 'rgba(31,119,180,0.15)'
             : 'rgba(31,119,180,0.45)';
         const traces = trial.segments.map((s, mi) => ({
-            x: shiftedX(s), y: s.ys, type: 'scatter', mode: 'lines',
+            x: shiftedX(s, mi), y: s.ys, type: 'scatter', mode: 'lines',
             line: { width: 1, color: baseColor },
             hoverinfo: 'skip', showlegend: false,
         }));
@@ -486,8 +581,9 @@ function _drawShapeOverlayPlots() {
         if (showMean) {
             const N = 200;
             const sums = new Float64Array(N), counts = new Float64Array(N);
-            for (const s of trial.segments) {
-                const sx = shiftedX(s);
+            for (let mi = 0; mi < trial.segments.length; mi++) {
+                const s = trial.segments[mi];
+                const sx = shiftedX(s, mi);
                 const ys = _resampleXY(sx, s.ys, xLo, xHi, N);
                 for (let i = 0; i < N; i++) {
                     if (isFinite(ys[i])) { sums[i] += ys[i]; counts[i] += 1; }
@@ -515,7 +611,7 @@ function _drawShapeOverlayPlots() {
         if (hiIdx > 0 && hiIdx <= trial.segments.length) {
             const s = trial.segments[hiIdx - 1];
             traces.push({
-                x: shiftedX(s), y: s.ys, type: 'scatter', mode: 'lines',
+                x: shiftedX(s, hiIdx - 1), y: s.ys, type: 'scatter', mode: 'lines',
                 line: { width: 2.5, color: '#d32f2f' },
                 hoverinfo: 'skip', showlegend: false,
             });
@@ -523,6 +619,7 @@ function _drawShapeOverlayPlots() {
 
         const xTitle = align === 'peak'
             ? 'Time from peak (s)'
+            : align === 'corr' ? 'Time from correlation peak (s)'
             : align === 'close' ? 'Time from closing (s)'
                                 : 'Time from opening (s)';
         const layout = {
@@ -550,15 +647,9 @@ function _drawShapeOverlayPlots() {
 document.addEventListener('DOMContentLoaded', () => {
     const xSl = document.getElementById('shapeXScaleSlider');
     const xVal = document.getElementById('shapeXScaleVal');
-    const mSl = document.getElementById('shapeMoveSlider');
-    const mVal = document.getElementById('shapeMoveVal');
     const meanCb = document.getElementById('shapeShowMean');
     if (xSl) xSl.addEventListener('input', () => {
         if (xVal) xVal.textContent = `${(+xSl.value).toFixed(2)} s`;
-        _drawShapeOverlayPlots();
-    });
-    if (mSl) mSl.addEventListener('input', () => {
-        if (mVal) mVal.textContent = mSl.value;
         _drawShapeOverlayPlots();
     });
     if (meanCb) meanCb.addEventListener('change', _drawShapeOverlayPlots);
