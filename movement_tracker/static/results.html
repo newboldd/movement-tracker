@@ -189,8 +189,8 @@
                     <label style="display:flex;align-items:center;gap:3px;">
                         <input type="radio" name="shapeMetric" value="cov"> cov
                     </label>
-                    <label title="Subtract the global trial mean from every time series before computing correlations or covariances.">
-                        <input type="checkbox" id="shapeSubtractAvg"> −avg
+                    <label title="Regress the global trial mean out of every time series (least-squares fit per segment) before computing correlations or covariances.">
+                        <input type="checkbox" id="shapeSubtractAvg"> Regress out avg
                     </label>
                     <label title="Reorder the matrix by hierarchical clustering and show the dendrogram.">
                         <input type="checkbox" id="shapeClusterOn" checked> Cluster
@@ -337,6 +337,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=11"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=94"></script>
+    <script src="/static/js/results.js?v=95"></script>
 </body>
 </html>

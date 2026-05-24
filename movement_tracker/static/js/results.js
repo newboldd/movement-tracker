@@ -1119,8 +1119,12 @@ function _pairwiseMatrix(trial, xLo, xHi, shiftedX, metric, subtractMean) {
     const GRID = 120;
     const resampled = trial.segments.map((s, mi) =>
         _resampleXY(shiftedX(s, mi), s.ys, xLo, xHi, GRID));
-    // Optionally subtract the global (per-time-point) mean across all
-    // segments so the matrix measures shape relative to the mean.
+    // Optionally regress the global mean out of each time series.
+    // For each segment we fit y_i ≈ α + β·mean (least squares, using
+    // only grid points where both y_i and the mean are defined), then
+    // keep the residual y_i − α − β·mean.  Correlations of the
+    // residuals then capture shape variation independent of the
+    // shared "average movement".
     let arrs = resampled;
     if (subtractMean) {
         const meanArr = new Float64Array(GRID);
@@ -1131,10 +1135,32 @@ function _pairwiseMatrix(trial, xLo, xHi, shiftedX, metric, subtractMean) {
             }
         }
         for (let k = 0; k < GRID; k++) meanArr[k] = counts[k] > 0 ? meanArr[k] / counts[k] : NaN;
+
         arrs = resampled.map(a => {
-            const out = new Float64Array(GRID);
+            // Centered statistics over the overlap of finite samples.
+            let n = 0, sy = 0, sm = 0, sym = 0, smm = 0;
             for (let k = 0; k < GRID; k++) {
-                out[k] = (isFinite(a[k]) && isFinite(meanArr[k])) ? a[k] - meanArr[k] : NaN;
+                if (isFinite(a[k]) && isFinite(meanArr[k])) {
+                    n += 1;
+                    sy += a[k]; sm += meanArr[k];
+                    sym += a[k] * meanArr[k];
+                    smm += meanArr[k] * meanArr[k];
+                }
+            }
+            const out = new Float64Array(GRID);
+            if (n < 2) {
+                for (let k = 0; k < GRID; k++) out[k] = NaN;
+                return out;
+            }
+            const my = sy / n, mm = sm / n;
+            const varM = smm - n * mm * mm;
+            const covYM = sym - n * my * mm;
+            const beta = (Math.abs(varM) > 1e-12) ? covYM / varM : 0;
+            const alpha = my - beta * mm;
+            for (let k = 0; k < GRID; k++) {
+                out[k] = (isFinite(a[k]) && isFinite(meanArr[k]))
+                    ? a[k] - alpha - beta * meanArr[k]
+                    : NaN;
             }
             return out;
         });
