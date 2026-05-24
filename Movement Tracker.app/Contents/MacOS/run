@@ -1,0 +1,12 @@
+#!/bin/bash
+# Movement Tracker .app launcher.
+# Resolves the project root (the directory containing this .app), then
+# opens a Terminal window running ./setup.sh so users see install/run logs.
+APP_PATH="$(cd "$(dirname "$0")/../../.." && pwd)"
+PROJECT_DIR="$APP_PATH"
+osascript <<APPLESCRIPT
+tell application "Terminal"
+    activate
+    do script "cd \"$PROJECT_DIR\" && ./setup.sh"
+end tell
+APPLESCRIPT
