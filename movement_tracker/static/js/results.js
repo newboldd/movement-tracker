@@ -567,7 +567,9 @@ function _buildShapeOverlayCells() {
     _shapeData.trials.forEach((trial, idx) => {
         const cell = document.createElement('div');
         cell.className = 'results-plot-cell';
-        cell.style.cssText = 'min-width:0;';
+        // Fixed-width column so all trials sit in one horizontally
+        // scrollable row.
+        cell.style.cssText = 'flex:0 0 auto;width:380px;min-width:0;';
 
         // Title with an inline per-trial movement-highlight slider.
         const title = document.createElement('div');
@@ -633,10 +635,11 @@ function _buildShapeOverlayCells() {
 
         // Correlation matrix (single heatmap, optionally clustered).
         // Always uses the dendrogram subplot's domain so unsorted and
-        // clustered modes render at the same physical size.
+        // clustered modes render at the same physical size.  Width
+        // matches the shape-overlay plot above it.
         const corrDiv = document.createElement('div');
         corrDiv.id = `shapeCorrPlot_${idx}`;
-        corrDiv.style.cssText = 'width:70%;margin-top:6px;';
+        corrDiv.style.cssText = 'width:100%;margin-top:6px;';
         cell.appendChild(corrDiv);
 
         container.appendChild(cell);
