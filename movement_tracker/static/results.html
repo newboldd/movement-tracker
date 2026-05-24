@@ -146,7 +146,7 @@
                     </label>
                     <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
                     <label title="Plot the across-movement mean trace in black.">
-                        <input type="checkbox" id="shapeShowMean"> Show average
+                        <input type="checkbox" id="shapeShowMean" checked> Show average
                     </label>
                     <label title="Mark peak events on the highlighted movement (or all if Movement # = All).">
                         <input type="checkbox" id="shapeShowPeaks" checked> Peak markers
@@ -154,7 +154,7 @@
                     <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
                     <span style="font-size:11px;color:var(--text-muted);">Align:</span>
                     <label style="display:flex;align-items:center;gap:3px;">
-                        <input type="radio" name="shapeAlign" value="open" checked> Open
+                        <input type="radio" name="shapeAlign" value="open"> Open
                     </label>
                     <label style="display:flex;align-items:center;gap:3px;">
                         <input type="radio" name="shapeAlign" value="peak"> Peak
@@ -164,11 +164,11 @@
                     </label>
                     <label style="display:flex;align-items:center;gap:3px;"
                            title="Align each movement to the trial average by max cross-correlation (parabolic interpolation).">
-                        <input type="radio" name="shapeAlign" value="corr"> Correlation
+                        <input type="radio" name="shapeAlign" value="corr" checked> Correlation
                     </label>
                     <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
                     <label title="Reorder the correlation matrix by hierarchical clustering and show the dendrogram.">
-                        <input type="checkbox" id="shapeClusterOn"> Cluster
+                        <input type="checkbox" id="shapeClusterOn" checked> Cluster
                     </label>
                     <label title="Dendrogram height cutoff for hierarchical clustering (avg linkage, 1-r distance, range 0-2)."
                            style="display:flex;align-items:center;gap:6px;margin:0;">
@@ -309,6 +309,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=10"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=75"></script>
+    <script src="/static/js/results.js?v=76"></script>
 </body>
 </html>
