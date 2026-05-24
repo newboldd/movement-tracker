@@ -316,8 +316,8 @@ const osc = (() => {
         const freqStep = 0.2;
         const phaseStep = 0.8;
 
-        for (let f1 = 0.1; f1 <= 12; f1 += freqStep) {
-            for (let f2 = 0.1; f2 <= 12; f2 += freqStep) {
+        for (let f1 = 0.1; f1 <= 20; f1 += freqStep) {
+            for (let f2 = 0.1; f2 <= 20; f2 += freqStep) {
                 for (let p1 = 0; p1 < 6.28; p1 += phaseStep) {
                     for (let p2 = 0; p2 < 6.28; p2 += phaseStep) {
                         const w1 = { freq: f1, amp: range / 2, phase: p1, offset: mean };
