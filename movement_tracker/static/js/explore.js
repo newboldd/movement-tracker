@@ -331,10 +331,14 @@ function renderScatter() {
             showline: true, linecolor: '#666', linewidth: 2, mirror: false, zeroline: false,
         },
         yaxis: {
-            title: { text: Y.label, font: { size: 24 } },
+            // automargin pushes the title left of the widest tick label
+            // automatically and grows the plot's left margin to fit, so
+            // the title can never sit on top of the numbers.
+            title: { text: Y.label, font: { size: 24 }, standoff: 14 },
             color: '#666', gridcolor: '#f0f0f0',
             tickfont: { size: 22 },
             showline: true, linecolor: '#666', linewidth: 2, mirror: false, zeroline: false,
+            automargin: true,
         },
         plot_bgcolor: '#fff', paper_bgcolor: '#fff',
         legend: { orientation: 'h', y: 1.08, font: { size: 22 } },
@@ -495,11 +499,14 @@ function renderBar() {
             tickvals: groups.map((_, i) => i), ticktext: groups, color: '#666',
             tickfont: { size: 22 },
             showline: true, linecolor: '#666', linewidth: 2, zeroline: false,
+            automargin: true,
         },
         yaxis: {
-            title: { text: X.label, font: { size: 24 } }, color: '#666', gridcolor: '#f0f0f0',
+            title: { text: X.label, font: { size: 24 }, standoff: 14 },
+            color: '#666', gridcolor: '#f0f0f0',
             tickfont: { size: 22 },
             showline: true, linecolor: '#666', linewidth: 2, zeroline: false,
+            automargin: true,
         },
         plot_bgcolor: '#fff', paper_bgcolor: '#fff', bargap: 0.5,
     };
