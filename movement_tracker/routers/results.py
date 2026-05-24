@@ -610,6 +610,247 @@ def _build_movement_params(
     return movements, trial_names
 
 
+# ── Movement-similarity helpers (parallels the JS shape-overlay code) ──
+def _resample_seg_to_grid(xs, ys, x_lo: float, x_hi: float, n_pts: int):
+    """Linear-interp resample to an evenly-spaced grid; NaN outside the
+    segment's own [xs[0], xs[-1]] range."""
+    out = np.full(n_pts, np.nan)
+    xs_arr = np.asarray(xs, dtype=float)
+    ys_arr = np.asarray(ys, dtype=float)
+    if xs_arr.size < 2:
+        return out
+    grid = np.linspace(x_lo, x_hi, n_pts)
+    in_range = (grid >= xs_arr[0]) & (grid <= xs_arr[-1])
+    out[in_range] = np.interp(grid[in_range], xs_arr, ys_arr)
+    return out
+
+
+def _upper_triangle_pearson_mean(arrs) -> float | None:
+    """nanmean of pairwise Pearson r across the upper triangle of the
+    correlation matrix between the resampled segments."""
+    vals = []
+    n = len(arrs)
+    for i in range(n):
+        a = arrs[i]
+        for j in range(i + 1, n):
+            b = arrs[j]
+            mask = np.isfinite(a) & np.isfinite(b)
+            cnt = int(mask.sum())
+            if cnt < 5:
+                continue
+            aa = a[mask]
+            bb = b[mask]
+            ma = aa.mean(); mb = bb.mean()
+            ax = aa - ma; bx = bb - mb
+            den = math.sqrt(max(1e-12, (ax * ax).sum() * (bx * bx).sum()))
+            r = float((ax * bx).sum() / den) if den > 0 else None
+            if r is not None and math.isfinite(r):
+                vals.append(r)
+    if not vals:
+        return None
+    return float(np.mean(vals))
+
+
+def _movement_corr_shifts(segs, x_max: float, dt: float = 1.0 / 240) -> list:
+    """Peak-aligned 2-pass cross-correlation refinement.  Returns the
+    shift applied to each segment's open-aligned xs.  Mirror of the
+    JavaScript `_computeCorrShifts` in static/js/results.js."""
+    n = len(segs)
+    if n == 0:
+        return []
+    x_lo_ref, x_hi_ref = -x_max, x_max
+    n_grid = int(round((x_hi_ref - x_lo_ref) / dt)) + 1
+    # Peak-aligned resamples.
+    peak_aligned = []
+    peak_ts = [s["peakT"] for s in segs]
+    for s, pt in zip(segs, peak_ts):
+        xs_shift = (np.asarray(s["xs"], dtype=float) - pt).tolist()
+        peak_aligned.append(_resample_seg_to_grid(
+            xs_shift, s["ys"], x_lo_ref, x_hi_ref, n_grid))
+
+    min_count = max(2, math.ceil(n * 0.25))
+
+    def build_mean(extra_lags):
+        sums = np.zeros(n_grid)
+        counts = np.zeros(n_grid)
+        for i, arr in enumerate(peak_aligned):
+            k = int(round(extra_lags[i])) if extra_lags is not None else 0
+            if k == 0:
+                m = np.isfinite(arr)
+                sums[m] += arr[m]
+                counts[m] += 1
+            else:
+                ii_lo = max(0, k)
+                ii_hi = min(n_grid, n_grid + k)
+                jj_lo = ii_lo - k
+                jj_hi = ii_hi - k
+                if ii_hi <= ii_lo:
+                    continue
+                seg_slice = arr[jj_lo:jj_hi]
+                m = np.isfinite(seg_slice)
+                sums[ii_lo:ii_hi][m] += seg_slice[m]
+                counts[ii_lo:ii_hi][m] += 1
+        ref = np.where(counts >= min_count, sums / np.maximum(counts, 1), np.nan)
+        idxs = np.where(np.isfinite(ref))[0]
+        if idxs.size == 0:
+            return ref, -math.inf, math.inf
+        first, last = int(idxs[0]), int(idxs[-1])
+        return ref, x_lo_ref + first * dt, x_lo_ref + last * dt
+
+    max_lag = int(round(x_max / 2 / dt))
+
+    def one_pass(ref, mean_xmin, mean_xmax):
+        lags = np.zeros(n)
+        for si in range(n):
+            seg = peak_aligned[si]
+            k_lo = max(-max_lag, math.ceil(-mean_xmax / dt))
+            k_hi = min( max_lag, math.floor(-mean_xmin / dt))
+            if k_lo > k_hi:
+                lags[si] = 0
+                continue
+            corr = np.full(2 * max_lag + 1, -math.inf)
+            best_lag = 0
+            best_c = -math.inf
+            for k in range(k_lo, k_hi + 1):
+                ii_lo = max(0, k)
+                ii_hi = min(n_grid, n_grid + k)
+                if ii_hi <= ii_lo:
+                    continue
+                a = seg[ii_lo:ii_hi]
+                b = ref[ii_lo - k:ii_hi - k]
+                m = np.isfinite(a) & np.isfinite(b)
+                if m.sum() < 5:
+                    continue
+                aa = a[m]; bb = b[m]
+                ma = aa.mean(); mb = bb.mean()
+                ax = aa - ma; bx = bb - mb
+                den = math.sqrt(max(1e-12, (ax * ax).sum() * (bx * bx).sum()))
+                c = float((ax * bx).sum() / den) if den > 0 else -math.inf
+                corr[k + max_lag] = c
+                if c > best_c:
+                    best_c = c
+                    best_lag = k
+            refined = float(best_lag)
+            if k_lo < best_lag < k_hi:
+                c0 = corr[best_lag - 1 + max_lag]
+                c1 = corr[best_lag     + max_lag]
+                c2 = corr[best_lag + 1 + max_lag]
+                denom = c0 - 2 * c1 + c2
+                if math.isfinite(c0) and math.isfinite(c2) and denom < 0:
+                    refined = best_lag + 0.5 * (c0 - c2) / denom
+                    refined = max(float(k_lo), min(float(k_hi), refined))
+            lags[si] = refined
+        return lags
+
+    ref1, mx_min1, mx_max1 = build_mean(None)
+    lags1 = one_pass(ref1, mx_min1, mx_max1)
+    ref2, mx_min2, mx_max2 = build_mean(lags1.tolist())
+    lags2 = one_pass(ref2, mx_min2, mx_max2)
+    # Final guard: clamp so the shifted peak lands inside the
+    # rebuilt-from-pass2 mean extent.
+    _, fxmin, fxmax = build_mean(lags2.tolist())
+    if math.isfinite(fxmin) and math.isfinite(fxmax):
+        for i in range(n):
+            peak_out = -lags2[i] * dt
+            if peak_out < fxmin:
+                lags2[i] = -fxmin / dt
+            elif peak_out > fxmax:
+                lags2[i] = -fxmax / dt
+    return [-peak_ts[i] - float(lags2[i]) * dt for i in range(n)]
+
+
+def _movement_similarity_per_trial(distances: list, trials: list[dict],
+                                     all_movements: list[dict],
+                                     grid: int = 120) -> dict:
+    """Compute the per-trial "movement similarity" for each alignment
+    mode.  Returns {trial_idx: {'corr':r, 'open':r, 'peak':r, 'close':r}}
+    where r is the nanmean of the upper triangle of the Pearson
+    correlation matrix between all movements in that trial under the
+    given alignment."""
+    movs_by_trial: dict[int, list] = {}
+    for m in all_movements:
+        if (m.get("open_frame_local") is None
+                or m.get("close_frame_local") is None):
+            continue
+        movs_by_trial.setdefault(int(m["trial_idx"]), []).append(m)
+
+    result: dict[int, dict] = {}
+    n_dist = len(distances)
+    for ti, trial in enumerate(trials):
+        movs = movs_by_trial.get(ti, [])
+        if len(movs) < 2:
+            result[ti] = {a: None for a in ("corr", "open", "peak", "close")}
+            continue
+        fps = float(trial.get("fps", 60) or 60)
+        s_start = int(trial["start_frame"])
+        s_end = int(trial["end_frame"])
+
+        segs = []
+        global_max_t = 0.0
+        for m in movs:
+            o_loc = max(0, int(m["open_frame_local"]))
+            c_loc = int(m["close_frame_local"])
+            o_g = s_start + o_loc
+            c_g = min(s_end, s_start + c_loc)
+            if c_g <= o_g:
+                continue
+            xs = []; ys = []
+            for f in range(o_g, c_g + 1):
+                if f < 0 or f >= n_dist:
+                    continue
+                v = distances[f]
+                if v is None:
+                    continue
+                xs.append((f - o_g) / fps)
+                ys.append(float(v))
+            if len(xs) < 2:
+                continue
+            p_loc = m.get("peak_frame_local")
+            peak_g = (s_start + int(p_loc)) if p_loc is not None else o_g
+            peak_g = max(o_g, min(c_g, peak_g))
+            segs.append({
+                "xs": xs, "ys": ys,
+                "peakT": (peak_g - o_g) / fps,
+                "closeT": (c_g  - o_g) / fps,
+            })
+            if xs[-1] > global_max_t:
+                global_max_t = xs[-1]
+
+        if len(segs) < 2 or global_max_t <= 0:
+            result[ti] = {a: None for a in ("corr", "open", "peak", "close")}
+            continue
+
+        x_max = max(0.5, math.ceil(global_max_t * 1.05 * 10) / 10)
+
+        # Open: t=0 at opening event.
+        arrs = [_resample_seg_to_grid(s["xs"], s["ys"], 0, x_max, grid)
+                for s in segs]
+        sim_open = _upper_triangle_pearson_mean(arrs)
+        # Peak: t=0 at peak.
+        arrs = [_resample_seg_to_grid(
+                    [x - s["peakT"] for x in s["xs"]],
+                    s["ys"], -x_max / 2, x_max / 2, grid) for s in segs]
+        sim_peak = _upper_triangle_pearson_mean(arrs)
+        # Close: t=0 at closing event.
+        arrs = [_resample_seg_to_grid(
+                    [x - s["closeT"] for x in s["xs"]],
+                    s["ys"], -x_max, 0, grid) for s in segs]
+        sim_close = _upper_triangle_pearson_mean(arrs)
+        # Corr: peak-seeded 2-pass cross-correlation.
+        shifts = _movement_corr_shifts(segs, x_max)
+        arrs = [_resample_seg_to_grid(
+                    [x + shifts[i] for x in segs[i]["xs"]],
+                    segs[i]["ys"], -x_max / 2, x_max / 2, grid)
+                for i in range(len(segs))]
+        sim_corr = _upper_triangle_pearson_mean(arrs)
+
+        result[ti] = {
+            "corr": sim_corr, "open": sim_open,
+            "peak": sim_peak, "close": sim_close,
+        }
+    return result
+
+
 def _linreg_fit(x: list[float], y: list[float]) -> tuple[float, float] | None:
     """OLS fit of y on x → (slope, R²).  None if < 2 valid points."""
     pairs = [(xi, yi) for xi, yi in zip(x, y)
@@ -1098,6 +1339,10 @@ def get_group_comparison(include_auto: bool = Query(False),
                             s[f"variance_{base}"] = None
                         else:
                             s[f"variance_{base}"] = round(abs(float(cv_v) * float(m_v)), 4)
+            # Movement-similarity keys can't be derived; fall through
+            # to live compute if any cached subject is missing them.
+            if subjs and "movement_similarity" not in subjs[0]:
+                raise RuntimeError("cache missing movement_similarity")
             return data
         except Exception:
             pass
@@ -1130,8 +1375,8 @@ def get_group_comparison(include_auto: bool = Query(False),
             # Gated by MT_EXPORT_CACHE so the live app is unaffected.
             ckey = (subject_name, source, bool(include_auto))
             cached = _EXPORT_MOVE_CACHE.get(ckey) if _EXPORT_CACHE_ON else None
-            if cached is not None:
-                trials, all_movements, event_source = cached
+            if cached is not None and len(cached) >= 4:
+                trials, all_movements, event_source, similarities = cached
             else:
                 distances, trials, _src = _load_distances_and_trials(subject_name, source)
                 if include_auto:
@@ -1140,8 +1385,14 @@ def get_group_comparison(include_auto: bool = Query(False),
                     events = saved_events
                     event_source = "saved" if has_saved else "none"
                 all_movements, _ = _build_movement_params(distances, events, trials)
+                # Per-trial movement-similarity (4 alignments).  Computed
+                # once per (subject, source, include_auto); aggregation
+                # over hand+trial selection happens below.
+                similarities = _movement_similarity_per_trial(
+                    distances, trials, all_movements)
                 if _EXPORT_CACHE_ON:
-                    _EXPORT_MOVE_CACHE[ckey] = (trials, all_movements, event_source)
+                    _EXPORT_MOVE_CACHE[ckey] = (trials, all_movements,
+                                                  event_source, similarities)
             # Larger / Smaller SE: pick which hand based on each hand's
             # last-trial sequence-effect slope (amplitude key, current
             # seq_mode) before applying the standard trial selector.
@@ -1177,6 +1428,22 @@ def get_group_comparison(include_auto: bool = Query(False),
             "laterality_raw": subj.get("laterality") or None,
             "laterality_side": _laterality_more_side(subj.get("laterality")),
         }
+
+        # Movement-similarity (nanmean upper-triangle r) averaged
+        # across the trials matching the hand+trial selection.
+        _SIM_KEYS = (
+            ("movement_similarity",       "corr"),
+            ("movement_similarity_open",  "open"),
+            ("movement_similarity_peak",  "peak"),
+            ("movement_similarity_close", "close"),
+        )
+        for out_key, align_key in _SIM_KEYS:
+            vals = []
+            for ti in sel_idx:
+                v = (similarities.get(ti) or {}).get(align_key)
+                if v is not None and math.isfinite(v):
+                    vals.append(float(v))
+            entry[out_key] = round(float(np.mean(vals)), 4) if vals else None
 
         for key in PARAM_KEYS:
             vals = [m[key] for m in movements if m[key] is not None]
@@ -1249,6 +1516,14 @@ def _explore_variable_catalog() -> list[dict]:
                     "aggregatable": True})
     out.append({"key": "frequency", "label": "Frequency (Hz)",
                 "category": "movement", "aggregatable": False})
+    for k, lbl in (
+        ("movement_similarity",       "Movement Similarity"),
+        ("movement_similarity_open",  "Movement Similarity (open)"),
+        ("movement_similarity_peak",  "Movement Similarity (peak)"),
+        ("movement_similarity_close", "Movement Similarity (close)"),
+    ):
+        out.append({"key": k, "label": lbl, "category": "movement",
+                    "aggregatable": False})
     return out
 
 
@@ -1257,6 +1532,8 @@ def _explore_value_keys() -> list[str]:
     keys = [k for k, _ in _CLINICAL_VARS] + ["frequency"]
     for k in _MOVE_PARAM_LABELS:
         keys += [f"mean_{k}", f"variance_{k}", f"cv_{k}", f"seq_{k}", f"seqslope_{k}"]
+    keys += ["movement_similarity", "movement_similarity_open",
+             "movement_similarity_peak", "movement_similarity_close"]
     return keys
 
 
@@ -1351,6 +1628,10 @@ def get_explore_variables(include_auto: bool = Query(False),
             if "variance" not in (cat.get("aggregators") or []):
                 cat.setdefault("aggregators", []).append("variance")
                 data["catalog"] = cat
+            # Movement-similarity keys can't be derived from cached
+            # values; fall through to live compute when missing.
+            if subjs and "movement_similarity" not in (subjs[0].get("vars") or {}):
+                raise RuntimeError("cache missing movement_similarity")
             return data
         except Exception:
             pass    # corrupt cache → recompute
