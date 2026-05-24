@@ -147,19 +147,21 @@
                 </button>
             </div>
             <!-- Row 2: X variable + aggregator + info -->
-            <div style="flex-basis:100%;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                <label id="exXLabel" style="display:flex;align-items:center;gap:6px;margin:0;">X:
+            <div style="flex-basis:100%;display:flex;align-items:center;gap:8px;flex-wrap:nowrap;">
+                <label id="exXLabel" style="display:flex;align-items:center;gap:6px;margin:0;flex:0 0 auto;">X:
                     <select id="exVarX" style="min-width:200px;"></select>
                 </label>
-                <span id="exXAgg" class="agg-radios" style="display:flex;align-items:center;gap:8px;font-size:11px;"></span>
+                <span id="exXAgg" class="agg-radios" style="display:flex;align-items:center;gap:8px;font-size:11px;flex-wrap:nowrap;white-space:nowrap;"></span>
                 <span id="exInfo" style="font-size:11px;color:var(--text-muted);"></span>
             </div>
-            <!-- Row 3: Y variable + aggregator (hidden in bar mode) -->
-            <div id="exYRow" style="flex-basis:100%;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                <label id="exYLabel" style="display:flex;align-items:center;gap:6px;margin:0;">Y:
+            <!-- Row 3: Y variable + aggregator (hidden in bar mode).
+                 flex-wrap:nowrap keeps the aggregator radios on the
+                 same line as the Y selector (matches the X row). -->
+            <div id="exYRow" style="flex-basis:100%;display:flex;align-items:center;gap:8px;flex-wrap:nowrap;">
+                <label id="exYLabel" style="display:flex;align-items:center;gap:6px;margin:0;flex:0 0 auto;">Y:
                     <select id="exVarY" style="min-width:200px;"></select>
                 </label>
-                <span id="exYAgg" class="agg-radios" style="display:flex;align-items:center;gap:8px;font-size:11px;"></span>
+                <span id="exYAgg" class="agg-radios" style="display:flex;align-items:center;gap:8px;font-size:11px;flex-wrap:nowrap;white-space:nowrap;"></span>
             </div>
         </div>
 
@@ -177,6 +179,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=10"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/explore.js?v=22"></script>
+    <script src="/static/js/explore.js?v=23"></script>
 </body>
 </html>
