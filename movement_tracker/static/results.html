@@ -166,6 +166,10 @@
                            title="Align each movement to the trial average by max cross-correlation (parabolic interpolation).">
                         <input type="radio" name="shapeAlign" value="corr" checked> Correlation
                     </label>
+                    <label style="display:flex;align-items:center;gap:3px;"
+                           title="Time-warp each movement so opens, peaks, and closes align to the trial median durations.">
+                        <input type="radio" name="shapeAlign" value="rigid"> Rigid
+                    </label>
                     <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
                     <span style="font-size:11px;color:var(--text-muted);">Metric:</span>
                     <label style="display:flex;align-items:center;gap:3px;">
@@ -319,6 +323,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=10"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=85"></script>
+    <script src="/static/js/results.js?v=86"></script>
 </body>
 </html>

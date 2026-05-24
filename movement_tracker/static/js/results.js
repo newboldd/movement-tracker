@@ -757,7 +757,9 @@ function _redrawOneTrial(idx) {
     if (!trial) return;
     const plotDiv = document.getElementById(`shapeOverlayPlot_${idx}`);
     if (!plotDiv) return;
-    const { xMax, showMean, align, xLo, xHi } = _shapeOverlayState();
+    const _state = _shapeOverlayState();
+    const { xMax, showMean, align } = _state;
+    let { xLo, xHi } = _state;
 
     if (!trial.segments.length) {
         plotDiv.innerHTML = '<div class="results-no-data">No movements</div>';
@@ -766,18 +768,43 @@ function _redrawOneTrial(idx) {
 
     const hiIdx = _shapeHighlight[idx] || 0;
 
-        // Per-segment alignment shift (subtracted from xs at draw
-        // time so the raw segment data can stay in open-aligned form).
-        // For 'corr' we precompute optimal shifts via cross-corr.
+        // Per-segment alignment.  Shift-based aligns (open/peak/close/corr)
+        // just translate xs.  "Rigid" piecewise-linearly time-warps each
+        // movement so its opening and closing phases match the trial's
+        // median durations, putting all opens/peaks/closes on top of
+        // each other.
         let corrShifts = null;
         if (align === 'corr') {
             corrShifts = _computeCorrShifts(trial.segments, xMax);
+        }
+        // Median open-peak and peak-close durations for Rigid.
+        let medOp = 0, medPc = 0;
+        if (align === 'rigid') {
+            const _median = (vs) => {
+                const a = vs.filter(v => v > 0 && isFinite(v)).sort((p, q) => p - q);
+                if (!a.length) return 0;
+                const m = Math.floor(a.length / 2);
+                return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+            };
+            medOp = _median(trial.segments.map(s => s.peakT));
+            medPc = _median(trial.segments.map(s => s.closeT - s.peakT));
+            const total = (medOp + medPc) * 1.05;
+            xLo = 0;
+            xHi = total > 0 ? total : (xMax || 1);
         }
         const shiftOf = (s, si) => align === 'peak' ? -s.peakT
                             : align === 'close' ? -s.closeT
                             : align === 'corr' ? (corrShifts ? corrShifts[si] : 0)
                             : 0;
-        const shiftedX = (s, si) => s.xs.map(x => x + shiftOf(s, si));
+        const warpT = (s, si, t) => {
+            if (align !== 'rigid') return t + shiftOf(s, si);
+            if (t <= 0) return 0;
+            const pT = s.peakT, cT = s.closeT;
+            if (t <= pT) return pT > 0 ? t * (medOp / pT) : medOp;
+            const pc = cT - pT;
+            return pc > 0 ? medOp + (t - pT) * (medPc / pc) : medOp + medPc;
+        };
+        const shiftedX = (s, si) => s.xs.map(x => warpT(s, si, x));
 
         // Cluster pre-compute (shared with the corr-matrix draw).
         // Use the already-shifted data so the clustering reflects
@@ -916,7 +943,7 @@ function _redrawOneTrial(idx) {
             for (const mi of markIdxs) {
                 const s = trial.segments[mi];
                 if (s.peakY == null) continue;
-                pxs.push(s.peakT + shiftOf(s, mi));
+                pxs.push(warpT(s, mi, s.peakT));
                 pys.push(s.peakY);
             }
             if (pxs.length) {
@@ -937,6 +964,7 @@ function _redrawOneTrial(idx) {
             ? 'Time from peak (s)'
             : align === 'corr' ? 'Time from correlation peak (s)'
             : align === 'close' ? 'Time from closing (s)'
+            : align === 'rigid' ? 'Canonical time (s)'
                                 : 'Time from opening (s)';
         const layout = {
             margin: { t: 6, b: 36, l: 48, r: 8 },
