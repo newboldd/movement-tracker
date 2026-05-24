@@ -418,6 +418,9 @@ function renderShapeOverlayPlots() {
     }
     _shapeHighlight = {};
 
+    // Force a fresh cell build (new subject — sliders / titles differ).
+    const cont = document.getElementById('shapeOverlayPlots');
+    if (cont) cont.innerHTML = '';
     _drawShapeOverlayPlots();
 }
 
@@ -533,24 +536,13 @@ function _computeCorrShifts(segments, xMax) {
     return segments.map((s, si) => -s.peakT - lags2[si] * dt);
 }
 
-function _drawShapeOverlayPlots() {
+// Build cells once (title + per-trial slider + plot div).  Re-used by
+// _drawShapeOverlayPlots — DOM is left in place between draws so the
+// movement sliders don't get destroyed mid-drag.
+function _buildShapeOverlayCells() {
     const container = document.getElementById('shapeOverlayPlots');
     if (!container || !_shapeData) return;
-    const xMax = parseFloat(document.getElementById('shapeXScaleSlider')?.value)
-              || _shapeData.xMaxDefault;
-    const showMean = !!document.getElementById('shapeShowMean')?.checked;
-    const alignR = document.querySelector('input[name="shapeAlign"]:checked');
-    const align = alignR ? alignR.value : 'open';
-
-    // X-axis range follows the alignment so that the alignment point
-    // sits at t=0 with the chosen total width = xMax.
-    let xLo, xHi;
-    if (align === 'peak' || align === 'corr') { xLo = -xMax / 2; xHi = xMax / 2; }
-    else if (align === 'close') { xLo = -xMax; xHi = 0; }
-    else { xLo = 0; xHi = xMax; }
-
     container.innerHTML = '';
-
     _shapeData.trials.forEach((trial, idx) => {
         const cell = document.createElement('div');
         cell.className = 'results-plot-cell';
@@ -562,10 +554,11 @@ function _drawShapeOverlayPlots() {
         const tn = document.createElement('span');
         tn.textContent = trial.name;
         title.appendChild(tn);
+
         const moveLabel = document.createElement('label');
         moveLabel.style.cssText = 'display:flex;align-items:center;gap:4px;font-size:11px;font-weight:400;color:var(--text-muted);';
         moveLabel.title = 'Highlight one movement.  0 = none.';
-        moveLabel.innerHTML = 'Movement #:';
+        moveLabel.appendChild(document.createTextNode('Movement #:'));
         const moveSlider = document.createElement('input');
         moveSlider.type = 'range'; moveSlider.min = '0';
         moveSlider.max = String(trial.segments.length);
@@ -573,15 +566,42 @@ function _drawShapeOverlayPlots() {
         moveSlider.value = String(_shapeHighlight[idx] || 0);
         moveSlider.style.cssText = 'width:140px;';
         const moveVal = document.createElement('span');
-        moveVal.style.cssText = 'min-width:28px;';
+        moveVal.style.cssText = 'min-width:28px;text-align:right;';
         moveVal.textContent = moveSlider.value;
         moveLabel.appendChild(moveSlider);
         moveLabel.appendChild(moveVal);
-        moveSlider.addEventListener('input', () => {
-            _shapeHighlight[idx] = parseInt(moveSlider.value, 10);
-            moveVal.textContent = moveSlider.value;
-            _drawShapeOverlayPlots();
-        });
+
+        const _setHighlight = (v) => {
+            const N = trial.segments.length;
+            let n = parseInt(v, 10);
+            if (!isFinite(n)) n = 0;
+            if (n < 0) n = 0;
+            if (n > N) n = N;
+            _shapeHighlight[idx] = n;
+            moveSlider.value = String(n);
+            moveVal.textContent = String(n);
+            _redrawOneTrial(idx);
+        };
+        moveSlider.addEventListener('input', () => _setHighlight(moveSlider.value));
+
+        // Prev / next arrow buttons.
+        const prevBtn = document.createElement('button');
+        prevBtn.type = 'button';
+        prevBtn.className = 'btn btn-sm';
+        prevBtn.textContent = '◀';
+        prevBtn.title = 'Previous movement';
+        prevBtn.style.cssText = 'padding:0 6px;font-size:11px;line-height:1.4;';
+        prevBtn.addEventListener('click', () => _setHighlight((_shapeHighlight[idx] || 0) - 1));
+        const nextBtn = document.createElement('button');
+        nextBtn.type = 'button';
+        nextBtn.className = 'btn btn-sm';
+        nextBtn.textContent = '▶';
+        nextBtn.title = 'Next movement';
+        nextBtn.style.cssText = 'padding:0 6px;font-size:11px;line-height:1.4;';
+        nextBtn.addEventListener('click', () => _setHighlight((_shapeHighlight[idx] || 0) + 1));
+        moveLabel.appendChild(prevBtn);
+        moveLabel.appendChild(nextBtn);
+
         title.appendChild(moveLabel);
         cell.appendChild(title);
 
@@ -590,13 +610,47 @@ function _drawShapeOverlayPlots() {
         plotDiv.style.cssText = 'width:100%;height:240px;';
         cell.appendChild(plotDiv);
         container.appendChild(cell);
+    });
+}
 
-        if (!trial.segments.length) {
-            plotDiv.innerHTML = '<div class="results-no-data">No movements</div>';
-            return;
-        }
+// Read all global control values used by every per-trial draw.
+function _shapeOverlayState() {
+    const xMax = parseFloat(document.getElementById('shapeXScaleSlider')?.value)
+              || (_shapeData ? _shapeData.xMaxDefault : 2.5);
+    const showMean = !!document.getElementById('shapeShowMean')?.checked;
+    const alignR = document.querySelector('input[name="shapeAlign"]:checked');
+    const align = alignR ? alignR.value : 'open';
+    let xLo, xHi;
+    if (align === 'peak' || align === 'corr') { xLo = -xMax / 2; xHi = xMax / 2; }
+    else if (align === 'close') { xLo = -xMax; xHi = 0; }
+    else { xLo = 0; xHi = xMax; }
+    return { xMax, showMean, align, xLo, xHi };
+}
 
-        const hiIdx = _shapeHighlight[idx] || 0;
+function _drawShapeOverlayPlots() {
+    if (!_shapeData) return;
+    // First draw of a new subject: build the cells.  Subsequent draws
+    // reuse them so the sliders stay alive during interaction.
+    const container = document.getElementById('shapeOverlayPlots');
+    const haveCells = container && container.children.length === _shapeData.trials.length;
+    if (!haveCells) _buildShapeOverlayCells();
+    _shapeData.trials.forEach((_t, idx) => _redrawOneTrial(idx));
+}
+
+function _redrawOneTrial(idx) {
+    if (!_shapeData) return;
+    const trial = _shapeData.trials[idx];
+    if (!trial) return;
+    const plotDiv = document.getElementById(`shapeOverlayPlot_${idx}`);
+    if (!plotDiv) return;
+    const { xMax, showMean, align, xLo, xHi } = _shapeOverlayState();
+
+    if (!trial.segments.length) {
+        plotDiv.innerHTML = '<div class="results-no-data">No movements</div>';
+        return;
+    }
+
+    const hiIdx = _shapeHighlight[idx] || 0;
 
         // Per-segment alignment shift (subtracted from xs at draw
         // time so the raw segment data can stay in open-aligned form).
@@ -684,9 +738,8 @@ function _drawShapeOverlayPlots() {
             plot_bgcolor: '#fff', paper_bgcolor: '#fff',
             hovermode: false, showlegend: false,
         };
-        Plotly.newPlot(plotDiv.id, traces, layout,
-                       { responsive: true, displayModeBar: false });
-    });
+        Plotly.react(plotDiv, traces, layout,
+                     { responsive: true, displayModeBar: false });
 }
 
 // Live-update the shape plots when the controls change.
