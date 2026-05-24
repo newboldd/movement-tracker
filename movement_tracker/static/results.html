@@ -163,6 +163,15 @@
                            title="Align each movement to the trial average by max cross-correlation (parabolic interpolation).">
                         <input type="radio" name="shapeAlign" value="corr"> Correlation
                     </label>
+                    <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
+                    <label title="Dendrogram height cutoff for hierarchical clustering (avg linkage, 1-r distance, range 0-2)."
+                           style="display:flex;align-items:center;gap:6px;margin:0;">
+                        Cluster cutoff:
+                        <input type="range" id="shapeClusterCutoff"
+                               min="0" max="2" step="0.01" value="0.5" style="width:130px;">
+                        <span id="shapeClusterCutoffVal"
+                              style="font-size:11px;color:var(--text-muted);min-width:34px;">0.50</span>
+                    </label>
                 </div>
                 <div id="shapeOverlayPlots" class="results-plot-grid"></div>
             </div>
@@ -293,6 +302,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=10"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=64"></script>
+    <script src="/static/js/results.js?v=65"></script>
 </body>
 </html>
