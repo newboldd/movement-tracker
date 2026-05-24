@@ -12,6 +12,7 @@ const GROUP_COLORS = {
 let _data = null;        // { groups, subjects, variables }
 let _varMeta = {};       // base key -> { label, aggregatable }
 let _subjChecked = {};   // subject name -> bool
+let _groupCollapsed = {};   // group name -> { subject_name: bool } snapshot (frozen state)
 
 const AGGS = [
     { v: 'mean',     label: 'Mean' },
@@ -173,7 +174,10 @@ function _renderSubjectList() {
         const subs = byGroup[g] || [];
         if (!subs.length) return;
         const color = GROUP_COLORS[g] || '#999';
-        html += `<div class="gsl-group"><span class="gsl-group-label">${g}</span><div class="gsl-tags">`;
+        const collapsed = !!_groupCollapsed[g];
+        const safeG = g.replace(/"/g, '&quot;');
+        html += `<div class="gsl-group"><span class="gsl-group-label${collapsed ? ' gsl-collapsed' : ''}"
+            data-group="${safeG}" title="Click to ${collapsed ? 'restore' : 'uncheck'} all ${g} subjects">${g}</span><div class="gsl-tags">`;
         subs.forEach(s => {
             const checked = !!_subjChecked[s.name];
             const complete = !!s.has_complete_events;
@@ -199,11 +203,41 @@ function _renderSubjectList() {
             render();
         });
     });
+    // Click a group name → uncheck every subject in it (saving the
+    // current state).  Click again → restore the saved state.
+    host.querySelectorAll('.gsl-group-label').forEach(lbl => {
+        lbl.addEventListener('click', () => _toggleGroupCollapsed(lbl.dataset.group));
+    });
 }
 
 function _activeSubjects() {
     if (!_data || !_data.subjects) return [];
     return _data.subjects.filter(s => _subjChecked[s.name]);
+}
+
+/** Toggle a group's "collapsed" state.  When collapsed we save each
+ *  subject's checked state and force them all OFF.  Clicking again
+ *  restores whatever was checked before. */
+function _toggleGroupCollapsed(g) {
+    if (!g || !_data || !_data.subjects) return;
+    const subs = _data.subjects.filter(s => s.group === g);
+    if (_groupCollapsed[g]) {
+        const saved = _groupCollapsed[g];
+        subs.forEach(s => {
+            if (Object.prototype.hasOwnProperty.call(saved, s.name)) {
+                _subjChecked[s.name] = saved[s.name];
+            }
+        });
+        delete _groupCollapsed[g];
+    } else {
+        const saved = {};
+        subs.forEach(s => {
+            saved[s.name] = !!_subjChecked[s.name];
+            _subjChecked[s.name] = false;
+        });
+        _groupCollapsed[g] = saved;
+    }
+    render();
 }
 
 function _exPlotMode() {
@@ -309,6 +343,24 @@ function _val(s, key) {
  *  horizontal position regardless of tick-label / Y-title widths.
  *  Plotly margins are measured inside the plot div, so we subtract
  *  the div's window-x from the desired window-x. */
+/** Read a (min, max) pair from two numeric inputs, falling back to
+ *  the data extremes (`vals`) for whichever bound is left blank.
+ *  Returns `null` when both inputs are empty so the caller can use
+ *  Plotly's autorange. */
+function _readRangeInputs(minId, maxId, vals) {
+    const mi = $(minId), ma = $(maxId);
+    if (!mi || !ma) return null;
+    const a = mi.value === '' ? NaN : parseFloat(mi.value);
+    const b = ma.value === '' ? NaN : parseFloat(ma.value);
+    if (!isFinite(a) && !isFinite(b)) return null;
+    const finite = vals.filter(v => isFinite(v));
+    const dMin = finite.length ? Math.min(...finite) : 0;
+    const dMax = finite.length ? Math.max(...finite) : 1;
+    const lo = isFinite(a) ? a : dMin;
+    const hi = isFinite(b) ? b : dMax;
+    return [lo, hi];
+}
+
 function _leftMarginForFixedYBaseline() {
     const div = document.getElementById('explorePlot');
     if (!div) return 90;
@@ -350,25 +402,32 @@ function renderScatter() {
         hoverinfo: 'skip', showlegend: false,
         visible: false,
     });
+    // Optional explicit axis ranges from the min/max textboxes.  If
+    // the user only fills in one bound, use the data extreme for the
+    // other so the user's bound is honoured.
+    const _xs = traces.flatMap(t => (t.x || []).filter(v => v != null && isFinite(v)));
+    const _ys = traces.flatMap(t => (t.y || []).filter(v => v != null && isFinite(v)));
+    const xRange = _readRangeInputs('exXMin', 'exXMax', _xs);
+    const yRange = _readRangeInputs('exYMin', 'exYMax', _ys);
     const layout = {
         // Pin the Y-axis baseline (= plot's left edge in pixels) to
-        // 10% of the window width so the plot doesn't shift when the
-        // tick labels or y-title get wider/narrower.  See _leftMargin().
+        // 10% of the controls-bar width so the plot doesn't shift
+        // when the tick labels or y-title get wider/narrower.
         margin: { t: 20, b: 80, l: _leftMarginForFixedYBaseline(), r: 20 },
         xaxis: {
             title: { text: X.label, font: { size: 24 } },
             color: '#666', gridcolor: '#f0f0f0',
             tickfont: { size: 22 },
             showline: true, linecolor: '#666', linewidth: 2, mirror: false, zeroline: false,
+            ...(xRange ? { range: xRange, autorange: false } : { autorange: true }),
         },
         yaxis: {
             title: { text: Y.label, font: { size: 24 }, standoff: 14 },
             color: '#666', gridcolor: '#f0f0f0',
             tickfont: { size: 22 },
             showline: true, linecolor: '#666', linewidth: 2, mirror: false, zeroline: false,
-            // automargin OFF so the left edge stays fixed regardless of
-            // tick-label or y-title widths.
             automargin: false,
+            ...(yRange ? { range: yRange, autorange: false } : { autorange: true }),
         },
         plot_bgcolor: '#fff', paper_bgcolor: '#fff',
         legend: { orientation: 'h', y: 1.08, font: { size: 22 } },
@@ -523,8 +582,13 @@ function renderBar() {
     };
 
     $('exInfo').textContent = `n = ${n}`;
+    // Bar's "X" variable is plotted on the y-axis; honour the X min/max
+    // inputs by piping them into yaxis.range.
+    const allValues = [];
+    for (const g in byGroup) byGroup[g].forEach(s => allValues.push(_val(s, key)));
+    const yRange = _readRangeInputs('exXMin', 'exXMax', allValues.filter(v => v != null && isFinite(v)));
     const layout = {
-        margin: { t: 20, b: 70, l: 90, r: 20 },
+        margin: { t: 20, b: 70, l: _leftMarginForFixedYBaseline(), r: 20 },
         xaxis: {
             tickvals: groups.map((_, i) => i), ticktext: groups, color: '#666',
             tickfont: { size: 22 },
@@ -536,11 +600,11 @@ function renderBar() {
             color: '#666', gridcolor: '#f0f0f0',
             tickfont: { size: 22 },
             showline: true, linecolor: '#666', linewidth: 2, zeroline: false,
-            automargin: false,    // see _leftMarginForFixedYBaseline()
+            automargin: false,
+            ...(yRange ? { range: yRange, autorange: false } : { autorange: true }),
         },
         plot_bgcolor: '#fff', paper_bgcolor: '#fff', bargap: 0.5,
     };
-    layout.margin = { t: 20, b: 70, l: _leftMarginForFixedYBaseline(), r: 20 };
     Plotly.newPlot('explorePlot', [barTrace, dotTrace], layout, { responsive: true, displayModeBar: false });
 }
 
@@ -569,7 +633,16 @@ $('exSelectAllBtn').addEventListener('click', () => {
 
 document.querySelectorAll('input[name="exPlotType"]').forEach(r =>
     r.addEventListener('change', render));
+// Variable changes clear the axis-range inputs (units may differ).
 ['exVarX', 'exVarY'].forEach(id =>
+    $(id).addEventListener('change', () => {
+        if (id === 'exVarX') { $('exXMin').value = ''; $('exXMax').value = ''; }
+        if (id === 'exVarY') { $('exYMin').value = ''; $('exYMax').value = ''; }
+        render();
+    }));
+// Axis-range textboxes — re-render on commit (change fires on blur /
+// Enter for number inputs).
+['exXMin','exXMax','exYMin','exYMax'].forEach(id =>
     $(id).addEventListener('change', render));
 // Toggling Slope doesn't change the underlying data — just restyle
 // the already-present best-fit trace in place so axes don't re-fit.

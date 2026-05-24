@@ -13,8 +13,10 @@
             background: transparent; max-height: 200px; overflow-y: auto;
         }
         .ex-subject-list .gsl-group { flex-basis: 100%; display: flex; gap: 4px; align-items: flex-start; }
-        .ex-subject-list .gsl-group-label { font-size: 11px; font-weight: 600; color: var(--text-muted);
-                                            flex: 0 0 auto; min-width: 64px; padding-top: 3px; }
+        .ex-subject-list .gsl-group-label { font-size: 16px; font-weight: 700; color: var(--text);
+                                            flex: 0 0 auto; min-width: 78px; padding-top: 1px;
+                                            cursor: pointer; user-select: none; }
+        .ex-subject-list .gsl-group-label.gsl-collapsed { color: var(--text-muted); text-decoration: line-through; }
         .ex-subject-list .gsl-tags { display: flex; flex-wrap: wrap; gap: 4px;
                                      flex: 1 1 auto; min-width: 0; }
         .ex-subject-list label {
@@ -154,6 +156,13 @@
                     <select id="exVarX" style="min-width:200px;"></select>
                 </label>
                 <span id="exXAgg" class="agg-radios" style="display:flex;align-items:center;gap:8px;font-size:11px;flex-wrap:nowrap;white-space:nowrap;flex:0 0 auto;"></span>
+                <span style="border-left:1px solid #ccc;height:18px;margin:0 4px;flex:0 0 auto;"></span>
+                <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);flex:0 0 auto;">min
+                    <input id="exXMin" type="number" step="any" placeholder="auto" style="width:80px;">
+                </label>
+                <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);flex:0 0 auto;">max
+                    <input id="exXMax" type="number" step="any" placeholder="auto" style="width:80px;">
+                </label>
             </div>
             <!-- Row 3: Y variable + aggregator (hidden in bar mode).
                  flex-wrap:nowrap keeps the aggregator radios on the
@@ -163,6 +172,13 @@
                     <select id="exVarY" style="min-width:200px;"></select>
                 </label>
                 <span id="exYAgg" class="agg-radios" style="display:flex;align-items:center;gap:8px;font-size:11px;flex-wrap:nowrap;white-space:nowrap;flex:0 0 auto;"></span>
+                <span style="border-left:1px solid #ccc;height:18px;margin:0 4px;flex:0 0 auto;"></span>
+                <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);flex:0 0 auto;">min
+                    <input id="exYMin" type="number" step="any" placeholder="auto" style="width:80px;">
+                </label>
+                <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);flex:0 0 auto;">max
+                    <input id="exYMax" type="number" step="any" placeholder="auto" style="width:80px;">
+                </label>
             </div>
         </div>
 
@@ -180,6 +196,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=10"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/explore.js?v=26"></script>
+    <script src="/static/js/explore.js?v=27"></script>
 </body>
 </html>
