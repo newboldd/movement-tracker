@@ -1059,6 +1059,10 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
             if (window.Plotly && targetDiv._fullLayout) Plotly.Plots.resize(targetDiv);
         }
     });
+    // Stash the row labels so the click handler resolves a clicked
+    // position (e.g. row 0 in a sorted matrix) to the original
+    // movement number rather than just the row index.
+    targetDiv._yLabels = labels;
     Plotly.react(targetDiv, [dendroTrace, heatTrace], layout,
                  { responsive: true, displayModeBar: false });
     // Click on any heatmap cell → set the highlighted movement to that row.
@@ -1067,20 +1071,14 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
         targetDiv.on('plotly_click', (ev) => {
             const p = ev?.points?.[0];
             if (!p || p.data?.type !== 'heatmap') return;
-            // y is the numeric position; map back to the label.
             const yi = (typeof p.y === 'number') ? p.y : parseInt(p.y, 10);
             if (!isFinite(yi)) return;
-            const N = p.data.y?.length || 0;
-            // Convert grid position (0..N-1) → movement label (label
-            // strings are the 1-indexed original movement #).
-            const lbl = p.data.y[yi];
+            const lbl = targetDiv._yLabels?.[yi];
             const mov = parseInt(lbl, 10);
             if (!isFinite(mov)) return;
-            // Look up which trial this div belongs to via its id.
             const m = /shapeCorrPlot_(\d+)/.exec(targetDiv.id || '');
             if (!m) return;
-            const trialIdx = parseInt(m[1], 10);
-            _shapeSetHighlight[trialIdx]?.(mov);
+            _shapeSetHighlight[parseInt(m[1], 10)]?.(mov);
         });
     }
 }
