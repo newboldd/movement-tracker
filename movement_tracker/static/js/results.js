@@ -978,7 +978,7 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
         hovertemplate: 'r = %{z:.2f}<extra></extra>',
         // Colorbar length is set later from the actual matrix height.
         colorbar: { thickness: 8, lenmode: 'fraction',
-                    y: 0.5, yanchor: 'middle', outlinewidth: 0, ypad: 0,
+                    y: 1, yanchor: 'top', outlinewidth: 0, ypad: 0,
                     tickvals: [-1, 0, 1], tickfont: { size: 10 } },
     };
     const shapes = [];
