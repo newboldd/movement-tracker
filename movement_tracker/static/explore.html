@@ -115,7 +115,7 @@
              legend/slope + copy on top, then X, then Y. -->
         <div class="results-controls" id="explorePlotControls"
              style="margin-top:8px;display:flex;flex-wrap:wrap;gap:8px 12px;">
-            <!-- Row 1: plot-type radios + legend/slope + copy button -->
+            <!-- Row 1: plot-type radios + legend/slope + n=## + copy button -->
             <div style="flex-basis:100%;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
                 <span style="font-weight:600;">Plot:</span>
                 <label style="display:flex;align-items:center;gap:3px;">
@@ -134,6 +134,8 @@
                        style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);">
                     <input type="checkbox" id="exBestFit" style="margin:0;" checked> Slope
                 </label>
+                <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
+                <span id="exInfo" style="font-size:11px;color:var(--text-muted);"></span>
                 <span style="flex:1 1 auto;"></span>
                 <button id="exCopyBtn" class="btn btn-sm" title="Copy to clipboard"
                         style="padding:4px 6px;line-height:0;">
@@ -146,22 +148,21 @@
                     </svg>
                 </button>
             </div>
-            <!-- Row 2: X variable + aggregator + info -->
-            <div style="flex-basis:100%;display:flex;align-items:center;gap:8px;flex-wrap:nowrap;">
+            <!-- Row 2: X variable + aggregator -->
+            <div style="flex-basis:100%;width:100%;display:flex;align-items:center;gap:8px;flex-wrap:nowrap;min-width:0;">
                 <label id="exXLabel" style="display:flex;align-items:center;gap:6px;margin:0;flex:0 0 auto;">X:
                     <select id="exVarX" style="min-width:200px;"></select>
                 </label>
-                <span id="exXAgg" class="agg-radios" style="display:flex;align-items:center;gap:8px;font-size:11px;flex-wrap:nowrap;white-space:nowrap;"></span>
-                <span id="exInfo" style="font-size:11px;color:var(--text-muted);"></span>
+                <span id="exXAgg" class="agg-radios" style="display:flex;align-items:center;gap:8px;font-size:11px;flex-wrap:nowrap;white-space:nowrap;flex:0 0 auto;"></span>
             </div>
             <!-- Row 3: Y variable + aggregator (hidden in bar mode).
                  flex-wrap:nowrap keeps the aggregator radios on the
                  same line as the Y selector (matches the X row). -->
-            <div id="exYRow" style="flex-basis:100%;display:flex;align-items:center;gap:8px;flex-wrap:nowrap;">
+            <div id="exYRow" style="flex-basis:100%;width:100%;display:flex;align-items:center;gap:8px;flex-wrap:nowrap;min-width:0;">
                 <label id="exYLabel" style="display:flex;align-items:center;gap:6px;margin:0;flex:0 0 auto;">Y:
                     <select id="exVarY" style="min-width:200px;"></select>
                 </label>
-                <span id="exYAgg" class="agg-radios" style="display:flex;align-items:center;gap:8px;font-size:11px;flex-wrap:nowrap;white-space:nowrap;"></span>
+                <span id="exYAgg" class="agg-radios" style="display:flex;align-items:center;gap:8px;font-size:11px;flex-wrap:nowrap;white-space:nowrap;flex:0 0 auto;"></span>
             </div>
         </div>
 
@@ -179,6 +180,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=10"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/explore.js?v=24"></script>
+    <script src="/static/js/explore.js?v=25"></script>
 </body>
 </html>
