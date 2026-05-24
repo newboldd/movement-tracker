@@ -130,6 +130,13 @@
                 <label><input type="checkbox" data-dparam="mean_close_vel"> Mean Closing Vel.</label>
             </div>
             <div id="distMovementPlots" class="results-plot-grid"></div>
+
+            <!-- Movement-shape overlay: every opening→closing distance
+                 segment for each trial, aligned with opening at t=0. -->
+            <div id="shapeOverlaySection" style="margin-top:24px;display:none;">
+                <h3 style="margin:0 0 8px 0;font-size:14px;">Movement shapes (aligned to opening)</h3>
+                <div id="shapeOverlayPlots" class="results-plot-grid"></div>
+            </div>
         </div>
 
         <!-- Movements Tab (hidden, kept for JS compatibility) -->
@@ -257,6 +264,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=10"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=51"></script>
+    <script src="/static/js/results.js?v=52"></script>
 </body>
 </html>

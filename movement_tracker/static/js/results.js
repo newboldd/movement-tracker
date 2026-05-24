@@ -202,9 +202,12 @@ async function loadDistances(subjectId) {
             cachedSequenceAssignments = null;
             if (movControls) movControls.style.display = '';
             renderDistMovementPlots();
+            renderShapeOverlayPlots();
         } else {
             if (movControls) movControls.style.display = 'none';
             if (movContainer) movContainer.innerHTML = '';
+            const shapeSec = document.getElementById('shapeOverlaySection');
+            if (shapeSec) shapeSec.style.display = 'none';
         }
     } catch (e) {
         container.innerHTML = `<div class="results-no-data" style="color:#d32f2f;">${e.message}</div>`;
@@ -318,6 +321,96 @@ function _updateSourceSelector(availableSources, activeSource) {
     // No-op: the page-level #resultsSourceSelect is now the single
     // source of truth for distance source.  The per-subject auto
     // result is surfaced via the badge in renderAllDistancePlots.
+}
+
+// Movement-shape overlay: for each trial, plot every opening→closing
+// distance segment with t=0 at the opening event.  Used to compare
+// movement shapes across the trial (hypothesis: MSA patients show
+// uniquely variable movement shapes).  X-axis is fixed so that 1 s
+// fills ~40% of the plot width (i.e. range 0..2.5 s).
+function renderShapeOverlayPlots() {
+    const section = document.getElementById('shapeOverlaySection');
+    const container = document.getElementById('shapeOverlayPlots');
+    if (!section || !container) return;
+    const trData = cachedTraces, mvData = cachedMovements;
+    if (!trData || !trData.trials || !mvData || !mvData.movements) {
+        section.style.display = 'none';
+        return;
+    }
+    const movsByTrial = {};
+    mvData.movements.forEach(m => {
+        if (m.open_frame_local == null || m.close_frame_local == null) return;
+        const ti = m.trial_idx;
+        (movsByTrial[ti] ||= []).push(m);
+    });
+    if (!Object.keys(movsByTrial).length) {
+        section.style.display = 'none';
+        return;
+    }
+    section.style.display = '';
+    container.innerHTML = '';
+
+    // 1 s = 40% of plot width → display range = 1 / 0.4 = 2.5 s.
+    const X_MAX = 2.5;
+
+    trData.trials.forEach((trial, idx) => {
+        const movs = movsByTrial[idx] || [];
+        const fps = trial.fps || 60;
+        const dist = trial.distances || [];
+
+        const cell = document.createElement('div');
+        cell.className = 'results-plot-cell';
+        cell.style.cssText = 'min-width:0;';
+        const title = document.createElement('div');
+        title.style.cssText = 'font-size:12px;font-weight:600;margin-bottom:4px;';
+        title.textContent = `${trial.name} — ${movs.length} movements`;
+        cell.appendChild(title);
+        const plotDiv = document.createElement('div');
+        plotDiv.id = `shapeOverlayPlot_${idx}`;
+        plotDiv.style.cssText = 'width:100%;height:240px;';
+        cell.appendChild(plotDiv);
+        container.appendChild(cell);
+
+        if (!movs.length || !dist.length) {
+            plotDiv.innerHTML = '<div class="results-no-data">No movements</div>';
+            return;
+        }
+
+        const traces = movs.map((m, mi) => {
+            const o = Math.max(0, m.open_frame_local | 0);
+            const c = Math.min(dist.length - 1, m.close_frame_local | 0);
+            const xs = [], ys = [];
+            for (let f = o; f <= c; f++) {
+                const v = dist[f];
+                if (v == null) continue;
+                xs.push((f - o) / fps);
+                ys.push(v);
+            }
+            return {
+                x: xs, y: ys, type: 'scatter', mode: 'lines',
+                line: { width: 1, color: 'rgba(31,119,180,0.45)' },
+                hoverinfo: 'skip', showlegend: false,
+            };
+        }).filter(t => t.x.length >= 2);
+
+        const layout = {
+            margin: { t: 6, b: 36, l: 48, r: 8 },
+            xaxis: {
+                title: { text: 'Time from opening (s)', font: { size: 11 } },
+                range: [0, X_MAX], showline: true, linecolor: '#666',
+                zeroline: false, tickfont: { size: 10 },
+            },
+            yaxis: {
+                title: { text: 'Distance (mm)', font: { size: 11 } },
+                showline: true, linecolor: '#666', zeroline: false,
+                tickfont: { size: 10 }, automargin: true,
+            },
+            plot_bgcolor: '#fff', paper_bgcolor: '#fff',
+            hovermode: false, showlegend: false,
+        };
+        Plotly.newPlot(plotDiv.id, traces, layout,
+                       { responsive: true, displayModeBar: false });
+    });
 }
 
 // When "Auto" is selected, append the actually-resolved source to the

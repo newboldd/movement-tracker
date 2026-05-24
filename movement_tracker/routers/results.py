@@ -575,10 +575,21 @@ def _build_movement_params(
         if peak_open_vel is not None and amplitude is not None:
             power = round(peak_open_vel * amplitude, 2)
 
+        # Per-trial-local frames for the opening and closing event, so
+        # the client can slice each trial's distance trace directly
+        # without re-computing the global → local offset.
+        trial_start = trials[ti]["start_frame"] if ti < len(trials) else 0
+        open_frame_local = (open_f - trial_start) if open_f is not None else None
+        close_frame_local = (close_f - trial_start) if close_f is not None else None
+
         movements.append({
             "peak_frame": pk,
             "peak_dist": round(pk_dist, 2) if pk_dist is not None else None,
             "peak_time": peak_time,
+            "open_frame": open_f,
+            "close_frame": close_f,
+            "open_frame_local": open_frame_local,
+            "close_frame_local": close_frame_local,
             "imi": imi,
             "amplitude": amplitude,
             "rel_amplitude": rel_amplitude,
