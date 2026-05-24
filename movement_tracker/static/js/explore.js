@@ -301,19 +301,21 @@ function _val(s, key) {
 }
 
 /** Compute the Plotly left-margin so the Y-axis baseline (the plot's
- *  left edge in pixels) lands at 10% of the window width — i.e. the
- *  plot's data area starts at a fixed horizontal position in the
- *  browser viewport, regardless of how wide the tick labels / Y-title
- *  end up being.  Plotly margins are measured inside the plot div, so
- *  we subtract the div's offset from the desired window-position. */
+ *  left edge in pixels) lands at 10% along the width of the plot-
+ *  controls bar above it.  This pins the data area to a fixed
+ *  horizontal position regardless of tick-label / Y-title widths.
+ *  Plotly margins are measured inside the plot div, so we subtract
+ *  the div's window-x from the desired window-x. */
 function _leftMarginForFixedYBaseline() {
     const div = document.getElementById('explorePlot');
-    if (!div || !window.innerWidth) return 90;
-    const rect = div.getBoundingClientRect();
-    const desired = window.innerWidth * 0.10;
-    // Keep a sensible minimum so the y-axis title / tick numbers don't
-    // get clipped off the left edge of the plot if the window is narrow.
-    return Math.max(40, Math.round(desired - rect.left));
+    if (!div) return 90;
+    const ref = document.getElementById('explorePlotControls') || div;
+    const refRect = ref.getBoundingClientRect();
+    const divRect = div.getBoundingClientRect();
+    const desired = refRect.left + refRect.width * 0.10;
+    // Floor so the y-title / tick numbers can't get clipped off the
+    // plot's left edge in narrow viewports.
+    return Math.max(40, Math.round(desired - divRect.left));
 }
 
 function renderScatter() {
