@@ -403,6 +403,23 @@ let _shapeSetHighlight = {};
 // (or missing) when "Cluster" is off — the slider then falls back to
 // the natural 1..N order.
 let _shapeClusterOrder = {};
+// Per-trial cluster colors keyed by ORIGINAL movement index.  Set
+// when the "Colors" checkbox is on so the shape plot and matrix tick
+// labels can paint each cluster distinctly.
+let _shapeClusterColors = {};
+// Categorical palette used to color clusters (max 9 visually distinct
+// hues; wraps if there are more clusters).
+const _SHAPE_PALETTE = [
+    '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+    '#8c564b', '#e377c2', '#bcbd22', '#17becf',
+];
+function _hexToRgba(hex, alpha) {
+    if (!hex || hex[0] !== '#' || hex.length !== 7) return hex;
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return `rgba(${r},${g},${b},${alpha})`;
+}
 // Per-trial slider DOM refs (slider + value span) so cluster-toggle
 // can resync the slider position when the order changes.
 let _shapeSliderByIdx = {};
@@ -459,6 +476,7 @@ function renderShapeOverlayPlots() {
     }
     _shapeHighlight = {};
     _shapeClusterOrder = {};
+    _shapeClusterColors = {};
     _shapeSliderByIdx = {};
 
     // Force a fresh cell build (new subject — sliders / titles differ).
@@ -754,14 +772,60 @@ function _redrawOneTrial(idx) {
                             : 0;
         const shiftedX = (s, si) => s.xs.map(x => x + shiftOf(s, si));
 
+        // Cluster pre-compute (shared with the corr-matrix draw).
+        // Use the already-shifted data so the clustering reflects
+        // exactly what the matrix below will compute.
+        const N = trial.segments.length;
+        const _matNow = (N >= 2)
+            ? _pairwiseCorrMatrix(trial, xLo, xHi, shiftedX)
+            : null;
+        const _cutH = parseFloat(document.getElementById('shapeClusterCutoff')?.value);
+        const _useCut = isFinite(_cutH) ? _cutH : 0.5;
+        const _colorsOn = !!document.getElementById('shapeClusterColors')?.checked;
+        let _movColors = null;
+        if (_matNow) {
+            const _dist = _matNow.map(row => row.map(v => v == null ? 2 : 1 - v));
+            const _root = _hacAverage(_dist);
+            if (_root) {
+                const _cut = _cutAndOrderHAC(_root, _useCut);
+                const _clusterOf = new Array(N).fill(0);
+                let _accC = 0;
+                for (let kk = 0; kk < _cut.sizes.length; kk++) {
+                    for (let j = 0; j < _cut.sizes[kk]; j++) {
+                        _clusterOf[_cut.order[_accC + j]] = kk;
+                    }
+                    _accC += _cut.sizes[kk];
+                }
+                if (_colorsOn) {
+                    _movColors = _clusterOf.map(c => _SHAPE_PALETTE[c % _SHAPE_PALETTE.length]);
+                }
+                trial._hacCache = {
+                    mat: _matNow, root: _root,
+                    order: _cut.order, sizes: _cut.sizes,
+                    useCut: _useCut, movColors: _movColors,
+                };
+            } else {
+                trial._hacCache = null;
+            }
+        } else {
+            trial._hacCache = null;
+        }
+        _shapeClusterColors[idx] = _movColors;
+
         // Dim the rest when a movement is highlighted.
         const dimmed = hiIdx > 0;
-        const baseColor = dimmed
+        const fallbackBase = dimmed
             ? 'rgba(31,119,180,0.15)'
             : 'rgba(31,119,180,0.45)';
+        const lineColor = (mi) => {
+            if (_movColors && _movColors[mi]) {
+                return _hexToRgba(_movColors[mi], dimmed ? 0.25 : 0.75);
+            }
+            return fallbackBase;
+        };
         const traces = trial.segments.map((s, mi) => ({
             x: shiftedX(s, mi), y: s.ys, type: 'scatter', mode: 'lines',
-            line: { width: 1, color: baseColor },
+            line: { width: 1, color: lineColor(mi) },
             customdata: new Array(s.xs.length).fill(mi),
             hoverinfo: 'skip', showlegend: false,
         }));
@@ -823,9 +887,12 @@ function _redrawOneTrial(idx) {
                 pys.push(s.peakY);
             }
             if (pxs.length) {
+                const markerColors = _movColors
+                    ? markIdxs.map(mi => _movColors[mi] || '#d32f2f')
+                    : '#d32f2f';
                 traces.push({
                     x: pxs, y: pys, type: 'scatter', mode: 'markers',
-                    marker: { size: 9, color: '#d32f2f',
+                    marker: { size: 9, color: markerColors,
                               line: { color: '#000', width: 1 }, symbol: 'circle' },
                     customdata: markIdxs.slice(),
                     hoverinfo: 'skip', showlegend: false,
@@ -1005,7 +1072,36 @@ function _buildDendroLines(root, leafToY) {
 // Clustered heatmap that includes a horizontal dendrogram to the
 // left.  Uses linear axes (with manual tick labels) for both the
 // heatmap and the dendrogram so they can share a single yaxis.
-function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, hiPos, boundaries, dendroLines, maxH, cutH) {
+// Annotations standing in for the row/column tick labels when each
+// movement is colored by cluster — text on a filled rectangle whose
+// fill is the cluster color.
+function _buildTickColorAnnotations(N, labels, tickColors) {
+    const out = [];
+    for (let i = 0; i < N; i++) {
+        const col = tickColors[i] || '#ddd';
+        out.push({
+            xref: 'x2', yref: 'y',
+            x: -0.5, y: i,
+            xanchor: 'right', yanchor: 'middle',
+            text: ` ${labels[i]} `, showarrow: false,
+            font: { size: 9, color: '#000' },
+            bgcolor: col, bordercolor: col, borderwidth: 0, borderpad: 1,
+            xshift: -2,
+        });
+        out.push({
+            xref: 'x2', yref: 'y',
+            x: i, y: N - 0.5,
+            xanchor: 'center', yanchor: 'top',
+            text: ` ${labels[i]} `, showarrow: false,
+            font: { size: 9, color: '#000' },
+            bgcolor: col, bordercolor: col, borderwidth: 0, borderpad: 1,
+            yshift: -2,
+        });
+    }
+    return out;
+}
+
+function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, hiPos, boundaries, dendroLines, maxH, cutH, tickColors) {
     const N = mat.length;
     const nums = Array.from({ length: N }, (_, i) => i);
     const dx = [], dy = [];
@@ -1096,6 +1192,7 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
             tickmode: 'array', tickvals: nums, ticktext: labels,
             range: [-0.5, N - 0.5],
             showline: false, showgrid: false, zeroline: false, ticks: '',
+            showticklabels: !tickColors,
         },
         // constrain on yaxis (not x2) so the y-domain shrinks to match
         // the square matrix; constraintoward:'top' keeps the matrix at
@@ -1108,9 +1205,11 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
             scaleanchor: 'x2', scaleratio: 1,
             constrain: 'domain', constraintoward: 'top',
             showline: false, showgrid: false, zeroline: false, ticks: '',
+            showticklabels: !tickColors,
         },
         plot_bgcolor: '#fff', paper_bgcolor: '#fff',
         shapes, showlegend: false,
+        annotations: (tickColors ? _buildTickColorAnnotations(N, labels, tickColors) : []),
     };
     // Keep height = width so the matrix renders square from the very
     // first paint.  Also set the colorbar's length to match the
@@ -1248,31 +1347,39 @@ function _redrawOneTrialCorr(idx, trial, xLo, xHi, shiftedX, hiIdx) {
     if (!corrDiv) return;
     if (N < 2) { corrDiv.innerHTML = ''; return; }
 
-    const mat = _pairwiseCorrMatrix(trial, xLo, xHi, shiftedX);
+    // Reuse the HAC cache produced by _redrawOneTrial when possible.
+    const cache = trial._hacCache;
+    const mat = cache ? cache.mat : _pairwiseCorrMatrix(trial, xLo, xHi, shiftedX);
     const labels = trial.segments.map((_, i) => String(i + 1));
     const clusterOn = !!document.getElementById('shapeClusterOn')?.checked;
+    const movColors = cache ? cache.movColors : null;
 
     if (!clusterOn) {
-        // Unsorted matrix, but rendered with the same two-subplot
-        // layout (empty dendrogram region) so the heatmap size matches
-        // the clustered view.
         _shapeClusterOrder[idx] = null;
+        const tickColors = movColors ? movColors.slice() : null;
         _renderClusteredCorrHeatmap(
             corrDiv, mat, labels, 'Pairwise correlation',
             hiIdx, hiIdx > 0 ? hiIdx - 1 : -1,
-            null, [], 1, null,
+            null, [], 1, null, tickColors,
         );
         _syncShapeSlider(idx);
         return;
     }
 
-    // Clustered: HAC with average linkage on 1 − r, cut at slider height.
-    const dist = mat.map(row => row.map(v => (v == null ? 2 : 1 - v)));
-    const root = _hacAverage(dist);
-    if (!root) { corrDiv.innerHTML = ''; return; }
-    const cutH = parseFloat(document.getElementById('shapeClusterCutoff')?.value);
-    const useCut = isFinite(cutH) ? cutH : 0.5;
-    const { order, sizes } = _cutAndOrderHAC(root, useCut);
+    // Clustered: reuse cached HAC tree / order if present.
+    let root, order, sizes, useCut;
+    if (cache) {
+        root = cache.root; order = cache.order; sizes = cache.sizes;
+        useCut = cache.useCut;
+    } else {
+        const dist = mat.map(row => row.map(v => (v == null ? 2 : 1 - v)));
+        root = _hacAverage(dist);
+        if (!root) { corrDiv.innerHTML = ''; return; }
+        const cutH = parseFloat(document.getElementById('shapeClusterCutoff')?.value);
+        useCut = isFinite(cutH) ? cutH : 0.5;
+        const _cut = _cutAndOrderHAC(root, useCut);
+        order = _cut.order; sizes = _cut.sizes;
+    }
     const reord = order.map(i => order.map(j => mat[i][j]));
     const reordLabels = order.map(i => String(i + 1));
     const boundaries = [];
@@ -1284,11 +1391,12 @@ function _redrawOneTrialCorr(idx, trial, xLo, xHi, shiftedX, hiIdx) {
     order.forEach((id, pos) => { leafToY[id] = pos; });
     const dendroLines = _buildDendroLines(root, leafToY);
     const maxH = root.height || 1;
+    const tickColors = movColors ? order.map(i => movColors[i]) : null;
     _shapeClusterOrder[idx] = order;
     _renderClusteredCorrHeatmap(
         corrDiv, reord, reordLabels,
         `Clustered (HAC, avg linkage, 1−r) — ${k} group${k === 1 ? '' : 's'}`,
-        hiIdx, hiPosClu, boundaries, dendroLines, maxH, useCut,
+        hiIdx, hiPosClu, boundaries, dendroLines, maxH, useCut, tickColors,
     );
     _syncShapeSlider(idx);
 }
@@ -1315,6 +1423,8 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     const cluCb = document.getElementById('shapeClusterOn');
     if (cluCb) cluCb.addEventListener('change', _drawShapeOverlayPlots);
+    const colCb = document.getElementById('shapeClusterColors');
+    if (colCb) colCb.addEventListener('change', _drawShapeOverlayPlots);
 });
 
 // When "Auto" is selected, append the actually-resolved source to the
