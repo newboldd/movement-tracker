@@ -323,60 +323,28 @@ function _updateSourceSelector(availableSources, activeSource) {
     // result is surfaced via the badge in renderAllDistancePlots.
 }
 
-// Movement-shape overlay: for each trial, plot every opening→closing
-// distance segment with t=0 at the opening event.  Used to compare
-// movement shapes across the trial (hypothesis: MSA patients show
-// uniquely variable movement shapes).  X-axis is fixed so that 1 s
-// fills ~40% of the plot width (i.e. range 0..2.5 s).
-function renderShapeOverlayPlots() {
-    const section = document.getElementById('shapeOverlaySection');
-    const container = document.getElementById('shapeOverlayPlots');
-    if (!section || !container) return;
+// Movement-shape overlay: per-trial superimposed opening→closing
+// distance segments with t=0 at the opening event.  X-axis range,
+// highlighted-movement index and mean-trace visibility are driven
+// from the shape-control bar above the plots.
+let _shapeData = null;   // {trials:[{name, fps, segments:[{xs,ys}], maxT}], xMaxDefault, maxMov}
+
+function _buildShapeData() {
     const trData = cachedTraces, mvData = cachedMovements;
-    if (!trData || !trData.trials || !mvData || !mvData.movements) {
-        section.style.display = 'none';
-        return;
-    }
+    if (!trData || !trData.trials || !mvData || !mvData.movements) return null;
     const movsByTrial = {};
     mvData.movements.forEach(m => {
         if (m.open_frame_local == null || m.close_frame_local == null) return;
-        const ti = m.trial_idx;
-        (movsByTrial[ti] ||= []).push(m);
+        (movsByTrial[m.trial_idx] ||= []).push(m);
     });
-    if (!Object.keys(movsByTrial).length) {
-        section.style.display = 'none';
-        return;
-    }
-    section.style.display = '';
-    container.innerHTML = '';
+    if (!Object.keys(movsByTrial).length) return null;
 
-    // 1 s = 40% of plot width → display range = 1 / 0.4 = 2.5 s.
-    const X_MAX = 2.5;
-
-    trData.trials.forEach((trial, idx) => {
+    let globalMaxT = 0, maxMov = 0;
+    const trials = trData.trials.map((trial, idx) => {
         const movs = movsByTrial[idx] || [];
         const fps = trial.fps || 60;
         const dist = trial.distances || [];
-
-        const cell = document.createElement('div');
-        cell.className = 'results-plot-cell';
-        cell.style.cssText = 'min-width:0;';
-        const title = document.createElement('div');
-        title.style.cssText = 'font-size:12px;font-weight:600;margin-bottom:4px;';
-        title.textContent = `${trial.name} — ${movs.length} movements`;
-        cell.appendChild(title);
-        const plotDiv = document.createElement('div');
-        plotDiv.id = `shapeOverlayPlot_${idx}`;
-        plotDiv.style.cssText = 'width:100%;height:240px;';
-        cell.appendChild(plotDiv);
-        container.appendChild(cell);
-
-        if (!movs.length || !dist.length) {
-            plotDiv.innerHTML = '<div class="results-no-data">No movements</div>';
-            return;
-        }
-
-        const traces = movs.map((m, mi) => {
+        const segments = movs.map(m => {
             const o = Math.max(0, m.open_frame_local | 0);
             const c = Math.min(dist.length - 1, m.close_frame_local | 0);
             const xs = [], ys = [];
@@ -386,18 +354,155 @@ function renderShapeOverlayPlots() {
                 xs.push((f - o) / fps);
                 ys.push(v);
             }
-            return {
-                x: xs, y: ys, type: 'scatter', mode: 'lines',
-                line: { width: 1, color: 'rgba(31,119,180,0.45)' },
+            return { xs, ys };
+        }).filter(s => s.xs.length >= 2);
+        const maxT = segments.reduce((a, s) => Math.max(a, s.xs[s.xs.length - 1]), 0);
+        if (maxT > globalMaxT) globalMaxT = maxT;
+        if (segments.length > maxMov) maxMov = segments.length;
+        return { name: trial.name, fps, segments, maxT };
+    });
+
+    // Sensible default x-max: covers the longest movement plus a touch
+    // of headroom, snapped to the nearest 0.1 s.
+    const xMaxDefault = Math.max(0.5, Math.ceil((globalMaxT * 1.05) * 10) / 10);
+    return { trials, xMaxDefault, maxMov };
+}
+
+// Resample a single (xs, ys) segment to a fixed time grid [0..xMax]
+// with `nPts` samples, linear interpolation, returning ys (NaN past
+// the segment end).
+function _resampleSegment(seg, xMax, nPts) {
+    const out = new Array(nPts);
+    const { xs, ys } = seg;
+    const xEnd = xs[xs.length - 1];
+    let j = 0;
+    for (let i = 0; i < nPts; i++) {
+        const t = (i / (nPts - 1)) * xMax;
+        if (t > xEnd) { out[i] = NaN; continue; }
+        while (j < xs.length - 2 && xs[j + 1] < t) j++;
+        const x0 = xs[j], x1 = xs[j + 1];
+        const f = (x1 > x0) ? (t - x0) / (x1 - x0) : 0;
+        out[i] = ys[j] + f * (ys[j + 1] - ys[j]);
+    }
+    return out;
+}
+
+function renderShapeOverlayPlots() {
+    const section = document.getElementById('shapeOverlaySection');
+    const container = document.getElementById('shapeOverlayPlots');
+    if (!section || !container) return;
+    _shapeData = _buildShapeData();
+    if (!_shapeData) {
+        section.style.display = 'none';
+        return;
+    }
+    section.style.display = '';
+
+    // Configure slider ranges from the data.  Preserve the user's
+    // current x-scale if they had set one; otherwise jump to the
+    // per-subject default.
+    const xSl = document.getElementById('shapeXScaleSlider');
+    const xVal = document.getElementById('shapeXScaleVal');
+    if (xSl) {
+        const xMaxCap = Math.max(5, Math.ceil(_shapeData.xMaxDefault * 1.5));
+        xSl.max = String(xMaxCap);
+        xSl.value = String(_shapeData.xMaxDefault.toFixed(2));
+        if (xVal) xVal.textContent = `${(+xSl.value).toFixed(2)} s`;
+    }
+    const mSl = document.getElementById('shapeMoveSlider');
+    const mVal = document.getElementById('shapeMoveVal');
+    if (mSl) {
+        mSl.max = String(_shapeData.maxMov);
+        mSl.value = '0';
+        if (mVal) mVal.textContent = '0';
+    }
+
+    _drawShapeOverlayPlots();
+}
+
+function _drawShapeOverlayPlots() {
+    const container = document.getElementById('shapeOverlayPlots');
+    if (!container || !_shapeData) return;
+    const xMax = parseFloat(document.getElementById('shapeXScaleSlider')?.value)
+              || _shapeData.xMaxDefault;
+    const hiIdx = parseInt(document.getElementById('shapeMoveSlider')?.value || '0', 10);
+    const showMean = !!document.getElementById('shapeShowMean')?.checked;
+
+    container.innerHTML = '';
+
+    _shapeData.trials.forEach((trial, idx) => {
+        const cell = document.createElement('div');
+        cell.className = 'results-plot-cell';
+        cell.style.cssText = 'min-width:0;';
+        const title = document.createElement('div');
+        title.style.cssText = 'font-size:12px;font-weight:600;margin-bottom:4px;';
+        title.textContent = `${trial.name} — ${trial.segments.length} movements`;
+        cell.appendChild(title);
+        const plotDiv = document.createElement('div');
+        plotDiv.id = `shapeOverlayPlot_${idx}`;
+        plotDiv.style.cssText = 'width:100%;height:240px;';
+        cell.appendChild(plotDiv);
+        container.appendChild(cell);
+
+        if (!trial.segments.length) {
+            plotDiv.innerHTML = '<div class="results-no-data">No movements</div>';
+            return;
+        }
+
+        // Dim the rest when a movement is highlighted.
+        const dimmed = hiIdx > 0;
+        const baseColor = dimmed
+            ? 'rgba(31,119,180,0.15)'
+            : 'rgba(31,119,180,0.45)';
+        const traces = trial.segments.map((s, mi) => ({
+            x: s.xs, y: s.ys, type: 'scatter', mode: 'lines',
+            line: { width: 1, color: baseColor },
+            hoverinfo: 'skip', showlegend: false,
+        }));
+
+        // Average trace (resampled to a common time grid).  Drawn
+        // before any highlighted movement so the highlight sits on top.
+        if (showMean) {
+            const N = 200;
+            const sums = new Float64Array(N), counts = new Float64Array(N);
+            for (const s of trial.segments) {
+                const ys = _resampleSegment(s, xMax, N);
+                for (let i = 0; i < N; i++) {
+                    if (isFinite(ys[i])) { sums[i] += ys[i]; counts[i] += 1; }
+                }
+            }
+            const xs = [], ys = [];
+            for (let i = 0; i < N; i++) {
+                if (counts[i] >= Math.max(2, trial.segments.length * 0.25)) {
+                    xs.push((i / (N - 1)) * xMax);
+                    ys.push(sums[i] / counts[i]);
+                }
+            }
+            if (xs.length >= 2) {
+                traces.push({
+                    x: xs, y: ys, type: 'scatter', mode: 'lines',
+                    line: { width: 3.5, color: '#000' },
+                    hoverinfo: 'skip', showlegend: false,
+                });
+            }
+        }
+
+        // Highlighted movement (1-indexed in the UI).  Skip if this
+        // trial doesn't have that many movements.
+        if (hiIdx > 0 && hiIdx <= trial.segments.length) {
+            const s = trial.segments[hiIdx - 1];
+            traces.push({
+                x: s.xs, y: s.ys, type: 'scatter', mode: 'lines',
+                line: { width: 2.5, color: '#d32f2f' },
                 hoverinfo: 'skip', showlegend: false,
-            };
-        }).filter(t => t.x.length >= 2);
+            });
+        }
 
         const layout = {
             margin: { t: 6, b: 36, l: 48, r: 8 },
             xaxis: {
                 title: { text: 'Time from opening (s)', font: { size: 11 } },
-                range: [0, X_MAX], showline: true, linecolor: '#666',
+                range: [0, xMax], showline: true, linecolor: '#666',
                 zeroline: false, tickfont: { size: 10 },
             },
             yaxis: {
@@ -412,6 +517,24 @@ function renderShapeOverlayPlots() {
                        { responsive: true, displayModeBar: false });
     });
 }
+
+// Live-update the shape plots when the controls change.
+document.addEventListener('DOMContentLoaded', () => {
+    const xSl = document.getElementById('shapeXScaleSlider');
+    const xVal = document.getElementById('shapeXScaleVal');
+    const mSl = document.getElementById('shapeMoveSlider');
+    const mVal = document.getElementById('shapeMoveVal');
+    const meanCb = document.getElementById('shapeShowMean');
+    if (xSl) xSl.addEventListener('input', () => {
+        if (xVal) xVal.textContent = `${(+xSl.value).toFixed(2)} s`;
+        _drawShapeOverlayPlots();
+    });
+    if (mSl) mSl.addEventListener('input', () => {
+        if (mVal) mVal.textContent = mSl.value;
+        _drawShapeOverlayPlots();
+    });
+    if (meanCb) meanCb.addEventListener('change', _drawShapeOverlayPlots);
+});
 
 // When "Auto" is selected, append the actually-resolved source to the
 // dropdown's Auto option (e.g. "Auto — DLC (corrected)").  On an

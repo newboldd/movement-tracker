@@ -135,6 +135,28 @@
                  segment for each trial, aligned with opening at t=0. -->
             <div id="shapeOverlaySection" style="margin-top:24px;display:none;">
                 <h3 style="margin:0 0 8px 0;font-size:14px;">Movement shapes (aligned to opening)</h3>
+                <div class="results-controls" id="shapeOverlayControls"
+                     style="margin-bottom:8px;flex-wrap:wrap;">
+                    <label title="Drag right to stretch the shape plots out (lower x-max)."
+                           style="display:flex;align-items:center;gap:6px;margin:0;">
+                        X scale:
+                        <input type="range" id="shapeXScaleSlider"
+                               min="0.3" max="5" step="0.05" value="2.5" style="width:130px;">
+                        <span id="shapeXScaleVal" style="font-size:11px;color:var(--text-muted);min-width:40px;">2.50 s</span>
+                    </label>
+                    <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
+                    <label title="Highlight one movement.  0 = none."
+                           style="display:flex;align-items:center;gap:6px;margin:0;">
+                        Movement #:
+                        <input type="range" id="shapeMoveSlider"
+                               min="0" max="0" step="1" value="0" style="width:160px;">
+                        <span id="shapeMoveVal" style="font-size:11px;color:var(--text-muted);min-width:30px;">0</span>
+                    </label>
+                    <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
+                    <label title="Plot the across-movement mean trace in black.">
+                        <input type="checkbox" id="shapeShowMean"> Show average
+                    </label>
+                </div>
                 <div id="shapeOverlayPlots" class="results-plot-grid"></div>
             </div>
         </div>
@@ -264,6 +286,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=10"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=52"></script>
+    <script src="/static/js/results.js?v=53"></script>
 </body>
 </html>
