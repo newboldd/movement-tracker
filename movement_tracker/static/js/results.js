@@ -637,7 +637,7 @@ function _buildShapeOverlayCells() {
         // a square — height matches width via _resizeCorrSquare.
         const corrDiv = document.createElement('div');
         corrDiv.id = `shapeCorrPlot_${idx}`;
-        corrDiv.style.cssText = 'width:100%;margin-top:6px;';
+        corrDiv.style.cssText = 'width:70%;margin-top:6px;';
         cell.appendChild(corrDiv);
 
         container.appendChild(cell);
