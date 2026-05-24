@@ -14,11 +14,12 @@ let _varMeta = {};       // base key -> { label, aggregatable }
 let _subjChecked = {};   // subject name -> bool
 
 const AGGS = [
-    { v: 'mean', label: 'Mean' },
-    { v: 'cv', label: 'CV' },
-    { v: 'seq', label: 'Sequence effect' },
+    { v: 'mean',     label: 'Mean' },
+    { v: 'variance', label: 'Variance' },
+    { v: 'cv',       label: 'CV' },
+    { v: 'seq',      label: 'Sequence effect' },
 ];
-const AGG_PREFIX = { mean: 'Mean ', cv: 'CV ', seq: 'Seq. Effect ' };
+const AGG_PREFIX = { mean: 'Mean ', variance: 'Variance ', cv: 'CV ', seq: 'Seq. Effect ' };
 
 const $ = (id) => document.getElementById(id);
 
@@ -103,7 +104,8 @@ function _renderAggRadios(prefix) {
     const name = `agg${prefix}`;
     const cur = host.querySelector(`input[name="${name}"]:checked`)?.value || 'mean';
     const mname = `seqm${prefix}`;
-    const curM = host.querySelector(`input[name="${mname}"]:checked`)?.value || 'r2';
+    // Default to slope when the user first picks "Sequence effect".
+    const curM = host.querySelector(`input[name="${mname}"]:checked`)?.value || 'slope';
     let html = AGGS.map(a =>
         `<label style="display:inline-flex;align-items:center;gap:2px;cursor:pointer;">
             <input type="radio" name="${name}" value="${a.v}" ${a.v === cur ? 'checked' : ''}> ${a.label}
@@ -305,8 +307,8 @@ function renderScatter() {
             y: subs.map(s => _val(s, Y.key)),
             text: subs.map(s => s.name),
             type: 'scatter', mode: 'markers', name: g,
-            marker: { color: GROUP_COLORS[g] || '#999', size: 9, opacity: 0.8,
-                      line: { color: '#333', width: 0.5 } },
+            marker: { color: GROUP_COLORS[g] || '#999', size: 18, opacity: 0.8,
+                      line: { color: '#333', width: 1 } },
             hovertemplate: `%{text}<br>${X.label}: %{x:.3f}<br>${Y.label}: %{y:.3f}<extra>${g}</extra>`,
         };
     });
@@ -321,19 +323,21 @@ function renderScatter() {
         visible: false,
     });
     const layout = {
-        margin: { t: 20, b: 50, l: 60, r: 20 },
+        margin: { t: 20, b: 80, l: 90, r: 20 },
         xaxis: {
-            title: { text: X.label, font: { size: 12 } },
+            title: { text: X.label, font: { size: 24 } },
             color: '#666', gridcolor: '#f0f0f0',
-            showline: true, linecolor: '#666', linewidth: 1, mirror: false, zeroline: false,
+            tickfont: { size: 22 },
+            showline: true, linecolor: '#666', linewidth: 2, mirror: false, zeroline: false,
         },
         yaxis: {
-            title: { text: Y.label, font: { size: 12 } },
+            title: { text: Y.label, font: { size: 24 } },
             color: '#666', gridcolor: '#f0f0f0',
-            showline: true, linecolor: '#666', linewidth: 1, mirror: false, zeroline: false,
+            tickfont: { size: 22 },
+            showline: true, linecolor: '#666', linewidth: 2, mirror: false, zeroline: false,
         },
         plot_bgcolor: '#fff', paper_bgcolor: '#fff',
-        legend: { orientation: 'h', y: 1.08, font: { size: 11 } },
+        legend: { orientation: 'h', y: 1.08, font: { size: 22 } },
         showlegend: $('exLegend') ? $('exLegend').checked : true,
         hovermode: 'closest',
     };
@@ -463,7 +467,8 @@ function renderBar() {
     const barTrace = {
         x: labels.map((_, i) => i), y: means, customdata: labels, type: 'bar',
         marker: { color: colors, opacity: 0.3 },
-        error_y: { type: 'data', array: sems, visible: true, color: '#666', thickness: 1.5 },
+        // Whiskers twice as thick.
+        error_y: { type: 'data', array: sems, visible: true, color: '#666', thickness: 3 },
         hovertemplate: '%{customdata}<br>Mean: %{y:.3f}<extra></extra>',
         width: 0.6, showlegend: false,
     };
@@ -479,20 +484,22 @@ function renderBar() {
     });
     const dotTrace = {
         x: dotX, y: dotY, text: dotText, type: 'scatter', mode: 'markers',
-        marker: { color: dotColors, size: 8, opacity: 0.85, line: { color: '#333', width: 0.5 } },
+        marker: { color: dotColors, size: 16, opacity: 0.85, line: { color: '#333', width: 1 } },
         hovertemplate: '%{text}<br>%{y:.3f}<extra></extra>', showlegend: false,
     };
 
     $('exInfo').textContent = `${n} subjects (missing variable excluded)`;
     const layout = {
-        margin: { t: 20, b: 40, l: 60, r: 20 },
+        margin: { t: 20, b: 70, l: 90, r: 20 },
         xaxis: {
             tickvals: groups.map((_, i) => i), ticktext: groups, color: '#666',
-            showline: true, linecolor: '#666', linewidth: 1, zeroline: false,
+            tickfont: { size: 22 },
+            showline: true, linecolor: '#666', linewidth: 2, zeroline: false,
         },
         yaxis: {
-            title: { text: X.label, font: { size: 12 } }, color: '#666', gridcolor: '#f0f0f0',
-            showline: true, linecolor: '#666', linewidth: 1, zeroline: false,
+            title: { text: X.label, font: { size: 24 } }, color: '#666', gridcolor: '#f0f0f0',
+            tickfont: { size: 22 },
+            showline: true, linecolor: '#666', linewidth: 2, zeroline: false,
         },
         plot_bgcolor: '#fff', paper_bgcolor: '#fff', bargap: 0.5,
     };

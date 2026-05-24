@@ -1113,6 +1113,7 @@ def get_group_comparison(include_auto: bool = Query(False),
                 mean_v = np.mean(vals)
                 std_v = np.std(vals)
                 entry[f"mean_{key}"] = round(float(mean_v), 4)
+                entry[f"variance_{key}"] = round(float(std_v), 4)
                 entry[f"cv_{key}"] = round(float(std_v / abs(mean_v)), 4) if mean_v != 0 else None
 
                 # Sequence effect under the selected mode (closing
@@ -1124,6 +1125,7 @@ def get_group_comparison(include_auto: bool = Query(False),
                 entry[f"seqslope_{key}"] = se["slope"] if se else None
             else:
                 entry[f"mean_{key}"] = None
+                entry[f"variance_{key}"] = None
                 entry[f"cv_{key}"] = None
                 entry[f"seq_{key}"] = None
                 entry[f"seqslope_{key}"] = None
@@ -1183,7 +1185,7 @@ def _explore_value_keys() -> list[str]:
     """Underlying per-subject value keys the UI looks up."""
     keys = [k for k, _ in _CLINICAL_VARS] + ["frequency"]
     for k in _MOVE_PARAM_LABELS:
-        keys += [f"mean_{k}", f"cv_{k}", f"seq_{k}", f"seqslope_{k}"]
+        keys += [f"mean_{k}", f"variance_{k}", f"cv_{k}", f"seq_{k}", f"seqslope_{k}"]
     return keys
 
 
