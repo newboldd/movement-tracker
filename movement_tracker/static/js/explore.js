@@ -779,6 +779,14 @@ document.querySelectorAll('input[name="exPlotType"]').forEach(r =>
 // the already-present best-fit trace in place so axes don't re-fit.
 $('exBestFit').addEventListener('change', _refitBestFitFromVisible);
 $('exAnova').addEventListener('change', render);
+function _resetRange(minId, maxId) {
+    const minEl = $(minId), maxEl = $(maxId);
+    if (minEl) minEl.value = '';
+    if (maxEl) maxEl.value = '';
+    render();
+}
+$('exXReset').addEventListener('click', () => _resetRange('exXMin', 'exXMax'));
+$('exYReset').addEventListener('click', () => _resetRange('exYMin', 'exYMax'));
 // Legend visibility — show/hide live on the existing plot.  Same
 // flag is read at copy time, so the exported PNG matches the screen.
 $('exLegend').addEventListener('change', () => {
