@@ -343,6 +343,54 @@ function _val(s, key) {
  *  horizontal position regardless of tick-label / Y-title widths.
  *  Plotly margins are measured inside the plot div, so we subtract
  *  the div's window-x from the desired window-x. */
+/** Choose a sensible up/down step for a numeric input based on the
+ *  current data span.  1 unit per click for ranges < 20, 5 for < 100,
+ *  25 for < 500, etc. */
+function _autoStep(range) {
+    if (!isFinite(range) || range <= 0) return 1;
+    if (range < 0.2)  return 0.01;
+    if (range < 2)    return 0.1;
+    if (range < 20)   return 1;
+    if (range < 100)  return 5;
+    if (range < 500)  return 25;
+    if (range < 2000) return 100;
+    return 500;
+}
+
+/** Round a value to a sensible precision for the chosen step. */
+function _fmtNum(v, step) {
+    if (!isFinite(v)) return '';
+    const dec = step < 0.1 ? 3 : step < 1 ? 2 : step < 10 ? 1 : 0;
+    return (+v.toFixed(dec)).toString();
+}
+
+/** After Plotly has rendered, push the resolved axis ranges into the
+ *  min/max textboxes (so the user sees real numbers, not "auto"),
+ *  and set each input's `step` to a sensible increment for the
+ *  variable's range.  User-typed values are never overwritten — only
+ *  empty inputs get filled. */
+function _applyAutoRangeInputs() {
+    const div = $('explorePlot');
+    if (!div || !div._fullLayout) return;
+    const mode = _exPlotMode();
+    // In bar mode the X variable lives on the y-axis (groups on x).
+    const axForX = (mode === 'scatter') ? div._fullLayout.xaxis : div._fullLayout.yaxis;
+    const axForY = (mode === 'scatter') ? div._fullLayout.yaxis : null;
+    const _fill = (minId, maxId, ax) => {
+        const minEl = $(minId), maxEl = $(maxId);
+        if (!minEl || !maxEl) return;
+        if (!ax || !ax.range) { minEl.step = '1'; maxEl.step = '1'; return; }
+        const [lo, hi] = ax.range;
+        const step = _autoStep(hi - lo);
+        if (minEl.value === '') minEl.value = _fmtNum(lo, step);
+        if (maxEl.value === '') maxEl.value = _fmtNum(hi, step);
+        minEl.step = String(step);
+        maxEl.step = String(step);
+    };
+    _fill('exXMin', 'exXMax', axForX);
+    _fill('exYMin', 'exYMax', axForY);
+}
+
 /** Read a (min, max) pair from two numeric inputs, falling back to
  *  the data extremes (`vals`) for whichever bound is left blank.
  *  Returns `null` when both inputs are empty so the caller can use
@@ -438,6 +486,7 @@ function renderScatter() {
         .then(() => {
             _refitBestFitFromVisible();
             _wireBestFitListener();
+            _applyAutoRangeInputs();
         });
 }
 
@@ -605,7 +654,8 @@ function renderBar() {
         },
         plot_bgcolor: '#fff', paper_bgcolor: '#fff', bargap: 0.5,
     };
-    Plotly.newPlot('explorePlot', [barTrace, dotTrace], layout, { responsive: true, displayModeBar: false });
+    Plotly.newPlot('explorePlot', [barTrace, dotTrace], layout, { responsive: true, displayModeBar: false })
+        .then(_applyAutoRangeInputs);
 }
 
 // ── Listeners ──────────────────────────────────────────────────
