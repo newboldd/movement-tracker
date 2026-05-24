@@ -2749,6 +2749,13 @@ document.getElementById('subjectSelect').addEventListener('change', (e) => {
     sessionStorage.setItem('dlc_lastSubjectId', String(currentSubjectId));
     if (typeof setLastSubject === 'function') setLastSubject(currentSubjectId);
     if (typeof setNavState === 'function') setNavState({ subjectId: parseInt(currentSubjectId) });
+    // Keep the URL in sync so a refresh resolves to the current subject
+    // instead of whichever subject was in ?subject=… at first load.
+    try {
+        const u = new URL(window.location.href);
+        u.searchParams.set('subject', String(currentSubjectId));
+        history.replaceState(null, '', u.toString());
+    } catch {}
     cachedTraces = null;
     cachedMovements = null;
     cachedSequenceAssignments = null;
