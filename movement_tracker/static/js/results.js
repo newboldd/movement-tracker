@@ -865,9 +865,10 @@ function _redrawOneTrial(idx) {
         // exactly what the matrix below will compute.
         const _metricR = document.querySelector('input[name="shapeMetric"]:checked');
         const _metric = _metricR ? _metricR.value : 'corr';
+        const _subAvg = !!document.getElementById('shapeSubtractAvg')?.checked;
         const N = trial.segments.length;
         const _matNow = (N >= 2)
-            ? _pairwiseMatrix(trial, xLo, xHi, shiftedX, _metric)
+            ? _pairwiseMatrix(trial, xLo, xHi, shiftedX, _metric, _subAvg)
             : null;
         const _cutH = parseFloat(document.getElementById('shapeClusterCutoff')?.value);
         const _useCut = isFinite(_cutH) ? _cutH : 0.5;
@@ -1113,17 +1114,37 @@ function _redrawOneTrial(idx) {
 // displayed alignment.  Resamples segments to a 120-pt grid over
 // [xLo, xHi] and ignores grid points where either side is NaN.
 // `metric` is 'corr' (Pearson r, default) or 'cov' (sample covariance).
-function _pairwiseMatrix(trial, xLo, xHi, shiftedX, metric) {
+function _pairwiseMatrix(trial, xLo, xHi, shiftedX, metric, subtractMean) {
     const N = trial.segments.length;
     const GRID = 120;
     const resampled = trial.segments.map((s, mi) =>
         _resampleXY(shiftedX(s, mi), s.ys, xLo, xHi, GRID));
+    // Optionally subtract the global (per-time-point) mean across all
+    // segments so the matrix measures shape relative to the mean.
+    let arrs = resampled;
+    if (subtractMean) {
+        const meanArr = new Float64Array(GRID);
+        const counts = new Float64Array(GRID);
+        for (const a of resampled) {
+            for (let k = 0; k < GRID; k++) {
+                if (isFinite(a[k])) { meanArr[k] += a[k]; counts[k] += 1; }
+            }
+        }
+        for (let k = 0; k < GRID; k++) meanArr[k] = counts[k] > 0 ? meanArr[k] / counts[k] : NaN;
+        arrs = resampled.map(a => {
+            const out = new Float64Array(GRID);
+            for (let k = 0; k < GRID; k++) {
+                out[k] = (isFinite(a[k]) && isFinite(meanArr[k])) ? a[k] - meanArr[k] : NaN;
+            }
+            return out;
+        });
+    }
     const mat = [];
     for (let i = 0; i < N; i++) {
         const row = new Array(N);
         for (let j = 0; j < N; j++) {
             if (j < i) { row[j] = mat[j][i]; continue; }
-            const a = resampled[i], b = resampled[j];
+            const a = arrs[i], b = arrs[j];
             let n = 0, sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
             for (let k = 0; k < GRID; k++) {
                 const u = a[k], v = b[k];
@@ -1563,7 +1584,8 @@ function _redrawOneTrialCorr(idx, trial, xLo, xHi, shiftedX, hiIdx) {
     // Reuse the HAC cache produced by _redrawOneTrial when possible.
     const cache = trial._hacCache;
     const metric = cache ? cache.metric : 'corr';
-    const mat = cache ? cache.mat : _pairwiseMatrix(trial, xLo, xHi, shiftedX, metric);
+    const subAvg = !!document.getElementById('shapeSubtractAvg')?.checked;
+    const mat = cache ? cache.mat : _pairwiseMatrix(trial, xLo, xHi, shiftedX, metric, subAvg);
     const labels = trial.segments.map((_, i) => String(i + 1));
     const clusterOn = !!document.getElementById('shapeClusterOn')?.checked;
     const movColors = cache ? cache.movColors : null;
@@ -1666,6 +1688,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (cluCb) cluCb.addEventListener('change', _drawShapeOverlayPlots);
     const colCb = document.getElementById('shapeClusterColors');
     if (colCb) colCb.addEventListener('change', _drawShapeOverlayPlots);
+    const subCb = document.getElementById('shapeSubtractAvg');
+    if (subCb) subCb.addEventListener('change', _drawShapeOverlayPlots);
     document.querySelectorAll('input[name="shapeMetric"]').forEach(r =>
         r.addEventListener('change', _drawShapeOverlayPlots));
 });
