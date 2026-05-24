@@ -631,17 +631,13 @@ function _buildShapeOverlayCells() {
         plotDiv.style.cssText = 'width:100%;height:240px;';
         cell.appendChild(plotDiv);
 
-        // Two correlation-matrix heatmaps stacked: (1) unsorted, in
-        // movement-index order; (2) reordered by HAC clustering at
-        // the current cutoff.  Both rendered as squares.
+        // Correlation matrix (single heatmap, optionally clustered).
+        // Always uses the dendrogram subplot's domain so unsorted and
+        // clustered modes render at the same physical size.
         const corrDiv = document.createElement('div');
         corrDiv.id = `shapeCorrPlot_${idx}`;
         corrDiv.style.cssText = 'width:70%;margin-top:6px;';
         cell.appendChild(corrDiv);
-        const corrCluDiv = document.createElement('div');
-        corrCluDiv.id = `shapeCorrClusterPlot_${idx}`;
-        corrCluDiv.style.cssText = 'width:70%;margin-top:6px;';
-        cell.appendChild(corrCluDiv);
 
         container.appendChild(cell);
     });
@@ -1094,30 +1090,30 @@ function _renderCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, hiPos, bou
 
 function _redrawOneTrialCorr(idx, trial, xLo, xHi, shiftedX, hiIdx) {
     const corrDiv = document.getElementById(`shapeCorrPlot_${idx}`);
-    const cluDiv  = document.getElementById(`shapeCorrClusterPlot_${idx}`);
     const N = trial.segments.length;
     if (!corrDiv) return;
-    if (N < 2) {
-        corrDiv.innerHTML = '';
-        if (cluDiv) cluDiv.innerHTML = '';
-        return;
-    }
+    if (N < 2) { corrDiv.innerHTML = ''; return; }
 
     const mat = _pairwiseCorrMatrix(trial, xLo, xHi, shiftedX);
     const labels = trial.segments.map((_, i) => String(i + 1));
+    const clusterOn = !!document.getElementById('shapeClusterOn')?.checked;
 
-    // 1) Unsorted heatmap (original movement order).
-    _renderCorrHeatmap(
-        corrDiv, mat, labels, 'Pairwise correlation',
-        hiIdx, hiIdx > 0 ? hiIdx - 1 : -1, null,
-    );
+    if (!clusterOn) {
+        // Unsorted matrix, but rendered with the same two-subplot
+        // layout (empty dendrogram region) so the heatmap size matches
+        // the clustered view.
+        _renderClusteredCorrHeatmap(
+            corrDiv, mat, labels, 'Pairwise correlation',
+            hiIdx, hiIdx > 0 ? hiIdx - 1 : -1,
+            null, [], 1, null,
+        );
+        return;
+    }
 
-    // 2) Clustered heatmap.  Distance matrix d = 1 - r, then HAC with
-    //    average linkage, cut at the slider's height.
-    if (!cluDiv) return;
+    // Clustered: HAC with average linkage on 1 − r, cut at slider height.
     const dist = mat.map(row => row.map(v => (v == null ? 2 : 1 - v)));
     const root = _hacAverage(dist);
-    if (!root) { cluDiv.innerHTML = ''; return; }
+    if (!root) { corrDiv.innerHTML = ''; return; }
     const cutH = parseFloat(document.getElementById('shapeClusterCutoff')?.value);
     const useCut = isFinite(cutH) ? cutH : 0.5;
     const { order, sizes } = _cutAndOrderHAC(root, useCut);
@@ -1128,13 +1124,12 @@ function _redrawOneTrialCorr(idx, trial, xLo, xHi, shiftedX, hiIdx) {
     for (let i = 0; i < sizes.length - 1; i++) { acc += sizes[i]; boundaries.push(acc); }
     const hiPosClu = hiIdx > 0 ? order.indexOf(hiIdx - 1) : -1;
     const k = sizes.length;
-    // Dendrogram line segments — leaf id → y position in the reordered axis.
     const leafToY = {};
     order.forEach((id, pos) => { leafToY[id] = pos; });
     const dendroLines = _buildDendroLines(root, leafToY);
     const maxH = root.height || 1;
     _renderClusteredCorrHeatmap(
-        cluDiv, reord, reordLabels,
+        corrDiv, reord, reordLabels,
         `Clustered (HAC, avg linkage, 1−r) — ${k} group${k === 1 ? '' : 's'}`,
         hiIdx, hiPosClu, boundaries, dendroLines, maxH, useCut,
     );
@@ -1160,6 +1155,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (cutVal) cutVal.textContent = (+cutSl.value).toFixed(2);
         _drawShapeOverlayPlots();
     });
+    const cluCb = document.getElementById('shapeClusterOn');
+    if (cluCb) cluCb.addEventListener('change', _drawShapeOverlayPlots);
 });
 
 // When "Auto" is selected, append the actually-resolved source to the
