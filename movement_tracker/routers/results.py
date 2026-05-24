@@ -1029,6 +1029,17 @@ def get_group_comparison(include_auto: bool = Query(False),
     contribute; ``trial`` ∈ {first, last, average} selects which
     trial(s) within each chosen hand.
     """
+    # Cache fast path: every combination is exported to site/data/.
+    # Saves the multi-second aggregation pass when the user is just
+    # browsing the Group Comparison page.  Falls through if the cache
+    # file is missing or unreadable.
+    cache = _group_cache_path(include_auto, source, seq_mode, hand, trial)
+    if cache is not None and cache.is_file():
+        try:
+            return _json.loads(cache.read_text())
+        except Exception:
+            pass
+
     with get_db_ctx() as db:
         subjects = db.execute(
             "SELECT * FROM subjects ORDER BY group_label, name"
@@ -1179,25 +1190,48 @@ def _explore_value_keys() -> list[str]:
 # Combinations exported to the static site (see scripts/export_results_static.py).
 # When the live request matches one of these, the endpoint returns the cached
 # JSON instead of recomputing — same trade-off the static site makes.
+_SITE_DATA_DIR = Path(__file__).resolve().parents[2] / "site" / "data"
+
+# Group page: every combination is exported.
+_GROUP_STATIC_SOURCES   = {"auto", "corrections", "mp_combined", "mp_forward"}
+_GROUP_STATIC_SEQ_MODES = {"none", "linear_full", "linear_first10", "linear_multi",
+                            "exp_full",    "exp_first10",    "exp_multi"}
+_GROUP_STATIC_HANDS     = {"more", "less", "L", "R", "average"}
+_GROUP_STATIC_TRIALS    = {"first", "last", "average"}
+
+# Explore page: smaller subset (no source≠auto, no seq=none, no L/R hand).
 _EXPLORE_STATIC_SOURCES   = {"auto"}
 _EXPLORE_STATIC_SEQ_MODES = {"linear_full", "linear_first10", "linear_multi",
                               "exp_full",    "exp_first10",    "exp_multi"}
 _EXPLORE_STATIC_HANDS     = {"more", "less", "average"}
 _EXPLORE_STATIC_TRIALS    = {"first", "last", "average"}
-_SITE_DATA_DIR = Path(__file__).resolve().parents[2] / "site" / "data"
 
 
-def _explore_cache_path(include_auto: bool, source: str, seq_mode: str,
-                         hand: str, trial: str) -> "Path | None":
-    if not include_auto:
-        return None
-    if source not in _EXPLORE_STATIC_SOURCES: return None
-    if seq_mode not in _EXPLORE_STATIC_SEQ_MODES: return None
-    if hand not in _EXPLORE_STATIC_HANDS: return None
-    if trial not in _EXPLORE_STATIC_TRIALS: return None
-    name = (f"api_results_explore_include_auto_true_source_{source}_"
+def _static_cache_path(endpoint: str, include_auto: bool,
+                        source: str, seq_mode: str, hand: str, trial: str,
+                        srcs: set, sms: set, hands: set, trials: set):
+    """Return Path to a cached JSON for the given combo, or None if the
+    combination wasn't exported (no cache to read)."""
+    if not include_auto: return None
+    if source not in srcs: return None
+    if seq_mode not in sms: return None
+    if hand not in hands: return None
+    if trial not in trials: return None
+    name = (f"api_results_{endpoint}_include_auto_true_source_{source}_"
             f"seq_mode_{seq_mode}_hand_{hand}_trial_{trial}.json")
     return _SITE_DATA_DIR / name
+
+
+def _explore_cache_path(include_auto, source, seq_mode, hand, trial):
+    return _static_cache_path("explore", include_auto, source, seq_mode, hand, trial,
+                              _EXPLORE_STATIC_SOURCES, _EXPLORE_STATIC_SEQ_MODES,
+                              _EXPLORE_STATIC_HANDS, _EXPLORE_STATIC_TRIALS)
+
+
+def _group_cache_path(include_auto, source, seq_mode, hand, trial):
+    return _static_cache_path("group", include_auto, source, seq_mode, hand, trial,
+                              _GROUP_STATIC_SOURCES, _GROUP_STATIC_SEQ_MODES,
+                              _GROUP_STATIC_HANDS, _GROUP_STATIC_TRIALS)
 
 
 @router.get("/explore")
