@@ -1042,14 +1042,19 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
             domain: [0.20, 1.0], anchor: 'y', automargin: false,
             tickfont: { size: 9 }, side: 'bottom',
             tickmode: 'array', tickvals: nums, ticktext: labels,
-            range: [-0.5, N - 0.5], constrain: 'domain',
+            range: [-0.5, N - 0.5],
             showline: false, showgrid: false, zeroline: false, ticks: '',
         },
+        // constrain on yaxis (not x2) so the y-domain shrinks to match
+        // the square matrix; constraintoward:'top' keeps the matrix at
+        // the top of the plot area so the bottom x-axis labels sit
+        // right under the matrix instead of at the plot-area bottom.
         yaxis: {
             tickfont: { size: 9 }, automargin: false, anchor: 'x2',
             tickmode: 'array', tickvals: nums, ticktext: labels,
-            range: [N - 0.5, -0.5],   // reversed so movement 1 is at top
+            range: [N - 0.5, -0.5],
             scaleanchor: 'x2', scaleratio: 1,
+            constrain: 'domain', constraintoward: 'top',
             showline: false, showgrid: false, zeroline: false, ticks: '',
         },
         plot_bgcolor: '#fff', paper_bgcolor: '#fff',
