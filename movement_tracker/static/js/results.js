@@ -1,5 +1,17 @@
 /* Results page: distance traces, movement parameters, group comparison */
 
+// Static-site mode: the SE-based hand groupings aren't pre-computed
+// into JSON files (they require live sequence-effect math per subject),
+// so hide them from the dropdown when STATIC_RESULTS is set.
+(function _trimStaticResultsControls() {
+    if (!window.STATIC_RESULTS) return;
+    const sel = document.getElementById('groupHandSelect');
+    if (!sel) return;
+    Array.from(sel.options).forEach(opt => {
+        if (['larger_se', 'smaller_se'].includes(opt.value)) opt.remove();
+    });
+})();
+
 let subjects = [];
 let currentTab = 'distances';
 let currentSubjectId = null;

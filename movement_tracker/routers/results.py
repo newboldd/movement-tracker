@@ -142,24 +142,26 @@ def _is_levodopa_off(raw) -> bool:
     return s in ("0", "none", "no", "off", "nil", "n")
 
 
-def _laterality_more_side(lat) -> str | None:
+def _laterality_more_side(lat) -> str:
     """More-affected side ('L'/'R') from a clinical laterality value.
 
     Handles 'L', 'R', 'left', 'right', and 'L>R' / 'R>L' (more-affected
-    side listed first).  Bilateral / none / blank → None (unknown).
+    side listed first).  Bilateral / none / blank / unrecognized →
+    default 'R' (per project convention: if no clinical laterality is
+    recorded the right hand is treated as more-affected).
     """
     if lat is None:
-        return None
+        return "R"
     s = str(lat).strip().lower()
     if not s or s in ("none", "b/l", "bilateral", "n/a", "na"):
-        return None
+        return "R"
     if ">" in s:
         s = s.split(">")[0].strip()
     if s.startswith("l"):
         return "L"
     if s.startswith("r"):
         return "R"
-    return None
+    return "R"
 
 
 def _hand_of_trial(trial_name: str) -> str | None:
@@ -169,13 +171,45 @@ def _hand_of_trial(trial_name: str) -> str | None:
     return c if c in ("L", "R") else None
 
 
+def _se_chosen_hand(trials, all_movements, seq_mode: str,
+                     prefer_larger: bool) -> str | None:
+    """Pick L or R based on the seq-effect slope of each hand's last
+    trial (using amplitude under the requested ``seq_mode``).
+    ``prefer_larger`` = True → return the hand with the MORE NEGATIVE
+    slope (larger magnitude decrement); False → the less negative one.
+    Returns None when no slopes are computable for either hand."""
+    if seq_mode == "none":
+        return None
+    by_hand: dict[str, list[int]] = {"L": [], "R": []}
+    for i, t in enumerate(trials):
+        h = _hand_of_trial(t.get("trial_name", ""))
+        if h:
+            by_hand[h].append(i)
+    slopes: dict[str, float] = {}
+    for h, idxs in by_hand.items():
+        if not idxs:
+            continue
+        last_idx = idxs[-1]
+        movs = [m for m in all_movements if m.get("trial_idx") == last_idx]
+        se = _sequence_effect(movs, "amplitude", seq_mode)
+        if se is not None and se.get("slope") is not None:
+            slopes[h] = se["slope"]
+    if not slopes:
+        return None
+    # Larger SE = more negative slope (treat as descending decrement).
+    return (min if prefer_larger else max)(slopes, key=lambda h: slopes[h])
+
+
 def _select_trial_indices(trials: list[dict], hand: str, trial_sel: str,
                           laterality) -> set[int]:
     """Which trial indices to include for the chosen hand + trial mode.
 
-    hand ∈ {more, less, L, R, average};
+    hand ∈ {more, less, L, R, average, larger_se, smaller_se};
     trial_sel ∈ {first, last, average}.  Returns an empty set when the
-    selection can't be resolved (e.g. unknown more-affected side).
+    selection can't be resolved (e.g. SE-based selection requested but
+    no slope data available).  For larger_se / smaller_se the caller
+    must use the ``hand=`` wrapper in ``get_group_comparison`` which
+    converts to a concrete 'L'/'R' first.
     """
     by_hand: dict[str, list[int]] = {"L": [], "R": []}
     for i, t in enumerate(trials):
@@ -185,9 +219,9 @@ def _select_trial_indices(trials: list[dict], hand: str, trial_sel: str,
 
     more = _laterality_more_side(laterality)
     if hand == "more":
-        hands = [more] if more else []
+        hands = [more]
     elif hand == "less":
-        hands = [("R" if more == "L" else "L")] if more else []
+        hands = ["R" if more == "L" else "L"]
     elif hand in ("L", "R"):
         hands = [hand]
     else:  # average → both hands
@@ -1080,10 +1114,19 @@ def get_group_comparison(include_auto: bool = Query(False),
                 all_movements, _ = _build_movement_params(distances, events, trials)
                 if _EXPORT_CACHE_ON:
                     _EXPORT_MOVE_CACHE[ckey] = (trials, all_movements, event_source)
+            # Larger / Smaller SE: pick which hand based on each hand's
+            # last-trial sequence-effect slope (amplitude key, current
+            # seq_mode) before applying the standard trial selector.
+            if hand in ("larger_se", "smaller_se"):
+                chosen = _se_chosen_hand(trials, all_movements, seq_mode,
+                                          prefer_larger=(hand == "larger_se"))
+                effective_hand = chosen if chosen else hand   # unresolved → empty set
+            else:
+                effective_hand = hand
             # Restrict to the selected hand + trial(s).  An empty
-            # selection (unknown affected side, or no trials for the
-            # chosen hand) excludes the subject via the len<2 check.
-            sel_idx = _select_trial_indices(trials, hand, trial,
+            # selection (no trials for the chosen hand, or SE unresolved)
+            # excludes the subject via the len<2 check below.
+            sel_idx = _select_trial_indices(trials, effective_hand, trial,
                                             subj.get("laterality"))
             movements = [m for m in all_movements if m.get("trial_idx") in sel_idx]
         except Exception as exc:

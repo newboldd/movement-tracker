@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Movement Tracker</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+    <style>
+        /* Highlight the currently-selected step button on the Jobs page —
+           matches the light-blue selected-button styling used on the Auto
+           page (--blue). */
+        .step-btn.active,
+        .step-btn.active:hover {
+            background: var(--blue) !important;
+            border-color: var(--blue) !important;
+            color: #fff !important;
+            font-weight: 700;
+        }
+        .remote-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+        .full-width { grid-column: 1 / -1; }
+        .execution-target-group {
+            display: flex;
+            gap: 16px;
+            align-items: center;
+            padding: 12px;
+            background: var(--bg);
+            border-radius: var(--radius);
+            margin-bottom: 12px;
+        }
+        .target-radios {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+        }
+        .target-radio {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .target-radio input[type="radio"] {
+            cursor: pointer;
+        }
+        .target-radio label {
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .gpu-selector {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            padding: 8px;
+            background: var(--bg-card);
+            border-radius: 4px;
+        }
+        .gpu-selector select {
+            padding: 4px 8px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--text);
+            font-size: 13px;
+        }
+        .gpu-status {
+            font-size: 12px;
+            color: var(--text-muted);
+            padding: 8px 12px;
+            background: var(--bg-card);
+            border-radius: 4px;
+            border-left: 3px solid var(--text-muted);
+        }
+        .gpu-status.available {
+            border-left-color: var(--green);
+            color: var(--green);
+        }
+        .gpu-status.unavailable {
+            border-left-color: var(--red);
+            color: var(--red);
+        }
+        .job-restriction-toggle {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+        }
+        .job-restriction-toggle input[type="checkbox"] {
+            cursor: pointer;
+        }
+        .subject-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            max-height: 200px;
+            overflow-y: auto;
+            padding: 8px;
+            background: var(--bg);
+            border-radius: var(--radius);
+        }
+        .subject-grid label {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 13px;
+            padding: 3px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+        }
+        .subject-grid label:hover { border-color: var(--blue); }
+        .subject-grid label.checked { background: var(--accent); border-color: var(--blue); }
+        .lane-panel {
+            padding: 12px;
+            background: var(--bg);
+            border-radius: var(--radius);
+            min-height: 60px;
+        }
+        .lane-panel h4 {
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+        }
+        .queue-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            border-radius: 4px;
+            margin-bottom: 4px;
+            font-size: 13px;
+            background: var(--bg-card);
+        }
+        .queue-item .pos {
+            color: var(--text-muted);
+            font-size: 11px;
+            min-width: 20px;
+        }
+        .queue-item .type { font-weight: 600; }
+        .queue-item .subjects {
+            color: var(--text-muted);
+            font-size: 12px;
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .history-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        .history-table th {
+            text-align: left;
+            padding: 6px 10px;
+            border-bottom: 1px solid var(--border);
+            color: var(--text-muted);
+            font-size: 11px;
+            text-transform: uppercase;
+        }
+        .history-table td {
+            padding: 6px 10px;
+            border-bottom: 1px solid var(--border);
+        }
+        .step-select, .redownload-step, .redownload-subject {
+            padding: 6px 12px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            color: var(--text);
+            font-size: 14px;
+        }
+        .toolbar {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+        .empty-state {
+            color: var(--text-muted);
+            font-size: 13px;
+            font-style: italic;
+        }
+        .trial-group {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .trial-group-label {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+        }
+        .trial-items {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .trial-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 13px;
+            padding: 3px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            user-select: none;
+        }
+        .trial-item:hover { border-color: var(--blue); }
+        .trial-item.done { border-color: var(--green); background: rgba(76,175,80,0.08); color: var(--green); }
+        .trial-item.needs-deident { border-color: #e53935; background: rgba(229,57,53,0.08); color: #e53935; }
+        .trial-item:not(.checked) { opacity: 0.4; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1><a href="/">Movement Tracker</a></h1>
+        <nav>
+            <a href="/subjects">Subjects</a>
+            <span class="nav-dropdown">
+                <a href="/labels">Analyze</a>
+                <div class="nav-dropdown-menu">
+                    <a href="/preproc">Pre-proc</a>
+                    <a href="/labels">Labels</a>
+                    <a href="/labeling-select">DLC</a>
+                    <a href="/events">Events</a>
+                    <a href="/deidentify">Deidentify</a>
+                </div>
+            </span>
+            <span class="nav-dropdown">
+                <a href="/results">Results</a>
+                <div class="nav-dropdown-menu">
+                    <a href="/results?tab=distances">Individual</a>
+                    <a href="/results?tab=group">Group Comparison</a>
+                    <a href="/explore">Explore</a>
+                    <a href="/oscillations">Oscillations</a>
+                </div>
+            </span>
+            <span class="nav-dropdown" id="navJobQueue">
+                <a href="/remote"><span id="navJobDot" class="nav-job-dot" style="display:none;"></span>Jobs</a>
+                <div class="nav-dropdown-menu nav-jobs-dropdown" id="navJobsPanel">
+                    <div style="padding:8px 12px;font-size:11px;color:var(--text-muted);">Loading...</div>
+                </div>
+            </span>
+            <a href="/settings">Settings</a>
+        </nav>
+    </div>
+
+    <div class="container">
+        <!-- Launch Job -->
+        <div class="card">
+            <h2>Launch Job</h2>
+
+            <!-- Step buttons + Target Selection -->
+            <div style="margin-bottom:12px;">
+                <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;">
+                    <div style="display:flex;flex-direction:column;gap:3px;">
+                        <span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">Detection</span>
+                        <div style="display:flex;gap:3px;">
+                            <button class="btn btn-sm step-btn" data-step="mediapipe" onclick="selectStep('mediapipe')">MediaPipe</button>
+                            <button class="btn btn-sm step-btn" data-step="vision" onclick="selectStep('vision')">Vision</button>
+                            <button class="btn btn-sm step-btn" data-step="pose" onclick="selectStep('pose')">Pose</button>
+                            <button class="btn btn-sm step-btn" data-step="hrnet" onclick="selectStep('hrnet')">HRNet</button>
+                        </div>
+                    </div>
+                    <div style="display:flex;flex-direction:column;gap:3px;">
+                        <span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">Pre-proc</span>
+                        <div style="display:flex;gap:3px;">
+                            <button class="btn btn-sm step-btn" data-step="preproc" onclick="selectStep('preproc')"
+                                    title="Run camera trajectory + background/mask bake for the selected trials.  Remote target reuses already-uploaded videos and the MP npz.">Preproc</button>
+                        </div>
+                    </div>
+                    <div style="display:flex;flex-direction:column;gap:3px;">
+                        <span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">Deidentify</span>
+                        <div style="display:flex;gap:3px;">
+                            <button class="btn btn-sm step-btn" data-step="deidentify" onclick="selectStep('deidentify')">Render</button>
+                        </div>
+                    </div>
+                    <div style="display:flex;flex-direction:column;gap:3px;">
+                        <span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">DLC</span>
+                        <div style="display:flex;gap:3px;">
+                            <button class="btn btn-sm step-btn" data-step="train" onclick="selectStep('train')">Train</button>
+                            <button class="btn btn-sm step-btn" data-step="refine" onclick="selectStep('refine')">Refine</button>
+                            <button class="btn btn-sm step-btn" data-step="analyze_v1" onclick="selectStep('analyze_v1')">Analyze v1</button>
+                            <button class="btn btn-sm step-btn" data-step="analyze_v2" onclick="selectStep('analyze_v2')">Analyze v2</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="toolbar" style="flex-wrap:wrap;">
+                <label style="font-size:13px;color:var(--text-muted);">Target:</label>
+                <div class="target-radios">
+                    <div class="target-radio">
+                        <input type="radio" id="targetLocalCpu" name="executionTarget" value="local-cpu" checked>
+                        <label for="targetLocalCpu"><span style="color:var(--blue);">⬤</span> Local CPU</label>
+                    </div>
+                    <div class="target-radio">
+                        <input type="radio" id="targetLocalGpu" name="executionTarget" value="local-gpu">
+                        <label for="targetLocalGpu"><span style="color:var(--green);">⬤</span> Local GPU</label>
+                    </div>
+                    <div class="target-radio">
+                        <input type="radio" id="targetRemote" name="executionTarget" value="remote">
+                        <label for="targetRemote"><span style="color:var(--gray);">⬤</span> Remote</label>
+                    </div>
+                    <div id="gpuSelectorDiv" class="gpu-selector" style="display:none;">
+                        <select id="gpuSelector"></select>
+                    </div>
+                </div>
+                <div style="flex:1;"></div>
+                <button class="btn btn-sm" onclick="selectAllSubjects()">Select All</button>
+                <button class="btn btn-sm" onclick="selectIncompleteSubjects()"
+                        title="Select subjects + trials whose output for the current job type doesn't exist locally yet (same logic as the red/green coloring).">Select Incomplete</button>
+                <button class="btn btn-sm" onclick="clearSubjects()">Clear</button>
+            </div>
+
+            <!-- Inline warning area -->
+            <div id="jobWarning" style="display:none;padding:8px 12px;border-radius:4px;margin-bottom:12px;font-size:13px;"></div>
+
+            <!-- Subject Selection -->
+            <div style="margin-bottom:12px;">
+                <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:6px;">Subjects:</label>
+                <div id="subjectGrid" class="subject-grid">
+                    <span class="empty-state">Loading subjects...</span>
+                </div>
+            </div>
+
+            <!-- MediaPipe-only: opt in to running the tracker on frames fed
+                 in reverse temporal order.  Output is saved separately as
+                 mediapipe_reverse_prelabels.npz so the forward pass is never
+                 overwritten; shown as the Reverse layer on the Labels page. -->
+            <label id="mpReverseRow" style="display:none;font-size:12px;color:var(--text-muted);margin-bottom:8px;cursor:pointer;align-items:center;gap:6px;"
+                   title="Feed frames to MediaPipe in reverse temporal order.  The tracker enters early-frame failures already locked on from a later well-labeled frame, often filling cold-start gaps.  Saved separately as the Reverse model layer; does not overwrite the forward pass.">
+                <input type="checkbox" id="mpReverseCb" style="cursor:pointer;">
+                Run in reverse (saves to <code>mediapipe_reverse_prelabels.npz</code>)
+            </label>
+
+            <!-- MediaPipe-only: honour saved per-trial crop boxes from the
+                 Labels / Auto pages.  Default on; un-check to force MP
+                 to scan the full camera-half frame. -->
+            <label id="mpUseBboxRow" style="display:none;font-size:12px;color:var(--text-muted);margin-bottom:12px;cursor:pointer;align-items:center;gap:6px;"
+                   title="When checked, MediaPipe runs on the saved per-trial bbox for each trial (faster, more robust when set).  When unchecked, MediaPipe scans the full camera-half frame regardless of any saved bbox.">
+                <input type="checkbox" id="mpUseBboxCb" checked style="cursor:pointer;">
+                Use bounding box (per-trial, if saved)
+            </label>
+
+            <!-- Trial Selection (shown for per-trial steps like deidentify and HRnet) -->
+            <div id="trialSection" style="display:none;margin-bottom:12px;">
+                <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:6px;">Trials:</label>
+                <div id="trialGrid" style="display:flex;flex-direction:column;gap:6px;padding:8px;background:var(--bg);border-radius:var(--radius);max-height:220px;overflow-y:auto;">
+                    <span class="empty-state">Select subjects above</span>
+                </div>
+                <!-- HRnet-only: choose whether to crop input by saved/derived bboxes -->
+                <label id="useBboxRow" style="display:none;font-size:12px;color:var(--text-muted);margin-top:8px;cursor:pointer;align-items:center;gap:6px;">
+                    <input type="checkbox" id="useBboxCb" checked style="cursor:pointer;">
+                    Use bounding boxes (saved or MediaPipe-derived defaults)
+                </label>
+                <div id="hrnetIneligibleBanner" style="display:none;font-size:11px;color:var(--text-muted);margin-top:6px;padding:6px 8px;background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.25);border-radius:var(--radius);"></div>
+            </div>
+
+            <!-- Submit Button -->
+            <div style="display:flex;justify-content:flex-end;gap:8px;">
+                <button class="btn" onclick="submitBatch()"
+                        title="HRnet: upload all videos + MP data once, then launch a single long-lived runner on the remote (survives local-server restarts).  MediaPipe: submit one job per selected subject so each appears as its own queue row.">Submit Batch</button>
+                <button class="btn btn-primary" onclick="submitJob()">Submit Processing Job</button>
+            </div>
+        </div>
+
+        <!-- Queue: 4 lane boxes -->
+        <div class="card">
+            <h2>Queue</h2>
+            <div class="remote-grid">
+                <div class="lane-panel">
+                    <h4><span style="color:var(--blue);">●</span> Local CPU</h4>
+                    <div id="localCpuLane"><span class="empty-state">Empty</span></div>
+                </div>
+                <div class="lane-panel" id="localGpuPanel">
+                    <h4><span style="color:var(--green);">●</span> Local GPU</h4>
+                    <div id="localGpuLane"><span class="empty-state">Empty</span></div>
+                </div>
+                <div class="lane-panel">
+                    <h4><span style="color:var(--text-muted);">●</span> Remote CPU</h4>
+                    <div id="remoteCpuLane"><span class="empty-state">Empty</span></div>
+                </div>
+                <div class="lane-panel">
+                    <h4><span style="color:var(--text-muted);">●</span> Remote GPU</h4>
+                    <div id="remoteGpuLane"><span class="empty-state">Empty</span></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Job History -->
+        <div class="card">
+            <h2>Job History</h2>
+            <div id="historyContent">
+                <span class="empty-state">No completed jobs yet.</span>
+            </div>
+        </div>
+
+        <!-- Lifetime History (append-only JSONL log) -->
+        <div class="card">
+            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
+                <h2 style="margin:0;">Lifetime History</h2>
+                <span id="lifetimeSummary" style="font-size:12px;color:var(--text-muted);"></span>
+                <div style="margin-left:auto;display:flex;align-items:center;gap:6px;">
+                    <label style="font-size:11px;color:var(--text-muted);">Filter:</label>
+                    <select id="lifetimeJobType" style="font-size:12px;">
+                        <option value="">All job types</option>
+                        <option value="preproc">preproc</option>
+                        <option value="deidentify">deidentify</option>
+                        <option value="hrnet">hrnet</option>
+                        <option value="mediapipe">mediapipe</option>
+                        <option value="vision">vision</option>
+                        <option value="pose">pose</option>
+                        <option value="train">train</option>
+                        <option value="refine">refine</option>
+                        <option value="analyze_v1">analyze_v1</option>
+                        <option value="analyze_v2">analyze_v2</option>
+                        <option value="skeleton_v1">skeleton_v1</option>
+                        <option value="skeleton_v2">skeleton_v2</option>
+                    </select>
+                    <select id="lifetimeStatus" style="font-size:12px;">
+                        <option value="">Any status</option>
+                        <option value="completed">completed</option>
+                        <option value="failed">failed</option>
+                        <option value="cancelled">cancelled</option>
+                    </select>
+                    <button class="btn btn-sm" onclick="refreshLifetimeHistory()">Refresh</button>
+                </div>
+            </div>
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">
+                Append-only log at <code>&lt;DATA_DIR&gt;/job_history.jsonl</code>.
+                Each row pairs a job's metadata with per-stage timings and the
+                git commit hash that was running — useful for correlating
+                performance changes with code changes.
+            </div>
+            <div id="lifetimeContent" style="font-size:12px;max-height:50vh;overflow-y:auto;">
+                <span class="empty-state">Loading...</span>
+            </div>
+        </div>
+
+        <!-- Re-download section removed — use Re-download buttons in Job History -->
+    </div>
+
+    <!-- Log Modal -->
+    <div class="modal-overlay" id="logModal">
+        <div class="modal" style="min-width:600px;max-width:80vw;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                <h3 style="margin:0;">Job Log</h3>
+                <button class="btn btn-sm" onclick="closeLogModal()">Close</button>
+            </div>
+            <pre id="logContent" style="max-height:60vh;overflow:auto;background:var(--bg);padding:12px;border-radius:var(--radius);font-size:12px;white-space:pre-wrap;word-break:break-all;margin:0;"></pre>
+        </div>
+    </div>
+
+    <!-- Trial-detail modal: live view of subjects/trials inside an
+         active batch job, colored by outcome (green=downloaded,
+         yellow=completed-not-downloaded, red=failed, blue=pending,
+         dim blue=uploading).  Polls every 3 s while open. -->
+    <div class="modal-overlay" id="trialsModal">
+        <div class="modal" style="min-width:520px;max-width:80vw;max-height:80vh;display:flex;flex-direction:column;">
+            <!-- Scoped sizing overrides: bump column headings, subject
+                 links, and trial chips inside this modal only.  The
+                 trial chips elsewhere (history table) keep their compact
+                 10px size. -->
+            <style>
+                #trialsModal #trialsModalContent th { font-size: 14px !important; }
+                #trialsModal #trialsModalContent .hist-row-line { font-size: 15px; line-height: 26px; min-height: 26px; height: 26px; }
+                #trialsModal #trialsModalContent .hist-row-line a,
+                #trialsModal #trialsModalContent .hist-row-line span { font-size: 13px; padding: 2px 8px; }
+                /* Legend swatch */
+                #trialsModalLegend .lg-sq {
+                    display: inline-block;
+                    width: 10px; height: 10px;
+                    border-radius: 2px;
+                    margin-right: 4px;
+                    vertical-align: middle;
+                }
+                /* In-process trial chip: pulse-yellow like the jobs-nav
+                   running indicator (job-pulse keyframes, 1.5s ease).
+                   Applied globally (no #trialsModal prefix) so chips in
+                   the queue rows also blink. */
+                .trial-current {
+                    animation: job-pulse 1.5s ease-in-out infinite;
+                }
+            </style>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                <h3 id="trialsModalTitle" style="margin:0;">Job Trials</h3>
+                <button class="btn btn-sm" onclick="closeTrialsModal()">Close</button>
+            </div>
+            <!-- Body: subjects/trials table on the left, vertical legend
+                 on the right (bordered).  Legend hugs the right edge so
+                 the Subject/Trials columns get the bulk of the width. -->
+            <div style="display:flex;flex:1;gap:12px;min-height:0;">
+                <div id="trialsModalContent" style="flex:1;overflow:auto;background:var(--bg);padding:12px;border-radius:var(--radius);font-size:13px;"></div>
+                <div id="trialsModalLegend" style="
+                        flex:0 0 auto;
+                        display:flex;flex-direction:column;gap:8px;
+                        align-self:flex-start;
+                        padding:10px 14px;
+                        font-size:12px;
+                        color:var(--text-muted);
+                        border:1px solid #fff;
+                        border-radius:var(--radius);
+                        background:var(--bg);
+                    ">
+                    <span><span class="lg-sq" style="background:#6b8aaa;"></span>Uploading</span>
+                    <span><span class="lg-sq" style="background:var(--accent,#2196f3);"></span>Pending</span>
+                    <span><span class="lg-sq" style="background:var(--yellow,#fbc02d);"></span>Completed</span>
+                    <span><span class="lg-sq" style="background:var(--green,#4caf50);"></span>Downloaded</span>
+                    <span><span class="lg-sq" style="background:#e53935;"></span>Failed</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/nav.js?v=9"></script>
+    <script src="/static/js/api.js?v=13"></script>
+    <script src="/static/js/remote.js?v=61"></script>
+</body>
+</html>

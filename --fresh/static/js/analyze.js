@@ -1,0 +1,1472 @@
+/**
+ * Analyze Page — 2D keypoint viewer with distance trace
+ *
+ * Canvas-based stereo video viewer with MediaPipe, Vision, and DLC overlays,
+ * distance trace chart, per-finger visibility toggles, and zoom/pan.
+ */
+
+const analyzeViewer = (() => {
+    // ── State ────────────────────────────────────────────────
+    let allSubjects = [];
+    let subjectId = null;
+    let subjectName = '';
+    let trials = [];
+    let currentTrialIdx = -1;
+    let trialData = null;
+
+    let currentFrame = 0;
+    let totalFrames = 0;
+    let fps = 30;
+    let currentSide = 'OS';
+    let cameraNames = ['OS', 'OD'];
+    let cameraMode = 'stereo';
+    let playing = false;
+    let playTimer = null;
+    let playbackRate = 1;
+    const SPEED_PRESETS = [0.1, 0.25, 0.5, 1, 2, 4, 8, 15, 30, 60, 120];
+
+    // Layer visibility
+    let showVideo = true;
+    let showMediapipe = true;
+    let showVision = false;
+    let showDLC = false;
+    let showSkeleton = true;
+    let showHeatmap = false;
+    let heatmapJoint = 4; // thumb tip default
+    let heatmapCache = {};
+    let hasHeatmaps = false;
+
+    // Finger visibility
+    const fingerVisibility = {
+        wrist: true, thumb: true, index: true,
+        middle: true, ring: true, pinky: true,
+    };
+    let visibleJoints = new Set([...Array(21).keys()]);
+
+    // Distance metric
+    let selectedMetric = '';
+
+    // Canvas
+    let canvas, ctx;
+    let distCanvas, distCtx;
+    let videoEl;
+
+    // Zoom/pan (in video-pixel space)
+    let scale = 1, offsetX = 0, offsetY = 0;
+    let defaultScale = 1, defaultOX = 0, defaultOY = 0;
+    let hasUserZoom = false;
+    let dragging = null;
+    let dragStartX = 0, dragStartY = 0;
+    let panStartOX = 0, panStartOY = 0;
+
+    // Video dimensions
+    let imgW = 0, imgH = 0, midline = 0;
+
+    // Hand skeleton chains (MediaPipe 21-joint model)
+    const HAND_SKELETON = [
+        [0, 1, 2, 3, 4],       // thumb
+        [0, 5, 6, 7, 8],       // index
+        [0, 9, 10, 11, 12],    // middle
+        [0, 13, 14, 15, 16],   // ring
+        [0, 17, 18, 19, 20],   // pinky
+    ];
+
+    // ── Helpers ───────────────────────────────────────────────
+    const $ = id => document.getElementById(id);
+
+    async function api(url, opts) {
+        const resp = await fetch(url, opts);
+        if (!resp.ok) {
+            let msg = `${resp.status} ${resp.statusText}`;
+            try { const b = await resp.json(); if (b.detail) msg = b.detail; } catch {}
+            throw new Error(msg);
+        }
+        return resp.json();
+    }
+
+    function isJointVisible(j) { return visibleJoints.has(j); }
+    function isBoneVisible(i, j) { return visibleJoints.has(i) && visibleJoints.has(j); }
+
+    function updateVisibleJoints() {
+        visibleJoints.clear();
+        if (!trialData) return;
+        const groups = trialData.finger_groups;
+        if (!groups) {
+            // Fallback: all joints visible
+            for (let i = 0; i < 21; i++) visibleJoints.add(i);
+            return;
+        }
+        for (const [finger, joints] of Object.entries(groups)) {
+            if (fingerVisibility[finger]) {
+                joints.forEach(j => visibleJoints.add(j));
+            }
+        }
+    }
+
+    /** Convert skeleton chains to bone pairs for rendering. */
+    function skeletonBones() {
+        if (trialData && trialData.skeleton) return trialData.skeleton;
+        // Derive from chains
+        const bones = [];
+        for (const chain of HAND_SKELETON) {
+            for (let i = 0; i < chain.length - 1; i++) {
+                bones.push([chain[i], chain[i + 1]]);
+            }
+        }
+        return bones;
+    }
+
+    // ── Initialisation ───────────────────────────────────────
+    async function init() {
+        const params = new URLSearchParams(window.location.search);
+        const subjectParam = params.get('subject');
+        // Optional ?trial=N param: jump straight to a specific trial after
+        // loading the subject.  Used by Job-page history links.
+        const trialParam = params.get('trial');
+        const trialIdxFromUrl = trialParam != null && trialParam !== ''
+            ? parseInt(trialParam, 10)
+            : null;
+
+        // Load camera names from settings
+        try {
+            const cfg = await api('/api/settings');
+            if (cfg.default_camera_mode) cameraMode = cfg.default_camera_mode;
+            if (Array.isArray(cfg.camera_names) && cfg.camera_names.length >= 1) {
+                cameraNames = cfg.camera_names;
+                currentSide = cameraNames[0];
+            }
+        } catch { /* defaults */ }
+
+        // Load subjects
+        allSubjects = await api('/api/subjects');
+        const sel = $('subjectSelect');
+        sel.innerHTML = '';
+        allSubjects.forEach(s => {
+            const opt = document.createElement('option');
+            opt.value = s.id;
+            opt.textContent = s.name;
+            sel.appendChild(opt);
+        });
+
+        // Restore subject from URL, nav state, or sessionStorage
+        const nav = typeof getNavState === 'function' ? getNavState() : {};
+        const savedSubject = subjectParam
+            || (nav.subjectId ? String(nav.subjectId) : null)
+            || sessionStorage.getItem('analyze_lastSubjectId');
+        if (savedSubject && allSubjects.some(s => String(s.id) === savedSubject)) {
+            sel.value = savedSubject;
+        } else if (allSubjects.length) {
+            sel.value = allSubjects[0].id;
+        }
+
+        sel.addEventListener('change', () => {
+            loadSubject(parseInt(sel.value));
+            // Drop focus from the <select> so keyboard shortcuts (Space,
+            // arrow keys, etc.) control the video instead of re-opening
+            // the dropdown.
+            sel.blur();
+        });
+
+        // Setup canvases
+        canvas = $('videoCanvas');
+        ctx = canvas.getContext('2d');
+        distCanvas = $('distanceCanvas');
+        distCtx = distCanvas.getContext('2d');
+        videoEl = $('videoEl');
+
+        // Disable side toggle for non-stereo modes
+        if (cameraMode !== 'stereo') {
+            const btn = $('sideToggle');
+            if (btn) { btn.disabled = true; btn.title = 'Single camera'; }
+        }
+
+        // Setup controls and events
+        setupControls();
+        setupCanvasEvents();
+
+        // Load initial subject and restore trial/frame from nav state
+        if (sel.value) {
+            const navState = typeof getNavState === 'function' ? getNavState() : {};
+            await loadSubject(parseInt(sel.value));
+            // ?trial=N takes precedence over nav-state restoration so links
+            // from the Jobs page always land on the requested trial.
+            if (trialIdxFromUrl != null && Number.isFinite(trialIdxFromUrl)
+                && trialIdxFromUrl >= 0 && trialIdxFromUrl < trials.length) {
+                await loadTrial(trialIdxFromUrl);
+            } else if (navState.subjectId === parseInt(sel.value)) {
+                if (navState.trialIdx != null && navState.trialIdx >= 0 && navState.trialIdx < trials.length) {
+                    await loadTrial(navState.trialIdx);
+                    if (navState.frame != null && trialData && navState.frame >= 0 && navState.frame < trialData.n_frames) {
+                        goToFrame(navState.frame);
+                    }
+                }
+                if (navState.side && cameraNames.includes(navState.side) && cameraMode === 'stereo') {
+                    currentSide = navState.side;
+                    $('sideToggle').textContent = currentSide;
+                    computeAutoCrop();
+                    render();
+                }
+            }
+        }
+    }
+
+    // ── Subject / Trial loading ──────────────────────────────
+    async function loadSubject(sid) {
+        subjectId = sid;
+        sessionStorage.setItem('analyze_lastSubjectId', String(sid));
+        if (typeof setNavState === 'function') setNavState({ subjectId: sid });
+        const subj = allSubjects.find(s => s.id === sid);
+        subjectName = subj ? subj.name : '';
+        if (subj && subj.camera_mode) cameraMode = subj.camera_mode;
+
+        // Clear the previous subject's video + canvas BEFORE we try to
+        // load the new one — otherwise an early-return below (no
+        // trials, API error, etc.) leaves the old subject's content
+        // visible.
+        try {
+            videoEl.pause();
+            videoEl.removeAttribute('src');
+            videoEl.load();
+        } catch {}
+        if (canvas && ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+        trialData = null;
+        currentTrialIdx = -1;
+        $('trialName').textContent = '';
+
+        try {
+            trials = await api(`/api/analyze/${sid}/trials`);
+        } catch {
+            trials = [];
+        }
+
+        const trialBtns = $('trialBtns');
+        trialBtns.innerHTML = '';
+        if (!trials.length) {
+            trialBtns.innerHTML = '<span style="font-size:12px;color:var(--text-muted);">No data</span>';
+            render();
+            return;
+        }
+
+        trials.forEach((t, i) => {
+            const btn = document.createElement('button');
+            btn.className = 'trial-btn';
+            // Strip subject name prefix: "Con01_R1" → "R1"
+            let label = t.trial_name || `Trial ${i}`;
+            if (subjectName && label.startsWith(subjectName + '_')) {
+                label = label.slice(subjectName.length + 1);
+            }
+            btn.textContent = label;
+            btn.title = t.trial_name || '';
+            btn.addEventListener('click', () => loadTrial(i));
+            trialBtns.appendChild(btn);
+        });
+
+        await loadTrial(0);
+    }
+
+    function highlightTrialButton(idx) {
+        const btns = $('trialBtns').querySelectorAll('.trial-btn');
+        btns.forEach((b, i) => b.classList.toggle('active', i === idx));
+    }
+
+    async function loadTrial(idx) {
+        if (idx < 0 || idx >= trials.length) return;
+        const trial = trials[idx];
+        currentTrialIdx = idx;
+        highlightTrialButton(idx);
+        if (typeof setNavState === 'function') setNavState({ trialIdx: idx, frame: currentFrame });
+
+        // Trial name: strip subject prefix for display
+        let displayTrial = trial.trial_name || '';
+        if (subjectName && displayTrial.startsWith(subjectName + '_')) {
+            displayTrial = displayTrial.slice(subjectName.length + 1);
+        }
+        $('trialName').textContent = displayTrial;
+
+        // Load bulk data
+        try {
+            trialData = await api(`/api/analyze/${subjectId}/trial/${trial.trial_idx != null ? trial.trial_idx : idx}/data`);
+        } catch (e) {
+            console.error('Failed to load trial data:', e);
+            trialData = null;
+            return;
+        }
+
+        totalFrames = trialData.n_frames || 0;
+        fps = trialData.fps || 30;
+
+        // Populate distance selector
+        const distSel = $('distanceSelect');
+        distSel.innerHTML = '';
+        if (trialData.distance_options) {
+            // distance_options can be an array of {name,...} or an object keyed by name
+            if (Array.isArray(trialData.distance_options)) {
+                trialData.distance_options.forEach(opt => {
+                    const el = document.createElement('option');
+                    el.value = opt.name || opt;
+                    el.textContent = opt.name || opt;
+                    distSel.appendChild(el);
+                });
+            } else {
+                for (const name of Object.keys(trialData.distance_options)) {
+                    const el = document.createElement('option');
+                    el.value = name;
+                    el.textContent = name;
+                    distSel.appendChild(el);
+                }
+            }
+        }
+        if (trialData.distances) {
+            for (const name of Object.keys(trialData.distances)) {
+                if (!distSel.querySelector(`option[value="${CSS.escape(name)}"]`)) {
+                    const el = document.createElement('option');
+                    el.value = name;
+                    el.textContent = name;
+                    distSel.appendChild(el);
+                }
+            }
+        }
+        if (selectedMetric && distSel.querySelector(`option[value="${CSS.escape(selectedMetric)}"]`)) {
+            distSel.value = selectedMetric;
+        } else if (distSel.options.length) {
+            selectedMetric = distSel.options[0].value;
+            distSel.value = selectedMetric;
+        }
+
+        // Show/hide model toggles based on available data
+        const mpRow = $('mpToggleRow');
+        const visRow = $('visionToggleRow');
+        const dlcRow = $('dlcToggleRow');
+        if (mpRow) mpRow.style.display = (trialData.mediapipe && (trialData.mediapipe.OS || trialData.mediapipe.OD)) ? '' : 'none';
+        if (visRow) visRow.style.display = (trialData.vision && (trialData.vision.OS || trialData.vision.OD)) ? '' : 'none';
+        if (dlcRow) dlcRow.style.display = (trialData.dlc && (trialData.dlc.OS || trialData.dlc.OD)) ? '' : 'none';
+
+        // Check for HRNet heatmaps
+        hasHeatmaps = false;
+        heatmapCache = {};
+        try {
+            // Quick check: try fetching frame 0 joint 0 — if 404, no heatmaps
+            await api(`/api/analyze/${subjectId}/heatmap?trial_idx=${trial.trial_idx}&frame=${trial.start_frame || 0}&joint=0&side=${currentSide}`);
+            hasHeatmaps = true;
+        } catch { hasHeatmaps = false; }
+        const hmRow = $('heatmapToggleRow');
+        if (hmRow) hmRow.style.display = hasHeatmaps ? '' : 'none';
+        if (!hasHeatmaps) {
+            showHeatmap = false;
+            const hmCb = $('showHeatmap');
+            if (hmCb) hmCb.checked = false;
+            $('heatmapControls').style.display = 'none';
+        }
+
+        // Load video
+        const trialIdx = trial.trial_idx != null ? trial.trial_idx : idx;
+        videoEl.src = `/api/analyze/${subjectId}/trial/${trialIdx}/video`;
+        videoEl.addEventListener('loadedmetadata', () => {
+            imgW = videoEl.videoWidth;
+            imgH = videoEl.videoHeight;
+            midline = cameraMode === 'stereo' ? imgW / 2 : imgW;
+            sizeCanvases();
+            if (!hasUserZoom) computeAutoCrop();
+            // Seek to midpoint of frame 0
+            videoEl.currentTime = 0.5 / fps;
+            videoEl.addEventListener('seeked', () => {
+                render();
+                renderDistanceTrace();
+            }, { once: true });
+        }, { once: true });
+
+        // Update state
+        currentFrame = 0;
+        $('frameDisplay').textContent = '0';
+        updateVisibleJoints();
+    }
+
+    // ── Controls setup ───────────────────────────────────────
+    function setupControls() {
+        $('prevFrameBtn').addEventListener('click', () => goToFrame(currentFrame - 1));
+        $('nextFrameBtn').addEventListener('click', () => goToFrame(currentFrame + 1));
+        $('playBtn').addEventListener('click', togglePlay);
+        $('sideToggle').addEventListener('click', toggleSide);
+        $('resetZoomBtn').addEventListener('click', resetZoom);
+
+        const prevSubBtn = $('prevSubjectBtn');
+        const nextSubBtn = $('nextSubjectBtn');
+        if (prevSubBtn) prevSubBtn.addEventListener('click', prevSubject);
+        if (nextSubBtn) nextSubBtn.addEventListener('click', nextSubject);
+
+        // Speed slider
+        const speedSlider = $('speedSlider');
+        speedSlider.addEventListener('input', () => {
+            playbackRate = SPEED_PRESETS[parseInt(speedSlider.value)];
+            $('speedDisplay').textContent = playbackRate + 'x';
+        });
+
+        // Layer toggles
+        // showVideo is always true (checkbox removed) — keep listener for backward compat
+        const showVideoEl = $('showVideo');
+        if (showVideoEl && showVideoEl.type === 'checkbox') showVideoEl.addEventListener('change', e => {
+            showVideo = e.target.checked;
+            render();
+        });
+        $('showMP').addEventListener('change', e => {
+            showMediapipe = e.target.checked;
+            render();
+            renderDistanceTrace();
+        });
+        $('showVision').addEventListener('change', e => {
+            showVision = e.target.checked;
+            render();
+            renderDistanceTrace();
+        });
+        $('showDLC').addEventListener('change', e => {
+            showDLC = e.target.checked;
+            render();
+            renderDistanceTrace();
+        });
+        $('showSkeleton').addEventListener('change', e => {
+            showSkeleton = e.target.checked;
+            render();
+        });
+        $('showHeatmap').addEventListener('change', e => {
+            showHeatmap = e.target.checked;
+            $('heatmapControls').style.display = showHeatmap ? 'block' : 'none';
+            render();
+        });
+        // Populate heatmap joint selector
+        const hmJointSel = $('heatmapJointSelect');
+        if (hmJointSel) {
+            const jointNames = ['Wrist','Thumb CMC','Thumb MCP','Thumb IP','Thumb Tip',
+                'Index MCP','Index PIP','Index DIP','Index Tip',
+                'Middle MCP','Middle PIP','Middle DIP','Middle Tip',
+                'Ring MCP','Ring PIP','Ring DIP','Ring Tip',
+                'Pinky MCP','Pinky PIP','Pinky DIP','Pinky Tip'];
+            jointNames.forEach((name, i) => {
+                const opt = document.createElement('option');
+                opt.value = i;
+                opt.textContent = `${i}: ${name}`;
+                if (i === heatmapJoint) opt.selected = true;
+                hmJointSel.appendChild(opt);
+            });
+            hmJointSel.addEventListener('change', e => {
+                heatmapJoint = parseInt(e.target.value);
+                render();
+            });
+        }
+
+        // Distance selector
+        $('distanceSelect').addEventListener('change', () => {
+            selectedMetric = $('distanceSelect').value;
+            _updateFrameInfo();
+            renderDistanceTrace();
+        });
+
+        // Y-range inputs
+        const yMinInput = $('yMinInput');
+        const yMaxInput = $('yMaxInput');
+        if (yMinInput) yMinInput.addEventListener('change', renderDistanceTrace);
+        if (yMaxInput) yMaxInput.addEventListener('change', renderDistanceTrace);
+
+        // Finger toggles
+        document.querySelectorAll('#fingerToggles input').forEach(cb => {
+            cb.addEventListener('change', () => {
+                fingerVisibility[cb.dataset.finger] = cb.checked;
+                updateFingerVisibility();
+            });
+        });
+
+        // Keyboard
+        document.addEventListener('keydown', e => {
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+            switch (e.key) {
+                case 'a': case 'ArrowLeft':
+                    goToFrame(currentFrame - 1); e.preventDefault(); break;
+                case 's': case 'ArrowRight':
+                    goToFrame(currentFrame + 1); e.preventDefault(); break;
+                case ' ':
+                    togglePlay(); e.preventDefault(); break;
+                case 'e':
+                    toggleSide(); break;
+                case 'z':
+                    resetZoom(); break;
+            }
+        });
+    }
+
+    function toggleSide() {
+        if (cameraMode !== 'stereo') return;
+        currentSide = currentSide === cameraNames[0] ? cameraNames[1] : cameraNames[0];
+        $('sideToggle').textContent = currentSide;
+        if (typeof setNavState === 'function') setNavState({ side: currentSide });
+        hasUserZoom = false;
+        computeAutoCrop();
+        render();
+        renderDistanceTrace();
+    }
+
+    function resetZoom() {
+        hasUserZoom = false;
+        computeAutoCrop();
+        render();
+    }
+
+    function updateFingerVisibility() {
+        updateVisibleJoints();
+        render();
+        renderDistanceTrace();
+    }
+
+    function prevSubject() {
+        const sel = $('subjectSelect');
+        const idx = allSubjects.findIndex(s => s.id === subjectId);
+        if (idx > 0) {
+            sel.value = allSubjects[idx - 1].id;
+            loadSubject(allSubjects[idx - 1].id);
+        }
+    }
+
+    function nextSubject() {
+        const sel = $('subjectSelect');
+        const idx = allSubjects.findIndex(s => s.id === subjectId);
+        if (idx < allSubjects.length - 1) {
+            sel.value = allSubjects[idx + 1].id;
+            loadSubject(allSubjects[idx + 1].id);
+        }
+    }
+
+    // ── Frame navigation ─────────────────────────────────────
+    function _updateFrameInfo() {
+        $('frameDisplay').textContent = currentFrame;
+        // Timestamp
+        const timeEl = $('timeDisplay');
+        if (timeEl) timeEl.textContent = (currentFrame / (fps || 30)).toFixed(2) + 's';
+        // Current distance readout
+        const readout = $('distanceReadout');
+        if (readout && trialData && trialData.distances && selectedMetric) {
+            const metricData = trialData.distances[selectedMetric];
+            if (metricData) {
+                // Find the first available source's value
+                const side = currentSide;
+                for (const srcKey of ['mediapipe_' + side, 'vision_' + side, 'dlc_' + side]) {
+                    const arr = metricData[srcKey];
+                    if (arr && currentFrame < arr.length && arr[currentFrame] != null) {
+                        readout.textContent = `Distance: ${arr[currentFrame].toFixed(1)} mm`;
+                        return;
+                    }
+                }
+                readout.textContent = 'Distance: — mm';
+            }
+        }
+    }
+
+    function goToFrame(n) {
+        if (!trialData) return;
+        currentFrame = Math.max(0, Math.min(n, trialData.n_frames - 1));
+        if (typeof setNavState === 'function') setNavState({ frame: currentFrame });
+        sessionStorage.setItem('analyze_lastFrame', String(currentFrame));
+
+        _updateFrameInfo();
+
+        // Update distance trace
+        renderDistanceTrace();
+
+        // Seek video then render
+        if (videoEl.readyState >= 2 && fps) {
+            const t = (currentFrame + 0.5) / fps;
+            videoEl.currentTime = t;
+            videoEl.addEventListener('seeked', render, { once: true });
+        } else {
+            render();
+        }
+    }
+
+    function seekFrame(f) {
+        goToFrame(f);
+    }
+
+    function togglePlay() {
+        if (playing) {
+            playing = false;
+            videoEl.pause();
+            if (playTimer) { cancelAnimationFrame(playTimer); playTimer = null; }
+            $('playBtn').innerHTML = '&#9654;';
+        } else {
+            playing = true;
+            $('playBtn').innerHTML = '&#9646;&#9646;';
+            videoEl.playbackRate = Math.min(playbackRate, 16);
+            videoEl.play().catch(() => {});
+            playLoop();
+        }
+    }
+
+    function playLoop() {
+        if (!playing) return;
+        if (videoEl.readyState >= 2 && trialData) {
+            const f = Math.floor(videoEl.currentTime * fps);
+            if (f !== currentFrame && f >= 0 && f < trialData.n_frames) {
+                currentFrame = f;
+                _updateFrameInfo();
+                render();
+                // Update distance trace less frequently during playback
+                if (currentFrame % 5 === 0) renderDistanceTrace();
+            }
+            if (f >= trialData.n_frames - 1) {
+                togglePlay();
+                return;
+            }
+        }
+        playTimer = requestAnimationFrame(playLoop);
+    }
+
+    // ── Canvas events (zoom/pan) ─────────────────────────────
+    function setupCanvasEvents() {
+        canvas.addEventListener('wheel', handleZoom);
+        canvas.addEventListener('mousedown', e => {
+            // Bbox editing intercepts left-click
+            if (bboxEditMode && e.button === 0) {
+                const isStereo = cameraMode === 'stereo';
+                const isLeft = currentSide === cameraNames[0];
+                const sw = isStereo ? (isLeft ? midline : imgW - midline) : imgW;
+                const bps = canvas.width / sw;
+                const xOff = isStereo ? (isLeft ? 0 : -midline) : 0;
+
+                const rect = canvas.getBoundingClientRect();
+                const mx = (e.clientX - rect.left - offsetX) / scale;
+                const my = (e.clientY - rect.top - offsetY) / scale;
+
+                const handle = _bboxHandleHitTest(mx, my, bps);
+                if (handle) {
+                    bboxDrag = {
+                        handle,
+                        startMx: e.clientX,
+                        startMy: e.clientY,
+                        origBox: [..._getBboxForSide()],
+                    };
+                    e.preventDefault();
+                    return;
+                }
+            }
+            if (e.button === 0 || e.button === 1) handlePanStart(e);
+        });
+        canvas.addEventListener('mousemove', e => {
+            if (bboxDrag) {
+                const isStereo = cameraMode === 'stereo';
+                const isLeft = currentSide === cameraNames[0];
+                const sw = isStereo ? (isLeft ? midline : imgW - midline) : imgW;
+                const bps = canvas.width / sw;
+                const dx = e.clientX - bboxDrag.startMx;
+                const dy = e.clientY - bboxDrag.startMy;
+                _applyBboxDrag(dx, dy, bps);
+                return;
+            }
+            handlePanMove(e);
+        });
+        canvas.addEventListener('mouseup', () => { dragging = null; bboxDrag = null; });
+        canvas.addEventListener('mouseleave', () => { dragging = null; bboxDrag = null; });
+
+        // Distance trace click to seek
+        distCanvas.addEventListener('click', e => {
+            if (!trialData) return;
+            const rect = distCanvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const padLeft = 40; // match renderDistanceTrace padding
+            const plotW = rect.width - padLeft - 8;
+            const fx = x - padLeft;
+            if (fx < 0) return;
+            const f = Math.round((fx / plotW) * (trialData.n_frames - 1));
+            goToFrame(Math.max(0, Math.min(f, trialData.n_frames - 1)));
+        });
+
+        // Resize observer
+        const viewport = canvas.parentElement.parentElement;
+        const ro = new ResizeObserver(() => {
+            sizeCanvases();
+            if (!hasUserZoom) computeAutoCrop();
+            render();
+            renderDistanceTrace();
+        });
+        ro.observe(viewport);
+    }
+
+    function handleZoom(e) {
+        e.preventDefault();
+        hasUserZoom = true;
+        const viewport = canvas.parentElement.parentElement;
+        const rect = viewport.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+        const newScale = Math.max(0.1, Math.min(scale * factor, 50));
+        offsetX = mx - (mx - offsetX) * (newScale / scale);
+        offsetY = my - (my - offsetY) * (newScale / scale);
+        scale = newScale;
+        render();
+    }
+
+    function handlePanStart(e) {
+        dragging = 'pan';
+        dragStartX = e.clientX;
+        dragStartY = e.clientY;
+        panStartOX = offsetX;
+        panStartOY = offsetY;
+        hasUserZoom = true;
+        e.preventDefault();
+    }
+
+    function handlePanMove(e) {
+        if (dragging === 'pan') {
+            offsetX = panStartOX + (e.clientX - dragStartX);
+            offsetY = panStartOY + (e.clientY - dragStartY);
+            render();
+        }
+    }
+
+    function sizeCanvases() {
+        const viewport = canvas.parentElement.parentElement; // .analyze-viewports
+        const vw = viewport.clientWidth;
+        const vh = viewport.clientHeight;
+        canvas.width = vw;
+        canvas.height = vh;
+
+        distCanvas.width = distCanvas.clientWidth;
+        distCanvas.height = distCanvas.clientHeight || 120;
+    }
+
+    // ── Auto-crop ────────────────────────────────────────────
+    /**
+     * Scan keypoints across frames to find hand bounding box,
+     * then set default scale/offset to zoom-to-fit with 15% padding.
+     */
+    function computeAutoCrop() {
+        if (!trialData || !canvas || imgW === 0) {
+            defaultScale = 1; defaultOX = 0; defaultOY = 0;
+            scale = 1; offsetX = 0; offsetY = 0;
+            return;
+        }
+
+        const isStereo = cameraMode === 'stereo';
+        const isLeft = currentSide === cameraNames[0];
+        const side = currentSide;
+
+        // Gather all keypoint sources for current side
+        const mpLandmarks = trialData.mediapipe?.[side]?.landmarks;
+        const viLandmarks = trialData.vision?.[side]?.landmarks;
+
+        // Landmarks are stored in per-camera-half coords (0-1920 for stereo)
+        // No offset needed — the video crop handles the coordinate mapping
+        const xOff = 0;
+
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+        // Sample every 5th frame for speed
+        const nFrames = trialData.n_frames || 0;
+        for (let f = 0; f < nFrames; f += 5) {
+            const sources = [];
+            if (mpLandmarks && mpLandmarks[f]) sources.push(mpLandmarks[f]);
+            if (viLandmarks && viLandmarks[f]) sources.push(viLandmarks[f]);
+
+            for (const pts of sources) {
+                if (!pts) continue;
+                for (let j = 0; j < pts.length; j++) {
+                    if (!pts[j]) continue;
+                    const px = pts[j][0] + xOff;
+                    const py = pts[j][1];
+                    if (px < minX) minX = px;
+                    if (py < minY) minY = py;
+                    if (px > maxX) maxX = px;
+                    if (py > maxY) maxY = py;
+                }
+            }
+        }
+
+        // Also scan DLC thumb/index
+        const dlcData = trialData.dlc?.[side];
+        if (dlcData) {
+            for (let f = 0; f < nFrames; f += 5) {
+                const pts = [dlcData.thumb?.[f], dlcData.index?.[f]];
+                for (const pt of pts) {
+                    if (!pt) continue;
+                    const px = pt[0] + xOff;
+                    const py = pt[1];
+                    if (px < minX) minX = px;
+                    if (py < minY) minY = py;
+                    if (px > maxX) maxX = px;
+                    if (py > maxY) maxY = py;
+                }
+            }
+        }
+
+        if (!isFinite(minX) || !isFinite(minY)) {
+            defaultScale = 1; defaultOX = 0; defaultOY = 0;
+            scale = 1; offsetX = 0; offsetY = 0;
+            return;
+        }
+
+        // Add 15% padding
+        const bw = maxX - minX;
+        const bh = maxY - minY;
+        const pad = 0.15;
+        minX -= bw * pad; maxX += bw * pad;
+        minY -= bh * pad; maxY += bh * pad;
+        const cropW = maxX - minX;
+        const cropH = maxY - minY;
+
+        const cw = canvas.width;
+        const ch = canvas.height;
+        const sw = isStereo ? (isLeft ? midline : imgW - midline) : imgW;
+        const bps = cw / sw; // base pixel scale
+
+        const scaleX = cw / (cropW * bps);
+        const scaleY = ch / (cropH * bps);
+        defaultScale = Math.min(scaleX, scaleY);
+
+        const cropCX = (minX + maxX) / 2;
+        const cropCY = (minY + maxY) / 2;
+        defaultOX = cw / 2 - defaultScale * cropCX * bps;
+        defaultOY = ch / 2 - defaultScale * cropCY * bps;
+
+        scale = defaultScale;
+        offsetX = defaultOX;
+        offsetY = defaultOY;
+    }
+
+    // ── 2D Rendering ─────────────────────────────────────────
+    function render() {
+        if (!ctx) return;
+        const w = canvas.width, h = canvas.height;
+        ctx.clearRect(0, 0, w, h);
+
+        if (videoEl.readyState >= 2 && imgW > 0) {
+            const isStereo = cameraMode === 'stereo';
+            const isLeft = currentSide === cameraNames[0];
+            const sx = isStereo ? (isLeft ? 0 : midline) : 0;
+            const sw = isStereo ? (isLeft ? midline : imgW - midline) : imgW;
+
+            // Base pixel scale: maps 1 video pixel to 1 canvas pixel at scale=1
+            const bps = w / sw;
+
+            ctx.save();
+            ctx.translate(offsetX, offsetY);
+            ctx.scale(scale, scale);
+
+            // Draw video frame
+            if (showVideo) {
+                ctx.drawImage(videoEl, sx, 0, sw, imgH, 0, 0, sw * bps, imgH * bps);
+            }
+
+            // Draw overlays
+            if (trialData) {
+                drawOverlays(bps);
+            }
+
+            // Bbox editor overlay
+            const xOff = isStereo ? (isLeft ? 0 : -midline) : 0;
+            _drawBboxOverlay(bps);
+
+            ctx.restore();
+        } else if (!showVideo && trialData) {
+            // No video but draw overlays on black background
+            const isStereo = cameraMode === 'stereo';
+            const isLeft = currentSide === cameraNames[0];
+            const sw = isStereo ? (isLeft ? midline : imgW - midline) : (imgW || w);
+            const bps = w / (sw || w);
+
+            ctx.save();
+            ctx.translate(offsetX, offsetY);
+            ctx.scale(scale, scale);
+            drawOverlays(bps);
+            ctx.restore();
+        }
+    }
+
+    function drawOverlays(pixelScale) {
+        const fn = currentFrame;
+        if (!trialData || fn >= trialData.n_frames) return;
+
+        const isStereo = cameraMode === 'stereo';
+        const isLeft = currentSide === cameraNames[0];
+        const side = currentSide;
+
+        // Landmarks are in per-camera-half coords — no offset needed
+        const xOff = 0;
+
+        // Get keypoints for current frame and side
+        const mpPts = trialData.mediapipe?.[side]?.landmarks?.[fn];
+        const viPts = trialData.vision?.[side]?.landmarks?.[fn];
+        const dlcData = trialData.dlc?.[side];
+        const bones = skeletonBones();
+
+        // Draw skeleton lines
+        if (showSkeleton && bones) {
+            bones.forEach(([i, j]) => {
+                if (!isBoneVisible(i, j)) return;
+
+                // MediaPipe skeleton (cyan)
+                if (showMediapipe && mpPts && mpPts[i] && mpPts[j]) {
+                    drawLine(
+                        (mpPts[i][0] + xOff) * pixelScale,
+                        mpPts[i][1] * pixelScale,
+                        (mpPts[j][0] + xOff) * pixelScale,
+                        mpPts[j][1] * pixelScale,
+                        '#4a9eff', 1.5, 0.6
+                    );
+                }
+
+                // Vision skeleton (orange)
+                if (showVision && viPts && viPts[i] && viPts[j]) {
+                    drawLine(
+                        (viPts[i][0] + xOff) * pixelScale,
+                        viPts[i][1] * pixelScale,
+                        (viPts[j][0] + xOff) * pixelScale,
+                        viPts[j][1] * pixelScale,
+                        '#ff9800', 1.5, 0.6
+                    );
+                }
+            });
+        }
+
+        // MediaPipe joints (cyan circles)
+        if (showMediapipe && mpPts) {
+            for (let j = 0; j < mpPts.length; j++) {
+                if (!isJointVisible(j) || !mpPts[j]) continue;
+                const x = (mpPts[j][0] + xOff) * pixelScale;
+                const y = mpPts[j][1] * pixelScale;
+                drawJoint(x, y, '#4a9eff', 3);
+            }
+        }
+
+        // Vision joints (orange circles)
+        if (showVision && viPts) {
+            for (let j = 0; j < viPts.length; j++) {
+                if (!isJointVisible(j) || !viPts[j]) continue;
+                const x = (viPts[j][0] + xOff) * pixelScale;
+                const y = viPts[j][1] * pixelScale;
+                drawJoint(x, y, '#ff9800', 3);
+            }
+        }
+
+        // DLC thumb + index (green circles, larger)
+        if (showDLC && dlcData) {
+            const thumbPt = dlcData.thumb?.[fn];
+            const indexPt = dlcData.index?.[fn];
+            if (thumbPt && isJointVisible(4)) {
+                drawJoint(
+                    (thumbPt[0] + xOff) * pixelScale,
+                    thumbPt[1] * pixelScale,
+                    '#4caf50', 5
+                );
+            }
+            if (indexPt && isJointVisible(8)) {
+                drawJoint(
+                    (indexPt[0] + xOff) * pixelScale,
+                    indexPt[1] * pixelScale,
+                    '#4caf50', 5
+                );
+            }
+        }
+
+        // HRNet heatmap overlay
+        if (showHeatmap && hasHeatmaps) {
+            drawHeatmapOverlay(fn, heatmapJoint, pixelScale);
+        }
+    }
+
+    async function drawHeatmapOverlay(frame, joint, pixelScale) {
+        if (!subjectId || currentTrialIdx < 0) return;
+        const trial = trials[currentTrialIdx];
+        if (!trial) return;
+
+        const key = `${frame}_${joint}_${currentSide}`;
+        if (!heatmapCache[key]) {
+            try {
+                heatmapCache[key] = await api(
+                    `/api/analyze/${subjectId}/heatmap?trial_idx=${trial.trial_idx}&frame=${frame}&joint=${joint}&side=${currentSide}`
+                );
+            } catch {
+                return;
+            }
+        }
+
+        const data = heatmapCache[key];
+        if (!data || !data.heatmap) return;
+
+        const hm = data.heatmap;
+        const [bx1, by1, bx2, by2] = data.bbox;
+        const hmH = hm.length, hmW = hm[0].length;
+
+        // Create colored heatmap image
+        const offCanvas = document.createElement('canvas');
+        offCanvas.width = hmW;
+        offCanvas.height = hmH;
+        const offCtx = offCanvas.getContext('2d');
+        const imgData = offCtx.createImageData(hmW, hmH);
+
+        const maxVal = data.max_val || 1;
+        for (let r = 0; r < hmH; r++) {
+            for (let c = 0; c < hmW; c++) {
+                const v = hm[r][c] / maxVal;
+                const idx = (r * hmW + c) * 4;
+                // Hot colormap: black → red → yellow → white
+                imgData.data[idx] = Math.min(255, v * 510);           // R
+                imgData.data[idx + 1] = Math.max(0, (v - 0.5) * 510);// G
+                imgData.data[idx + 2] = Math.max(0, (v - 0.75) * 1020);// B
+                imgData.data[idx + 3] = Math.min(200, v * 400);       // A
+            }
+        }
+        offCtx.putImageData(imgData, 0, 0);
+
+        // Draw onto main canvas at the bbox location
+        // Bbox coords are in camera-half pixel space
+        const dx = bx1 * pixelScale;
+        const dy = by1 * pixelScale;
+        const dw = (bx2 - bx1) * pixelScale;
+        const dh = (by2 - by1) * pixelScale;
+        ctx.drawImage(offCanvas, dx, dy, dw, dh);
+    }
+
+    function drawLine(x1, y1, x2, y2, color, width, alpha) {
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = width / scale;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    function drawJoint(x, y, color, radius) {
+        ctx.save();
+        ctx.fillStyle = color;
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 0.5 / scale;
+        ctx.beginPath();
+        ctx.arc(x, y, radius / scale, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    // ── Distance trace ───────────────────────────────────────
+    function renderDistanceTrace() {
+        if (!distCtx || !trialData) return;
+        const w = distCanvas.width, h = distCanvas.height;
+        distCtx.clearRect(0, 0, w, h);
+
+        // Background
+        distCtx.fillStyle = '#1a1a2e';
+        distCtx.fillRect(0, 0, w, h);
+
+        const N = trialData.n_frames;
+        if (N < 2) return;
+
+        const metric = selectedMetric;
+        const distances = trialData.distances?.[metric];
+        if (!distances) return;
+
+        // Gather visible series
+        const series = [];
+        const mpColor = '#4a9eff';
+        const viColor = '#ff9800';
+        const dlcColor = '#4caf50';
+
+        // MediaPipe series
+        if (showMediapipe) {
+            const keyOS = `mediapipe_${cameraNames[0]}`;
+            const keyOD = `mediapipe_${cameraNames[1]}`;
+            const key = `mediapipe_${currentSide}`;
+            // Try side-specific key first, then generic
+            const data = distances[key] || distances.mediapipe;
+            if (data) series.push({ data, color: mpColor, label: 'MediaPipe' });
+        }
+        if (showVision) {
+            const key = `vision_${currentSide}`;
+            const data = distances[key] || distances.vision;
+            if (data) series.push({ data, color: viColor, label: 'Vision' });
+        }
+        if (showDLC) {
+            const key = `dlc_${currentSide}`;
+            const data = distances[key] || distances.dlc;
+            if (data) series.push({ data, color: dlcColor, label: 'DLC' });
+        }
+
+        // If no side-specific keys found, try without side suffix
+        if (series.length === 0) {
+            // Fallback: try all keys that exist and match visibility
+            for (const [key, data] of Object.entries(distances)) {
+                if (!Array.isArray(data)) continue;
+                if (showMediapipe && key.startsWith('mediapipe')) {
+                    series.push({ data, color: mpColor, label: key });
+                } else if (showVision && key.startsWith('vision')) {
+                    series.push({ data, color: viColor, label: key });
+                } else if (showDLC && key.startsWith('dlc')) {
+                    series.push({ data, color: dlcColor, label: key });
+                }
+            }
+        }
+
+        // Compute Y range (auto or user-specified)
+        let yMin = Infinity, yMax = -Infinity;
+        for (const s of series) {
+            for (const v of s.data) {
+                if (v != null && isFinite(v)) {
+                    yMin = Math.min(yMin, v);
+                    yMax = Math.max(yMax, v);
+                }
+            }
+        }
+        if (!isFinite(yMin)) { yMin = 0; yMax = 100; }
+        const yPad = (yMax - yMin) * 0.1 || 10;
+        yMin = Math.max(0, yMin - yPad);
+        yMax += yPad;
+
+        // Override with user-specified Y range if provided
+        const userYMin = parseFloat(($('yMinInput') || {}).value);
+        const userYMax = parseFloat(($('yMaxInput') || {}).value);
+        if (isFinite(userYMin)) yMin = userYMin;
+        if (isFinite(userYMax)) yMax = userYMax;
+
+        // Plot area with left padding for labels
+        const padLeft = 40;
+        const padRight = 8;
+        const plotW = w - padLeft - padRight;
+        const plotH = h;
+
+        const toX = f => padLeft + (f / (N - 1)) * plotW;
+        const toY = v => plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+        // Draw series
+        for (const s of series) {
+            distCtx.strokeStyle = s.color;
+            distCtx.lineWidth = 1.5;
+            distCtx.beginPath();
+            let started = false;
+            for (let i = 0; i < N; i++) {
+                if (s.data[i] == null || !isFinite(s.data[i])) { started = false; continue; }
+                if (!started) { distCtx.moveTo(toX(i), toY(s.data[i])); started = true; }
+                else distCtx.lineTo(toX(i), toY(s.data[i]));
+            }
+            distCtx.stroke();
+        }
+
+        // Current frame indicator (vertical dashed line)
+        distCtx.strokeStyle = '#fff';
+        distCtx.lineWidth = 1;
+        distCtx.setLineDash([3, 3]);
+        distCtx.beginPath();
+        distCtx.moveTo(toX(currentFrame), 0);
+        distCtx.lineTo(toX(currentFrame), h);
+        distCtx.stroke();
+        distCtx.setLineDash([]);
+
+        // Y-axis labels
+        distCtx.fillStyle = '#888';
+        distCtx.font = '10px monospace';
+        distCtx.textAlign = 'left';
+        distCtx.fillText(yMax.toFixed(0) + 'mm', 2, 12);
+        distCtx.fillText(yMin.toFixed(0) + 'mm', 2, h - 4);
+
+        // Mid-point label
+        const yMid = (yMin + yMax) / 2;
+        distCtx.fillText(yMid.toFixed(0), 2, h / 2 + 4);
+
+        // Legend
+        distCtx.textAlign = 'right';
+        let lx = w - 8, ly = 14;
+        for (const s of series) {
+            distCtx.fillStyle = s.color;
+            distCtx.fillText(s.label, lx, ly);
+            ly += 14;
+        }
+
+        // Metric name at bottom center
+        distCtx.fillStyle = '#666';
+        distCtx.textAlign = 'center';
+        distCtx.fillText(metric, w / 2, h - 4);
+    }
+
+    // ── Layer setter (for external use) ──────────────────────
+    function setLayer(layer, visible) {
+        switch (layer) {
+            case 'video':
+                showVideo = visible;
+                if ($('showVideo') && $('showVideo').type === 'checkbox') $('showVideo').checked = visible;
+                break;
+            case 'mediapipe':
+                showMediapipe = visible;
+                $('showMP').checked = visible;
+                break;
+            case 'vision':
+                showVision = visible;
+                $('showVision').checked = visible;
+                break;
+            case 'dlc':
+                showDLC = visible;
+                $('showDLC').checked = visible;
+                break;
+            case 'skeleton':
+                showSkeleton = visible;
+                $('showSkeleton').checked = visible;
+                break;
+        }
+        render();
+        renderDistanceTrace();
+    }
+
+    // ── Run detection models ────────────────────────────────────
+    async function _runDetection(endpoint, btnId, label) {
+        const btn = $(btnId);
+        const status = $('detectionStatus');
+        if (btn) btn.disabled = true;
+        if (status) status.textContent = `Running ${label}...`;
+
+        try {
+            const result = await api(`/api/analyze/${subjectId}/${endpoint}`, { method: 'POST' });
+            const jobId = result.job_id;
+            if (!jobId) throw new Error('No job_id returned');
+
+            // Stream progress via SSE
+            const evtSource = new EventSource(`/api/jobs/${jobId}/stream`);
+            evtSource.onmessage = async (event) => {
+                const data = JSON.parse(event.data);
+                if (data.status === 'running') {
+                    const pct = data.progress_pct ? Math.round(data.progress_pct) : 0;
+                    if (status) status.textContent = `${label}... ${pct}%`;
+                } else if (data.status === 'completed') {
+                    evtSource.close();
+                    if (status) status.textContent = `${label} complete. Reloading...`;
+                    if (btn) btn.disabled = false;
+                    // Reload trial data to pick up new detections
+                    await loadTrial(currentTrialIdx);
+                    if (status) status.textContent = `${label} complete.`;
+                } else if (data.status === 'failed') {
+                    evtSource.close();
+                    if (status) status.textContent = `${label} failed: ${data.error_msg || 'unknown'}`;
+                    if (btn) btn.disabled = false;
+                } else if (data.status === 'cancelled') {
+                    evtSource.close();
+                    if (status) status.textContent = `${label} cancelled.`;
+                    if (btn) btn.disabled = false;
+                }
+            };
+            evtSource.onerror = () => {
+                evtSource.close();
+                if (status) status.textContent = 'Connection lost — check Processing page.';
+                if (btn) btn.disabled = false;
+            };
+        } catch (err) {
+            if (status) status.textContent = `Error: ${err.message || err}`;
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    function runMediapipe() { _runDetection('run-mediapipe', 'runMPBtn', 'MediaPipe Hands'); }
+    function runVision() { _runDetection('run-vision', 'runVisionBtn', 'Apple Vision Hands'); }
+    function runPose() { _runDetection('run-pose', 'runPoseBtn', 'Pose Detection'); }
+
+    // ── HRNet crop box editing ───────────────────────────────
+    let bboxEditMode = false;
+    let bboxOS = null;  // [x1, y1, x2, y2] in image pixels
+    let bboxOD = null;
+    let bboxDrag = null; // {side, handle, startMx, startMy, origBox}
+
+    async function loadDefaultBbox() {
+        if (!subjectId || currentTrialIdx < 0) return;
+        const trial = trials[currentTrialIdx];
+        try {
+            const data = await api(`/api/analyze/${subjectId}/hrnet/bbox?trial_idx=${trial.trial_idx}`);
+            bboxOS = data.bbox_os;
+            bboxOD = data.bbox_od;
+        } catch (e) {
+            const s = $('hrnetStatus');
+            if (s) s.textContent = e.message;
+        }
+    }
+
+    function toggleBboxEdit() {
+        bboxEditMode = !bboxEditMode;
+        const btn = $('editBboxBtn');
+        if (btn) btn.textContent = bboxEditMode ? 'Done Editing' : 'Edit Crop Box';
+        if (bboxEditMode && !bboxOS) loadDefaultBbox().then(render);
+        render();
+    }
+
+    function _getBboxForSide() {
+        return currentSide === cameraNames[0] ? bboxOS : bboxOD;
+    }
+
+    function _setBboxForSide(box) {
+        if (currentSide === cameraNames[0]) bboxOS = box;
+        else bboxOD = box;
+    }
+
+    function _drawBboxOverlay(pixelScale) {
+        if (!bboxEditMode) return;
+        const box = _getBboxForSide();
+        if (!box) return;
+
+        // Bbox coords are in camera-half pixel space (same as MP landmarks) — no xOff needed
+        const [x1, y1, x2, y2] = box;
+        const px1 = x1 * pixelScale;
+        const py1 = y1 * pixelScale;
+        const px2 = x2 * pixelScale;
+        const py2 = y2 * pixelScale;
+
+        // Dim outside
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.4)';
+        const cw = canvas.width / scale, ch = canvas.height / scale;
+        ctx.fillRect(0, 0, cw, py1);
+        ctx.fillRect(0, py2, cw, ch - py2);
+        ctx.fillRect(0, py1, px1, py2 - py1);
+        ctx.fillRect(px2, py1, cw - px2, py2 - py1);
+
+        // Border
+        ctx.strokeStyle = '#0f0';
+        ctx.lineWidth = 2 / scale;
+        ctx.setLineDash([6 / scale, 4 / scale]);
+        ctx.strokeRect(px1, py1, px2 - px1, py2 - py1);
+        ctx.setLineDash([]);
+
+        // Handles (corners + edges)
+        const hs = 6 / scale;
+        ctx.fillStyle = '#0f0';
+        const mx = (px1 + px2) / 2, my = (py1 + py2) / 2;
+        for (const [hx, hy] of [
+            [px1, py1], [px2, py1], [px1, py2], [px2, py2],
+            [mx, py1], [mx, py2], [px1, my], [px2, my],
+        ]) {
+            ctx.fillRect(hx - hs / 2, hy - hs / 2, hs, hs);
+        }
+        ctx.restore();
+    }
+
+    function _bboxHandleHitTest(mx, my, pixelScale) {
+        const box = _getBboxForSide();
+        if (!box) return null;
+        const [x1, y1, x2, y2] = box;
+        const px1 = x1 * pixelScale;
+        const py1 = y1 * pixelScale;
+        const px2 = x2 * pixelScale;
+        const py2 = y2 * pixelScale;
+
+        const r = 10 / scale;
+        const midx = (px1 + px2) / 2, midy = (py1 + py2) / 2;
+        const handles = [
+            ['nw', px1, py1], ['ne', px2, py1], ['sw', px1, py2], ['se', px2, py2],
+            ['n', midx, py1], ['s', midx, py2], ['w', px1, midy], ['e', px2, midy],
+        ];
+        for (const [name, hx, hy] of handles) {
+            if (Math.abs(mx - hx) < r && Math.abs(my - hy) < r) return name;
+        }
+        if (mx >= px1 && mx <= px2 && my >= py1 && my <= py2) return 'move';
+        return null;
+    }
+
+    function _applyBboxDrag(dx, dy, pixelScale) {
+        if (!bboxDrag) return;
+        const box = [...bboxDrag.origBox];
+        const dpx = dx / (pixelScale * scale);
+        const dpy = dy / (pixelScale * scale);
+        const h = bboxDrag.handle;
+
+        if (h === 'move') {
+            box[0] += dpx; box[1] += dpy; box[2] += dpx; box[3] += dpy;
+        } else {
+            if (h.includes('w')) box[0] += dpx;
+            if (h.includes('e')) box[2] += dpx;
+            if (h.includes('n')) box[1] += dpy;
+            if (h.includes('s')) box[3] += dpy;
+        }
+        // Ensure min size
+        if (box[2] - box[0] < 20) box[2] = box[0] + 20;
+        if (box[3] - box[1] < 20) box[3] = box[1] + 20;
+        _setBboxForSide(box.map(v => Math.round(v)));
+        render();
+    }
+
+    async function runHRNet() {
+        if (!subjectId || currentTrialIdx < 0) return;
+        if (!bboxOS) await loadDefaultBbox();
+
+        const trial = trials[currentTrialIdx];
+        const btn = $('runHRNetBtn');
+        const status = $('hrnetStatus');
+
+        if (btn) btn.disabled = true;
+        if (status) status.textContent = 'Submitting...';
+
+        try {
+            const result = await api(`/api/analyze/${subjectId}/run-hrnet`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    trial_idx: trial.trial_idx,
+                    bbox_os: bboxOS,
+                    bbox_od: bboxOD,
+                }),
+            });
+            const jobId = result.job_id;
+            if (status) status.textContent = 'HRNet running...';
+
+            const evtSource = new EventSource(`/api/jobs/${jobId}/stream`);
+            evtSource.onmessage = async (event) => {
+                const data = JSON.parse(event.data);
+                if (data.status === 'running') {
+                    const pct = data.progress_pct ? Math.round(data.progress_pct) : 0;
+                    if (status) status.textContent = `HRNet... ${pct}%`;
+                } else if (data.status === 'completed') {
+                    evtSource.close();
+                    if (status) status.textContent = 'HRNet complete.';
+                    if (btn) btn.disabled = false;
+                } else if (data.status === 'failed') {
+                    evtSource.close();
+                    if (status) status.textContent = `HRNet failed: ${data.error_msg || 'unknown'}`;
+                    if (btn) btn.disabled = false;
+                } else if (data.status === 'cancelled') {
+                    evtSource.close();
+                    if (status) status.textContent = 'HRNet cancelled.';
+                    if (btn) btn.disabled = false;
+                }
+            };
+            evtSource.onerror = () => {
+                evtSource.close();
+                if (status) status.textContent = 'Connection lost.';
+                if (btn) btn.disabled = false;
+            };
+        } catch (err) {
+            if (status) status.textContent = `Error: ${err.message || err}`;
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    // ── Public API ───────────────────────────────────────────
+    return {
+        init,
+        togglePlay,
+        toggleSide,
+        resetZoom,
+        setLayer,
+        updateFingerVisibility,
+        seekFrame,
+        runMediapipe,
+        runVision,
+        runPose,
+        toggleBboxEdit,
+        runHRNet,
+    };
+})();
+
+// ── Bootstrap ────────────────────────────────────────────────
+(async function bootstrap() {
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', async () => {
+            // Small delay for nav.js to finish its DOM manipulation
+            await new Promise(r => setTimeout(r, 50));
+            await analyzeViewer.init();
+        });
+    } else {
+        await new Promise(r => setTimeout(r, 50));
+        await analyzeViewer.init();
+    }
+})();

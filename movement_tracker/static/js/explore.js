@@ -42,7 +42,7 @@ const $ = (id) => document.getElementById(id);
         if (srcSel.parentElement) srcSel.parentElement.style.display = 'none';
     }
     drop('exSeqModeSelect', ['none']);
-    drop('exHandSelect',    ['L', 'R']);
+    drop('exHandSelect',    ['L', 'R', 'larger_se', 'smaller_se']);
 })();
 
 async function loadExplore() {

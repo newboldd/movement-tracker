@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Movement Tracker — Explore</title>
+    <link rel="stylesheet" href="/static/css/main.css?v=3">
+    <style>
+        /* Subject checkbox list (same look as the Group Comparison page). */
+        .ex-subject-list {
+            display: flex; flex-wrap: wrap; gap: 4px 6px;
+            padding: 6px 0; margin-top: 8px;
+            background: transparent; max-height: 200px; overflow-y: auto;
+        }
+        .ex-subject-list .gsl-group { flex-basis: 100%; display: flex; gap: 4px; align-items: flex-start; }
+        .ex-subject-list .gsl-group-label { font-size: 11px; font-weight: 600; color: var(--text-muted);
+                                            flex: 0 0 auto; min-width: 64px; padding-top: 3px; }
+        .ex-subject-list .gsl-tags { display: flex; flex-wrap: wrap; gap: 4px;
+                                     flex: 1 1 auto; min-width: 0; }
+        .ex-subject-list label {
+            display: inline-flex; align-items: center; gap: 3px;
+            font-size: 11px; padding: 2px 6px; border-radius: 3px;
+            border: 1px solid var(--border, #ddd); background: var(--bg-card, #fff);
+            cursor: pointer; user-select: none;
+        }
+        .ex-subject-list label.dim { opacity: 0.45; }
+        .ex-subject-list label input { margin: 0; }
+    </style>
+</head>
+<body class="results-page">
+    <div class="header">
+        <div style="display:flex;align-items:center;gap:16px;">
+            <h1 style="margin:0;"><a href="/" style="font-size:18px;">Movement Tracker</a></h1>
+            <span style="font-size:13px;color:var(--text-muted);">Variable Explorer</span>
+        </div>
+        <nav>
+            <a href="/subjects">Subjects</a>
+            <span class="nav-dropdown">
+                <a href="/labels">Analyze</a>
+                <div class="nav-dropdown-menu">
+                    <a href="/preproc">Pre-proc</a>
+                    <a href="/labels">Labels</a>
+                    <a href="/labeling-select">DLC</a>
+                    <a href="/events">Events</a>
+                    <a href="/deidentify">Deidentify</a>
+                </div>
+            </span>
+            <span class="nav-dropdown">
+                <a href="/results" class="active">Results</a>
+                <div class="nav-dropdown-menu">
+                    <a href="/results">Individual</a>
+                    <a href="/results?tab=group">Group Comparison</a>
+                    <a href="/explore" class="active">Explore</a>
+                    <a href="/oscillations">Oscillations</a>
+                </div>
+            </span>
+            <span class="nav-dropdown" id="navJobQueue">
+                <a href="/remote"><span id="navJobDot" class="nav-job-dot" style="display:none;"></span>Jobs</a>
+                <div class="nav-dropdown-menu nav-jobs-dropdown" id="navJobsPanel">
+                    <div style="padding:8px 12px;font-size:11px;color:var(--text-muted);">Loading...</div>
+                </div>
+            </span>
+            <a href="/settings">Settings</a>
+        </nav>
+    </div>
+
+    <div class="results-container">
+        <!-- Data-source controls (movement variables depend on these) -->
+        <div class="results-controls" id="exploreControls">
+            <label style="display:flex;align-items:center;gap:6px;margin:0;">Source:
+                <select id="exSourceSelect" style="min-width:140px;">
+                    <option value="auto" selected>Auto</option>
+                    <option value="corrections">DLC (corrected)</option>
+                    <option value="mp_combined">MP combined</option>
+                    <option value="mp_forward">MP forward</option>
+                </select>
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;margin:0;">Sequence effect:
+                <select id="exSeqModeSelect" style="min-width:150px;">
+                    <option value="none">None</option>
+                    <option value="linear_full">Linear (full)</option>
+                    <option value="linear_first10">Linear (first 10)</option>
+                    <option value="linear_multi">Linear (multi-seq)</option>
+                    <option value="exp_full">Exponential (full)</option>
+                    <option value="exp_first10">Exponential (first 10)</option>
+                    <option value="exp_multi" selected>Exponential (multi-seq)</option>
+                </select>
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;margin:0;">Hand:
+                <select id="exHandSelect" style="min-width:130px;">
+                    <option value="more" selected>More affected</option>
+                    <option value="less">Less affected</option>
+                    <option value="L">Left</option>
+                    <option value="R">Right</option>
+                    <option value="average">Average</option>
+                </select>
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;margin:0;">Trial:
+                <select id="exTrialSelect" style="min-width:90px;">
+                    <option value="first">First</option>
+                    <option value="last" selected>Last</option>
+                    <option value="average">Average</option>
+                </select>
+            </label>
+            <label><input type="checkbox" id="exIncludeAuto"> Include auto-detected events</label>
+            <button class="btn btn-sm" id="exSelectAllBtn" type="button">All</button>
+        </div>
+
+        <!-- Subject selection (color-coded by group, like Group Comparison) -->
+        <div id="exSubjectList" class="ex-subject-list"></div>
+
+        <!-- Plot-type + variable controls -->
+        <div class="results-controls" id="explorePlotControls" style="margin-top:8px;">
+            <label style="display:flex;align-items:center;gap:6px;margin:0;">Plot:
+                <select id="exPlotType" style="min-width:150px;">
+                    <option value="scatter" selected>Scatter (X vs Y)</option>
+                    <option value="bar">Bar by group</option>
+                </select>
+            </label>
+            <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
+            <label id="exXLabel" style="display:flex;align-items:center;gap:6px;margin:0;">X:
+                <select id="exVarX" style="min-width:200px;"></select>
+            </label>
+            <span id="exXAgg" class="agg-radios" style="display:flex;align-items:center;gap:8px;font-size:11px;"></span>
+            <label id="exYLabel" style="display:flex;align-items:center;gap:6px;margin:0;">Y:
+                <select id="exVarY" style="min-width:200px;"></select>
+            </label>
+            <span id="exYAgg" class="agg-radios" style="display:flex;align-items:center;gap:8px;font-size:11px;"></span>
+            <label id="exLegendLabel" title="Show the group legend on the plot and in copies"
+                   style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);">
+                <input type="checkbox" id="exLegend" style="margin:0;" checked> Legend
+            </label>
+            <label id="exBestFitLabel" style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);">
+                <input type="checkbox" id="exBestFit" style="margin:0;"> Slope
+            </label>
+            <span id="exInfo" style="font-size:11px;color:var(--text-muted);"></span>
+            <span style="flex:1 1 auto;"></span>
+            <button id="exCopyBtn" class="btn btn-sm" title="Copy to clipboard"
+                    style="padding:4px 6px;line-height:0;">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none"
+                     stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round"
+                     style="display:block;">
+                    <rect x="9" y="9" width="13" height="13" rx="2"/>
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                </svg>
+            </button>
+        </div>
+
+        <div style="display:flex;align-items:flex-start;gap:12px;margin-top:12px;">
+            <div id="explorePlot"
+                 style="height:520px;width:50vw;flex:0 0 auto;resize:both;overflow:hidden;min-width:360px;min-height:240px;">
+                <div class="results-no-data">Loading…</div>
+            </div>
+            <!-- Fit-stats text box: selectable HTML, never copied with the plot. -->
+            <div id="exFitBox"
+                 style="display:none;flex:0 0 auto;font:30px/1.25 system-ui,-apple-system,'Segoe UI',sans-serif;color:#000;white-space:pre;padding:14px 18px;background:#fff;border:1px solid #888;border-radius:6px;user-select:text;cursor:text;"></div>
+        </div>
+    </div>
+
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+    <script src="/static/js/nav.js?v=10"></script>
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/explore.js?v=18"></script>
+</body>
+</html>
