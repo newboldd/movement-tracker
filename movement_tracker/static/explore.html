@@ -111,42 +111,56 @@
         <!-- Subject selection (color-coded by group, like Group Comparison) -->
         <div id="exSubjectList" class="ex-subject-list"></div>
 
-        <!-- Plot-type + variable controls -->
-        <div class="results-controls" id="explorePlotControls" style="margin-top:8px;">
-            <label style="display:flex;align-items:center;gap:6px;margin:0;">Plot:
-                <select id="exPlotType" style="min-width:150px;">
-                    <option value="scatter" selected>Scatter (X vs Y)</option>
-                    <option value="bar">Bar by group</option>
-                </select>
-            </label>
-            <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
-            <label id="exXLabel" style="display:flex;align-items:center;gap:6px;margin:0;">X:
-                <select id="exVarX" style="min-width:200px;"></select>
-            </label>
-            <span id="exXAgg" class="agg-radios" style="display:flex;align-items:center;gap:8px;font-size:11px;"></span>
-            <label id="exYLabel" style="display:flex;align-items:center;gap:6px;margin:0;">Y:
-                <select id="exVarY" style="min-width:200px;"></select>
-            </label>
-            <span id="exYAgg" class="agg-radios" style="display:flex;align-items:center;gap:8px;font-size:11px;"></span>
-            <label id="exLegendLabel" title="Show the group legend on the plot and in copies"
-                   style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);">
-                <input type="checkbox" id="exLegend" style="margin:0;" checked> Legend
-            </label>
-            <label id="exBestFitLabel" style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);">
-                <input type="checkbox" id="exBestFit" style="margin:0;"> Slope
-            </label>
-            <span id="exInfo" style="font-size:11px;color:var(--text-muted);"></span>
-            <span style="flex:1 1 auto;"></span>
-            <button id="exCopyBtn" class="btn btn-sm" title="Copy to clipboard"
-                    style="padding:4px 6px;line-height:0;">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none"
-                     stroke="currentColor" stroke-width="2"
-                     stroke-linecap="round" stroke-linejoin="round"
-                     style="display:block;">
-                    <rect x="9" y="9" width="13" height="13" rx="2"/>
-                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-                </svg>
-            </button>
+        <!-- Plot-type + variable controls.  Three rows: plot-type +
+             legend/slope + copy on top, then X, then Y. -->
+        <div class="results-controls" id="explorePlotControls"
+             style="margin-top:8px;display:flex;flex-wrap:wrap;gap:8px 12px;">
+            <!-- Row 1: plot-type radios + legend/slope + copy button -->
+            <div style="flex-basis:100%;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                <span style="font-weight:600;">Plot:</span>
+                <label style="display:flex;align-items:center;gap:3px;">
+                    <input type="radio" name="exPlotType" value="scatter" checked> Scatter (X vs Y)
+                </label>
+                <label style="display:flex;align-items:center;gap:3px;">
+                    <input type="radio" name="exPlotType" value="bar"> Bar by group
+                </label>
+                <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
+                <label id="exLegendLabel"
+                       title="Show the group legend on the plot and in copies"
+                       style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);">
+                    <input type="checkbox" id="exLegend" style="margin:0;"> Legend
+                </label>
+                <label id="exBestFitLabel"
+                       style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);">
+                    <input type="checkbox" id="exBestFit" style="margin:0;" checked> Slope
+                </label>
+                <span style="flex:1 1 auto;"></span>
+                <button id="exCopyBtn" class="btn btn-sm" title="Copy to clipboard"
+                        style="padding:4px 6px;line-height:0;">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none"
+                         stroke="currentColor" stroke-width="2"
+                         stroke-linecap="round" stroke-linejoin="round"
+                         style="display:block;">
+                        <rect x="9" y="9" width="13" height="13" rx="2"/>
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                    </svg>
+                </button>
+            </div>
+            <!-- Row 2: X variable + aggregator + info -->
+            <div style="flex-basis:100%;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <label id="exXLabel" style="display:flex;align-items:center;gap:6px;margin:0;">X:
+                    <select id="exVarX" style="min-width:200px;"></select>
+                </label>
+                <span id="exXAgg" class="agg-radios" style="display:flex;align-items:center;gap:8px;font-size:11px;"></span>
+                <span id="exInfo" style="font-size:11px;color:var(--text-muted);"></span>
+            </div>
+            <!-- Row 3: Y variable + aggregator (hidden in bar mode) -->
+            <div id="exYRow" style="flex-basis:100%;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <label id="exYLabel" style="display:flex;align-items:center;gap:6px;margin:0;">Y:
+                    <select id="exVarY" style="min-width:200px;"></select>
+                </label>
+                <span id="exYAgg" class="agg-radios" style="display:flex;align-items:center;gap:8px;font-size:11px;"></span>
+            </div>
         </div>
 
         <div style="display:flex;align-items:flex-start;gap:12px;margin-top:12px;">
@@ -163,6 +177,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=10"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/explore.js?v=20"></script>
+    <script src="/static/js/explore.js?v=21"></script>
 </body>
 </html>

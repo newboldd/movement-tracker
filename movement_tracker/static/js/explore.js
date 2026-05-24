@@ -206,11 +206,18 @@ function _activeSubjects() {
     return _data.subjects.filter(s => _subjChecked[s.name]);
 }
 
+function _exPlotMode() {
+    const r = document.querySelector('input[name="exPlotType"]:checked');
+    return r ? r.value : 'scatter';
+}
+
 function render() {
     if (!_data) return;
     _renderSubjectList();
-    const mode = $('exPlotType').value;
-    $('exYLabel').style.display = (mode === 'scatter') ? '' : 'none';
+    const mode = _exPlotMode();
+    // Y row hides entirely in bar mode (no Y variable).
+    const yRow = $('exYRow');
+    if (yRow) yRow.style.display = (mode === 'scatter') ? '' : 'none';
     $('exXLabel').childNodes[0].textContent = (mode === 'scatter') ? 'X: ' : 'Variable: ';
     // "Slope" + "Legend" only apply to scatter.
     const bestFitLbl = $('exBestFitLabel');
@@ -379,7 +386,7 @@ function _refitBestFitFromVisible() {
     const visibleCount = div.data.reduce((s, t, i) => i === bfIdx ? s
         : s + (t.visible === 'legendonly' || t.visible === false
                ? 0 : (t.x || []).length), 0);
-    const baseText = `${checked ? allX.length : visibleCount} subjects plotted (missing either variable excluded)`;
+    const baseText = `n = ${checked ? allX.length : visibleCount}`;
     let lineX = null, lineY = null, fitBoxText = null;
     if (checked && allX.length >= 3) {
         const stats = _linRegStats(allX, allY);
@@ -492,7 +499,7 @@ function renderBar() {
         hovertemplate: '%{text}<br>%{y:.3f}<extra></extra>', showlegend: false,
     };
 
-    $('exInfo').textContent = `${n} subjects (missing variable excluded)`;
+    $('exInfo').textContent = `n = ${n}`;
     const layout = {
         margin: { t: 20, b: 70, l: 90, r: 20 },
         xaxis: {
@@ -536,7 +543,9 @@ $('exSelectAllBtn').addEventListener('click', () => {
     render();
 });
 
-['exPlotType', 'exVarX', 'exVarY'].forEach(id =>
+document.querySelectorAll('input[name="exPlotType"]').forEach(r =>
+    r.addEventListener('change', render));
+['exVarX', 'exVarY'].forEach(id =>
     $(id).addEventListener('change', render));
 // Toggling Slope doesn't change the underlying data — just restyle
 // the already-present best-fit trace in place so axes don't re-fit.
