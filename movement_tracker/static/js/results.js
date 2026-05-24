@@ -733,11 +733,36 @@ function _shapeOverlayState() {
     const showMean = !!document.getElementById('shapeShowMean')?.checked;
     const alignR = document.querySelector('input[name="shapeAlign"]:checked');
     const align = alignR ? alignR.value : 'open';
+    const phaseR = document.querySelector('input[name="shapePhase"]:checked');
+    const phase = phaseR ? phaseR.value : 'whole';
     let xLo, xHi;
     if (align === 'peak' || align === 'corr') { xLo = -xMax / 2; xHi = xMax / 2; }
     else if (align === 'close') { xLo = -xMax; xHi = 0; }
     else { xLo = 0; xHi = xMax; }
-    return { xMax, showMean, align, xLo, xHi };
+    return { xMax, showMean, align, xLo, xHi, phase };
+}
+
+// Slice a segment's xs/ys to the requested phase.  Returns a NEW
+// object so callers can swap it into a fresh trial without mutating
+// the cached _shapeData segments.
+function _phaseSliceSegment(s, phase) {
+    if (phase === 'whole' || !phase) return s;
+    const xs = [], ys = [];
+    const peakT = s.peakT;
+    if (phase === 'open') {
+        for (let i = 0; i < s.xs.length; i++) {
+            if (s.xs[i] <= peakT + 1e-9) { xs.push(s.xs[i]); ys.push(s.ys[i]); }
+        }
+    } else if (phase === 'close') {
+        for (let i = 0; i < s.xs.length; i++) {
+            if (s.xs[i] >= peakT - 1e-9) { xs.push(s.xs[i]); ys.push(s.ys[i]); }
+        }
+    }
+    return {
+        xs, ys,
+        peakT: s.peakT, closeT: s.closeT, peakY: s.peakY,
+        peak_frame: s.peak_frame,
+    };
 }
 
 function _drawShapeOverlayPlots() {
@@ -761,17 +786,24 @@ function _drawShapeOverlayPlots() {
 
 function _redrawOneTrial(idx) {
     if (!_shapeData) return;
-    const trial = _shapeData.trials[idx];
+    let trial = _shapeData.trials[idx];
     if (!trial) return;
     const plotDiv = document.getElementById(`shapeOverlayPlot_${idx}`);
     if (!plotDiv) return;
     const _state = _shapeOverlayState();
-    const { xMax, showMean, align } = _state;
+    const { xMax, showMean, align, phase } = _state;
     let { xLo, xHi } = _state;
 
     if (!trial.segments.length) {
         plotDiv.innerHTML = '<div class="results-no-data">No movements</div>';
         return;
+    }
+
+    // Phase-slice each segment so the rest of the function (lines,
+    // average, correlation, clustering) only sees the plotted portion.
+    if (phase && phase !== 'whole') {
+        const sliced = trial.segments.map(s => _phaseSliceSegment(s, phase));
+        trial = Object.assign({}, trial, { segments: sliced });
     }
 
     const hiIdx = _shapeHighlight[idx] || 0;
@@ -1607,6 +1639,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const peaksCb = document.getElementById('shapeShowPeaks');
     if (peaksCb) peaksCb.addEventListener('change', _drawShapeOverlayPlots);
     document.querySelectorAll('input[name="shapeAlign"]').forEach(r =>
+        r.addEventListener('change', _drawShapeOverlayPlots));
+    document.querySelectorAll('input[name="shapePhase"]').forEach(r =>
         r.addEventListener('change', _drawShapeOverlayPlots));
     const cutSl = document.getElementById('shapeClusterCutoff');
     const cutVal = document.getElementById('shapeClusterCutoffVal');

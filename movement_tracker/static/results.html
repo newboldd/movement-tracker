@@ -137,6 +137,17 @@
                 <h3 style="margin:0 0 8px 0;font-size:14px;">Movement shapes (aligned to opening)</h3>
                 <div class="results-controls" id="shapeOverlayControls"
                      style="margin-bottom:8px;flex-wrap:wrap;">
+                    <span style="font-size:11px;color:var(--text-muted);">Phase:</span>
+                    <label style="display:flex;align-items:center;gap:3px;">
+                        <input type="radio" name="shapePhase" value="open"> Open
+                    </label>
+                    <label style="display:flex;align-items:center;gap:3px;">
+                        <input type="radio" name="shapePhase" value="close"> Close
+                    </label>
+                    <label style="display:flex;align-items:center;gap:3px;">
+                        <input type="radio" name="shapePhase" value="whole" checked> Whole
+                    </label>
+                    <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
                     <label title="Drag right to stretch the shape plots out (lower x-max)."
                            style="display:flex;align-items:center;gap:6px;margin:0;">
                         X scale:
@@ -323,6 +334,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=10"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=90"></script>
+    <script src="/static/js/results.js?v=91"></script>
 </body>
 </html>
