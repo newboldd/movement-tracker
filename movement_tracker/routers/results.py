@@ -1072,8 +1072,20 @@ def get_group_comparison(include_auto: bool = Query(False),
         try:
             data = _json.loads(cache.read_text())
             subjs = data.get("subjects") or []
-            if not subjs or "variance_amplitude" in subjs[0]:
-                return data
+            if subjs and "variance_amplitude" not in subjs[0]:
+                # variance (σ) = |cv * mean| — derive instead of recompute.
+                for s in subjs:
+                    for k in list(s.keys()):
+                        if not k.startswith("cv_"):
+                            continue
+                        base = k[3:]
+                        cv_v = s.get(k)
+                        m_v = s.get(f"mean_{base}")
+                        if cv_v is None or m_v is None:
+                            s[f"variance_{base}"] = None
+                        else:
+                            s[f"variance_{base}"] = round(abs(float(cv_v) * float(m_v)), 4)
+            return data
         except Exception:
             pass
 
@@ -1303,12 +1315,30 @@ def get_explore_variables(include_auto: bool = Query(False),
     if cache is not None and cache.is_file():
         try:
             data = _json.loads(cache.read_text())
-            # Sanity-check: older caches predate the `variance_*` keys.
-            # Fall through to recompute if the field is missing so the
-            # Variance radio button works without re-exporting.
+            # Older caches predate the `variance_*` keys.  Variance (σ) is
+            # just |cv * mean|, so derive it on the fly instead of forcing
+            # a full re-export.
             subjs = data.get("subjects") or []
-            if not subjs or "variance_amplitude" in (subjs[0].get("vars") or {}):
-                return data
+            if subjs and "variance_amplitude" not in (subjs[0].get("vars") or {}):
+                for s in subjs:
+                    vars_ = s.get("vars") or {}
+                    for k in list(vars_.keys()):
+                        if not k.startswith("cv_"):
+                            continue
+                        base = k[3:]
+                        cv_v = vars_.get(k)
+                        m_v = vars_.get(f"mean_{base}")
+                        if cv_v is None or m_v is None:
+                            vars_[f"variance_{base}"] = None
+                        else:
+                            vars_[f"variance_{base}"] = round(abs(float(cv_v) * float(m_v)), 4)
+                    s["vars"] = vars_
+            # Ensure the catalog advertises the variance keys.
+            cat = data.get("catalog") or {}
+            if "variance" not in (cat.get("aggregators") or []):
+                cat.setdefault("aggregators", []).append("variance")
+                data["catalog"] = cat
+            return data
         except Exception:
             pass    # corrupt cache → recompute
 
