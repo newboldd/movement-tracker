@@ -470,21 +470,26 @@ function renderShapeOverlayPlots() {
     }
     section.style.display = '';
 
-    // Configure x-scale slider.  Update the cap based on this subject
-    // but preserve the user's previously-chosen value across subject
-    // changes; only fall back to the per-subject default if the slider
-    // hasn't been touched yet (sentinel attribute).
+    // Configure x-scale slider.  We always preserve the user's
+    // current value across subject changes — only initialize to the
+    // per-subject default on the very first load (when the slider
+    // hasn't been seeded yet).  Cap is updated for this subject and
+    // the value is clamped if it exceeds the new cap.
     const xSl = document.getElementById('shapeXScaleSlider');
     const xVal = document.getElementById('shapeXScaleVal');
     if (xSl) {
         const xMaxCap = Math.max(5, Math.ceil(_shapeData.xMaxDefault * 1.5));
         xSl.max = String(xMaxCap);
-        if (!xSl.dataset.userSet) {
+        if (!xSl.dataset.seeded) {
             xSl.value = String(_shapeData.xMaxDefault.toFixed(2));
+            xSl.dataset.seeded = '1';
         } else {
             const v = parseFloat(xSl.value);
-            if (!isFinite(v) || v <= 0) xSl.value = String(_shapeData.xMaxDefault.toFixed(2));
-            else if (v > xMaxCap) xSl.value = String(xMaxCap);
+            if (!isFinite(v) || v <= 0) {
+                xSl.value = String(_shapeData.xMaxDefault.toFixed(2));
+            } else if (v > xMaxCap) {
+                xSl.value = String(xMaxCap);
+            }
         }
         if (xVal) xVal.textContent = `${(+xSl.value).toFixed(2)} s`;
     }
@@ -1641,7 +1646,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const xVal = document.getElementById('shapeXScaleVal');
     const meanCb = document.getElementById('shapeShowMean');
     if (xSl) xSl.addEventListener('input', () => {
-        xSl.dataset.userSet = '1';
         if (xVal) xVal.textContent = `${(+xSl.value).toFixed(2)} s`;
         _drawShapeOverlayPlots();
     });
