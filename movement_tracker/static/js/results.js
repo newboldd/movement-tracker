@@ -360,7 +360,8 @@ function _buildShapeData() {
             // Peak / close offsets in the segment's own time axis.
             const peakT = (p - o) / fps;
             const closeT = (c - o) / fps;
-            return { xs, ys, peakT, closeT };
+            const peakY = (dist[p] != null) ? dist[p] : null;
+            return { xs, ys, peakT, closeT, peakY };
         }).filter(s => s.xs.length >= 2);
         const maxT = segments.reduce((a, s) => Math.max(a, s.xs[s.xs.length - 1]), 0);
         if (maxT > globalMaxT) globalMaxT = maxT;
@@ -715,6 +716,16 @@ function _redrawOneTrial(idx) {
                 line: { width: 2.5, color: '#d32f2f' },
                 hoverinfo: 'skip', showlegend: false,
             });
+            // Peak-event marker on the highlighted movement.
+            if (s.peakY != null) {
+                const peakX = s.peakT + shiftOf(s, hiIdx - 1);
+                traces.push({
+                    x: [peakX], y: [s.peakY], type: 'scatter', mode: 'markers',
+                    marker: { size: 11, color: '#d32f2f',
+                              line: { color: '#000', width: 1.2 }, symbol: 'circle' },
+                    hoverinfo: 'skip', showlegend: false,
+                });
+            }
         }
 
         const xTitle = align === 'peak'
