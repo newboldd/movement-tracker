@@ -572,7 +572,7 @@ function _buildShapeOverlayCells() {
         cell.className = 'results-plot-cell';
         // Fixed-width column so all trials sit in one horizontally
         // scrollable row.
-        cell.style.cssText = 'flex:0 0 auto;width:380px;min-width:0;';
+        cell.style.cssText = 'flex:0 0 auto;width:494px;min-width:0;';
 
         // Title with an inline per-trial movement-highlight slider.
         const title = document.createElement('div');
@@ -634,7 +634,7 @@ function _buildShapeOverlayCells() {
 
         const plotDiv = document.createElement('div');
         plotDiv.id = `shapeOverlayPlot_${idx}`;
-        plotDiv.style.cssText = 'width:100%;height:240px;';
+        plotDiv.style.cssText = 'width:100%;height:312px;';
         cell.appendChild(plotDiv);
 
         // Correlation matrix (single heatmap, optionally clustered).
