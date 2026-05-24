@@ -572,7 +572,7 @@ function _buildShapeOverlayCells() {
         cell.className = 'results-plot-cell';
         // Fixed-width column so all trials sit in one horizontally
         // scrollable row.
-        cell.style.cssText = 'flex:0 0 auto;width:494px;min-width:0;';
+        cell.style.cssText = 'flex:0 0 auto;width:527px;min-width:0;';
 
         // Title with an inline per-trial movement-highlight slider.
         const title = document.createElement('div');
@@ -1033,13 +1033,13 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
         margin: MARGIN,
         title: { text: titleText, font: { size: 11 }, x: 0, xanchor: 'left', y: 0.98 },
         xaxis: {
-            domain: [0, 0.15],
+            domain: [0, 0.21],
             range: [xMaxDendro, 0],
             showticklabels: false, zeroline: false, showgrid: false,
             showline: false, ticks: '', fixedrange: true, automargin: false,
         },
         xaxis2: {
-            domain: [0.20, 1.0], anchor: 'y', automargin: false,
+            domain: [0.26, 1.0], anchor: 'y', automargin: false,
             tickfont: { size: 9 }, side: 'bottom',
             tickmode: 'array', tickvals: nums, ticktext: labels,
             range: [-0.5, N - 0.5],
@@ -1071,7 +1071,7 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
         }
         const plotW = Math.max(1, w - MARGIN.l - MARGIN.r);
         const plotH = Math.max(1, w - MARGIN.t - MARGIN.b);
-        const x2Frac = 1.0 - 0.20;   // matrix domain [0.20, 1.0]
+        const x2Frac = 1.0 - 0.26;   // matrix domain [0.26, 1.0]
         const matrixSide = Math.min(x2Frac * plotW, plotH);
         const cbLen = Math.max(0.1, Math.min(1, matrixSide / plotH));
         if (window.Plotly) {
@@ -1094,7 +1094,7 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
         const w0 = targetDiv.clientWidth || targetDiv.offsetWidth || 380;
         const plotW0 = Math.max(1, w0 - MARGIN.l - MARGIN.r);
         const plotH0 = Math.max(1, w0 - MARGIN.t - MARGIN.b);
-        const matrixSide0 = Math.min((1 - 0.20) * plotW0, plotH0);
+        const matrixSide0 = Math.min((1 - 0.26) * plotW0, plotH0);
         heatTrace.colorbar.len = Math.max(0.1, Math.min(1, matrixSide0 / plotH0));
     }
     _sizeToSquare();
