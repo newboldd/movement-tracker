@@ -633,10 +633,11 @@ function _buildShapeOverlayCells() {
 
         // Correlation matrix between every pair of movements at the
         // current alignment (Pearson on the shifted-and-resampled
-        // segments).  Blue (-1) → white (0) → red (+1).
+        // segments).  Blue (-1) → white (0) → red (+1).  Rendered as
+        // a square — height matches width via _resizeCorrSquare.
         const corrDiv = document.createElement('div');
         corrDiv.id = `shapeCorrPlot_${idx}`;
-        corrDiv.style.cssText = 'width:100%;height:280px;margin-top:6px;';
+        corrDiv.style.cssText = 'width:100%;margin-top:6px;';
         cell.appendChild(corrDiv);
 
         container.appendChild(cell);
@@ -833,17 +834,39 @@ function _redrawOneTrialCorr(idx, trial, xLo, xHi, shiftedX, hiIdx) {
         hovertemplate: 'mov %{x} × mov %{y}<br>r = %{z:.2f}<extra></extra>',
         colorbar: { thickness: 8, tickvals: [-1, 0, 1], tickfont: { size: 10 } },
     };
+    // Highlight row + column of the currently highlighted movement.
+    const shapes = [];
+    if (hiIdx > 0 && hiIdx <= N) {
+        const j = hiIdx - 1;
+        shapes.push(
+            { type: 'rect', xref: 'x', yref: 'paper',
+              x0: j - 0.5, x1: j + 0.5, y0: 0, y1: 1,
+              line: { color: '#000', width: 2 }, fillcolor: 'rgba(0,0,0,0)' },
+            { type: 'rect', xref: 'paper', yref: 'y',
+              x0: 0, x1: 1, y0: j - 0.5, y1: j + 0.5,
+              line: { color: '#000', width: 2 }, fillcolor: 'rgba(0,0,0,0)' },
+        );
+    }
     const layout = {
         margin: { t: 6, b: 36, l: 36, r: 50 },
         title: { text: 'Pairwise correlation', font: { size: 11 }, x: 0, xanchor: 'left' },
         xaxis: { title: { text: 'Movement #', font: { size: 10 } },
                  tickfont: { size: 9 }, side: 'bottom', automargin: true,
-                 type: 'category' },
+                 type: 'category', constrain: 'domain' },
         yaxis: { title: { text: 'Movement #', font: { size: 10 } },
                  tickfont: { size: 9 }, autorange: 'reversed', automargin: true,
-                 type: 'category' },
+                 type: 'category', scaleanchor: 'x', scaleratio: 1 },
         plot_bgcolor: '#fff', paper_bgcolor: '#fff',
+        shapes,
     };
+    // Square the container: height = width (read after layout settles).
+    requestAnimationFrame(() => {
+        const w = corrDiv.clientWidth || corrDiv.offsetWidth || 0;
+        if (w > 0) {
+            corrDiv.style.height = `${w}px`;
+            if (window.Plotly && corrDiv._fullLayout) Plotly.Plots.resize(corrDiv);
+        }
+    });
     Plotly.react(corrDiv, [trace], layout,
                  { responsive: true, displayModeBar: false });
 }
