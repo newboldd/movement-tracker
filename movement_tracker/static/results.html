@@ -167,7 +167,14 @@
                         <input type="radio" name="shapeAlign" value="corr" checked> Correlation
                     </label>
                     <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
-                    <label title="Reorder the correlation matrix by hierarchical clustering and show the dendrogram.">
+                    <span style="font-size:11px;color:var(--text-muted);">Metric:</span>
+                    <label style="display:flex;align-items:center;gap:3px;">
+                        <input type="radio" name="shapeMetric" value="corr" checked> r
+                    </label>
+                    <label style="display:flex;align-items:center;gap:3px;">
+                        <input type="radio" name="shapeMetric" value="cov"> cov
+                    </label>
+                    <label title="Reorder the matrix by hierarchical clustering and show the dendrogram.">
                         <input type="checkbox" id="shapeClusterOn" checked> Cluster
                     </label>
                     <label title="Dendrogram height cutoff for hierarchical clustering (avg linkage, 1-r distance, range 0-2)."
@@ -312,6 +319,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=10"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=83"></script>
+    <script src="/static/js/results.js?v=84"></script>
 </body>
 </html>

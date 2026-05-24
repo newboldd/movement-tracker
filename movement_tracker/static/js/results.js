@@ -775,16 +775,41 @@ function _redrawOneTrial(idx) {
         // Cluster pre-compute (shared with the corr-matrix draw).
         // Use the already-shifted data so the clustering reflects
         // exactly what the matrix below will compute.
+        const _metricR = document.querySelector('input[name="shapeMetric"]:checked');
+        const _metric = _metricR ? _metricR.value : 'corr';
         const N = trial.segments.length;
         const _matNow = (N >= 2)
-            ? _pairwiseCorrMatrix(trial, xLo, xHi, shiftedX)
+            ? _pairwiseMatrix(trial, xLo, xHi, shiftedX, _metric)
             : null;
         const _cutH = parseFloat(document.getElementById('shapeClusterCutoff')?.value);
         const _useCut = isFinite(_cutH) ? _cutH : 0.5;
         const _colorsOn = !!document.getElementById('shapeClusterColors')?.checked;
         let _movColors = null;
         if (_matNow) {
-            const _dist = _matNow.map(row => row.map(v => v == null ? 2 : 1 - v));
+            // Distance: 1 - r for correlation, or covariance rescaled
+            // to [0, 2] so the same cutoff slider applies in both
+            // modes (largest covariance ↦ distance 0, smallest ↦ 2).
+            let _dist;
+            if (_metric === 'cov') {
+                let _lo = +Infinity, _hi = -Infinity;
+                for (let i = 0; i < N; i++) {
+                    for (let j = 0; j < N; j++) {
+                        if (i === j) continue;
+                        const v = _matNow[i][j];
+                        if (v == null || !isFinite(v)) continue;
+                        if (v < _lo) _lo = v;
+                        if (v > _hi) _hi = v;
+                    }
+                }
+                const _range = Math.max(1e-12, _hi - _lo);
+                _dist = _matNow.map((row, i) => row.map((v, j) => {
+                    if (i === j) return 0;
+                    if (v == null || !isFinite(v)) return 2;
+                    return 2 * (_hi - v) / _range;
+                }));
+            } else {
+                _dist = _matNow.map(row => row.map(v => v == null ? 2 : 1 - v));
+            }
             const _root = _hacAverage(_dist);
             if (_root) {
                 const _cut = _cutAndOrderHAC(_root, _useCut);
@@ -803,6 +828,7 @@ function _redrawOneTrial(idx) {
                     mat: _matNow, root: _root,
                     order: _cut.order, sizes: _cut.sizes,
                     useCut: _useCut, movColors: _movColors,
+                    metric: _metric,
                 };
             } else {
                 trial._hacCache = null;
@@ -942,10 +968,11 @@ function _redrawOneTrial(idx) {
         _redrawOneTrialCorr(idx, trial, xLo, xHi, shiftedX, hiIdx);
 }
 
-// Pairwise Pearson correlations between every movement at the
-// currently-displayed alignment.  Resamples segments to a 120-pt grid
-// over [xLo, xHi] and ignores grid points where either side is NaN.
-function _pairwiseCorrMatrix(trial, xLo, xHi, shiftedX) {
+// Pairwise similarity between every movement at the currently-
+// displayed alignment.  Resamples segments to a 120-pt grid over
+// [xLo, xHi] and ignores grid points where either side is NaN.
+// `metric` is 'corr' (Pearson r, default) or 'cov' (sample covariance).
+function _pairwiseMatrix(trial, xLo, xHi, shiftedX, metric) {
     const N = trial.segments.length;
     const GRID = 120;
     const resampled = trial.segments.map((s, mi) =>
@@ -955,7 +982,6 @@ function _pairwiseCorrMatrix(trial, xLo, xHi, shiftedX) {
         const row = new Array(N);
         for (let j = 0; j < N; j++) {
             if (j < i) { row[j] = mat[j][i]; continue; }
-            if (i === j) { row[j] = 1; continue; }
             const a = resampled[i], b = resampled[j];
             let n = 0, sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
             for (let k = 0; k < GRID; k++) {
@@ -965,14 +991,23 @@ function _pairwiseCorrMatrix(trial, xLo, xHi, shiftedX) {
             }
             if (n < 5) { row[j] = null; continue; }
             const mx = sx / n, my = sy / n;
-            const num = sxy - n * mx * my;
-            const den = Math.sqrt(Math.max(1e-12, (sxx - n * mx * mx) * (syy - n * my * my)));
-            row[j] = num / den;
+            const sxxC = sxx - n * mx * mx;
+            const syyC = syy - n * my * my;
+            const sxyC = sxy - n * mx * my;
+            if (metric === 'cov') {
+                row[j] = (n > 1) ? sxyC / (n - 1) : 0;
+            } else {
+                if (i === j) { row[j] = 1; continue; }
+                row[j] = sxyC / Math.sqrt(Math.max(1e-12, sxxC * syyC));
+            }
         }
         mat.push(row);
     }
     return mat;
 }
+// Backwards-compatible alias.
+const _pairwiseCorrMatrix = (trial, xLo, xHi, shiftedX) =>
+    _pairwiseMatrix(trial, xLo, xHi, shiftedX, 'corr');
 
 // Hierarchical agglomerative clustering with average linkage on the
 // supplied distance matrix.  Returns the root node of the binary
@@ -1101,7 +1136,8 @@ function _buildTickColorAnnotations(N, labels, tickColors) {
     return out;
 }
 
-function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, hiPos, boundaries, dendroLines, maxH, cutH, tickColors) {
+function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, hiPos, boundaries, dendroLines, maxH, cutH, tickColors, zRange, metric) {
+    if (!zRange) zRange = { min: -1, max: 1, mid: 0 };
     const N = mat.length;
     const nums = Array.from({ length: N }, (_, i) => i);
     const dx = [], dy = [];
@@ -1117,17 +1153,19 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
     const heatTrace = {
         z: mat, x: nums, y: nums, type: 'heatmap',
         xaxis: 'x2', yaxis: 'y',
-        zmin: -1, zmax: 1, zmid: 0,
+        zmin: zRange.min, zmax: zRange.max, zmid: zRange.mid,
         colorscale: [
             [0.0, 'rgb(33,102,172)'], [0.25, 'rgb(146,197,222)'],
             [0.5, 'rgb(247,247,247)'],
             [0.75, 'rgb(244,165,130)'], [1.0, 'rgb(178,24,43)'],
         ],
-        hovertemplate: 'r = %{z:.2f}<extra></extra>',
+        hovertemplate: (metric === 'cov' ? 'cov = %{z:.3g}' : 'r = %{z:.2f}') + '<extra></extra>',
         // Colorbar length is set later from the actual matrix height.
         colorbar: { thickness: 8, lenmode: 'fraction',
                     y: 1, yanchor: 'top', outlinewidth: 0, ypad: 0,
-                    tickvals: [-1, 0, 1], tickfont: { size: 10 } },
+                    tickvals: [zRange.min, zRange.mid, zRange.max],
+                    tickformat: (metric === 'cov' ? '.2g' : '.2f'),
+                    tickfont: { size: 10 } },
     };
     const shapes = [];
     // Highlight: vertical pair for the column, horizontal pair for the
@@ -1349,18 +1387,40 @@ function _redrawOneTrialCorr(idx, trial, xLo, xHi, shiftedX, hiIdx) {
 
     // Reuse the HAC cache produced by _redrawOneTrial when possible.
     const cache = trial._hacCache;
-    const mat = cache ? cache.mat : _pairwiseCorrMatrix(trial, xLo, xHi, shiftedX);
+    const metric = cache ? cache.metric : 'corr';
+    const mat = cache ? cache.mat : _pairwiseMatrix(trial, xLo, xHi, shiftedX, metric);
     const labels = trial.segments.map((_, i) => String(i + 1));
     const clusterOn = !!document.getElementById('shapeClusterOn')?.checked;
     const movColors = cache ? cache.movColors : null;
+    // Color-scale bounds: fixed [-1, 1] for correlation; symmetric
+    // around 0 with absMax for covariance.
+    let zRange = { min: -1, max: 1, mid: 0 };
+    if (metric === 'cov') {
+        let absMax = 0;
+        for (let i = 0; i < mat.length; i++) {
+            for (let j = 0; j < mat.length; j++) {
+                if (i === j) continue;
+                const v = mat[i][j];
+                if (v == null || !isFinite(v)) continue;
+                const a = Math.abs(v);
+                if (a > absMax) absMax = a;
+            }
+        }
+        if (absMax < 1e-12) absMax = 1;
+        zRange = { min: -absMax, max: absMax, mid: 0 };
+    }
+    const titlePrefix = metric === 'cov' ? 'Pairwise covariance' : 'Pairwise correlation';
+    const titleClu = (k) => metric === 'cov'
+        ? `Clustered (HAC, avg linkage, cov) — ${k} group${k === 1 ? '' : 's'}`
+        : `Clustered (HAC, avg linkage, 1−r) — ${k} group${k === 1 ? '' : 's'}`;
 
     if (!clusterOn) {
         _shapeClusterOrder[idx] = null;
         const tickColors = movColors ? movColors.slice() : null;
         _renderClusteredCorrHeatmap(
-            corrDiv, mat, labels, 'Pairwise correlation',
+            corrDiv, mat, labels, titlePrefix,
             hiIdx, hiIdx > 0 ? hiIdx - 1 : -1,
-            null, [], 1, null, tickColors,
+            null, [], 1, null, tickColors, zRange, metric,
         );
         _syncShapeSlider(idx);
         return;
@@ -1394,9 +1454,9 @@ function _redrawOneTrialCorr(idx, trial, xLo, xHi, shiftedX, hiIdx) {
     const tickColors = movColors ? order.map(i => movColors[i]) : null;
     _shapeClusterOrder[idx] = order;
     _renderClusteredCorrHeatmap(
-        corrDiv, reord, reordLabels,
-        `Clustered (HAC, avg linkage, 1−r) — ${k} group${k === 1 ? '' : 's'}`,
+        corrDiv, reord, reordLabels, titleClu(k),
         hiIdx, hiPosClu, boundaries, dendroLines, maxH, useCut, tickColors,
+        zRange, metric,
     );
     _syncShapeSlider(idx);
 }
@@ -1425,6 +1485,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (cluCb) cluCb.addEventListener('change', _drawShapeOverlayPlots);
     const colCb = document.getElementById('shapeClusterColors');
     if (colCb) colCb.addEventListener('change', _drawShapeOverlayPlots);
+    document.querySelectorAll('input[name="shapeMetric"]').forEach(r =>
+        r.addEventListener('change', _drawShapeOverlayPlots));
 });
 
 // When "Auto" is selected, append the actually-resolved source to the
