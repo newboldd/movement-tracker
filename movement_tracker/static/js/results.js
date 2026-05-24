@@ -393,12 +393,49 @@ function _resampleXY(xs, ys, xLo, xHi, nPts) {
     return out;
 }
 
-// Per-trial highlight index (1-indexed, 0 = none).  Reset on each
-// renderShapeOverlayPlots() call.
+// Per-trial highlight = the original movement number (1-indexed,
+// 0 = none).  Reset on each renderShapeOverlayPlots() call.
 let _shapeHighlight = {};
 // Per-trial highlight setter — populated by _buildShapeOverlayCells so
 // click handlers in _redrawOneTrial can update the slider in place.
 let _shapeSetHighlight = {};
+// Per-trial sorted leaf order from the most recent HAC pass.  Null
+// (or missing) when "Cluster" is off — the slider then falls back to
+// the natural 1..N order.
+let _shapeClusterOrder = {};
+// Per-trial slider DOM refs (slider + value span) so cluster-toggle
+// can resync the slider position when the order changes.
+let _shapeSliderByIdx = {};
+
+// Position (slider value) → original movement number.
+function _posToMov(idx, pos, N) {
+    if (!(pos > 0)) return 0;
+    if (pos > N) pos = N;
+    const ord = _shapeClusterOrder[idx];
+    if (ord && ord.length === N) return ord[pos - 1] + 1;
+    return pos;
+}
+// Original movement number → slider position.
+function _movToPos(idx, mov, N) {
+    if (!(mov > 0)) return 0;
+    if (mov > N) mov = N;
+    const ord = _shapeClusterOrder[idx];
+    if (ord && ord.length === N) {
+        const p = ord.indexOf(mov - 1);
+        return p >= 0 ? p + 1 : mov;
+    }
+    return mov;
+}
+// Keep the slider position matching the currently-highlighted movement
+// after the cluster order changes.
+function _syncShapeSlider(idx) {
+    const refs = _shapeSliderByIdx[idx];
+    if (!refs || !_shapeData) return;
+    const N = _shapeData.trials[idx]?.segments.length || 0;
+    const mov = _shapeHighlight[idx] || 0;
+    refs.slider.value = String(_movToPos(idx, mov, N));
+    refs.valSpan.textContent = mov === 0 ? 'All' : String(mov);
+}
 
 function renderShapeOverlayPlots() {
     const section = document.getElementById('shapeOverlaySection');
@@ -421,6 +458,8 @@ function renderShapeOverlayPlots() {
         if (xVal) xVal.textContent = `${(+xSl.value).toFixed(2)} s`;
     }
     _shapeHighlight = {};
+    _shapeClusterOrder = {};
+    _shapeSliderByIdx = {};
 
     // Force a fresh cell build (new subject — sliders / titles differ).
     const cont = document.getElementById('shapeOverlayPlots');
@@ -597,19 +636,32 @@ function _buildShapeOverlayCells() {
         moveLabel.appendChild(moveSlider);
         moveLabel.appendChild(moveVal);
 
-        const _setHighlight = (v) => {
+        // Highlight is keyed by ORIGINAL movement number.  The slider
+        // value is a POSITION (1..N) which maps to a movement via the
+        // current cluster order (when "Cluster" is on) or directly
+        // (when off).
+        const _setByMov = (m) => {
             const N = trial.segments.length;
-            let n = parseInt(v, 10);
-            if (!isFinite(n)) n = 0;
-            if (n < 0) n = 0;
-            if (n > N) n = N;
-            _shapeHighlight[idx] = n;
-            moveSlider.value = String(n);
-            moveVal.textContent = n === 0 ? 'All' : String(n);
+            let mov = parseInt(m, 10);
+            if (!isFinite(mov)) mov = 0;
+            if (mov < 0) mov = 0;
+            if (mov > N) mov = N;
+            _shapeHighlight[idx] = mov;
+            moveSlider.value = String(_movToPos(idx, mov, N));
+            moveVal.textContent = mov === 0 ? 'All' : String(mov);
             _redrawOneTrial(idx);
         };
-        _shapeSetHighlight[idx] = _setHighlight;
-        moveSlider.addEventListener('input', () => _setHighlight(moveSlider.value));
+        const _setByPos = (p) => {
+            const N = trial.segments.length;
+            let pos = parseInt(p, 10);
+            if (!isFinite(pos)) pos = 0;
+            if (pos < 0) pos = 0;
+            if (pos > N) pos = N;
+            _setByMov(_posToMov(idx, pos, N));
+        };
+        _shapeSetHighlight[idx] = _setByMov;
+        _shapeSliderByIdx[idx] = { slider: moveSlider, valSpan: moveVal };
+        moveSlider.addEventListener('input', () => _setByPos(moveSlider.value));
 
         // Prev / next arrow buttons.
         const prevBtn = document.createElement('button');
@@ -618,14 +670,14 @@ function _buildShapeOverlayCells() {
         prevBtn.textContent = '◀';
         prevBtn.title = 'Previous movement';
         prevBtn.style.cssText = 'padding:0 6px;font-size:11px;line-height:1.4;';
-        prevBtn.addEventListener('click', () => _setHighlight((_shapeHighlight[idx] || 0) - 1));
+        prevBtn.addEventListener('click', () => _setByPos(parseInt(moveSlider.value, 10) - 1));
         const nextBtn = document.createElement('button');
         nextBtn.type = 'button';
         nextBtn.className = 'btn btn-sm';
         nextBtn.textContent = '▶';
         nextBtn.title = 'Next movement';
         nextBtn.style.cssText = 'padding:0 6px;font-size:11px;line-height:1.4;';
-        nextBtn.addEventListener('click', () => _setHighlight((_shapeHighlight[idx] || 0) + 1));
+        nextBtn.addEventListener('click', () => _setByPos(parseInt(moveSlider.value, 10) + 1));
         moveLabel.appendChild(prevBtn);
         moveLabel.appendChild(nextBtn);
 
@@ -1204,11 +1256,13 @@ function _redrawOneTrialCorr(idx, trial, xLo, xHi, shiftedX, hiIdx) {
         // Unsorted matrix, but rendered with the same two-subplot
         // layout (empty dendrogram region) so the heatmap size matches
         // the clustered view.
+        _shapeClusterOrder[idx] = null;
         _renderClusteredCorrHeatmap(
             corrDiv, mat, labels, 'Pairwise correlation',
             hiIdx, hiIdx > 0 ? hiIdx - 1 : -1,
             null, [], 1, null,
         );
+        _syncShapeSlider(idx);
         return;
     }
 
@@ -1230,11 +1284,13 @@ function _redrawOneTrialCorr(idx, trial, xLo, xHi, shiftedX, hiIdx) {
     order.forEach((id, pos) => { leafToY[id] = pos; });
     const dendroLines = _buildDendroLines(root, leafToY);
     const maxH = root.height || 1;
+    _shapeClusterOrder[idx] = order;
     _renderClusteredCorrHeatmap(
         corrDiv, reord, reordLabels,
         `Clustered (HAC, avg linkage, 1−r) — ${k} group${k === 1 ? '' : 's'}`,
         hiIdx, hiPosClu, boundaries, dendroLines, maxH, useCut,
     );
+    _syncShapeSlider(idx);
 }
 
 // Live-update the shape plots when the controls change.
