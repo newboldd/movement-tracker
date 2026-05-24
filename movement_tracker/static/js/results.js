@@ -347,14 +347,20 @@ function _buildShapeData() {
         const segments = movs.map(m => {
             const o = Math.max(0, m.open_frame_local | 0);
             const c = Math.min(dist.length - 1, m.close_frame_local | 0);
+            const p = (m.peak_frame_local != null)
+                ? Math.min(c, Math.max(o, m.peak_frame_local | 0))
+                : o;
             const xs = [], ys = [];
             for (let f = o; f <= c; f++) {
                 const v = dist[f];
                 if (v == null) continue;
-                xs.push((f - o) / fps);
+                xs.push((f - o) / fps);   // raw: open at 0
                 ys.push(v);
             }
-            return { xs, ys };
+            // Peak / close offsets in the segment's own time axis.
+            const peakT = (p - o) / fps;
+            const closeT = (c - o) / fps;
+            return { xs, ys, peakT, closeT };
         }).filter(s => s.xs.length >= 2);
         const maxT = segments.reduce((a, s) => Math.max(a, s.xs[s.xs.length - 1]), 0);
         if (maxT > globalMaxT) globalMaxT = maxT;
@@ -368,18 +374,17 @@ function _buildShapeData() {
     return { trials, xMaxDefault, maxMov };
 }
 
-// Resample a single (xs, ys) segment to a fixed time grid [0..xMax]
-// with `nPts` samples, linear interpolation, returning ys (NaN past
-// the segment end).
-function _resampleSegment(seg, xMax, nPts) {
+// Resample (xs, ys) to nPts samples spanning [xLo..xHi] using linear
+// interpolation.  Returns NaN for grid points outside the segment.
+function _resampleXY(xs, ys, xLo, xHi, nPts) {
     const out = new Array(nPts);
-    const { xs, ys } = seg;
-    const xEnd = xs[xs.length - 1];
+    const xStart = xs[0], xEnd = xs[xs.length - 1];
     let j = 0;
     for (let i = 0; i < nPts; i++) {
-        const t = (i / (nPts - 1)) * xMax;
-        if (t > xEnd) { out[i] = NaN; continue; }
+        const t = xLo + (i / (nPts - 1)) * (xHi - xLo);
+        if (t < xStart || t > xEnd) { out[i] = NaN; continue; }
         while (j < xs.length - 2 && xs[j + 1] < t) j++;
+        while (j > 0 && xs[j] > t) j--;
         const x0 = xs[j], x1 = xs[j + 1];
         const f = (x1 > x0) ? (t - x0) / (x1 - x0) : 0;
         out[i] = ys[j] + f * (ys[j + 1] - ys[j]);
@@ -427,6 +432,15 @@ function _drawShapeOverlayPlots() {
               || _shapeData.xMaxDefault;
     const hiIdx = parseInt(document.getElementById('shapeMoveSlider')?.value || '0', 10);
     const showMean = !!document.getElementById('shapeShowMean')?.checked;
+    const alignR = document.querySelector('input[name="shapeAlign"]:checked');
+    const align = alignR ? alignR.value : 'open';
+
+    // X-axis range follows the alignment so that the alignment point
+    // sits at t=0 with the chosen total width = xMax.
+    let xLo, xHi;
+    if (align === 'peak') { xLo = -xMax / 2; xHi = xMax / 2; }
+    else if (align === 'close') { xLo = -xMax; xHi = 0; }
+    else { xLo = 0; xHi = xMax; }
 
     container.innerHTML = '';
 
@@ -449,38 +463,47 @@ function _drawShapeOverlayPlots() {
             return;
         }
 
+        // Per-segment alignment shift (subtracted from xs at draw
+        // time so the raw segment data can stay in open-aligned form).
+        const shiftOf = s => align === 'peak' ? -s.peakT
+                            : align === 'close' ? -s.closeT
+                            : 0;
+        const shiftedX = s => s.xs.map(x => x + shiftOf(s));
+
         // Dim the rest when a movement is highlighted.
         const dimmed = hiIdx > 0;
         const baseColor = dimmed
             ? 'rgba(31,119,180,0.15)'
             : 'rgba(31,119,180,0.45)';
         const traces = trial.segments.map((s, mi) => ({
-            x: s.xs, y: s.ys, type: 'scatter', mode: 'lines',
+            x: shiftedX(s), y: s.ys, type: 'scatter', mode: 'lines',
             line: { width: 1, color: baseColor },
             hoverinfo: 'skip', showlegend: false,
         }));
 
-        // Average trace (resampled to a common time grid).  Drawn
+        // Average trace (resampled to the displayed time grid).  Drawn
         // before any highlighted movement so the highlight sits on top.
         if (showMean) {
             const N = 200;
             const sums = new Float64Array(N), counts = new Float64Array(N);
             for (const s of trial.segments) {
-                const ys = _resampleSegment(s, xMax, N);
+                const sx = shiftedX(s);
+                const ys = _resampleXY(sx, s.ys, xLo, xHi, N);
                 for (let i = 0; i < N; i++) {
                     if (isFinite(ys[i])) { sums[i] += ys[i]; counts[i] += 1; }
                 }
             }
-            const xs = [], ys = [];
+            const meanXs = [], meanYs = [];
+            const minCount = Math.max(2, trial.segments.length * 0.25);
             for (let i = 0; i < N; i++) {
-                if (counts[i] >= Math.max(2, trial.segments.length * 0.25)) {
-                    xs.push((i / (N - 1)) * xMax);
-                    ys.push(sums[i] / counts[i]);
+                if (counts[i] >= minCount) {
+                    meanXs.push(xLo + (i / (N - 1)) * (xHi - xLo));
+                    meanYs.push(sums[i] / counts[i]);
                 }
             }
-            if (xs.length >= 2) {
+            if (meanXs.length >= 2) {
                 traces.push({
-                    x: xs, y: ys, type: 'scatter', mode: 'lines',
+                    x: meanXs, y: meanYs, type: 'scatter', mode: 'lines',
                     line: { width: 3.5, color: '#000' },
                     hoverinfo: 'skip', showlegend: false,
                 });
@@ -492,18 +515,23 @@ function _drawShapeOverlayPlots() {
         if (hiIdx > 0 && hiIdx <= trial.segments.length) {
             const s = trial.segments[hiIdx - 1];
             traces.push({
-                x: s.xs, y: s.ys, type: 'scatter', mode: 'lines',
+                x: shiftedX(s), y: s.ys, type: 'scatter', mode: 'lines',
                 line: { width: 2.5, color: '#d32f2f' },
                 hoverinfo: 'skip', showlegend: false,
             });
         }
 
+        const xTitle = align === 'peak'
+            ? 'Time from peak (s)'
+            : align === 'close' ? 'Time from closing (s)'
+                                : 'Time from opening (s)';
         const layout = {
             margin: { t: 6, b: 36, l: 48, r: 8 },
             xaxis: {
-                title: { text: 'Time from opening (s)', font: { size: 11 } },
-                range: [0, xMax], showline: true, linecolor: '#666',
-                zeroline: false, tickfont: { size: 10 },
+                title: { text: xTitle, font: { size: 11 } },
+                range: [xLo, xHi], showline: true, linecolor: '#666',
+                zeroline: (align !== 'open'), zerolinecolor: '#bbb',
+                tickfont: { size: 10 },
             },
             yaxis: {
                 title: { text: 'Distance (mm)', font: { size: 11 } },
@@ -534,6 +562,8 @@ document.addEventListener('DOMContentLoaded', () => {
         _drawShapeOverlayPlots();
     });
     if (meanCb) meanCb.addEventListener('change', _drawShapeOverlayPlots);
+    document.querySelectorAll('input[name="shapeAlign"]').forEach(r =>
+        r.addEventListener('change', _drawShapeOverlayPlots));
 });
 
 // When "Auto" is selected, append the actually-resolved source to the

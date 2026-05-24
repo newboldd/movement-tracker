@@ -581,6 +581,7 @@ def _build_movement_params(
         trial_start = trials[ti]["start_frame"] if ti < len(trials) else 0
         open_frame_local = (open_f - trial_start) if open_f is not None else None
         close_frame_local = (close_f - trial_start) if close_f is not None else None
+        peak_frame_local = pk - trial_start
 
         movements.append({
             "peak_frame": pk,
@@ -590,6 +591,7 @@ def _build_movement_params(
             "close_frame": close_f,
             "open_frame_local": open_frame_local,
             "close_frame_local": close_frame_local,
+            "peak_frame_local": peak_frame_local,
             "imi": imi,
             "amplitude": amplitude,
             "rel_amplitude": rel_amplitude,
