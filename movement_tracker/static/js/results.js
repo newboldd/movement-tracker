@@ -445,14 +445,33 @@ function _computeCorrShifts(segments, xMax) {
     const ref = new Float64Array(nGrid);
     for (let i = 0; i < nGrid; i++) ref[i] = counts[i] >= 2 ? sums[i] / counts[i] : NaN;
 
+    // Defined extent of the mean trace, in seconds (open-aligned axis).
+    let refFirstI = -1, refLastI = -1;
+    for (let i = 0; i < nGrid; i++) {
+        if (isFinite(ref[i])) { if (refFirstI < 0) refFirstI = i; refLastI = i; }
+    }
+    const meanXmin = refFirstI >= 0 ? xLoRef + refFirstI * dt : -Infinity;
+    const meanXmax = refLastI  >= 0 ? xLoRef + refLastI  * dt :  Infinity;
+
     // Per-segment shift via lag-of-max-correlation + parabolic refine.
     const maxLagSamples = Math.round(xMax / 2 / dt);   // search ±xMax/2
     const shifts = new Array(N).fill(0);
     for (let si = 0; si < N; si++) {
         const seg = resampled[si];
+        // Constrain the lag search so the segment's peak, after the
+        // shift, stays inside the defined mean trace.  shift_t = -k*dt
+        // and the shifted peak time is segments[si].peakT + shift_t,
+        // which must lie in [meanXmin, meanXmax].
+        const peakT = segments[si].peakT;
+        const kLoConstr = Math.ceil((peakT - meanXmax) / dt);
+        const kHiConstr = Math.floor((peakT - meanXmin) / dt);
+        const kLo = Math.max(-maxLagSamples, kLoConstr);
+        const kHi = Math.min( maxLagSamples, kHiConstr);
+        if (kLo > kHi) { shifts[si] = 0; continue; }
         let bestLag = 0, bestC = -Infinity;
         const corr = new Float64Array(2 * maxLagSamples + 1);
-        for (let k = -maxLagSamples; k <= maxLagSamples; k++) {
+        for (let i = 0; i < corr.length; i++) corr[i] = -Infinity;
+        for (let k = kLo; k <= kHi; k++) {
             let s = 0, n = 0, sx = 0, sy = 0, sxx = 0, syy = 0;
             for (let i = 0; i < nGrid; i++) {
                 const j = i - k;
@@ -469,15 +488,18 @@ function _computeCorrShifts(segments, xMax) {
             corr[k + maxLagSamples] = c;
             if (c > bestC) { bestC = c; bestLag = k; }
         }
-        // Parabolic interpolation around the peak (if it isn't on the
-        // edge of the search range).
+        // Parabolic interpolation around the peak — only if both
+        // neighbors are also inside the constrained search window.
         let refined = bestLag;
-        const idx = bestLag + maxLagSamples;
-        if (idx > 0 && idx < corr.length - 1) {
-            const c0 = corr[idx - 1], c1 = corr[idx], c2 = corr[idx + 1];
+        if (bestLag > kLo && bestLag < kHi) {
+            const c0 = corr[bestLag - 1 + maxLagSamples];
+            const c1 = corr[bestLag + maxLagSamples];
+            const c2 = corr[bestLag + 1 + maxLagSamples];
             const denom = (c0 - 2 * c1 + c2);
             if (isFinite(c0) && isFinite(c2) && denom < 0) {
                 refined = bestLag + 0.5 * (c0 - c2) / denom;
+                if (refined < kLo) refined = kLo;
+                if (refined > kHi) refined = kHi;
             }
         }
         // shift = -lag * dt (we want to subtract from segment xs so
