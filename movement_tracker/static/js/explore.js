@@ -215,9 +215,12 @@ function render() {
     if (!_data) return;
     _renderSubjectList();
     const mode = _exPlotMode();
-    // Y row hides entirely in bar mode (no Y variable).
+    // Y row hides entirely in bar mode.  Must re-apply display:flex
+    // (not just empty string) — the row is a <div>, which falls back
+    // to display:block, breaking the side-by-side layout of label +
+    // agg-radios.
     const yRow = $('exYRow');
-    if (yRow) yRow.style.display = (mode === 'scatter') ? '' : 'none';
+    if (yRow) yRow.style.display = (mode === 'scatter') ? 'flex' : 'none';
     $('exXLabel').childNodes[0].textContent = (mode === 'scatter') ? 'X: ' : 'Variable: ';
     // "Slope" + "Legend" only apply to scatter.
     const bestFitLbl = $('exBestFitLabel');
