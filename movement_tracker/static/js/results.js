@@ -909,35 +909,59 @@ function _redrawOneTrial(idx) {
             hoverinfo: 'skip', showlegend: false,
         }));
 
-        // Average trace (resampled to the displayed time grid).  Drawn
-        // before any highlighted movement so the highlight sits on top.
+        // Average trace(s).  When Colors is on we draw one mean per
+        // visible cluster (each in its cluster color); otherwise a
+        // single global mean in black.  Drawn before any highlighted
+        // movement so the highlight sits on top.
         if (showMean) {
             const N = 200;
-            const sums = new Float64Array(N), counts = new Float64Array(N);
-            for (let mi = 0; mi < trial.segments.length; mi++) {
-                if (!inFilter(mi)) continue;
-                const s = trial.segments[mi];
-                const sx = shiftedX(s, mi);
-                const ys = _resampleXY(sx, s.ys, xLo, xHi, N);
-                for (let i = 0; i < N; i++) {
-                    if (isFinite(ys[i])) { sums[i] += ys[i]; counts[i] += 1; }
-                }
-            }
-            const meanXs = [], meanYs = [];
-            const _visN = trial.segments.reduce((a, _s, mi) => a + (inFilter(mi) ? 1 : 0), 0);
-            const minCount = Math.max(2, _visN * 0.25);
-            for (let i = 0; i < N; i++) {
-                if (counts[i] >= minCount) {
-                    meanXs.push(xLo + (i / (N - 1)) * (xHi - xLo));
-                    meanYs.push(sums[i] / counts[i]);
-                }
-            }
-            if (meanXs.length >= 2) {
-                traces.push({
-                    x: meanXs, y: meanYs, type: 'scatter', mode: 'lines',
-                    line: { width: 3.5, color: '#000' },
-                    hoverinfo: 'skip', showlegend: false,
+            const _gridX = (i) => xLo + (i / (N - 1)) * (xHi - xLo);
+
+            // Build the list of {label, indices, color} groups to average.
+            const groupBuckets = [];
+            if (_movColors && clusterOfArr) {
+                const map = new Map();   // cluster idx → bucket
+                trial.segments.forEach((_s, mi) => {
+                    if (!inFilter(mi)) return;
+                    const c = clusterOfArr[mi];
+                    if (c == null) return;
+                    if (!map.has(c)) {
+                        map.set(c, { color: _movColors[mi] || '#000', indices: [] });
+                    }
+                    map.get(c).indices.push(mi);
                 });
+                for (const b of map.values()) groupBuckets.push(b);
+            } else {
+                const indices = [];
+                trial.segments.forEach((_s, mi) => { if (inFilter(mi)) indices.push(mi); });
+                if (indices.length) groupBuckets.push({ color: '#000', indices });
+            }
+
+            for (const bucket of groupBuckets) {
+                const sums = new Float64Array(N), counts = new Float64Array(N);
+                for (const mi of bucket.indices) {
+                    const s = trial.segments[mi];
+                    const sx = shiftedX(s, mi);
+                    const ys = _resampleXY(sx, s.ys, xLo, xHi, N);
+                    for (let i = 0; i < N; i++) {
+                        if (isFinite(ys[i])) { sums[i] += ys[i]; counts[i] += 1; }
+                    }
+                }
+                const minCount = Math.max(2, bucket.indices.length * 0.25);
+                const meanXs = [], meanYs = [];
+                for (let i = 0; i < N; i++) {
+                    if (counts[i] >= minCount) {
+                        meanXs.push(_gridX(i));
+                        meanYs.push(sums[i] / counts[i]);
+                    }
+                }
+                if (meanXs.length >= 2) {
+                    traces.push({
+                        x: meanXs, y: meanYs, type: 'scatter', mode: 'lines',
+                        line: { width: 3.5, color: bucket.color },
+                        hoverinfo: 'skip', showlegend: false,
+                    });
+                }
             }
         }
 
