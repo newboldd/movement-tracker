@@ -893,6 +893,126 @@ function _cutAndOrderHAC(root, cutH) {
     return { order, sizes };
 }
 
+// Build dendrogram line segments for an HAC tree.  `leafToY` maps
+// each leaf node id → its y position (matching the heatmap's
+// reordered axis).  Returns an array of {x0, x1, y0, y1} segments
+// drawn as horizontal "U" connectors at each merge.
+function _buildDendroLines(root, leafToY) {
+    const lines = [];
+    function walk(node) {
+        if (!node) return null;
+        if (!node.left || !node.right) {
+            return { reprX: 0, reprY: leafToY[node.id] };
+        }
+        const L = walk(node.left);
+        const R = walk(node.right);
+        const h = node.height;
+        lines.push({ x0: L.reprX, x1: h, y0: L.reprY, y1: L.reprY });
+        lines.push({ x0: h, x1: h, y0: L.reprY, y1: R.reprY });
+        lines.push({ x0: h, x1: R.reprX, y0: R.reprY, y1: R.reprY });
+        return { reprX: h, reprY: (L.reprY + R.reprY) / 2 };
+    }
+    walk(root);
+    return lines;
+}
+
+// Clustered heatmap that includes a horizontal dendrogram to the
+// left.  Uses linear axes (with manual tick labels) for both the
+// heatmap and the dendrogram so they can share a single yaxis.
+function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, hiPos, boundaries, dendroLines, maxH, cutH) {
+    const N = mat.length;
+    const nums = Array.from({ length: N }, (_, i) => i);
+    const dx = [], dy = [];
+    for (const s of dendroLines) {
+        dx.push(s.x0, s.x1, null);
+        dy.push(s.y0, s.y1, null);
+    }
+    const dendroTrace = {
+        x: dx, y: dy, type: 'scatter', mode: 'lines',
+        line: { color: '#666', width: 1 }, hoverinfo: 'skip', showlegend: false,
+        xaxis: 'x', yaxis: 'y',
+    };
+    const heatTrace = {
+        z: mat, x: nums, y: nums, type: 'heatmap',
+        xaxis: 'x2', yaxis: 'y',
+        zmin: -1, zmax: 1, zmid: 0,
+        colorscale: [
+            [0.0, 'rgb(33,102,172)'], [0.25, 'rgb(146,197,222)'],
+            [0.5, 'rgb(247,247,247)'],
+            [0.75, 'rgb(244,165,130)'], [1.0, 'rgb(178,24,43)'],
+        ],
+        hovertemplate: 'r = %{z:.2f}<extra></extra>',
+        colorbar: { thickness: 8, tickvals: [-1, 0, 1], tickfont: { size: 10 } },
+    };
+    const shapes = [];
+    if (hiIdx > 0 && hiPos >= 0) {
+        shapes.push(
+            { type: 'rect', xref: 'x2', yref: 'y',
+              x0: hiPos - 0.5, x1: hiPos + 0.5, y0: -0.5, y1: N - 0.5,
+              line: { color: '#000', width: 2 }, fillcolor: 'rgba(0,0,0,0)' },
+            { type: 'rect', xref: 'x2', yref: 'y',
+              x0: -0.5, x1: N - 0.5, y0: hiPos - 0.5, y1: hiPos + 0.5,
+              line: { color: '#000', width: 2 }, fillcolor: 'rgba(0,0,0,0)' },
+        );
+    }
+    if (boundaries && boundaries.length) {
+        for (const p of boundaries) {
+            const pos = p - 0.5;
+            shapes.push(
+                { type: 'line', xref: 'x2', yref: 'y',
+                  x0: pos, x1: pos, y0: -0.5, y1: N - 0.5,
+                  line: { color: '#fff', width: 3 } },
+                { type: 'line', xref: 'x2', yref: 'y',
+                  x0: -0.5, x1: N - 0.5, y0: pos, y1: pos,
+                  line: { color: '#fff', width: 3 } },
+            );
+        }
+    }
+    // Vertical dashed line at the dendrogram cutoff.
+    if (isFinite(cutH)) {
+        shapes.push({
+            type: 'line', xref: 'x', yref: 'y',
+            x0: cutH, x1: cutH, y0: -0.5, y1: N - 0.5,
+            line: { color: '#d32f2f', width: 1, dash: 'dash' },
+        });
+    }
+    const xMaxDendro = Math.max(maxH * 1.05, 0.05);
+    const layout = {
+        margin: { t: 18, b: 36, l: 8, r: 50 },
+        title: { text: titleText, font: { size: 11 }, x: 0, xanchor: 'left', y: 0.98 },
+        xaxis: {
+            domain: [0, 0.20],
+            range: [xMaxDendro, 0],
+            showticklabels: false, zeroline: false, showgrid: false,
+            showline: false, ticks: '', fixedrange: true,
+        },
+        xaxis2: {
+            domain: [0.22, 1.0], anchor: 'y',
+            title: { text: 'Movement #', font: { size: 10 } },
+            tickfont: { size: 9 }, side: 'bottom', automargin: true,
+            tickmode: 'array', tickvals: nums, ticktext: labels,
+            range: [-0.5, N - 0.5], constrain: 'domain',
+        },
+        yaxis: {
+            tickfont: { size: 9 }, automargin: true,
+            tickmode: 'array', tickvals: nums, ticktext: labels,
+            range: [N - 0.5, -0.5],   // reversed so movement 1 is at top
+            scaleanchor: 'x2', scaleratio: 1,
+        },
+        plot_bgcolor: '#fff', paper_bgcolor: '#fff',
+        shapes, showlegend: false,
+    };
+    requestAnimationFrame(() => {
+        const w = targetDiv.clientWidth || targetDiv.offsetWidth || 0;
+        if (w > 0) {
+            targetDiv.style.height = `${w}px`;
+            if (window.Plotly && targetDiv._fullLayout) Plotly.Plots.resize(targetDiv);
+        }
+    });
+    Plotly.react(targetDiv, [dendroTrace, heatTrace], layout,
+                 { responsive: true, displayModeBar: false });
+}
+
 // Render a single correlation-matrix heatmap into `targetDiv`.
 // Optional `boundaries` is an array of category indices (in the
 // reordered axis) where vertical/horizontal separator lines are drawn
@@ -984,20 +1104,24 @@ function _redrawOneTrialCorr(idx, trial, xLo, xHi, shiftedX, hiIdx) {
     const root = _hacAverage(dist);
     if (!root) { cluDiv.innerHTML = ''; return; }
     const cutH = parseFloat(document.getElementById('shapeClusterCutoff')?.value);
-    const { order, sizes } = _cutAndOrderHAC(root, isFinite(cutH) ? cutH : 0.5);
+    const useCut = isFinite(cutH) ? cutH : 0.5;
+    const { order, sizes } = _cutAndOrderHAC(root, useCut);
     const reord = order.map(i => order.map(j => mat[i][j]));
     const reordLabels = order.map(i => String(i + 1));
-    // Where to put the white separator lines (between clusters).
     const boundaries = [];
     let acc = 0;
     for (let i = 0; i < sizes.length - 1; i++) { acc += sizes[i]; boundaries.push(acc); }
-    // Highlight position in the reordered axis.
     const hiPosClu = hiIdx > 0 ? order.indexOf(hiIdx - 1) : -1;
     const k = sizes.length;
-    _renderCorrHeatmap(
+    // Dendrogram line segments — leaf id → y position in the reordered axis.
+    const leafToY = {};
+    order.forEach((id, pos) => { leafToY[id] = pos; });
+    const dendroLines = _buildDendroLines(root, leafToY);
+    const maxH = root.height || 1;
+    _renderClusteredCorrHeatmap(
         cluDiv, reord, reordLabels,
         `Clustered (HAC, avg linkage, 1−r) — ${k} group${k === 1 ? '' : 's'}`,
-        hiIdx, hiPosClu, boundaries,
+        hiIdx, hiPosClu, boundaries, dendroLines, maxH, useCut,
     );
 }
 
