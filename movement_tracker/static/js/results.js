@@ -630,6 +630,15 @@ function _buildShapeOverlayCells() {
         plotDiv.id = `shapeOverlayPlot_${idx}`;
         plotDiv.style.cssText = 'width:100%;height:240px;';
         cell.appendChild(plotDiv);
+
+        // Correlation matrix between every pair of movements at the
+        // current alignment (Pearson on the shifted-and-resampled
+        // segments).  Blue (-1) → white (0) → red (+1).
+        const corrDiv = document.createElement('div');
+        corrDiv.id = `shapeCorrPlot_${idx}`;
+        corrDiv.style.cssText = 'width:100%;height:280px;margin-top:6px;';
+        cell.appendChild(corrDiv);
+
         container.appendChild(cell);
     });
 }
@@ -771,6 +780,72 @@ function _redrawOneTrial(idx) {
         };
         Plotly.react(plotDiv, traces, layout,
                      { responsive: true, displayModeBar: false });
+
+        // ── Pairwise correlation matrix ──────────────────────────
+        _redrawOneTrialCorr(idx, trial, xLo, xHi, shiftedX, hiIdx);
+}
+
+// Resample each segment at its current shifted x-coords onto a common
+// time grid spanning the displayed [xLo, xHi], then compute Pearson
+// correlations between every pair of movements ignoring grid points
+// where either is NaN.
+function _redrawOneTrialCorr(idx, trial, xLo, xHi, shiftedX, hiIdx) {
+    const corrDiv = document.getElementById(`shapeCorrPlot_${idx}`);
+    if (!corrDiv) return;
+    const N = trial.segments.length;
+    if (N < 2) { corrDiv.innerHTML = ''; return; }
+
+    const GRID = 120;   // resolution for pairwise overlap
+    const resampled = trial.segments.map((s, mi) =>
+        _resampleXY(shiftedX(s, mi), s.ys, xLo, xHi, GRID));
+
+    const mat = [];
+    for (let i = 0; i < N; i++) {
+        const row = new Array(N);
+        for (let j = 0; j < N; j++) {
+            if (j < i) { row[j] = mat[j][i]; continue; }   // symmetric
+            if (i === j) { row[j] = 1; continue; }
+            const a = resampled[i], b = resampled[j];
+            let n = 0, sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
+            for (let k = 0; k < GRID; k++) {
+                const u = a[k], v = b[k];
+                if (!isFinite(u) || !isFinite(v)) continue;
+                sx += u; sy += v; sxx += u * u; syy += v * v; sxy += u * v; n += 1;
+            }
+            if (n < 5) { row[j] = null; continue; }
+            const mx = sx / n, my = sy / n;
+            const num = sxy - n * mx * my;
+            const den = Math.sqrt(Math.max(1e-12, (sxx - n * mx * mx) * (syy - n * my * my)));
+            row[j] = num / den;
+        }
+        mat.push(row);
+    }
+
+    const labels = trial.segments.map((_, i) => String(i + 1));
+    const trace = {
+        z: mat, x: labels, y: labels, type: 'heatmap',
+        zmin: -1, zmax: 1, zmid: 0,
+        colorscale: [
+            [0.0, 'rgb(33,102,172)'], [0.25, 'rgb(146,197,222)'],
+            [0.5, 'rgb(247,247,247)'],
+            [0.75, 'rgb(244,165,130)'], [1.0, 'rgb(178,24,43)'],
+        ],
+        hovertemplate: 'mov %{x} × mov %{y}<br>r = %{z:.2f}<extra></extra>',
+        colorbar: { thickness: 8, tickvals: [-1, 0, 1], tickfont: { size: 10 } },
+    };
+    const layout = {
+        margin: { t: 6, b: 36, l: 36, r: 50 },
+        title: { text: 'Pairwise correlation', font: { size: 11 }, x: 0, xanchor: 'left' },
+        xaxis: { title: { text: 'Movement #', font: { size: 10 } },
+                 tickfont: { size: 9 }, side: 'bottom', automargin: true,
+                 type: 'category' },
+        yaxis: { title: { text: 'Movement #', font: { size: 10 } },
+                 tickfont: { size: 9 }, autorange: 'reversed', automargin: true,
+                 type: 'category' },
+        plot_bgcolor: '#fff', paper_bgcolor: '#fff',
+    };
+    Plotly.react(corrDiv, [trace], layout,
+                 { responsive: true, displayModeBar: false });
 }
 
 // Live-update the shape plots when the controls change.
