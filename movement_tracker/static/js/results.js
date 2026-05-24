@@ -409,6 +409,9 @@ let _shapeClusterOrder = {};
 // when the "Colors" checkbox is on so the shape plot and matrix tick
 // labels can paint each cluster distinctly.
 let _shapeClusterColors = {};
+// Per-trial active-cluster filter (set by clicking a tick label):
+//   null/undefined = show all clusters, otherwise = the visible cluster index.
+let _shapeClusterFilter = {};
 // Categorical palette used to color clusters (max 9 visually distinct
 // hues; wraps if there are more clusters).
 const _SHAPE_PALETTE = [
@@ -479,6 +482,7 @@ function renderShapeOverlayPlots() {
     _shapeHighlight = {};
     _shapeClusterOrder = {};
     _shapeClusterColors = {};
+    _shapeClusterFilter = {};
     _shapeSliderByIdx = {};
 
     // Force a fresh cell build (new subject — sliders / titles differ).
@@ -866,7 +870,7 @@ function _redrawOneTrial(idx) {
                     mat: _matNow, root: _root,
                     order: _cut.order, sizes: _cut.sizes,
                     useCut: _useCut, movColors: _movColors,
-                    metric: _metric,
+                    metric: _metric, clusterOf: _clusterOf,
                 };
             } else {
                 trial._hacCache = null;
@@ -887,10 +891,21 @@ function _redrawOneTrial(idx) {
             }
             return fallbackBase;
         };
+        // Cluster filter: when a tick label was clicked, only show
+        // movements in that cluster.  null = show all.
+        const activeCluster = _shapeClusterFilter[idx];
+        const clusterOfArr = trial._hacCache ? trial._hacCache.clusterOf : null;
+        const inFilter = (mi) => {
+            if (activeCluster == null) return true;
+            if (!clusterOfArr) return true;
+            return clusterOfArr[mi] === activeCluster;
+        };
+
         const traces = trial.segments.map((s, mi) => ({
             x: shiftedX(s, mi), y: s.ys, type: 'scatter', mode: 'lines',
             line: { width: 1, color: lineColor(mi) },
             customdata: new Array(s.xs.length).fill(mi),
+            visible: inFilter(mi) ? true : false,
             hoverinfo: 'skip', showlegend: false,
         }));
 
@@ -900,6 +915,7 @@ function _redrawOneTrial(idx) {
             const N = 200;
             const sums = new Float64Array(N), counts = new Float64Array(N);
             for (let mi = 0; mi < trial.segments.length; mi++) {
+                if (!inFilter(mi)) continue;
                 const s = trial.segments[mi];
                 const sx = shiftedX(s, mi);
                 const ys = _resampleXY(sx, s.ys, xLo, xHi, N);
@@ -908,7 +924,8 @@ function _redrawOneTrial(idx) {
                 }
             }
             const meanXs = [], meanYs = [];
-            const minCount = Math.max(2, trial.segments.length * 0.25);
+            const _visN = trial.segments.reduce((a, _s, mi) => a + (inFilter(mi) ? 1 : 0), 0);
+            const minCount = Math.max(2, _visN * 0.25);
             for (let i = 0; i < N; i++) {
                 if (counts[i] >= minCount) {
                     meanXs.push(xLo + (i / (N - 1)) * (xHi - xLo));
@@ -943,22 +960,22 @@ function _redrawOneTrial(idx) {
             const markIdxs = (hiIdx === 0)
                 ? trial.segments.map((_, i) => i)
                 : (hiIdx > 0 && hiIdx <= trial.segments.length ? [hiIdx - 1] : []);
-            const pxs = [], pys = [];
+            const pxs = [], pys = [], pcs = [], pcd = [];
             for (const mi of markIdxs) {
+                if (!inFilter(mi)) continue;
                 const s = trial.segments[mi];
                 if (s.peakY == null) continue;
                 pxs.push(warpT(s, mi, s.peakT));
                 pys.push(s.peakY);
+                pcs.push(_movColors ? (_movColors[mi] || '#d32f2f') : '#d32f2f');
+                pcd.push(mi);
             }
             if (pxs.length) {
-                const markerColors = _movColors
-                    ? markIdxs.map(mi => _movColors[mi] || '#d32f2f')
-                    : '#d32f2f';
                 traces.push({
                     x: pxs, y: pys, type: 'scatter', mode: 'markers',
-                    marker: { size: 9, color: markerColors,
+                    marker: { size: 9, color: _movColors ? pcs : '#d32f2f',
                               line: { color: '#000', width: 1 }, symbol: 'circle' },
-                    customdata: markIdxs.slice(),
+                    customdata: pcd,
                     hoverinfo: 'skip', showlegend: false,
                 });
             }
@@ -1149,8 +1166,9 @@ function _buildDendroLines(root, leafToY) {
 // Annotations standing in for the row/column tick labels when each
 // movement is colored by cluster — text on a filled rectangle whose
 // fill is the cluster color.
-function _buildTickColorAnnotations(N, labels, tickColors) {
+function _buildTickColorAnnotations(N, labels, tickColors, tickClusters) {
     const out = [];
+    const click = !!tickClusters;
     for (let i = 0; i < N; i++) {
         const col = tickColors[i] || '#ddd';
         out.push({
@@ -1161,6 +1179,7 @@ function _buildTickColorAnnotations(N, labels, tickColors) {
             font: { size: 9, color: '#000' },
             bgcolor: col, bordercolor: col, borderwidth: 0, borderpad: 1,
             xshift: -2,
+            captureevents: click,
         });
         out.push({
             xref: 'x2', yref: 'y',
@@ -1170,12 +1189,13 @@ function _buildTickColorAnnotations(N, labels, tickColors) {
             font: { size: 9, color: '#000' },
             bgcolor: col, bordercolor: col, borderwidth: 0, borderpad: 1,
             yshift: -2,
+            captureevents: click,
         });
     }
     return out;
 }
 
-function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, hiPos, boundaries, dendroLines, maxH, cutH, tickColors, zRange, metric) {
+function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, hiPos, boundaries, dendroLines, maxH, cutH, tickColors, zRange, metric, tickClusters) {
     if (!zRange) zRange = { min: -1, max: 1, mid: 0 };
     const N = mat.length;
     const nums = Array.from({ length: N }, (_, i) => i);
@@ -1286,8 +1306,17 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
         },
         plot_bgcolor: '#fff', paper_bgcolor: '#fff',
         shapes, showlegend: false,
-        annotations: (tickColors ? _buildTickColorAnnotations(N, labels, tickColors) : []),
+        annotations: (tickColors ? _buildTickColorAnnotations(N, labels, tickColors, tickClusters) : []),
     };
+    // Cluster index per annotation, in the order returned by
+    // _buildTickColorAnnotations (y-tick then x-tick per movement).
+    if (tickColors && tickClusters) {
+        const meta = [];
+        for (let i = 0; i < N; i++) { meta.push(tickClusters[i]); meta.push(tickClusters[i]); }
+        targetDiv._annotClusters = meta;
+    } else {
+        targetDiv._annotClusters = null;
+    }
     // Keep height = width so the matrix renders square from the very
     // first paint.  Also set the colorbar's length to match the
     // matrix height (heatmap is square — width set by x2's domain).
@@ -1336,6 +1365,28 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
     targetDiv._yLabels = labels;
     Plotly.react(targetDiv, [dendroTrace, heatTrace], layout,
                  { responsive: true, displayModeBar: false });
+    // Click on a tick-label annotation (Colors mode) → toggle the
+    // cluster filter on the shape-overlay plot.
+    if (!targetDiv._annotClickBound) {
+        targetDiv._annotClickBound = true;
+        targetDiv.on('plotly_clickannotation', (ev) => {
+            const meta = targetDiv._annotClusters;
+            const ai = ev?.index;
+            if (!meta || typeof ai !== 'number') return;
+            const cluster = meta[ai];
+            if (cluster == null) return;
+            const m = /shapeCorrPlot_(\d+)/.exec(targetDiv.id || '');
+            if (!m) return;
+            const tIdx = parseInt(m[1], 10);
+            // Toggle: same cluster (or any label in it) → show all; new cluster → switch.
+            if (_shapeClusterFilter[tIdx] === cluster) {
+                _shapeClusterFilter[tIdx] = null;
+            } else {
+                _shapeClusterFilter[tIdx] = cluster;
+            }
+            _redrawOneTrial(tIdx);
+        });
+    }
     // Click on any heatmap cell → set the highlighted movement to that row.
     if (!targetDiv._clickBound) {
         targetDiv._clickBound = true;
@@ -1456,10 +1507,12 @@ function _redrawOneTrialCorr(idx, trial, xLo, xHi, shiftedX, hiIdx) {
     if (!clusterOn) {
         _shapeClusterOrder[idx] = null;
         const tickColors = movColors ? movColors.slice() : null;
+        const tickClusters = (movColors && cache && cache.clusterOf)
+            ? cache.clusterOf.slice() : null;
         _renderClusteredCorrHeatmap(
             corrDiv, mat, labels, titlePrefix,
             hiIdx, hiIdx > 0 ? hiIdx - 1 : -1,
-            null, [], 1, null, tickColors, zRange, metric,
+            null, [], 1, null, tickColors, zRange, metric, tickClusters,
         );
         _syncShapeSlider(idx);
         return;
@@ -1491,11 +1544,13 @@ function _redrawOneTrialCorr(idx, trial, xLo, xHi, shiftedX, hiIdx) {
     const dendroLines = _buildDendroLines(root, leafToY);
     const maxH = root.height || 1;
     const tickColors = movColors ? order.map(i => movColors[i]) : null;
+    const tickClusters = (movColors && cache && cache.clusterOf)
+        ? order.map(i => cache.clusterOf[i]) : null;
     _shapeClusterOrder[idx] = order;
     _renderClusteredCorrHeatmap(
         corrDiv, reord, reordLabels, titleClu(k),
         hiIdx, hiPosClu, boundaries, dendroLines, maxH, useCut, tickColors,
-        zRange, metric,
+        zRange, metric, tickClusters,
     );
     _syncShapeSlider(idx);
 }
