@@ -588,7 +588,7 @@ function _buildShapeOverlayCells() {
         moveSlider.style.cssText = 'width:140px;';
         const moveVal = document.createElement('span');
         moveVal.style.cssText = 'min-width:28px;text-align:right;';
-        moveVal.textContent = moveSlider.value;
+        moveVal.textContent = moveSlider.value === '0' ? 'All' : moveSlider.value;
         moveLabel.appendChild(moveSlider);
         moveLabel.appendChild(moveVal);
 
@@ -600,7 +600,7 @@ function _buildShapeOverlayCells() {
             if (n > N) n = N;
             _shapeHighlight[idx] = n;
             moveSlider.value = String(n);
-            moveVal.textContent = String(n);
+            moveVal.textContent = n === 0 ? 'All' : String(n);
             _redrawOneTrial(idx);
         };
         moveSlider.addEventListener('input', () => _setHighlight(moveSlider.value));
@@ -749,13 +749,28 @@ function _redrawOneTrial(idx) {
                 line: { width: 2.5, color: '#d32f2f' },
                 hoverinfo: 'skip', showlegend: false,
             });
-            // Peak-event marker on the highlighted movement.
-            if (s.peakY != null) {
-                const peakX = s.peakT + shiftOf(s, hiIdx - 1);
+        }
+
+        // Peak-event markers.  Gate on the global checkbox.  When the
+        // movement slider is at "All" (0) mark every movement; otherwise
+        // mark just the highlighted one.
+        const showPeaks = !!document.getElementById('shapeShowPeaks')?.checked;
+        if (showPeaks) {
+            const markIdxs = (hiIdx === 0)
+                ? trial.segments.map((_, i) => i)
+                : (hiIdx > 0 && hiIdx <= trial.segments.length ? [hiIdx - 1] : []);
+            const pxs = [], pys = [];
+            for (const mi of markIdxs) {
+                const s = trial.segments[mi];
+                if (s.peakY == null) continue;
+                pxs.push(s.peakT + shiftOf(s, mi));
+                pys.push(s.peakY);
+            }
+            if (pxs.length) {
                 traces.push({
-                    x: [peakX], y: [s.peakY], type: 'scatter', mode: 'markers',
-                    marker: { size: 11, color: '#d32f2f',
-                              line: { color: '#000', width: 1.2 }, symbol: 'circle' },
+                    x: pxs, y: pys, type: 'scatter', mode: 'markers',
+                    marker: { size: 9, color: '#d32f2f',
+                              line: { color: '#000', width: 1 }, symbol: 'circle' },
                     hoverinfo: 'skip', showlegend: false,
                 });
             }
@@ -1135,6 +1150,8 @@ document.addEventListener('DOMContentLoaded', () => {
         _drawShapeOverlayPlots();
     });
     if (meanCb) meanCb.addEventListener('change', _drawShapeOverlayPlots);
+    const peaksCb = document.getElementById('shapeShowPeaks');
+    if (peaksCb) peaksCb.addEventListener('change', _drawShapeOverlayPlots);
     document.querySelectorAll('input[name="shapeAlign"]').forEach(r =>
         r.addEventListener('change', _drawShapeOverlayPlots));
     const cutSl = document.getElementById('shapeClusterCutoff');
