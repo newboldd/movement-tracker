@@ -976,17 +976,30 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
             [0.75, 'rgb(244,165,130)'], [1.0, 'rgb(178,24,43)'],
         ],
         hovertemplate: 'r = %{z:.2f}<extra></extra>',
-        colorbar: { thickness: 8, tickvals: [-1, 0, 1], tickfont: { size: 10 } },
+        // len:1 plus outlinewidth:0 so the bar height matches the
+        // matrix without surrounding lines/labels.
+        colorbar: { thickness: 8, len: 1, lenmode: 'fraction',
+                    y: 0.5, yanchor: 'middle', outlinewidth: 0, ypad: 0,
+                    tickvals: [-1, 0, 1], tickfont: { size: 10 } },
     };
     const shapes = [];
+    // Highlight: vertical pair for the column, horizontal pair for the
+    // row.  Plain line shapes (no rect outline) so there are no short
+    // perpendicular caps where the rect's top/bottom edges used to be.
     if (hiIdx > 0 && hiPos >= 0) {
         shapes.push(
-            { type: 'rect', xref: 'x2', yref: 'y',
-              x0: hiPos - 0.5, x1: hiPos + 0.5, y0: -0.5, y1: N - 0.5,
-              line: { color: '#000', width: 2 }, fillcolor: 'rgba(0,0,0,0)' },
-            { type: 'rect', xref: 'x2', yref: 'y',
-              x0: -0.5, x1: N - 0.5, y0: hiPos - 0.5, y1: hiPos + 0.5,
-              line: { color: '#000', width: 2 }, fillcolor: 'rgba(0,0,0,0)' },
+            { type: 'line', xref: 'x2', yref: 'y',
+              x0: hiPos - 0.5, x1: hiPos - 0.5, y0: -0.5, y1: N - 0.5,
+              line: { color: '#000', width: 2 } },
+            { type: 'line', xref: 'x2', yref: 'y',
+              x0: hiPos + 0.5, x1: hiPos + 0.5, y0: -0.5, y1: N - 0.5,
+              line: { color: '#000', width: 2 } },
+            { type: 'line', xref: 'x2', yref: 'y',
+              x0: -0.5, x1: N - 0.5, y0: hiPos - 0.5, y1: hiPos - 0.5,
+              line: { color: '#000', width: 2 } },
+            { type: 'line', xref: 'x2', yref: 'y',
+              x0: -0.5, x1: N - 0.5, y0: hiPos + 0.5, y1: hiPos + 0.5,
+              line: { color: '#000', width: 2 } },
         );
     }
     if (boundaries && boundaries.length) {
@@ -1002,7 +1015,8 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
             );
         }
     }
-    // Vertical dashed line at the dendrogram cutoff.
+    // Vertical dashed line at the dendrogram cutoff — only on the
+    // dendrogram subplot (xref='x'), constrained to matrix y range.
     if (cutH != null && Number.isFinite(cutH)) {
         shapes.push({
             type: 'line', xref: 'x', yref: 'y',
@@ -1026,12 +1040,14 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
             tickfont: { size: 9 }, side: 'bottom', automargin: true,
             tickmode: 'array', tickvals: nums, ticktext: labels,
             range: [-0.5, N - 0.5], constrain: 'domain',
+            showline: false, showgrid: false, zeroline: false, ticks: '',
         },
         yaxis: {
             tickfont: { size: 9 }, automargin: true,
             tickmode: 'array', tickvals: nums, ticktext: labels,
             range: [N - 0.5, -0.5],   // reversed so movement 1 is at top
             scaleanchor: 'x2', scaleratio: 1,
+            showline: false, showgrid: false, zeroline: false, ticks: '',
         },
         plot_bgcolor: '#fff', paper_bgcolor: '#fff',
         shapes, showlegend: false,
