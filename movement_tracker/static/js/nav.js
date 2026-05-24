@@ -243,9 +243,19 @@ const SUBJECT_PAGES = [
         const idx = allSubjects.findIndex(s => s.id === current);
         const newIdx = Math.max(0, Math.min(allSubjects.length - 1, idx + delta));
         if (newIdx === idx) return;
-        sel.value = allSubjects[newIdx].id;
-        setLastSubject(allSubjects[newIdx].id);
-        _navigateToSubject(allSubjects[newIdx].id);
+        const newId = allSubjects[newIdx].id;
+        sel.value = newId;
+        setLastSubject(newId);
+        // Prefer a soft switch through the local selector (so in-page
+        // state — sliders, checkboxes, etc. — survives).  Fall back to
+        // a hard navigation only when no local selector is available.
+        const localSel = document.getElementById('subjectSelect');
+        if (localSel && localSel !== sel) {
+            localSel.value = String(newId);
+            localSel.dispatchEvent(new Event('change'));
+            return;
+        }
+        _navigateToSubject(newId);
     }
 
     function _navigateToSubject(sid) {
