@@ -980,7 +980,7 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
         }
     }
     // Vertical dashed line at the dendrogram cutoff.
-    if (isFinite(cutH)) {
+    if (cutH != null && Number.isFinite(cutH)) {
         shapes.push({
             type: 'line', xref: 'x', yref: 'y',
             x0: cutH, x1: cutH, y0: -0.5, y1: N - 0.5,
