@@ -361,7 +361,9 @@ function _buildShapeData() {
             const peakT = (p - o) / fps;
             const closeT = (c - o) / fps;
             const peakY = (dist[p] != null) ? dist[p] : null;
-            return { xs, ys, peakT, closeT, peakY };
+            // Keep the original movement's global peak_frame so other
+            // pages (movement-parameter plots) can map back to a color.
+            return { xs, ys, peakT, closeT, peakY, peak_frame: m.peak_frame };
         }).filter(s => s.xs.length >= 2);
         const maxT = segments.reduce((a, s) => Math.max(a, s.xs[s.xs.length - 1]), 0);
         if (maxT > globalMaxT) globalMaxT = maxT;
@@ -742,6 +744,11 @@ function _drawShapeOverlayPlots() {
     const haveCells = container && container.children.length === _shapeData.trials.length;
     if (!haveCells) _buildShapeOverlayCells();
     _shapeData.trials.forEach((_t, idx) => _redrawOneTrial(idx));
+    // Cluster colors may have changed — refresh the movement-parameter
+    // plots above so their markers pick up the new palette.
+    if (cachedMovements && typeof renderDistMovementPlots === 'function') {
+        renderDistMovementPlots();
+    }
 }
 
 function _redrawOneTrial(idx) {
@@ -2281,6 +2288,31 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
     // labels above each trial's segment instead of a color key.
     const color = MOVEMENT_DOT_COLOR;
 
+    // Per-trial peak_frame → cluster color lookup so each movement
+    // marker can pick up the same hue as the shape-overlay plot.
+    const colorsOn = !!document.getElementById('shapeClusterColors')?.checked;
+    const colorsByTrial = {};
+    if (colorsOn && typeof _shapeData !== 'undefined' && _shapeData
+            && typeof _shapeClusterColors !== 'undefined' && _shapeClusterColors) {
+        for (let ti2 = 0; ti2 < (_shapeData.trials || []).length; ti2++) {
+            const segs = _shapeData.trials[ti2].segments || [];
+            const cols = _shapeClusterColors[ti2];
+            if (!cols) continue;
+            const map = {};
+            for (let si = 0; si < segs.length; si++) {
+                if (segs[si].peak_frame != null && cols[si]) {
+                    map[segs[si].peak_frame] = cols[si];
+                }
+            }
+            colorsByTrial[ti2] = map;
+        }
+    }
+    const colorForMovement = (m) => {
+        const map = colorsByTrial[m.trial_idx];
+        if (map && m.peak_frame != null && map[m.peak_frame]) return map[m.peak_frame];
+        return color;
+    };
+
     // Each trial becomes its own subplot (own X axis restarting at 0),
     // all sharing the single Y axis.  Domains are sized in proportion
     // to each trial's time span, separated by a small gap.
@@ -2323,13 +2355,14 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
         // Short label: just the trial suffix (e.g. "R1" from "PD03_R1").
         const trialShort = String(trialLabel).split('_').pop();
 
+        const msColors = ms.map(colorForMovement);
         traces.push({
             x, y,
             type: 'scatter',
             mode: 'markers',
             name: trialLabel,
             xaxis: axId, yaxis: 'y',
-            marker: { color, size: 7, opacity: 0.8 },
+            marker: { color: msColors, size: 7, opacity: 0.8 },
             hovertemplate: `${trialShort}<br>t=%{x:.2f}s<br>${PARAM_LABELS[param]}: %{y:.2f}<extra></extra>`,
             showlegend: false,
         });
