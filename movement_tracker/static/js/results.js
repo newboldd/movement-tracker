@@ -396,6 +396,9 @@ function _resampleXY(xs, ys, xLo, xHi, nPts) {
 // Per-trial highlight index (1-indexed, 0 = none).  Reset on each
 // renderShapeOverlayPlots() call.
 let _shapeHighlight = {};
+// Per-trial highlight setter — populated by _buildShapeOverlayCells so
+// click handlers in _redrawOneTrial can update the slider in place.
+let _shapeSetHighlight = {};
 
 function renderShapeOverlayPlots() {
     const section = document.getElementById('shapeOverlaySection');
@@ -605,6 +608,7 @@ function _buildShapeOverlayCells() {
             moveVal.textContent = n === 0 ? 'All' : String(n);
             _redrawOneTrial(idx);
         };
+        _shapeSetHighlight[idx] = _setHighlight;
         moveSlider.addEventListener('input', () => _setHighlight(moveSlider.value));
 
         // Prev / next arrow buttons.
@@ -706,6 +710,7 @@ function _redrawOneTrial(idx) {
         const traces = trial.segments.map((s, mi) => ({
             x: shiftedX(s, mi), y: s.ys, type: 'scatter', mode: 'lines',
             line: { width: 1, color: baseColor },
+            customdata: new Array(s.xs.length).fill(mi),
             hoverinfo: 'skip', showlegend: false,
         }));
 
@@ -770,6 +775,7 @@ function _redrawOneTrial(idx) {
                     x: pxs, y: pys, type: 'scatter', mode: 'markers',
                     marker: { size: 9, color: '#d32f2f',
                               line: { color: '#000', width: 1 }, symbol: 'circle' },
+                    customdata: markIdxs.slice(),
                     hoverinfo: 'skip', showlegend: false,
                 });
             }
@@ -798,6 +804,20 @@ function _redrawOneTrial(idx) {
         };
         Plotly.react(plotDiv, traces, layout,
                      { responsive: true, displayModeBar: false });
+
+        // Click on a movement line or peak marker → set the highlight.
+        if (!plotDiv._clickBound) {
+            plotDiv._clickBound = true;
+            plotDiv.on('plotly_click', (ev) => {
+                const p = ev?.points?.[0];
+                if (!p || p.customdata == null) return;
+                const mi = (typeof p.customdata === 'number')
+                    ? p.customdata
+                    : parseInt(p.customdata, 10);
+                if (!isFinite(mi)) return;
+                _shapeSetHighlight[idx]?.(mi + 1);
+            });
+        }
 
         // ── Pairwise correlation matrix ──────────────────────────
         _redrawOneTrialCorr(idx, trial, xLo, xHi, shiftedX, hiIdx);
@@ -1025,6 +1045,28 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
     });
     Plotly.react(targetDiv, [dendroTrace, heatTrace], layout,
                  { responsive: true, displayModeBar: false });
+    // Click on any heatmap cell → set the highlighted movement to that row.
+    if (!targetDiv._clickBound) {
+        targetDiv._clickBound = true;
+        targetDiv.on('plotly_click', (ev) => {
+            const p = ev?.points?.[0];
+            if (!p || p.data?.type !== 'heatmap') return;
+            // y is the numeric position; map back to the label.
+            const yi = (typeof p.y === 'number') ? p.y : parseInt(p.y, 10);
+            if (!isFinite(yi)) return;
+            const N = p.data.y?.length || 0;
+            // Convert grid position (0..N-1) → movement label (label
+            // strings are the 1-indexed original movement #).
+            const lbl = p.data.y[yi];
+            const mov = parseInt(lbl, 10);
+            if (!isFinite(mov)) return;
+            // Look up which trial this div belongs to via its id.
+            const m = /shapeCorrPlot_(\d+)/.exec(targetDiv.id || '');
+            if (!m) return;
+            const trialIdx = parseInt(m[1], 10);
+            _shapeSetHighlight[trialIdx]?.(mov);
+        });
+    }
 }
 
 // Render a single correlation-matrix heatmap into `targetDiv`.
