@@ -1028,7 +1028,7 @@ function _renderClusteredCorrHeatmap(targetDiv, mat, labels, titleText, hiIdx, h
     // gap [0.15, 0.20]; matrix in [0.20, 1.0].  The yaxis is anchored
     // to x2 so the labels render right next to the matrix.  Tight
     // bottom margin pulls the column numbers up against the matrix.
-    const MARGIN = { t: 18, b: 14, l: 8, r: 50 };
+    const MARGIN = { t: 28, b: 14, l: 8, r: 50 };
     const layout = {
         margin: MARGIN,
         title: { text: titleText, font: { size: 11 }, x: 0, xanchor: 'left', y: 0.98 },
