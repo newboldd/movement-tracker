@@ -447,6 +447,10 @@ function _computeCorrShifts(segments, xMax) {
 
     // Build a mean reference, optionally weighting samples by an
     // existing per-segment correction (used on the second iteration).
+    // The extent uses the same density threshold as the displayed
+    // average trace so the per-peak constraint matches what the user
+    // sees.
+    const minCount = Math.max(2, Math.ceil(N * 0.25));
     const buildMean = (extraCorrSamples) => {
         const sums = new Float64Array(nGrid), counts = new Float64Array(nGrid);
         for (let si = 0; si < N; si++) {
@@ -461,7 +465,7 @@ function _computeCorrShifts(segments, xMax) {
             }
         }
         const ref = new Float64Array(nGrid);
-        for (let i = 0; i < nGrid; i++) ref[i] = counts[i] >= 2 ? sums[i] / counts[i] : NaN;
+        for (let i = 0; i < nGrid; i++) ref[i] = counts[i] >= minCount ? sums[i] / counts[i] : NaN;
         let first = -1, last = -1;
         for (let i = 0; i < nGrid; i++) {
             if (isFinite(ref[i])) { if (first < 0) first = i; last = i; }
@@ -530,7 +534,23 @@ function _computeCorrShifts(segments, xMax) {
     // Pass 2 — rebuild the mean from the corr-shifted traces, refine.
     const lagsRounded = lags1.map(l => Math.round(l));
     const mean2 = buildMean(lagsRounded);
-    const lags2 = onePass(mean2.ref, mean2.meanXmin, mean2.meanXmax);
+    let lags2 = onePass(mean2.ref, mean2.meanXmin, mean2.meanXmax);
+
+    // Final guard: build the mean *with the actual pass-2 shifts* and
+    // clamp any per-segment lag whose post-shift peak falls outside
+    // that displayed-mean extent.  Catches edge cases where the pass-2
+    // constraint (computed against mean2) lets the peak escape the
+    // mean that ends up on screen.
+    const finalMean = buildMean(lags2.map(l => Math.round(l)));
+    const lo = finalMean.meanXmin, hi = finalMean.meanXmax;
+    if (isFinite(lo) && isFinite(hi)) {
+        lags2 = lags2.map(l => {
+            const peakOut = -l * dt;        // peak's display time
+            if (peakOut < lo) return -lo / dt;
+            if (peakOut > hi) return -hi / dt;
+            return l;
+        });
+    }
 
     // Final shift applied to open-aligned xs: align peak to 0 then
     // apply the (sub-frame) correlation lag.  shift_t = -peakT - lag*dt.
