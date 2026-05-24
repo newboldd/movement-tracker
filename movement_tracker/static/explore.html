@@ -119,12 +119,12 @@
              style="margin-top:8px;display:flex;flex-wrap:wrap;gap:8px 12px;">
             <!-- Row 1: plot-type radios + legend/slope + n=## + copy button -->
             <div style="flex-basis:100%;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                <span style="font-weight:600;">Plot:</span>
+                <span style="font-weight:600;">Plot type:</span>
                 <label style="display:flex;align-items:center;gap:3px;">
-                    <input type="radio" name="exPlotType" value="scatter" checked> Scatter (X vs Y)
+                    <input type="radio" name="exPlotType" value="scatter" checked> Scatter
                 </label>
                 <label style="display:flex;align-items:center;gap:3px;">
-                    <input type="radio" name="exPlotType" value="bar"> Bar by group
+                    <input type="radio" name="exPlotType" value="bar"> Bar
                 </label>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
                 <label id="exLegendLabel"
@@ -135,6 +135,10 @@
                 <label id="exBestFitLabel"
                        style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);">
                     <input type="checkbox" id="exBestFit" style="margin:0;" checked> Slope
+                </label>
+                <label id="exAnovaLabel"
+                       style="display:none;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);">
+                    <input type="checkbox" id="exAnova" style="margin:0;"> ANOVA
                 </label>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
                 <span id="exInfo" style="font-size:11px;color:var(--text-muted);"></span>
@@ -196,6 +200,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=10"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/explore.js?v=30"></script>
+    <script src="/static/js/explore.js?v=31"></script>
 </body>
 </html>

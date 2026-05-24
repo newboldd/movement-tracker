@@ -261,6 +261,8 @@ function render() {
     if (bestFitLbl) bestFitLbl.style.display = (mode === 'scatter') ? '' : 'none';
     const legendLbl  = $('exLegendLabel');
     if (legendLbl)  legendLbl.style.display  = (mode === 'scatter') ? '' : 'none';
+    const anovaLbl   = $('exAnovaLabel');
+    if (anovaLbl)   anovaLbl.style.display   = (mode === 'bar') ? 'flex' : 'none';
     _renderAggRadios('X');
     if (mode === 'scatter') { _renderAggRadios('Y'); renderScatter(); }
     else { $('exYAgg').innerHTML = ''; renderBar(); }
@@ -291,6 +293,51 @@ function _linRegStats(xs, ys) {
 function _studentT2Tail(t, df) {
     const x = df / (df + t * t);
     return _betai(df / 2, 0.5, x);
+}
+// Upper-tail p-value for the F-distribution: P(F > f | df1, df2).
+function _fPValue(f, df1, df2) {
+    if (!isFinite(f) || f <= 0 || df1 <= 0 || df2 <= 0) return 1;
+    return _betai(df2 / 2, df1 / 2, df2 / (df2 + df1 * f));
+}
+// One-way ANOVA across groups.  `groups` is an array of value-arrays.
+// Returns {F, df1, df2, p, k, N} or null if not enough data.
+function _oneWayANOVA(groups) {
+    const nonEmpty = groups.filter(g => g.length > 0);
+    const k = nonEmpty.length;
+    if (k < 2) return null;
+    const N = nonEmpty.reduce((a, g) => a + g.length, 0);
+    if (N - k < 1) return null;
+    const grandMean = nonEmpty.reduce((a, g) => a + g.reduce((x, y) => x + y, 0), 0) / N;
+    let SSB = 0, SSW = 0;
+    for (const g of nonEmpty) {
+        const m = g.reduce((a, v) => a + v, 0) / g.length;
+        SSB += g.length * (m - grandMean) ** 2;
+        for (const v of g) SSW += (v - m) ** 2;
+    }
+    const df1 = k - 1, df2 = N - k;
+    const MSB = SSB / df1, MSW = SSW / df2;
+    if (MSW <= 0) return { F: Infinity, df1, df2, p: 0, k, N };
+    const F = MSB / MSW;
+    return { F, df1, df2, p: _fPValue(F, df1, df2), k, N };
+}
+// Welch's unpaired t-test for two samples.  Returns {t, df, p} or null.
+function _welchT(a, b) {
+    if (a.length < 2 || b.length < 2) return null;
+    const ma = a.reduce((x, y) => x + y, 0) / a.length;
+    const mb = b.reduce((x, y) => x + y, 0) / b.length;
+    const va = a.reduce((x, y) => x + (y - ma) ** 2, 0) / (a.length - 1);
+    const vb = b.reduce((x, y) => x + (y - mb) ** 2, 0) / (b.length - 1);
+    const se2 = va / a.length + vb / b.length;
+    if (se2 <= 0) return { t: 0, df: a.length + b.length - 2, p: 1 };
+    const t = (ma - mb) / Math.sqrt(se2);
+    const df = (se2 ** 2) /
+        ((va / a.length) ** 2 / (a.length - 1) + (vb / b.length) ** 2 / (b.length - 1));
+    return { t, df, p: _studentT2Tail(t, df) };
+}
+function _fmtP(p) {
+    if (!isFinite(p)) return 'NaN';
+    if (p < 0.001) return 'p < 0.001';
+    return `p = ${p.toFixed(3)}`;
 }
 function _betai(a, b, x) {
     if (x <= 0 || x >= 1) return x <= 0 ? 0 : 1;
@@ -631,6 +678,40 @@ function renderBar() {
     };
 
     $('exInfo').textContent = `n = ${n}`;
+    // ANOVA + post-hoc Welch's t pairwise — populates the side text box.
+    const fitBox = $('exFitBox');
+    const anovaOn = $('exAnova') && $('exAnova').checked;
+    if (fitBox) {
+        if (anovaOn) {
+            const groupVals = groups.map(g => byGroup[g].map(s => _val(s, key)));
+            const res = _oneWayANOVA(groupVals);
+            if (!res) {
+                fitBox.style.display = '';
+                fitBox.textContent = 'ANOVA: not enough data';
+            } else {
+                const lines = [
+                    `ANOVA F(${res.df1}, ${res.df2}) = ${res.F.toFixed(2)}`,
+                    `      ${_fmtP(res.p)}`,
+                ];
+                if (res.p < 0.05) {
+                    lines.push('', 'Post-hoc (Welch):');
+                    const idx = groups.map((g, i) => [g, i]).filter(([g, i]) => groupVals[i].length >= 2);
+                    for (let i = 0; i < idx.length; i++) {
+                        for (let j = i + 1; j < idx.length; j++) {
+                            const [ga, ia] = idx[i], [gb, ib] = idx[j];
+                            const t = _welchT(groupVals[ia], groupVals[ib]);
+                            if (t) lines.push(`  ${ga} vs ${gb}: ${_fmtP(t.p)}`);
+                        }
+                    }
+                }
+                fitBox.style.display = '';
+                fitBox.textContent = lines.join('\n');
+            }
+        } else {
+            fitBox.style.display = 'none';
+            fitBox.textContent = '';
+        }
+    }
     // Bar's "X" variable is plotted on the y-axis; honour the X min/max
     // inputs by piping them into yaxis.range.
     const allValues = [];
@@ -697,6 +778,7 @@ document.querySelectorAll('input[name="exPlotType"]').forEach(r =>
 // Toggling Slope doesn't change the underlying data — just restyle
 // the already-present best-fit trace in place so axes don't re-fit.
 $('exBestFit').addEventListener('change', _refitBestFitFromVisible);
+$('exAnova').addEventListener('change', render);
 // Legend visibility — show/hide live on the existing plot.  Same
 // flag is read at copy time, so the exported PNG matches the screen.
 $('exLegend').addEventListener('change', () => {
