@@ -745,9 +745,13 @@ function _drawShapeOverlayPlots() {
     if (!haveCells) _buildShapeOverlayCells();
     _shapeData.trials.forEach((_t, idx) => _redrawOneTrial(idx));
     // Cluster colors may have changed — refresh the movement-parameter
-    // plots above so their markers pick up the new palette.
+    // plots and the distance/velocity peak overlays so their markers
+    // pick up the new palette.
     if (cachedMovements && typeof renderDistMovementPlots === 'function') {
         renderDistMovementPlots();
+    }
+    if (cachedTraces && typeof renderAllDistancePlots === 'function') {
+        renderAllDistancePlots();
     }
 }
 
@@ -1570,6 +1574,31 @@ function renderAllDistancePlots() {
     const overlayPeakDist = document.getElementById('overlayPeakDist').checked;
     const overlayPeakOpenVel = document.getElementById('overlayPeakOpenVel').checked;
     const overlayPeakCloseVel = document.getElementById('overlayPeakCloseVel').checked;
+
+    // Per-trial peak_frame → cluster color lookup so the peak-distance
+    // and peak-velocity markers below can pick up the shape-overlay
+    // colors when the "Colors" checkbox is on.
+    const _colorsOn = !!document.getElementById('shapeClusterColors')?.checked;
+    const _colByTrial = {};
+    if (_colorsOn && typeof _shapeData !== 'undefined' && _shapeData
+            && typeof _shapeClusterColors !== 'undefined' && _shapeClusterColors) {
+        for (let ti2 = 0; ti2 < (_shapeData.trials || []).length; ti2++) {
+            const segs = _shapeData.trials[ti2].segments || [];
+            const cols = _shapeClusterColors[ti2];
+            if (!cols) continue;
+            const map = {};
+            for (let si = 0; si < segs.length; si++) {
+                if (segs[si].peak_frame != null && cols[si]) {
+                    map[segs[si].peak_frame] = cols[si];
+                }
+            }
+            _colByTrial[ti2] = map;
+        }
+    }
+    const _peakColor = (trialIdx, peakFrame, fallback) => {
+        const map = _colByTrial[trialIdx];
+        return (map && peakFrame != null && map[peakFrame]) ? map[peakFrame] : fallback;
+    };
     // Sequence shading on the distance/velocity traces was removed with
     // the "Sequences" checkbox; sequence fits now live only in the
     // Movement-plot scatters below.
@@ -1684,19 +1713,20 @@ function renderAllDistancePlots() {
         const distOverlays = [];
         const distShapes = [];
         if (overlayPeakDist && trialMovs.length > 0) {
-            const peakTimes = [], peakVals = [];
+            const peakTimes = [], peakVals = [], peakColors = [];
             trialMovs.forEach(m => {
                 if (m.peak_dist != null && m.peak_frame != null) {
                     const localFrame = m.peak_frame - trialStart;
                     peakTimes.push(+(localFrame / fps).toFixed(3));
                     peakVals.push(m.peak_dist);
+                    peakColors.push(_peakColor(idx, m.peak_frame, '#FF9800'));
                 }
             });
             if (peakTimes.length > 0) {
                 distOverlays.push({
                     x: peakTimes, y: peakVals,
                     type: 'scatter', mode: 'markers',
-                    marker: { color: '#FF9800', size: 7, symbol: 'diamond' },
+                    marker: { color: peakColors, size: 7, symbol: 'diamond' },
                     name: 'Peak Distance',
                     hovertemplate: '%{x:.2f}s<br>Peak: %{y:.1f} mm<extra></extra>',
                 });
@@ -1726,7 +1756,7 @@ function renderAllDistancePlots() {
         // Build overlay traces for velocity plot
         const velOverlays = [];
         if (overlayPeakOpenVel && trialMovs.length > 0) {
-            const ts = [], vs = [];
+            const ts = [], vs = [], cs = [];
             trialMovs.forEach(m => {
                 // Position the marker at the opening-velocity peak frame
                 // (falls back to the distance-peak frame if absent).
@@ -1734,20 +1764,21 @@ function renderAllDistancePlots() {
                 if (m.peak_open_vel != null && vf != null) {
                     ts.push(+((vf - trialStart) / fps).toFixed(3));
                     vs.push(m.peak_open_vel);
+                    cs.push(_peakColor(idx, m.peak_frame, '#2196F3'));
                 }
             });
             if (ts.length > 0) {
                 velOverlays.push({
                     x: ts, y: vs,
                     type: 'scatter', mode: 'markers',
-                    marker: { color: '#2196F3', size: 6, symbol: 'triangle-up' },
+                    marker: { color: cs, size: 6, symbol: 'triangle-up' },
                     name: 'Peak Open Vel',
                     hovertemplate: '%{x:.2f}s<br>%{y:.1f} mm/s<extra></extra>',
                 });
             }
         }
         if (overlayPeakCloseVel && trialMovs.length > 0) {
-            const ts = [], vs = [];
+            const ts = [], vs = [], cs = [];
             trialMovs.forEach(m => {
                 // Position the marker at the closing-velocity peak frame
                 // (falls back to the distance-peak frame if absent).
@@ -1755,13 +1786,14 @@ function renderAllDistancePlots() {
                 if (m.peak_close_vel != null && vf != null) {
                     ts.push(+((vf - trialStart) / fps).toFixed(3));
                     vs.push(m.peak_close_vel);
+                    cs.push(_peakColor(idx, m.peak_frame, '#f44336'));
                 }
             });
             if (ts.length > 0) {
                 velOverlays.push({
                     x: ts, y: vs,
                     type: 'scatter', mode: 'markers',
-                    marker: { color: '#f44336', size: 6, symbol: 'triangle-down' },
+                    marker: { color: cs, size: 6, symbol: 'triangle-down' },
                     name: 'Peak Close Vel',
                     hovertemplate: '%{x:.2f}s<br>%{y:.1f} mm/s<extra></extra>',
                 });
