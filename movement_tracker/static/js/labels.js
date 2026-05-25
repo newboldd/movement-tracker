@@ -7771,6 +7771,7 @@ const manoViewer = (() => {
         document.querySelectorAll('.detect-model-row').forEach(row => {
             row.querySelector('.detect-model-btn')?.classList.remove('active');
             row.querySelector('.detect-actions')?.remove();
+            row.querySelector('.detect-recombine-row')?.remove();
         });
         // Hide MP-specific Static-image-mode row whenever no model is active.
         const _simRow = document.getElementById('mpStaticImageRow');
