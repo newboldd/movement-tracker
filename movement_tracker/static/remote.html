@@ -344,10 +344,22 @@
             <!-- MediaPipe-only: honour saved per-trial crop boxes from the
                  Labels / Auto pages.  Default on; un-check to force MP
                  to scan the full camera-half frame. -->
-            <label id="mpUseBboxRow" style="display:none;font-size:12px;color:var(--text-muted);margin-bottom:12px;cursor:pointer;align-items:center;gap:6px;"
+            <label id="mpUseBboxRow" style="display:none;font-size:12px;color:var(--text-muted);margin-bottom:8px;cursor:pointer;align-items:center;gap:6px;"
                    title="When checked, MediaPipe runs on the saved per-trial bbox for each trial (faster, more robust when set).  When unchecked, MediaPipe scans the full camera-half frame regardless of any saved bbox.">
                 <input type="checkbox" id="mpUseBboxCb" checked style="cursor:pointer;">
                 Use bounding box (per-trial, if saved)
+            </label>
+
+            <!-- MediaPipe-only: static_image_mode disables MP's between-frame
+                 tracker so each frame gets a fresh palm-detector pass.
+                 3-5x slower but recovers detection on hard poses (e.g.
+                 back-of-hand views) where the sticky tracker fails to
+                 lock on.  Saved separately as mediapipe_static.npz so
+                 it doesn't overwrite the regular forward pass. -->
+            <label id="mpStaticRow" style="display:none;font-size:12px;color:var(--text-muted);margin-bottom:12px;cursor:pointer;align-items:center;gap:6px;"
+                   title="Disable MediaPipe's between-frame tracker so each frame gets a fresh palm-detector pass.  3-5x slower but recovers detection on hard poses where the sticky tracker fails to lock on.  Saved to mediapipe_static.npz.">
+                <input type="checkbox" id="mpStaticCb" style="cursor:pointer;">
+                Static image mode (saves to <code>mediapipe_static.npz</code>)
             </label>
 
             <!-- Trial Selection (shown for per-trial steps like deidentify and HRnet) -->
@@ -522,6 +534,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js?v=13"></script>
-    <script src="/static/js/remote.js?v=61"></script>
+    <script src="/static/js/remote.js?v=62"></script>
 </body>
 </html>

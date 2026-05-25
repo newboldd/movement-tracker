@@ -302,6 +302,14 @@ function selectStep(step) {
             if (cb) cb.checked = true;
         }
     }
+    const mpStaticRow = document.getElementById('mpStaticRow');
+    if (mpStaticRow) {
+        mpStaticRow.style.display = isMP ? 'flex' : 'none';
+        if (!isMP) {
+            const cb = document.getElementById('mpStaticCb');
+            if (cb) cb.checked = false;
+        }
+    }
 }
 
 // ── Load steps ──────────────────────────────────────────
@@ -909,11 +917,14 @@ async function submitBatch() {
         }
         const revCb = document.getElementById('mpReverseCb');
         const ubCb  = document.getElementById('mpUseBboxCb');
+        const stCb  = document.getElementById('mpStaticCb');
         const reverse = !!(revCb && revCb.checked);
         const useBbox = !(ubCb && !ubCb.checked);
+        const staticMode = !!(stCb && stCb.checked);
         const extra = { _use_batch_runner: true };
         if (reverse) extra.reverse = true;
         if (!useBbox) extra.use_bbox = false;
+        if (staticMode) extra.static_image_mode = true;
         try {
             await API.post('/api/remote/launch', {
                 job_type: 'mediapipe',
@@ -1065,8 +1076,10 @@ async function submitJob() {
                 // the per-trial mediapipe.npz output layout.
                 const revCb = document.getElementById('mpReverseCb');
                 const ubCb  = document.getElementById('mpUseBboxCb');
+                const stCb  = document.getElementById('mpStaticCb');
                 const reverse = !!(revCb && revCb.checked);
                 const useBbox = !(ubCb && !ubCb.checked);
+                const staticMode = !!(stCb && stCb.checked);
                 let ok = 0;
                 let firstError = null;
                 const submittedSubjectIds = new Set();
@@ -1083,6 +1096,7 @@ async function submitJob() {
                     const extra = { trial_idx: trialIdx, trial_name: shortTrial };
                     if (reverse) extra.reverse = true;
                     if (!useBbox) extra.use_bbox = false;
+                    if (staticMode) extra.static_image_mode = true;
                     try {
                         await API.post('/api/remote/launch', {
                             job_type: 'mediapipe',
@@ -1198,6 +1212,7 @@ async function submitJob() {
     if (jobType === 'mediapipe') {
         const rev = document.getElementById('mpReverseCb');
         const ub  = document.getElementById('mpUseBboxCb');
+        const st  = document.getElementById('mpStaticCb');
         const useBbox = !!(ub && ub.checked);
         const obj = {};
         if (rev && rev.checked) obj.reverse = true;
@@ -1205,6 +1220,7 @@ async function submitJob() {
         // when it differs from the default so older queue manager
         // builds that don't recognize the field keep working.
         if (!useBbox) obj.use_bbox = false;
+        if (st && st.checked) obj.static_image_mode = true;
         if (Object.keys(obj).length) extraParams = obj;
     }
 
