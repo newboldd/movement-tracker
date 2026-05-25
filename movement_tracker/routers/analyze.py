@@ -492,6 +492,29 @@ def get_trial_video(subject_id: int, trial_idx: int,
 
 # ── Run detection models ─────────────────────────────────────────────────
 
+@router.post("/{subject_id}/recombine-mp")
+def recombine_mp(subject_id: int, body: dict = Body(default={})) -> dict:
+    """Manually rebuild ``mediapipe_combined.npz`` for one trial (or
+    every trial of the subject when neither ``trial_stem`` nor
+    ``trial_idx`` is supplied).  Useful after running an additional MP
+    source (static / cropped / reverse) or after the combine algorithm
+    itself changes."""
+    from ..services.mediapipe_prelabel import (
+        build_combined_mp_npz_for_trial,
+        maybe_rebuild_combined_for_subject,
+    )
+    subj_name = _subject_name(subject_id)
+    stem = body.get("trial_stem")
+    if not stem:
+        n = maybe_rebuild_combined_for_subject(subj_name)
+        return {"ok": True, "rebuilt": int(n), "scope": "subject"}
+    path = build_combined_mp_npz_for_trial(subj_name, str(stem))
+    if not path:
+        raise HTTPException(404, f"No MP sources to combine for {stem}")
+    return {"ok": True, "rebuilt": 1, "scope": "trial",
+            "trial": stem, "path": path}
+
+
 @router.post("/{subject_id}/run-mediapipe")
 def run_mediapipe(subject_id: int, body: dict = Body(default={})) -> dict:
     """Run MediaPipe hand detection on all trials. Creates a background job.

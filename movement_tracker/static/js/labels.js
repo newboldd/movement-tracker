@@ -7650,9 +7650,45 @@ const manoViewer = (() => {
                         <button class="btn btn-sm detect-cancel-btn" style="font-size:10px;">Cancel</button>
                     `;
                     row.appendChild(actions);
+                    // MediaPipe-only: a second row with the Re-combine
+                    // button so the user can manually rebuild
+                    // mediapipe_combined.npz from the current source
+                    // npzs without re-running detection.
+                    if (endpoint === 'run-mediapipe') {
+                        const recombineRow = document.createElement('div');
+                        recombineRow.className = 'detect-recombine-row';
+                        recombineRow.style.cssText = 'display:flex;gap:4px;margin-top:3px;';
+                        recombineRow.innerHTML = `
+                            <button class="btn btn-sm detect-recombine-btn"
+                                    title="Rebuild mediapipe_combined.npz from the existing forward / cropped / reverse / static npzs for the current trial."
+                                    style="flex:1;font-size:10px;">Re-combine</button>
+                        `;
+                        row.appendChild(recombineRow);
+                        recombineRow.querySelector('.detect-recombine-btn')
+                            .addEventListener('click', _recombineMpCurrentTrial);
+                    }
                     actions.querySelector('.detect-run-btn').addEventListener('click', _runActiveDetection);
                     actions.querySelector('.detect-save-btn').addEventListener('click', _saveBbox);
                     actions.querySelector('.detect-cancel-btn').addEventListener('click', _exitDetectMode);
+                    // Save Box only matters when MediaPipe will use the
+                    // bbox — hide it otherwise, and keep it in sync as
+                    // Use Bounding Box is toggled.
+                    if (endpoint === 'run-mediapipe') {
+                        const useBboxCb = document.getElementById('mpUseBbox');
+                        const saveBtn = actions.querySelector('.detect-save-btn');
+                        const _syncSaveVisible = () => {
+                            saveBtn.style.display = (useBboxCb && useBboxCb.checked) ? '' : 'none';
+                        };
+                        _syncSaveVisible();
+                        if (useBboxCb && !useBboxCb._saveVisListener) {
+                            useBboxCb._saveVisListener = true;
+                            useBboxCb.addEventListener('change', () => {
+                                document.querySelectorAll('.detect-actions .detect-save-btn').forEach(b => {
+                                    b.style.display = useBboxCb.checked ? '' : 'none';
+                                });
+                            });
+                        }
+                    }
                 }
             } else {
                 btn.classList.remove('active');
@@ -7744,6 +7780,28 @@ const manoViewer = (() => {
         const _ubRow = document.getElementById('mpUseBboxRow');
         if (_ubRow) _ubRow.style.display = 'none';
         render();
+    }
+
+    async function _recombineMpCurrentTrial() {
+        const btn = document.querySelector('.detect-recombine-btn');
+        if (!btn || !subjectId || currentTrialIdx < 0) return;
+        const trial = trials[currentTrialIdx];
+        if (!trial) return;
+        const orig = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Recombining…';
+        try {
+            const res = await api(`/api/analyze/${subjectId}/recombine-mp`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ trial_stem: trial.trial_stem }),
+            });
+            btn.textContent = res && res.ok ? 'Done' : 'Error';
+        } catch (e) {
+            console.warn('[labels] re-combine failed:', e);
+            btn.textContent = 'Error';
+        }
+        setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1200);
     }
 
     async function _saveBbox() {
