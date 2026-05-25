@@ -344,26 +344,51 @@ function _buildShapeData() {
         const movs = movsByTrial[idx] || [];
         const fps = trial.fps || 60;
         const dist = trial.distances || [];
-        const segments = movs.map(m => {
-            const o = Math.max(0, m.open_frame_local | 0);
-            const c = Math.min(dist.length - 1, m.close_frame_local | 0);
-            const p = (m.peak_frame_local != null)
-                ? Math.min(c, Math.max(o, m.peak_frame_local | 0))
-                : o;
-            const xs = [], ys = [];
-            for (let f = o; f <= c; f++) {
+        // distValid(lo, hi): true iff dist[f] is a finite number for
+        // every integer f in [lo, hi].  Used by the per-phase validity
+        // checks below — any missing or NaN value disqualifies the
+        // movement from similarity analysis under that phase.
+        const distValid = (lo, hi) => {
+            if (lo == null || hi == null || lo > hi) return false;
+            if (lo < 0 || hi >= dist.length) return false;
+            for (let f = lo; f <= hi; f++) {
                 const v = dist[f];
-                if (v == null) continue;
-                xs.push((f - o) / fps);   // raw: open at 0
-                ys.push(v);
+                if (v == null || !isFinite(v)) return false;
             }
-            // Peak / close offsets in the segment's own time axis.
-            const peakT = (p - o) / fps;
-            const closeT = (c - o) / fps;
-            const peakY = (dist[p] != null) ? dist[p] : null;
-            // Keep the original movement's global peak_frame so other
-            // pages (movement-parameter plots) can map back to a color.
-            return { xs, ys, peakT, closeT, peakY, peak_frame: m.peak_frame };
+            return true;
+        };
+        const segments = movs.map((m, origMovIdx) => {
+            const o_raw = m.open_frame_local;
+            const p_raw = m.peak_frame_local;
+            const c_raw = m.close_frame_local;
+            const o = (o_raw != null) ? Math.max(0, o_raw | 0) : null;
+            const c = (c_raw != null) ? Math.min(dist.length - 1, c_raw | 0) : null;
+            const p = (p_raw != null && o !== null && c !== null)
+                ? Math.min(c, Math.max(o, p_raw | 0)) : null;
+            const xs = [], ys = [];
+            if (o !== null && c !== null && o <= c) {
+                for (let f = o; f <= c; f++) {
+                    const v = dist[f];
+                    if (v == null) continue;
+                    xs.push((f - o) / fps);   // raw: open at 0
+                    ys.push(v);
+                }
+            }
+            const peakT = (p !== null && o !== null) ? (p - o) / fps : 0;
+            const closeT = (c !== null && o !== null) ? (c - o) / fps : 0;
+            const peakY = (p !== null && dist[p] != null) ? dist[p] : null;
+            // Per-phase validity flags.  Order is checked on the
+            // original (un-clamped) frame indices so a movement with a
+            // peak outside [open, close] is flagged invalid.
+            const orderOpen  = (o_raw != null && p_raw != null && o_raw < p_raw);
+            const orderClose = (p_raw != null && c_raw != null && p_raw < c_raw);
+            const orderWhole = orderOpen && orderClose;
+            const validWhole = orderWhole && distValid(o, c);
+            const validOpen  = orderOpen  && distValid(o, p);
+            const validClose = orderClose && distValid(p, c);
+            return { xs, ys, peakT, closeT, peakY,
+                     peak_frame: m.peak_frame, origMovIdx,
+                     validWhole, validOpen, validClose };
         }).filter(s => s.xs.length >= 2);
         const maxT = segments.reduce((a, s) => Math.max(a, s.xs[s.xs.length - 1]), 0);
         if (maxT > globalMaxT) globalMaxT = maxT;
@@ -429,23 +454,29 @@ function _hexToRgba(hex, alpha) {
 // can resync the slider position when the order changes.
 let _shapeSliderByIdx = {};
 
-// Position (slider value) → original movement number.
+// Position (slider value) → original movement number.  The cluster
+// order, when present, stores the original movement indices of the
+// VISIBLE / VALID movements for the current phase.
 function _posToMov(idx, pos, N) {
     if (!(pos > 0)) return 0;
-    if (pos > N) pos = N;
     const ord = _shapeClusterOrder[idx];
-    if (ord && ord.length === N) return ord[pos - 1] + 1;
+    if (ord && ord.length > 0) {
+        if (pos > ord.length) return 0;
+        return ord[pos - 1] + 1;
+    }
+    if (pos > N) pos = N;
     return pos;
 }
-// Original movement number → slider position.
+// Original movement number → slider position; 0 if the movement is
+// not in the currently-visible / valid set.
 function _movToPos(idx, mov, N) {
     if (!(mov > 0)) return 0;
-    if (mov > N) mov = N;
     const ord = _shapeClusterOrder[idx];
-    if (ord && ord.length === N) {
+    if (ord && ord.length > 0) {
         const p = ord.indexOf(mov - 1);
-        return p >= 0 ? p + 1 : mov;
+        return p >= 0 ? p + 1 : 0;
     }
+    if (mov > N) mov = N;
     return mov;
 }
 // Keep the slider position matching the currently-highlighted movement
@@ -454,6 +485,12 @@ function _syncShapeSlider(idx) {
     const refs = _shapeSliderByIdx[idx];
     if (!refs || !_shapeData) return;
     const N = _shapeData.trials[idx]?.segments.length || 0;
+    // When filtering / phase-dependent validity reduces the visible
+    // count, cap the slider's max accordingly so dragging only steps
+    // through visible movements.
+    const ord = _shapeClusterOrder[idx];
+    const maxPos = (ord && ord.length > 0) ? ord.length : N;
+    refs.slider.max = String(maxPos);
     const mov = _shapeHighlight[idx] || 0;
     refs.slider.value = String(_movToPos(idx, mov, N));
     refs.valSpan.textContent = mov === 0 ? 'All' : String(mov);
@@ -694,7 +731,9 @@ function _buildShapeOverlayCells() {
             let pos = parseInt(p, 10);
             if (!isFinite(pos)) pos = 0;
             if (pos < 0) pos = 0;
-            if (pos > N) pos = N;
+            const ord = _shapeClusterOrder[idx];
+            const cap = (ord && ord.length > 0) ? ord.length : N;
+            if (pos > cap) pos = cap;
             _setByMov(_posToMov(idx, pos, N));
         };
         _shapeSetHighlight[idx] = _setByMov;
@@ -772,11 +811,7 @@ function _phaseSliceSegment(s, phase) {
             if (s.xs[i] >= peakT - 1e-9) { xs.push(s.xs[i]); ys.push(s.ys[i]); }
         }
     }
-    return {
-        xs, ys,
-        peakT: s.peakT, closeT: s.closeT, peakY: s.peakY,
-        peak_frame: s.peak_frame,
-    };
+    return Object.assign({}, s, { xs, ys });
 }
 
 function _drawShapeOverlayPlots() {
@@ -813,11 +848,23 @@ function _redrawOneTrial(idx) {
         return;
     }
 
-    // Phase-slice each segment so the rest of the function (lines,
-    // average, correlation, clustering) only sees the plotted portion.
+    // Restrict similarity analysis to movements that have the
+    // required events in order with valid distances between them
+    // (depends on phase: Whole = open<peak<close + open→close valid;
+    // Open = open<peak + open→peak valid; Close = peak<close +
+    // peak→close valid).
+    const phaseValidKey = phase === 'open'  ? 'validOpen'
+                       : phase === 'close' ? 'validClose'
+                                            : 'validWhole';
+    let phaseSegs = trial.segments.filter(s => !!s[phaseValidKey]);
     if (phase && phase !== 'whole') {
-        const sliced = trial.segments.map(s => _phaseSliceSegment(s, phase));
-        trial = Object.assign({}, trial, { segments: sliced });
+        phaseSegs = phaseSegs.map(s => _phaseSliceSegment(s, phase));
+    }
+    trial = Object.assign({}, trial, { segments: phaseSegs });
+
+    if (!trial.segments.length) {
+        plotDiv.innerHTML = '<div class="results-no-data">No valid movements</div>';
+        return;
     }
 
     const hiIdx = _shapeHighlight[idx] || 0;
@@ -925,7 +972,22 @@ function _redrawOneTrial(idx) {
         } else {
             trial._hacCache = null;
         }
-        _shapeClusterColors[idx] = _movColors;
+        // Externally _shapeClusterColors[idx] is a peak_frame → color
+        // map so other plots (movement-parameter scatter, distance /
+        // velocity peak overlays) can look up the color for any
+        // movement by its global peak_frame.  Local code below still
+        // uses the _movColors array indexed by the (filtered) segment
+        // position `mi`.
+        if (_movColors) {
+            const _pfMap = {};
+            for (let mi = 0; mi < trial.segments.length; mi++) {
+                const pf = trial.segments[mi].peak_frame;
+                if (pf != null && _movColors[mi]) _pfMap[pf] = _movColors[mi];
+            }
+            _shapeClusterColors[idx] = _pfMap;
+        } else {
+            _shapeClusterColors[idx] = null;
+        }
 
         // Dim the rest when a movement is highlighted.
         const dimmed = hiIdx > 0;
@@ -951,7 +1013,10 @@ function _redrawOneTrial(idx) {
         const traces = trial.segments.map((s, mi) => ({
             x: shiftedX(s, mi), y: s.ys, type: 'scatter', mode: 'lines',
             line: { width: 1, color: lineColor(mi) },
-            customdata: new Array(s.xs.length).fill(mi),
+            // customdata holds the ORIGINAL movement index so click
+            // handlers resolve to the user-facing movement number.
+            customdata: new Array(s.xs.length).fill(
+                s.origMovIdx != null ? s.origMovIdx : mi),
             visible: inFilter(mi) ? true : false,
             hoverinfo: 'skip', showlegend: false,
         }));
@@ -1012,12 +1077,15 @@ function _redrawOneTrial(idx) {
             }
         }
 
-        // Highlighted movement (1-indexed in the UI).  Skip if this
-        // trial doesn't have that many movements.
-        if (hiIdx > 0 && hiIdx <= trial.segments.length) {
-            const s = trial.segments[hiIdx - 1];
+        // Highlighted movement.  hiIdx is the ORIGINAL movement number;
+        // find the segment whose origMovIdx matches.
+        const hiSegIdx = hiIdx > 0
+            ? trial.segments.findIndex(s => s.origMovIdx === hiIdx - 1)
+            : -1;
+        if (hiSegIdx >= 0) {
+            const s = trial.segments[hiSegIdx];
             traces.push({
-                x: shiftedX(s, hiIdx - 1), y: s.ys, type: 'scatter', mode: 'lines',
+                x: shiftedX(s, hiSegIdx), y: s.ys, type: 'scatter', mode: 'lines',
                 line: { width: 2.5, color: '#d32f2f' },
                 hoverinfo: 'skip', showlegend: false,
             });
@@ -1030,7 +1098,7 @@ function _redrawOneTrial(idx) {
         if (showPeaks) {
             const markIdxs = (hiIdx === 0)
                 ? trial.segments.map((_, i) => i)
-                : (hiIdx > 0 && hiIdx <= trial.segments.length ? [hiIdx - 1] : []);
+                : (hiSegIdx >= 0 ? [hiSegIdx] : []);
             const pxs = [], pys = [], pcs = [], pcd = [];
             for (const mi of markIdxs) {
                 if (!inFilter(mi)) continue;
@@ -1039,7 +1107,7 @@ function _redrawOneTrial(idx) {
                 pxs.push(warpT(s, mi, s.peakT));
                 pys.push(s.peakY);
                 pcs.push(_movColors ? (_movColors[mi] || '#d32f2f') : '#d32f2f');
-                pcd.push(mi);
+                pcd.push(s.origMovIdx != null ? s.origMovIdx : mi);
             }
             if (pxs.length) {
                 traces.push({
@@ -1612,7 +1680,11 @@ function _redrawOneTrialCorr(idx, trial, xLo, xHi, shiftedX, hiIdx) {
     const metric = cache ? cache.metric : 'corr';
     const subAvg = !!document.getElementById('shapeSubtractAvg')?.checked;
     const mat = cache ? cache.mat : _pairwiseMatrix(trial, xLo, xHi, shiftedX, metric, subAvg);
-    const labels = trial.segments.map((_, i) => String(i + 1));
+    // Labels use the ORIGINAL movement number (origMovIdx + 1) so a
+    // valid segment shown at position 0 in a filtered trial still
+    // reads as e.g. movement #7 if movements #1–6 were excluded.
+    const labels = trial.segments.map((s, i) =>
+        String((s.origMovIdx != null ? s.origMovIdx : i) + 1));
     const clusterOn = !!document.getElementById('shapeClusterOn')?.checked;
     const movColors = cache ? cache.movColors : null;
     // Color-scale bounds: fixed [-1, 1] for correlation; symmetric
@@ -1666,7 +1738,10 @@ function _redrawOneTrialCorr(idx, trial, xLo, xHi, shiftedX, hiIdx) {
         order = _cut.order; sizes = _cut.sizes;
     }
     const reord = order.map(i => order.map(j => mat[i][j]));
-    const reordLabels = order.map(i => String(i + 1));
+    const reordLabels = order.map(i => {
+        const s = trial.segments[i];
+        return String((s && s.origMovIdx != null ? s.origMovIdx : i) + 1);
+    });
     const boundaries = [];
     let acc = 0;
     for (let i = 0; i < sizes.length - 1; i++) { acc += sizes[i]; boundaries.push(acc); }
@@ -1679,7 +1754,13 @@ function _redrawOneTrialCorr(idx, trial, xLo, xHi, shiftedX, hiIdx) {
     const tickColors = movColors ? order.map(i => movColors[i]) : null;
     const tickClusters = (movColors && cache && cache.clusterOf)
         ? order.map(i => cache.clusterOf[i]) : null;
-    _shapeClusterOrder[idx] = order;
+    // Store order as ORIGINAL movement indices (origMovIdx values) so
+    // _posToMov / _movToPos translate to the user-facing movement
+    // number even when the trial has been filtered.
+    _shapeClusterOrder[idx] = order.map(pos => {
+        const s = trial.segments[pos];
+        return (s && s.origMovIdx != null) ? s.origMovIdx : pos;
+    });
     _renderClusteredCorrHeatmap(
         corrDiv, reord, reordLabels, titleClu(k),
         hiIdx, hiPosClu, boundaries, dendroLines, maxH, useCut, tickColors,
@@ -1769,22 +1850,13 @@ function renderAllDistancePlots() {
 
     // Per-trial peak_frame → cluster color lookup so the peak-distance
     // and peak-velocity markers below can pick up the shape-overlay
-    // colors when the "Colors" checkbox is on.
+    // colors when the "Colors" checkbox is on.  _shapeClusterColors
+    // is already keyed by peak_frame.
     const _colorsOn = !!document.getElementById('shapeClusterColors')?.checked;
     const _colByTrial = {};
-    if (_colorsOn && typeof _shapeData !== 'undefined' && _shapeData
-            && typeof _shapeClusterColors !== 'undefined' && _shapeClusterColors) {
-        for (let ti2 = 0; ti2 < (_shapeData.trials || []).length; ti2++) {
-            const segs = _shapeData.trials[ti2].segments || [];
-            const cols = _shapeClusterColors[ti2];
-            if (!cols) continue;
-            const map = {};
-            for (let si = 0; si < segs.length; si++) {
-                if (segs[si].peak_frame != null && cols[si]) {
-                    map[segs[si].peak_frame] = cols[si];
-                }
-            }
-            _colByTrial[ti2] = map;
+    if (_colorsOn && typeof _shapeClusterColors !== 'undefined' && _shapeClusterColors) {
+        for (const k in _shapeClusterColors) {
+            if (_shapeClusterColors[k]) _colByTrial[k] = _shapeClusterColors[k];
         }
     }
     const _peakColor = (trialIdx, peakFrame, fallback) => {
@@ -2542,21 +2614,12 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
 
     // Per-trial peak_frame → cluster color lookup so each movement
     // marker can pick up the same hue as the shape-overlay plot.
+    // _shapeClusterColors[ti] is already keyed by peak_frame.
     const colorsOn = !!document.getElementById('shapeClusterColors')?.checked;
     const colorsByTrial = {};
-    if (colorsOn && typeof _shapeData !== 'undefined' && _shapeData
-            && typeof _shapeClusterColors !== 'undefined' && _shapeClusterColors) {
-        for (let ti2 = 0; ti2 < (_shapeData.trials || []).length; ti2++) {
-            const segs = _shapeData.trials[ti2].segments || [];
-            const cols = _shapeClusterColors[ti2];
-            if (!cols) continue;
-            const map = {};
-            for (let si = 0; si < segs.length; si++) {
-                if (segs[si].peak_frame != null && cols[si]) {
-                    map[segs[si].peak_frame] = cols[si];
-                }
-            }
-            colorsByTrial[ti2] = map;
+    if (colorsOn && typeof _shapeClusterColors !== 'undefined' && _shapeClusterColors) {
+        for (const k in _shapeClusterColors) {
+            if (_shapeClusterColors[k]) colorsByTrial[k] = _shapeClusterColors[k];
         }
     }
     const colorForMovement = (m) => {

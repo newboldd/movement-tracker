@@ -759,6 +759,44 @@ def _movement_corr_shifts(segs, x_max: float, dt: float = 1.0 / 240) -> list:
     return [-peak_ts[i] - float(lags2[i]) * dt for i in range(n)]
 
 
+def _movement_is_valid(m: dict, distances: list, phase: str = "whole") -> bool:
+    """Validity test for the movement-similarity analysis.
+
+    phase='whole' (default): require open<peak<close events and a
+       finite distance at every frame between open and close.
+    phase='open':  require open<peak; finite distances open→peak.
+    phase='close': require peak<close; finite distances peak→close.
+    """
+    o = m.get("open_frame")
+    p = m.get("peak_frame")
+    c = m.get("close_frame")
+    if phase == "open":
+        if o is None or p is None or o >= p:
+            return False
+        lo, hi = o, p
+    elif phase == "close":
+        if p is None or c is None or p >= c:
+            return False
+        lo, hi = p, c
+    else:
+        if o is None or p is None or c is None or not (o < p < c):
+            return False
+        lo, hi = o, c
+    n = len(distances)
+    if lo < 0 or hi >= n:
+        return False
+    for f in range(lo, hi + 1):
+        v = distances[f]
+        if v is None:
+            return False
+        try:
+            if not math.isfinite(float(v)):
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 def _movement_similarity_per_trial(distances: list, trials: list[dict],
                                      all_movements: list[dict],
                                      grid: int = 120) -> dict:
@@ -766,11 +804,14 @@ def _movement_similarity_per_trial(distances: list, trials: list[dict],
     mode.  Returns {trial_idx: {'corr':r, 'open':r, 'peak':r, 'close':r}}
     where r is the nanmean of the upper triangle of the Pearson
     correlation matrix between all movements in that trial under the
-    given alignment."""
+    given alignment.  Only movements with open<peak<close in order and
+    finite distances at every frame from open to close are included."""
     movs_by_trial: dict[int, list] = {}
     for m in all_movements:
         if (m.get("open_frame_local") is None
                 or m.get("close_frame_local") is None):
+            continue
+        if not _movement_is_valid(m, distances, "whole"):
             continue
         movs_by_trial.setdefault(int(m["trial_idx"]), []).append(m)
 
