@@ -1845,6 +1845,8 @@ function renderAllDistancePlots() {
 
     // Build per-trial overlay data from movements
     const overlayPeakDist = document.getElementById('overlayPeakDist').checked;
+    const overlayOpen = document.getElementById('overlayOpen')?.checked;
+    const overlayClose = document.getElementById('overlayClose')?.checked;
     const overlayPeakOpenVel = document.getElementById('overlayPeakOpenVel').checked;
     const overlayPeakCloseVel = document.getElementById('overlayPeakCloseVel').checked;
 
@@ -1996,6 +1998,36 @@ function renderAllDistancePlots() {
                 });
             }
         }
+
+        // Open / close event markers on the distance trace.  Plotted
+        // at the open/close frame's distance value, in green (open)
+        // and red (close).
+        const _evMarkers = (kind, frameField, color, name) => {
+            if (!trialMovs.length) return;
+            const xs = [], ys = [];
+            trialMovs.forEach(m => {
+                const f = m[frameField];
+                if (f == null || !isFinite(f)) return;
+                const idxLocal = f;       // global frame index
+                const local = idxLocal - trialStart;
+                if (local < 0) return;
+                const fpsT = trial.fps || fps;
+                if (!trial.distances) return;
+                const v = trial.distances[local];
+                if (v == null || !isFinite(v)) return;
+                xs.push(+(local / fpsT).toFixed(3));
+                ys.push(v);
+            });
+            if (xs.length) {
+                distOverlays.push({
+                    x: xs, y: ys, type: 'scatter', mode: 'markers',
+                    marker: { color, size: 7, symbol: 'circle' },
+                    name, hoverinfo: 'skip', showlegend: false,
+                });
+            }
+        };
+        if (overlayOpen) _evMarkers('open', 'open_frame', '#2ca02c', 'Open');
+        if (overlayClose) _evMarkers('close', 'close_frame', '#d62728', 'Close');
 
         // Sequence shading
         if (showSequences && seqAssignments && seqAssignments.byTrial[idx]) {
@@ -3880,7 +3912,7 @@ document.getElementById('distSequenceMode').addEventListener('change', () => {
 });
 
 // Overlay controls: re-render distance/velocity plots
-['overlayPeakDist', 'overlayPeakOpenVel', 'overlayPeakCloseVel'].forEach(id => {
+['overlayPeakDist', 'overlayOpen', 'overlayClose', 'overlayPeakOpenVel', 'overlayPeakCloseVel'].forEach(id => {
     document.getElementById(id).addEventListener('change', () => {
         if (cachedTraces) renderAllDistancePlots();
     });
