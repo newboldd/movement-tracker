@@ -1015,13 +1015,6 @@ COMBINED_SRC_NAMES = {
     COMBINED_SRC_STATIC:  "static",
 }
 
-# Joint indices (MediaPipe Hands convention) used by the Combined
-# bone-length consistency term.  Thumb CMC -> tip (full thumb) and
-# index MCP -> tip (full index) are the segments whose endpoints
-# define the thumb-index aperture, so their lengths are the most
-# diagnostic of bad-tip combos.
-THUMB_CMC = 1
-INDEX_MCP = 5
 
 
 def build_combined_mp_npz_for_trial(subject_name: str, trial_stem: str) -> str | None:
@@ -1034,32 +1027,16 @@ def build_combined_mp_npz_for_trial(subject_name: str, trial_stem: str) -> str |
       * Exactly one source has labels -> use that source's full
         21-joint set for that camera, that frame.
       * Multiple sources have labels -> consider every
-        (OS_source, OD_source) combination where the thumb tip +
-        index tip are present on both cameras and the triangulated
-        thumb / index 3D points are finite.  Score each candidate
-        and pick the lowest-score combination; fall back to
-        min-distance when scoring isn't possible.
+        (OS_source, OD_source) combination where the thumb tip and
+        index tip are present on both cameras and triangulate to
+        finite 3D points.  Pick the combo with the smallest 3-D
+        thumb-tip ↔ index-tip distance.
 
-    Scoring (lower is better) blends three z-scored terms:
-
-      z_dist  = |dist_3d - ref_dist(frame)| / max(ref_dist_std, ε)
-      z_thumb = |thumb_bone_len - thumb_median| / max(thumb_std, ε)
-      z_index = |index_bone_len - index_median| / max(index_std, ε)
-      score   = z_dist + z_thumb + z_index
-
-    ``ref_dist`` is a rolling median (window ±15 frames) of the
-    first-pass min-distance pick across the trial.  The bone-length
-    medians + stds come from "stable" first-pass frames -- frames
-    whose min-distance distance is within k_std of its local rolling
-    median.  Using ``std`` derived from the actual stable distribution
-    instead of a fixed % deviation makes the tolerance scale with the
-    subject's hand size + the trial's typical motion noise.
-
-    Both heuristic terms are skipped when there aren't enough stable
-    frames to fit them (e.g. very short trials, or trials where
-    every frame has multiple disagreeing sources).  In that case
-    the function gracefully reverts to the original min-distance
-    behaviour.
+    Bone-length heuristics were removed because the relevant joint
+    pairs (thumb CMC ↔ tip and index MCP ↔ tip) span the finger
+    knuckles and flex with the movement, so they aren't a stable
+    reference.  Thumb-index aperture alone keeps the choice tied to
+    the only quantity the downstream analysis cares about.
 
     Writes ``<dlc>/<subject>/<trial>/mediapipe_combined.npz`` and
     returns its path on success; returns None if no source exists
@@ -1122,101 +1099,10 @@ def build_combined_mp_npz_for_trial(subject_name: str, trial_stem: str) -> str |
             return None
         return pts3d[0]
 
-    # ── Pass 1: gather candidate combos per frame ─────────────────
-    # candidate := (os_src, od_src, thumb_pt_3d, index_pt_3d,
-    #               thumb_bone_len, index_bone_len, dist_3d).
-    # We need thumb CMC (joint 1) + tip (joint 4) and index MCP
-    # (joint 5) + tip (joint 8) all triangulated for bone-length
-    # scoring.  Each combo's lengths use the chosen source per
-    # camera for ALL of those joints, so picking a source applies
-    # consistently across the whole landmark set.
-    cand_per_frame: list[list[tuple]] = [[] for _ in range(n)]
-    # First-pass min-distance pick + its bone lengths -- the seed
-    # for the temporal + bone-length statistics below.
-    first_dist = np.full(n, np.nan)
-    first_thumb = np.full(n, np.nan)
-    first_index = np.full(n, np.nan)
-
-    for f in range(n):
-        os_codes = [c for c in os_lm if (_valid(os_lm[c], f, THUMB_TIP)
-                                          and _valid(os_lm[c], f, INDEX_TIP)
-                                          and _valid(os_lm[c], f, THUMB_CMC)
-                                          and _valid(os_lm[c], f, INDEX_MCP))]
-        od_codes = [c for c in od_lm if (_valid(od_lm[c], f, THUMB_TIP)
-                                          and _valid(od_lm[c], f, INDEX_TIP)
-                                          and _valid(od_lm[c], f, THUMB_CMC)
-                                          and _valid(od_lm[c], f, INDEX_MCP))]
-        if not os_codes or not od_codes:
-            continue
-        best_d = float("inf"); best_c = None
-        for oc in os_codes:
-            for dc in od_codes:
-                tip_t = _tri(os_lm[oc][f, THUMB_TIP],
-                             od_lm[dc][f, THUMB_TIP])
-                tip_i = _tri(os_lm[oc][f, INDEX_TIP],
-                             od_lm[dc][f, INDEX_TIP])
-                if tip_t is None or tip_i is None:
-                    continue
-                bone_t = _tri(os_lm[oc][f, THUMB_CMC],
-                              od_lm[dc][f, THUMB_CMC])
-                bone_i = _tri(os_lm[oc][f, INDEX_MCP],
-                              od_lm[dc][f, INDEX_MCP])
-                if bone_t is None or bone_i is None:
-                    continue
-                d_ti = float(np.linalg.norm(tip_t - tip_i))
-                l_t  = float(np.linalg.norm(tip_t - bone_t))
-                l_i  = float(np.linalg.norm(tip_i - bone_i))
-                cand_per_frame[f].append((oc, dc, d_ti, l_t, l_i))
-                if d_ti < best_d:
-                    best_d = d_ti
-                    best_c = (oc, dc, d_ti, l_t, l_i)
-        if best_c is not None:
-            first_dist[f]  = best_c[2]
-            first_thumb[f] = best_c[3]
-            first_index[f] = best_c[4]
-
-    # ── Pass 2: rolling reference + bone-length statistics ────────
-    WINDOW = 15           # ± window (frames) for rolling median + MAD
-    K_STABLE = 2.5        # z threshold for "stable" frame inclusion
-    MAD_TO_STD = 1.4826   # MAD → robust std scale
-    EPS = 1e-6
-
-    def _rolling_median_mad(arr, w):
-        """Return (med, mad*scale) arrays of length n; NaN-aware."""
-        med = np.full(len(arr), np.nan)
-        scale = np.full(len(arr), np.nan)
-        for i in range(len(arr)):
-            lo = max(0, i - w); hi = min(len(arr), i + w + 1)
-            chunk = arr[lo:hi]
-            chunk = chunk[~np.isnan(chunk)]
-            if chunk.size >= 3:
-                m = float(np.median(chunk))
-                med[i] = m
-                scale[i] = MAD_TO_STD * float(np.median(np.abs(chunk - m)))
-        return med, scale
-
-    ref_dist, ref_dist_std = _rolling_median_mad(first_dist, WINDOW)
-
-    # Stable mask: first-pass distance was within k_std of its
-    # local rolling median.  Use this to compute SUBJECT-LEVEL
-    # bone-length medians / stds (one constant per trial), since
-    # bone lengths shouldn't vary much across a trial -- a single
-    # median + spread is more reliable than per-frame estimates.
-    diffs = np.abs(first_dist - ref_dist)
-    eff_std = np.where(ref_dist_std > EPS, ref_dist_std, np.nan)
-    stable = ~np.isnan(diffs) & ~np.isnan(eff_std) & (diffs <= K_STABLE * eff_std)
-    thumb_stable = first_thumb[stable]
-    index_stable = first_index[stable]
-    have_bone_stats = thumb_stable.size >= 5 and index_stable.size >= 5
-    if have_bone_stats:
-        thumb_med = float(np.median(thumb_stable))
-        thumb_std = MAD_TO_STD * float(np.median(np.abs(thumb_stable - thumb_med)))
-        index_med = float(np.median(index_stable))
-        index_std = MAD_TO_STD * float(np.median(np.abs(index_stable - index_med)))
-    else:
-        thumb_med = thumb_std = index_med = index_std = None
-
-    # ── Pass 3: score each frame's candidates + pick best ─────────
+    # ── Per-frame: pick the combo with the smallest 3-D thumb-tip ↔
+    #    index-tip distance.  Bone-length terms were dropped because
+    #    the candidate "bones" (thumb CMC ↔ tip, index MCP ↔ tip)
+    #    cross knuckles that bend, so they aren't fixed lengths.
     OS_combined = np.full((n, N_JOINTS, 2), np.nan)
     OD_combined = np.full((n, N_JOINTS, 2), np.nan)
     conf_OS = np.full(n, np.nan)
@@ -1225,31 +1111,24 @@ def build_combined_mp_npz_for_trial(subject_name: str, trial_stem: str) -> str |
     src_OD = np.zeros(n, dtype=np.uint8)
 
     for f in range(n):
-        cands = cand_per_frame[f]
+        os_codes = [c for c in os_lm if (_valid(os_lm[c], f, THUMB_TIP)
+                                          and _valid(os_lm[c], f, INDEX_TIP))]
+        od_codes = [c for c in od_lm if (_valid(od_lm[c], f, THUMB_TIP)
+                                          and _valid(od_lm[c], f, INDEX_TIP))]
         os_pick = od_pick = COMBINED_SRC_NONE
-
-        if cands:
-            # When we have rolling stats AND bone stats, score by
-            # z-sum.  Otherwise score by raw distance (original
-            # min-distance behaviour) so trials too short / sparse
-            # for stats still come out reasonable.
-            rd  = ref_dist[f] if np.isfinite(ref_dist[f]) else None
-            rds = ref_dist_std[f] if (rd is not None
-                                       and np.isfinite(ref_dist_std[f])) else None
-            best = None; best_score = float("inf")
-            for (oc, dc, d, l_t, l_i) in cands:
-                if rd is not None and rds is not None and have_bone_stats:
-                    z_d = abs(d   - rd       ) / max(rds,       EPS)
-                    z_t = abs(l_t - thumb_med) / max(thumb_std, EPS)
-                    z_i = abs(l_i - index_med) / max(index_std, EPS)
-                    score = z_d + z_t + z_i
-                else:
-                    score = d
-                if score < best_score:
-                    best_score = score
-                    best = (oc, dc)
-            if best is not None:
-                os_pick, od_pick = best
+        best_d = float("inf")
+        for oc in os_codes:
+            for dc in od_codes:
+                tip_t = _tri(os_lm[oc][f, THUMB_TIP],
+                             od_lm[dc][f, THUMB_TIP])
+                tip_i = _tri(os_lm[oc][f, INDEX_TIP],
+                             od_lm[dc][f, INDEX_TIP])
+                if tip_t is None or tip_i is None:
+                    continue
+                d = float(np.linalg.norm(tip_t - tip_i))
+                if d < best_d:
+                    best_d = d
+                    os_pick, od_pick = oc, dc
 
         # When tip-based selection didn't run for a camera (no
         # candidate had both tips), fall back to "use whichever
@@ -1308,9 +1187,7 @@ def build_combined_mp_npz_for_trial(subject_name: str, trial_stem: str) -> str |
         ) or "none"
     logger.info(
         f"Combined MP for {subject_name}/{trial_stem}: "
-        f"OS [{_counts(src_OS)}] | OD [{_counts(src_OD)}] | "
-        f"bone-stats {'on' if have_bone_stats else 'off'} "
-        f"(stable_n={int(np.sum(stable))}/{int(np.sum(~np.isnan(first_dist)))})"
+        f"OS [{_counts(src_OS)}] | OD [{_counts(src_OD)}]"
     )
 
     # Keep the subject's median hand sizes current — Combined-MP just
