@@ -193,6 +193,7 @@ function renderDiagnosisGroups() {
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/preproc?subject=${s.id}'">Preproc</button>
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/labels?subject=${s.id}'">Labels</button>
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="openLabeling(${s.id})">DLC</button>
+                            <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/events?subject=${s.id}'">Events</button>
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/results?subject=${s.id}&from=dashboard'">Results</button>
                         </div>
                     </div>
