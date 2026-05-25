@@ -193,7 +193,15 @@ function renderDiagnosisGroups() {
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/preproc?subject=${s.id}'">Preproc</button>
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/labels?subject=${s.id}'">Labels</button>
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="openLabeling(${s.id})">DLC</button>
-                            <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/events?subject=${s.id}'">Events</button>
+                            <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;${
+                                (s.stage === 'events_complete' || s.stage === 'complete')
+                                    ? ''
+                                    : 'background:#d32f2f;border-color:#b71c1c;color:#fff;'
+                            }" title="${
+                                (s.stage === 'events_complete' || s.stage === 'complete')
+                                    ? 'All trials have open, peak, and close events saved'
+                                    : 'Missing open / peak / close events on one or more trials'
+                            }" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/events?subject=${s.id}'">Events</button>
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/results?subject=${s.id}&from=dashboard'">Results</button>
                         </div>
                     </div>
