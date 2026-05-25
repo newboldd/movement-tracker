@@ -73,13 +73,32 @@ def main() -> None:
     # subjects list is always re-fetched (cheap) so we can enumerate.
     resume = "--fresh" not in sys.argv
 
+    def _stale(url: str, payload) -> bool:
+        """Decide whether an already-cached payload is missing fields
+        that were added after it was first written — in which case we
+        force a re-fetch.  Add new sentinels here as the schema evolves."""
+        if not isinstance(payload, dict):
+            return False
+        subjs = payload.get("subjects")
+        if not isinstance(subjs, list) or not subjs:
+            return False
+        s0 = subjs[0]
+        if "/api/results/explore" in url:
+            vars0 = s0.get("vars") or {}
+            return "movement_similarity" not in vars0
+        if "/api/results/group" in url:
+            return "movement_similarity" not in s0
+        return False
+
     def dump(url: str, *, always: bool = False) -> dict | list | None:
         nonlocal written, resumed
         out_file = data_dir / _flatten(url)
         if resume and not always and out_file.exists() and out_file.stat().st_size > 0:
-            resumed += 1
             try:
-                return json.loads(out_file.read_text())
+                cached = json.loads(out_file.read_text())
+                if not _stale(url, cached):
+                    resumed += 1
+                    return cached
             except Exception:
                 pass  # corrupt → re-fetch below
         resp = client.get(url)
