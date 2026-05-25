@@ -120,7 +120,14 @@ function _renderAggRadios(prefix) {
             </label>`).join('');
     }
     host.innerHTML = html;
-    host.querySelectorAll('input').forEach(r => r.addEventListener('change', render));
+    host.querySelectorAll('input').forEach(r => r.addEventListener('change', () => {
+        // Treat an aggregator / metric change like a variable change:
+        // reset the corresponding axis so Plotly's auto-range kicks in
+        // on the next draw.
+        if (prefix === 'X') { $('exXMin').value = ''; $('exXMax').value = ''; }
+        else if (prefix === 'Y') { $('exYMin').value = ''; $('exYMax').value = ''; }
+        render();
+    }));
 }
 
 function _agg(prefix) {
