@@ -33,7 +33,10 @@ import numpy as np
 from ..config import get_settings
 from .calibration import get_calibration_for_subject, triangulate_points
 from .skeleton_data import _skeleton_dir, HAND_SKELETON
-from .mediapipe_prelabel import load_mediapipe_prelabels
+from .mediapipe_prelabel import (
+    load_mediapipe_prelabels,
+    load_mediapipe_combined_prelabels,
+)
 from .video import build_trial_map
 
 logger = logging.getLogger(__name__)
@@ -1250,7 +1253,11 @@ def _run_skeleton_v3_fk_legacy(
     start_frame = trial_info.get("start_frame", 0)
 
     # ── MediaPipe ───────────────────────────────────────────────
-    prelabels = load_mediapipe_prelabels(subject_name)
+    # Prefer the per-frame fused Combined layer; fall back to the
+    # forward-only baseline when no combined file exists yet.
+    prelabels = load_mediapipe_combined_prelabels(subject_name)
+    if prelabels is None:
+        prelabels = load_mediapipe_prelabels(subject_name)
     if prelabels is None:
         raise ValueError(f"No MediaPipe prelabels for {subject_name}")
     os_lm = prelabels["OS_landmarks"]
