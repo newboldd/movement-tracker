@@ -3970,6 +3970,32 @@ document.getElementById('includeAutoToggle').addEventListener('change', _onInclu
 document.getElementById('groupSelectAllBtn').addEventListener('click',
     () => window._groupSelectAll(true));
 
+document.getElementById('groupRegenerateBtn')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const orig = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Regenerating…';
+    try {
+        const src = document.getElementById('groupSourceSelect')?.value || 'auto';
+        const seqMode = document.getElementById('groupSeqModeSelect')?.value || 'linear_full';
+        const hand = document.getElementById('groupHandSelect')?.value || 'more';
+        const trial = document.getElementById('groupTrialSelect')?.value || 'last';
+        cachedGroup = await API.post(
+            `/api/results/group/regenerate?include_auto=true&source=${src}` +
+            `&seq_mode=${seqMode}&hand=${hand}&trial=${trial}`);
+        _initGroupSubjectChecked();
+        renderGroupPlots();
+        btn.textContent = 'Done';
+        setTimeout(() => { btn.textContent = orig; }, 1200);
+    } catch (err) {
+        btn.textContent = 'Error';
+        console.error('Regenerate failed:', err);
+        setTimeout(() => { btn.textContent = orig; }, 1800);
+    } finally {
+        btn.disabled = false;
+    }
+});
+
 // Group-tab source + sequence-effect dropdowns — re-fetch the group
 // data with the new parameters.
 document.getElementById('groupSourceSelect')?.addEventListener('change', () => {

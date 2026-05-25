@@ -1339,6 +1339,43 @@ def get_movements(subject_id: int, source: str = Query("auto")) -> dict:
     }
 
 
+@router.post("/group/regenerate")
+def regenerate_group_cache(include_auto: bool = Query(False),
+                             source: str = Query("auto"),
+                             seq_mode: str = Query("linear_full"),
+                             hand: str = Query("more"),
+                             trial: str = Query("last")) -> dict:
+    """Force a fresh recompute of the group-comparison data for the
+    given query combo and overwrite the on-disk cache JSON.  Useful
+    after editing a subject's events — drop in a new copy of the
+    cached file so subsequent visits to the page (here or on the
+    static site) reflect the change."""
+    cache = _group_cache_path(include_auto, source, seq_mode, hand, trial)
+    if cache is not None and cache.is_file():
+        try:
+            cache.unlink()
+        except OSError:
+            pass
+    # Drop the in-memory per-subject movement cache too (if the
+    # export-cache flag happens to be on) so the recompute starts from
+    # disk events.
+    try:
+        _EXPORT_MOVE_CACHE.clear()
+    except Exception:
+        pass
+    data = get_group_comparison(
+        include_auto=include_auto, source=source,
+        seq_mode=seq_mode, hand=hand, trial=trial,
+    )
+    if cache is not None:
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(_json.dumps(data))
+        except OSError:
+            pass
+    return data
+
+
 @router.get("/group")
 def get_group_comparison(include_auto: bool = Query(False),
                           source: str = Query("auto"),
