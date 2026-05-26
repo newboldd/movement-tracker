@@ -1,24 +1,40 @@
 #!/usr/bin/env python3
 """Measure the residual offset between auto-detected events and the
-saved (manually-curated) events, and write per-event integer shifts to
+saved (manually-curated) events, and write the calibration JSON read
+by ``detect_events_from_peaks`` / ``auto_detect_from_distance`` at
 ``<MT_DATA_DIR>/auto_detect_calibration.json``.
 
-``auto_detect_from_distance`` reads that file and applies the shifts
-AFTER detection so the auto picks land on the same integer frame the
-user typically chooses.
+Two phases:
+
+1. Run ``detect_events_from_peaks`` with the user's saved peaks as
+   anchors (matching the production workflow — peaks are manually
+   corrected before opens / closes are detected) and with calibration
+   *disabled*, so the measurements reflect the raw algorithm.
+
+2. For each event type, pick the integer shift that MAXIMIZES the
+   exact-match count.  For CLOSE we additionally sweep a velocity
+   veto threshold; the wider shift + veto combination that pays off
+   on more events wins.
+
+Output JSON (richer than the older bare-int format):
+
+    {
+      "open":  {"shift": -1},
+      "peak":  {"shift": 0},
+      "close": {"shift": -3, "veto": {"side": "next", "thresh": 0.60}}
+    }
+
+The loader (``_load_calibration_offsets``) also accepts the legacy
+``{"open": -2, "peak": 0, "close": -1}`` form for backwards compat.
 
 Run:
 
     MT_DATA_DIR=~/data/movement-tracker python3 scripts/calibrate_auto_detect.py
 
-By default the script uses the file at ``<MT_DATA_DIR>``.  Pass
-``--print`` to skip writing and just see the numbers.
-
-The auto-detector is invoked with ``calibration_offsets={...zero...}``
-so the measurement isn't biased by a previous calibration pass.
-
-Matching tolerance is ``--tol`` frames (default 5).  Median offset
-across all matched events per type goes into the JSON.
+Options:
+    --tol N      Matching tolerance for (saved, auto) pairs (default 5).
+    --print      Print the result instead of writing it.
+    --subjects   Whitespace-separated subject names; otherwise all with events.csv.
 """
 from __future__ import annotations
 
@@ -34,8 +50,18 @@ sys.path.insert(0, str(REPO_ROOT))
 import numpy as np
 
 from movement_tracker.config import DATA_DIR
-from movement_tracker.services.metrics import auto_detect_from_distance
-from movement_tracker.services.mediapipe_prelabel import get_mediapipe_for_session
+from movement_tracker.services.calibration import get_calibration_for_subject
+from movement_tracker.services.metrics import (
+    detect_events_from_peaks,
+    build_joint_3d_trace,
+    velocity_magnitude_3d,
+    INDEX_TIP,
+)
+from movement_tracker.services.mediapipe_prelabel import (
+    get_mediapipe_for_session,
+    load_mediapipe_combined_prelabels,
+    load_mediapipe_prelabels,
+)
 from movement_tracker.services.video import build_trial_map
 
 
@@ -60,34 +86,24 @@ def _read_saved_events(path: Path) -> dict:
 
 
 def _build_trials(subject: str) -> list[dict]:
-    """Build the [{start_frame, end_frame, ...}, ...] trial list the
-    same way the labeling endpoints do."""
     trial_map = build_trial_map(subject)
     if not trial_map:
         return []
-    trials = []
-    for tm in trial_map:
-        trials.append({
-            "start_frame": int(tm["start_frame"]),
-            "end_frame": int(tm["end_frame"]),
-            "trial_name": tm.get("trial_name", ""),
-        })
-    return trials
+    return [{"start_frame": int(t["start_frame"]),
+              "end_frame": int(t["end_frame"]),
+              "trial_name": t.get("trial_name", "")} for t in trial_map]
 
 
 def _match(saved: list[int], auto: list[int], tol: int):
-    """Greedy 1-to-1 match within ±tol frames; return list of (auto−saved)
-    offsets for matched pairs."""
     used = [False] * len(auto)
     offsets = []
     for s in saved:
-        best_j = -1
-        best_d = tol + 1
+        best_j, best_d = -1, tol + 1
         for j, a in enumerate(auto):
             if used[j]:
                 continue
             d = a - s
-            if abs(d) < abs(best_d) or (abs(d) == abs(best_d) and best_j < 0):
+            if abs(d) < abs(best_d):
                 best_d = d
                 best_j = j
         if best_j >= 0 and abs(best_d) <= tol:
@@ -98,18 +114,14 @@ def _match(saved: list[int], auto: list[int], tol: int):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tol", type=int, default=5,
-                    help="Matching tolerance (frames) for (saved, auto) pairs.")
-    ap.add_argument("--print", action="store_true",
-                    help="Print the result instead of writing it.")
-    ap.add_argument("--subjects", nargs="*", default=None,
-                    help="Limit to specific subject names (default: all).")
+    ap.add_argument("--tol", type=int, default=5)
+    ap.add_argument("--print", action="store_true")
+    ap.add_argument("--subjects", nargs="*", default=None)
     args = ap.parse_args()
 
     dlc_root = DATA_DIR / "dlc"
     if not dlc_root.is_dir():
-        print(f"No dlc directory at {dlc_root}; nothing to calibrate.",
-              file=sys.stderr)
+        print(f"No dlc directory at {dlc_root}.", file=sys.stderr)
         sys.exit(1)
 
     subjects = args.subjects
@@ -118,87 +130,155 @@ def main():
                            if p.is_dir() and (p / "events.csv").exists())
     print(f"Scanning {len(subjects)} subjects…", file=sys.stderr)
 
-    pooled = {"open": [], "peak": [], "close": []}
-    per_subject = {}
-    n_match = {"open": 0, "peak": 0, "close": 0}
-
+    # Collect per-event (saved_frame, auto_frame_unshifted, v_index_full)
+    records = {"open": [], "close": []}
+    n_subj = 0
     for subj in subjects:
         events_path = dlc_root / subj / "events.csv"
         saved = _read_saved_events(events_path)
-        if not any(saved.values()):
+        if not (saved["peak"] and (saved["open"] or saved["close"])):
             continue
         trials = _build_trials(subj)
         if not trials:
             continue
-        try:
-            mp = get_mediapipe_for_session(subj, prefer_combined=True)
-        except Exception as e:
-            print(f"  ! {subj}: load failed ({e})", file=sys.stderr)
+        # Load raw arrays directly (the labeler-facing helper aliases
+        # them as thumb/index dicts; we need full 21-joint arrays).
+        data = load_mediapipe_combined_prelabels(subj)
+        if data is None:
+            data = load_mediapipe_prelabels(subj)
+        if data is None:
             continue
-        if mp is None or "distances" not in mp:
-            continue
-        distances = mp.get("distances_clean")
+        distances = data.get("distances_clean")
         if distances is None or not np.any(~np.isnan(distances)):
-            distances = mp["distances"]
-        # ``pre_clean`` is True so we exercise the production path;
-        # offsets={0,0,0} so we measure the raw residual.
-        auto = auto_detect_from_distance(
-            list(distances), trials,
-            calibration_offsets={"open": 0, "peak": 0, "close": 0},
+            distances = data.get("distances")
+        if distances is None:
+            continue
+        OS = data.get("OS_landmarks")
+        OD = data.get("OD_landmarks")
+        calib = None
+        try:
+            calib = get_calibration_for_subject(subj)
+        except Exception:
+            calib = None
+        # Run detection with calibration disabled (zero shifts, no veto)
+        # so the offsets we measure reflect the raw algorithm.
+        auto = detect_events_from_peaks(
+            list(distances), trials, saved["peak"],
+            OS_landmarks=OS, OD_landmarks=OD, calib=calib,
+            calibration={"open": 0, "peak": 0, "close": 0},
         )
-        subj_off = {"open": [], "peak": [], "close": []}
-        for etype in ("open", "peak", "close"):
-            offs = _match(saved.get(etype, []), auto.get(etype, []), args.tol)
-            pooled[etype].extend(offs)
-            subj_off[etype] = offs
-            n_match[etype] += len(offs)
-        per_subject[subj] = subj_off
+        # Per-event records.  We also need v_index for the close sweep
+        # so the adaptive veto can be evaluated post-hoc.
+        v_index = None
+        if OS is not None and OD is not None and calib is not None:
+            try:
+                idx3d = build_joint_3d_trace(OS, OD, INDEX_TIP, calib)
+                v_index = velocity_magnitude_3d(idx3d, smooth_sigma=1.0)
+            except Exception:
+                v_index = None
+        for etype in ("open", "close"):
+            pairs = _match(saved[etype], auto[etype], args.tol)
+            # We need (saved, auto) pairs not just offsets to evaluate
+            # shifts — recover them via a parallel match.
+            used = [False] * len(auto[etype])
+            for s in saved[etype]:
+                bj, bd = -1, args.tol + 1
+                for j, a in enumerate(auto[etype]):
+                    if used[j]: continue
+                    d = a - s
+                    if abs(d) < abs(bd):
+                        bd = d; bj = j
+                if bj >= 0 and abs(bd) <= args.tol:
+                    used[bj] = True
+                    records[etype].append({
+                        "subject": subj,
+                        "saved": int(s),
+                        "auto": int(auto[etype][bj]),
+                        "v": v_index,
+                    })
+        n_subj += 1
+
+    print(f"\nUsable subjects: {n_subj}", file=sys.stderr)
+    print(f"Open pairs: {len(records['open'])}  Close pairs: {len(records['close'])}\n",
+          file=sys.stderr)
+
+    def _ratio(v, f, side, window=5):
+        if v is None: return np.nan
+        n = len(v)
+        if f < 1 or f >= n - 1: return np.nan
+        fq = f - 1 if side == "prior" else f + 1
+        if fq < 0 or fq >= n: return np.nan
+        lo = max(0, f - window); hi = min(n, f + window + 1)
+        lm = np.nanmax(v[lo:hi]) if hi > lo else np.nan
+        if not np.isfinite(lm) or lm < 1.0: return np.nan
+        vq = v[fq]
+        if not np.isfinite(vq): return np.nan
+        return float(vq / lm)
+
+    def _exact_count(etype, shift, thresh=None):
+        side = "prior" if etype == "open" else "next"
+        n = 0
+        for r in records[etype]:
+            cand = r["auto"] + shift
+            use_shift = True
+            if thresh is not None:
+                rr = _ratio(r["v"], cand, side)
+                if np.isfinite(rr) and rr > thresh:
+                    use_shift = False
+            chosen = cand if use_shift else r["auto"]
+            if chosen == r["saved"]:
+                n += 1
+        return n
 
     out = {}
-    print("\nResidual offsets (auto − saved):", file=sys.stderr)
-    print(f"  {'event':<6} {'matches':>8} {'median':>7} {'mean':>7} {'IQR':>14} {'shift':>6}",
+
+    # OPEN — sweep shift only (no veto; the velocity-onset detector
+    # plus a global shift already does well).
+    print("OPEN  (no veto):", file=sys.stderr)
+    best_shift, best_n = 0, _exact_count("open", 0)
+    for s in range(-4, 5):
+        c = _exact_count("open", s)
+        marker = " *" if c > best_n else ""
+        print(f"  shift {s:+d}: exact {c:5d}{marker}", file=sys.stderr)
+        if c > best_n:
+            best_shift, best_n = s, c
+    out["open"] = {"shift": int(best_shift)}
+    print(f"  → open shift = {best_shift:+d}  (exact {best_n})\n", file=sys.stderr)
+
+    # CLOSE — sweep (shift, thresh).
+    print("CLOSE  (veto on next-frame v_index ratio):", file=sys.stderr)
+    print(f"  {'shift':>6}  " + "  ".join(f"t={t:.2f}" for t in
+          [0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 1.00]) + "  no-veto",
           file=sys.stderr)
-    for etype in ("open", "peak", "close"):
-        offs = np.asarray(pooled[etype], dtype=int)
-        if offs.size == 0:
-            shift = 0
-            print(f"  {etype:<6} {0:>8} {'-':>7} {'-':>7} {'-':>14} {0:>6}",
-                  file=sys.stderr)
-        else:
-            med = float(np.median(offs))
-            mean = float(np.mean(offs))
-            q1, q3 = float(np.percentile(offs, 25)), float(np.percentile(offs, 75))
-            # Pick the integer shift that MAXIMIZES the at-exact-0 count
-            # (mode-based, not median-based).  The median-based rule
-            # over-corrects when the distribution is skewed: e.g. closes
-            # with offsets concentrated at 0 but a long tail at +2/+3
-            # have median +1, but shifting by −1 moves the cluster of
-            # already-zero events to −1 and only the small tail to 0.
-            counts = {}
-            for o in offs:
-                counts[int(o)] = counts.get(int(o), 0) + 1
-            # Search the small integer range around the median; pick
-            # the shift k that puts the most events at offset 0 (i.e.
-            # the count at integer −k in the raw distribution).
-            best_k, best_count = 0, counts.get(0, 0)
-            for k in range(-5, 6):
-                c = counts.get(-k, 0)
-                if c > best_count:
-                    best_count = c
-                    best_k = k
-            shift = best_k
-            print(f"  {etype:<6} {offs.size:>8} {med:>+7.2f} {mean:>+7.2f}"
-                  f"  [{q1:+.1f},{q3:+.1f}]  {shift:>+6d}",
-                  file=sys.stderr)
-        out[etype] = shift
+    best = {"shift": 0, "thresh": None, "exact": _exact_count("close", 0)}
+    for shift in range(-4, 4):
+        row = [f"  {shift:+d}    "]
+        for thresh in (0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 1.00, None):
+            c = _exact_count("close", shift, thresh)
+            row.append(f"{c:5d}")
+            if c > best["exact"]:
+                best = {"shift": shift, "thresh": thresh, "exact": c}
+        print("  ".join(row), file=sys.stderr)
+
+    close_entry: dict = {"shift": int(best["shift"])}
+    if best["thresh"] is not None and best["exact"] > _exact_count("close", best["shift"], None):
+        close_entry["veto"] = {"side": "next", "thresh": float(best["thresh"])}
+        print(f"  → close shift = {best['shift']:+d}, veto thresh = "
+              f"{best['thresh']:.2f}  (exact {best['exact']})\n", file=sys.stderr)
+    else:
+        print(f"  → close shift = {best['shift']:+d}  no veto  "
+              f"(exact {best['exact']})\n", file=sys.stderr)
+    out["close"] = close_entry
+
+    # PEAK — saved peaks pass through unmodified.
+    out["peak"] = {"shift": 0}
 
     if args.print:
-        print("\n" + json.dumps(out, indent=2))
+        print(json.dumps(out, indent=2))
         return
-
     cal_path = DATA_DIR / "auto_detect_calibration.json"
     cal_path.write_text(json.dumps(out, indent=2) + "\n")
-    print(f"\nWrote {cal_path}", file=sys.stderr)
+    print(f"Wrote {cal_path}", file=sys.stderr)
     print(json.dumps(out, indent=2))
 
 
