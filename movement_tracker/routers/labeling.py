@@ -886,6 +886,45 @@ def commit_session(
 AUTO_DETECT_TYPES = ("open", "peak", "close")  # used by auto-detection
 
 
+# Auto-tuned ``detect_strategy_g`` parameters live next to the data
+# dir; ``scripts/calibrate_strategy_g.py`` regenerates the file by
+# sweeping against the saved-events corpus.  Mtime-cached so the
+# labeler picks up edits on the next call without a restart.
+_STRATEGY_G_CAL_CACHE: tuple[float, dict] | None = None
+_STRATEGY_G_CAL_KEYS = (
+    "ssd_search_radius",
+    "dist_guard_factor",
+    "open_bias",
+    "close_bias",
+    "gaussian_sigma",
+    "reversal_search_radius",
+    "peak_guard_factor",
+    "dist_guard_factor",
+)
+
+
+def _load_strategy_g_cal() -> dict:
+    """Return the auto-tuned strategy_g params dict, or {} if the file
+    is missing / unreadable.  Cached by mtime."""
+    global _STRATEGY_G_CAL_CACHE
+    from ..config import DATA_DIR
+    path = DATA_DIR / "strategy_g_calibration.json"
+    try:
+        st = path.stat()
+    except OSError:
+        _STRATEGY_G_CAL_CACHE = None
+        return {}
+    if _STRATEGY_G_CAL_CACHE and _STRATEGY_G_CAL_CACHE[0] == st.st_mtime:
+        return _STRATEGY_G_CAL_CACHE[1]
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    out = {k: raw[k] for k in _STRATEGY_G_CAL_KEYS if k in raw}
+    _STRATEGY_G_CAL_CACHE = (st.st_mtime, out)
+    return out
+
+
 def _get_event_type_names() -> list[str]:
     """Get configured event type names from settings."""
     settings = get_settings()
@@ -1427,6 +1466,15 @@ def detect_events_v2(session_id: int, body: dict = Body(...)) -> dict:
     ef = trial["end_frame"]
 
     params = body.get("params", {})
+    # Merge in the auto-tuned strategy_g parameters from
+    # ``<DATA_DIR>/strategy_g_calibration.json`` (written by
+    # scripts/calibrate_strategy_g.py).  Caller-supplied keys override.
+    try:
+        cal_params = _load_strategy_g_cal()
+        if cal_params:
+            params = {**cal_params, **params}
+    except Exception:
+        pass   # calibration file optional
     steps = body.get("steps", {})
     metrics = body.get("metrics")
     # ``phase`` is the new explicit control replacing the boolean
