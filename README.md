@@ -1,28 +1,36 @@
-# Movement Tracker
+<p align="center">
+  <img src="skeleton_icon.png" alt="Movement Tracker" width="220">
+</p>
 
-A self-hosted web app for video-based fine motor assessment. Designed for clinical research on conditions such as Parkinson's disease, MSA, and essential tremor — specifically tasks like finger tapping, alternating hand movements, and fist opening/closing that are standard in neurological exams.
+<h1 align="center">Movement Tracker</h1>
 
-The app manages the full pipeline: importing and de-identifying subject videos, labeling keypoints with DeepLabCut, running MediaPipe hand tracking, fitting 3D hand models with MANO, and computing movement metrics for analysis.
+<p align="center">
+  <em>A self-hosted web app for video-based fine-motor assessment</em><br>
+  for clinical research on <strong>Parkinson's</strong>, <strong>MSA</strong>, <strong>PSP</strong>, essential tremor and related movement disorders.
+</p>
+
+<p align="center">
+  <a href="https://creativecommons.org/licenses/by-nc/4.0/"><img alt="License: CC BY-NC 4.0" src="https://img.shields.io/badge/license-CC--BY--NC--4.0-blue.svg"></a>
+  <a href="#"><img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9+-3776ab.svg?logo=python&logoColor=white"></a>
+  <a href="https://fastapi.tiangolo.com/"><img alt="FastAPI" src="https://img.shields.io/badge/web-FastAPI-009688?logo=fastapi&logoColor=white"></a>
+  <a href="https://deeplabcut.github.io/DeepLabCut/"><img alt="DeepLabCut" src="https://img.shields.io/badge/pose-DeepLabCut-555.svg"></a>
+  <a href="https://mediapipe.dev/"><img alt="MediaPipe" src="https://img.shields.io/badge/hands-MediaPipe-4285F4?logo=google&logoColor=white"></a>
+  <a href="https://doi.org/10.5281/zenodo.19099855"><img alt="Sample data: Zenodo" src="https://img.shields.io/badge/sample%20data-Zenodo-1682d4.svg"></a>
+</p>
+
+<p align="center">
+  <a href="#-quick-start">Quick start</a> ·
+  <a href="#-features">Features</a> ·
+  <a href="#-typical-workflow">Workflow</a> ·
+  <a href="#%EF%B8%8F-configuration">Configuration</a> ·
+  <a href="#-citation">Citation</a>
+</p>
 
 ---
 
-## Features
+## 🚀 Quick start
 
-- **Subject management** — import videos, trim trials, organise subjects by diagnosis group
-- **Face de-identification** — automatic face blurring before storage or sharing
-- **Video viewer** — scrub, zoom, and switch camera views; MediaPipe-guided auto-crop
-- **DLC labeling** — frame-by-frame keypoint annotation with keyboard shortcuts, auto-detection of movement events (open/peak/close/pause)
-- **MediaPipe prelabeling** — hand landmark tracking used to guide crop and camera selection; re-run with a custom bounding box per camera for improved detection
-- **MANO viewer** — 3D hand pose overlaid on stereo video with distance traces
-- **Results dashboard** — per-trial movement metrics with configurable sequence and group comparisons
-- **Remote processing** — run DLC inference and MediaPipe on a GPU server over SSH; results download automatically
-- **Configurable** — camera names, bodyparts, diagnosis groups, event types all set via the Settings page or environment variables
-
----
-
-## Quick start
-
-**Requirements:** Python 3.9+, macOS or Linux (Windows via WSL or the included `run.bat`)
+> **Requirements:** Python 3.9+, macOS or Linux (Windows via WSL or the bundled `run.bat`).
 
 ```bash
 git clone https://github.com/newboldd/movement-tracker
@@ -30,57 +38,93 @@ cd movement-tracker
 ./setup.sh
 ```
 
-`setup.sh` will:
-1. Create a virtual environment and install Python dependencies
-2. Download the sample video (~24 MB) from Zenodo on first run
-3. Start the app and open `http://localhost:8080` in your browser
+`setup.sh` creates a virtual environment, installs Python dependencies, downloads the ~24 MB sample video from Zenodo, and opens the app at **http://localhost:8080**.
 
-> **Shortcut:** The repo includes `Movement Tracker.command` — on macOS you can drag it to your Dock or Desktop to launch the app with a double-click.
+<table>
+  <tr>
+    <td>🍎</td>
+    <td><strong>macOS</strong> — double-click <code>Movement Tracker.app</code> in the repo (or drag it to your Dock).</td>
+  </tr>
+  <tr>
+    <td>🪟</td>
+    <td><strong>Windows</strong> — double-click <code>run.bat</code>. On first launch it auto-creates <code>Movement Tracker.lnk</code> with the hand icon so you can pin it like a normal app.</td>
+  </tr>
+  <tr>
+    <td>🐧</td>
+    <td><strong>Linux / WSL</strong> — same as macOS: <code>./setup.sh</code>.</td>
+  </tr>
+</table>
 
-On first launch, open **Settings** and point the app at your video directory and DeepLabCut project directory. To explore with the included sample data, set the video directory to `sample_data/` and click **Sync from disk** on the dashboard.
-
-> **Workshop?** See [`WORKSHOP.md`](WORKSHOP.md) for a guided 45-minute hands-on walkthrough — covers installation, MediaPipe, labeling, bounding box cropping, and results. Ideal for lab meetings or onboarding new team members.
-
-### Windows
-
-```bat
-run.bat
-```
-
-Or, using WSL, follow the same steps as macOS/Linux above.
-
----
-
-## Typical workflow
-
-```
-1. Add Subject    (/onboarding)
-   Browse to a source video → trim trial segments → set labels (L1, R1, ...) → process
-   Face blurring happens here; trimmed trials are saved to your video directory.
-
-2. DLC Labeling   (/labeling-select)
-   Open a subject → label keypoints frame by frame → use auto-detect to mark events.
-
-3. MediaPipe      (runs via Processing tab or automatically during import)
-   Hand landmarks extracted per trial; used for auto-crop in the video viewer.
-   Draw a bounding box in the labeler to re-run on a cropped region per camera.
-
-4. MANO           (/mano)
-   3D hand pose fitted to stereo video; distance traces computed per trial.
-
-5. Results        (/results)
-   Per-subject and group-level movement metrics; export to CSV.
-```
+> 🎓 **Running a workshop?** [`WORKSHOP.md`](WORKSHOP.md) walks through a guided 45-minute session — install → MediaPipe → labeling → bounding-box crop → results. Ideal for lab meetings and onboarding.
 
 ---
 
-## Sample data
+## ✨ Features
 
-A short finger-tapping example video (Con01_R1.mp4, ~24 MB, stereo) is available on Zenodo:
+<table>
+  <tr>
+    <td valign="top" width="50%">
+      <h3>👤 Subject management</h3>
+      Import raw stereo videos, trim trials, organise by diagnosis group. Face detection runs automatically on import so identifiable faces are blurred before storage.
+    </td>
+    <td valign="top" width="50%">
+      <h3>🖍️ DLC labeling</h3>
+      Frame-by-frame keypoint annotation with keyboard shortcuts. Auto-detects movement events (open / peak / close) from the distance trace and renders them on a synchronised timeline.
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <h3>✋ MediaPipe prelabels</h3>
+      Forward, reverse, static, and bbox-cropped MediaPipe passes are fused into a single <em>Combined</em> layer that the rest of the pipeline reads. Run any source with one click.
+    </td>
+    <td valign="top">
+      <h3>🦴 MANO 3D fit</h3>
+      Stereo-triangulated 3-D hand pose; multiple fitting strategies (Stage 1, Fit Legacy, Fit v2) share the Combined-MP layer so improvements propagate everywhere.
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <h3>📊 Results</h3>
+      Per-trial movement metrics (amplitude, IMI, peak velocities, sequence effect, …), group comparisons, and an Explore tool with scatter/bar plots, hierarchical clustering, and correlation/covariance matrices.
+    </td>
+    <td valign="top">
+      <h3>☁️ Remote GPU</h3>
+      Submit MediaPipe / DLC inference to a GPU host over SSH. Videos upload, jobs run remotely, results download — no GPU dependencies needed locally.
+    </td>
+  </tr>
+</table>
 
-> Newbold, D. (2025). *Finger tapping example* [Data set]. Zenodo. https://doi.org/10.5281/zenodo.19099855
+---
 
-This file is downloaded automatically by `setup.sh`. To fetch it manually:
+## 🔁 Typical workflow
+
+```
+1. Add Subject    /onboarding
+   Browse to source video → trim trials → set hand labels (L1, R1, …)
+   Faces blurred and trials saved to your video directory.
+
+2. DLC Labeling   /labeling-select
+   Open subject → label keypoints frame-by-frame → auto-detect events.
+
+3. MediaPipe      Processing tab (or auto on import)
+   Hand landmarks per trial; combined source layer drives downstream code.
+
+4. MANO Fit       /mano
+   Stereo 3-D pose; distance traces computed per trial.
+
+5. Results        /results
+   Per-subject + group metrics; static-site export for GitHub-Pages sharing.
+```
+
+---
+
+## 🗂️ Sample data
+
+A short finger-tapping example video (<code>Con01_R1.mp4</code>, ~24 MB, stereo) is on Zenodo:
+
+> Newbold, D. (2025). *Finger tapping example* [Data set]. Zenodo. <https://doi.org/10.5281/zenodo.19099855>
+
+Downloaded automatically by `setup.sh`. Manual fetch:
 
 ```bash
 python scripts/download_sample.py
@@ -88,9 +132,9 @@ python scripts/download_sample.py
 
 ---
 
-## Configuration
+## ⚙️ Configuration
 
-Settings are stored in `movement_tracker/settings.json` (created on first run, gitignored). All settings can also be provided as environment variables — useful for deployment or CI.
+Settings live in `movement_tracker/settings.json` (gitignored). Every setting also reads from an environment variable — useful for deployment or CI.
 
 | Setting | Env var | Description |
 |---|---|---|
@@ -98,62 +142,59 @@ Settings are stored in `movement_tracker/settings.json` (created on first run, g
 | DLC directory | `DLC_APP_DLC_DIR` | DeepLabCut project directory |
 | Camera names | `DLC_APP_CAMERA_NAMES` | Comma-separated, e.g. `OS,OD` |
 | Bodyparts | `DLC_APP_BODYPARTS` | Comma-separated, e.g. `thumb,index` |
-| Port | `DLC_APP_PORT` | Default: `8080` |
+| Port | `DLC_APP_PORT` | Default `8080` |
 | Remote host | `DLC_APP_REMOTE_HOST` | SSH target, e.g. `user@gpu-server` |
-| Remote Python | `DLC_APP_REMOTE_PYTHON` | Python executable on remote, e.g. `/home/user/envs/dlc/bin/python` |
+| Remote Python | `DLC_APP_REMOTE_PYTHON` | Remote python binary, e.g. `/home/user/envs/dlc/bin/python` |
 | Remote work dir | `DLC_APP_REMOTE_WORK_DIR` | Scratch directory on remote |
 | Remote SSH key | `DLC_APP_REMOTE_SSH_KEY` | Optional path to private key |
-| Remote SSH port | `DLC_APP_REMOTE_SSH_PORT` | Default: `22` |
-
-### Remote GPU processing
-
-The **Processing** tab lets you run DLC inference and MediaPipe on a remote machine over SSH without installing GPU dependencies locally. Videos are uploaded to the remote host, processed, and results are downloaded when the job completes. Configure the connection in **Settings → Remote Processing**.
+| Remote SSH port | `DLC_APP_REMOTE_SSH_PORT` | Default `22` |
 
 ### Calibration (stereo only)
 
-For 3D reconstruction, place camera calibration YAML files in `calibration/` and set the calibration directory in Settings. Default calibration files for two camera configurations are included.
+Place camera calibration YAML files in `calibration/` and set the calibration directory in **Settings**. Two default configurations are included.
 
 ---
 
-## Project layout
+## 📁 Project layout
 
 ```
-movement_tracker/       Python/FastAPI package
-  app.py                Route registration and startup
-  config.py             Settings singleton (JSON + env var overrides)
-  routers/              API endpoints (subjects, labeling, MANO, results, ...)
-  services/             Business logic (DLC, MediaPipe, MANO, jobs, remote SSH, ...)
+movement_tracker/       Python / FastAPI package
+  app.py                Route registration + startup hooks
+  config.py             Settings singleton (JSON + env-var overrides)
+  routers/              API endpoints (subjects, labeling, MANO, results, …)
+  services/             Business logic (DLC, MediaPipe, MANO, jobs, remote SSH, …)
   static/
     css/main.css        Single stylesheet (dark theme, CSS variables)
-    js/                 One JS module per page — no build step, no framework
+    js/                 One module per page — no build step, no framework
     *.html              One HTML file per page
 calibration/            Camera calibration YAML files
-scripts/                Utility scripts
-  download_sample.py    Fetch sample data from Zenodo
-setup.sh                One-command setup + launch (macOS/Linux)
+scripts/                Utility scripts (sample download, static export, …)
+setup.sh                One-command setup + launch (macOS / Linux)
 run.bat                 Launch script (Windows)
-requirements.txt
-CITATION.cff
+Movement Tracker.app    macOS launcher bundle (custom icon)
+icon.ico                Windows icon used by the auto-generated shortcut
 ```
 
 ---
 
-## Dependencies
+## 🧩 Dependencies
 
-Core:
-- [FastAPI](https://fastapi.tiangolo.com/) + [uvicorn](https://www.uvicorn.org/) — web server
-- [DeepLabCut](https://deeplabcut.github.io/DeepLabCut/) — pose estimation
-- [MediaPipe](https://mediapipe.dev/) — hand landmark tracking
-- [OpenCV](https://opencv.org/) — video processing and face detection
-- [NumPy](https://numpy.org/) / [SciPy](https://scipy.org/) — numerical computation
+| Layer | Library |
+|---|---|
+| Web server | [FastAPI](https://fastapi.tiangolo.com/) · [uvicorn](https://www.uvicorn.org/) |
+| Pose estimation | [DeepLabCut](https://deeplabcut.github.io/DeepLabCut/) |
+| Hand tracking | [MediaPipe](https://mediapipe.dev/) |
+| Video / face detection | [OpenCV](https://opencv.org/) |
+| Numerics | [NumPy](https://numpy.org/) · [SciPy](https://scipy.org/) |
+| Plots (frontend) | [Plotly](https://plotly.com/javascript/) |
 
-All dependencies are listed in `requirements.txt` and installed automatically by `setup.sh`.
+Full list in `requirements.txt`; installed automatically by `setup.sh`.
 
 ---
 
-## Citation
+## 📚 Citation
 
-If you use this software in your research, please cite it:
+If you use this software in published research, please cite it:
 
 ```bibtex
 @software{newbold_movement_tracker,
@@ -164,11 +205,18 @@ If you use this software in your research, please cite it:
 }
 ```
 
-A [CITATION.cff](CITATION.cff) file is included; GitHub shows a "Cite this repository" button in the sidebar automatically.
+A [`CITATION.cff`](CITATION.cff) file is included so GitHub shows a **Cite this repository** button in the sidebar.
 
 ---
 
-## License
+## 📜 License
 
-[CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) — free for academic and non-commercial use.
-If you intend to use this in a commercial product, please get in touch.
+<a href="https://creativecommons.org/licenses/by-nc/4.0/">
+  <img src="https://licensebuttons.net/l/by-nc/4.0/88x31.png" alt="CC BY-NC 4.0">
+</a>
+
+[**CC BY-NC 4.0**](https://creativecommons.org/licenses/by-nc/4.0/) — free for academic and non-commercial use. For commercial licensing, please get in touch.
+
+<p align="center">
+  <sub>Built for the neurology research bench. Made open so other labs don't reinvent the same wheel.</sub>
+</p>
