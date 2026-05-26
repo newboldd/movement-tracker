@@ -141,5 +141,5 @@ A [`CITATION.cff`](CITATION.cff) file is included so GitHub shows a **Cite this 
 [**CC BY-NC 4.0**](https://creativecommons.org/licenses/by-nc/4.0/) — free for academic and non-commercial use. For commercial licensing, please get in touch.
 
 <p align="center">
-  <sub>Built for the neurology research bench. Made open so other labs don't reinvent the same wheel.</sub>
+  <sub>Built for neurological research. Made open for clinicians and scientists to make video-based measurements.</sub>
 </p>
