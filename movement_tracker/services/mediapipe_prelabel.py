@@ -829,6 +829,23 @@ def _attach_fresh_distances(result: dict | None, subject_name: str) -> dict | No
         existing = result.get("distances")
         if existing is None or not np.any(~np.isnan(existing)):
             result["distances"] = _compute_2d_distances(os_lm)
+    # Attach the cleaned trace.  Prefer a freshly-stored copy from the
+    # combined npz if it lines up with the current ``distances``;
+    # otherwise (or for older npzs) compute on the fly so callers can
+    # always read ``result["distances_clean"]``.
+    try:
+        stored = result.get("distances_clean")
+        need_recompute = (
+            stored is None
+            or not isinstance(stored, np.ndarray)
+            or stored.shape != result["distances"].shape
+            or not np.any(~np.isnan(stored))
+        )
+        if need_recompute:
+            from .metrics import clean_distance_trace
+            result["distances_clean"] = clean_distance_trace(result["distances"])
+    except Exception as e:
+        logger.warning(f"distances_clean attach failed for {subject_name}: {e}")
     return result
 
 
@@ -1162,6 +1179,30 @@ def build_combined_mp_npz_for_trial(subject_name: str, trial_stem: str) -> str |
         src_OS[f] = os_pick
         src_OD[f] = od_pick
 
+    # Pre-compute distances + a cleaned (spike-filtered + smoothed)
+    # variant so the labeler UI and the auto-detector can share the
+    # exact same signal.  Raw distances are still recomputed at load
+    # time when calibration changes (_attach_fresh_distances) — the
+    # cleaned trace falls out from there if the raw has been touched.
+    distances = np.full(n, np.nan)
+    distances_clean = np.full(n, np.nan)
+    if calib is not None:
+        try:
+            distances = _compute_distances(OS_combined, OD_combined, calib)
+        except Exception:
+            distances = np.full(n, np.nan)
+    if not np.any(~np.isnan(distances)):
+        try:
+            distances = _compute_2d_distances(OS_combined)
+        except Exception:
+            distances = np.full(n, np.nan)
+    if np.any(~np.isnan(distances)):
+        try:
+            from .metrics import clean_distance_trace
+            distances_clean = clean_distance_trace(distances)
+        except Exception as _e:
+            logger.warning(f"distances_clean failed for {subject_name}/{trial_stem}: {_e}")
+
     out_path = trial_dir / "mediapipe_combined.npz"
     try:
         np.savez(
@@ -1170,7 +1211,8 @@ def build_combined_mp_npz_for_trial(subject_name: str, trial_stem: str) -> str |
             OD_landmarks=OD_combined,
             confidence_OS=conf_OS,
             confidence_OD=conf_OD,
-            distances=np.full(n, np.nan),  # recomputed at load time
+            distances=distances,
+            distances_clean=distances_clean,
             start_frame=start_frame,
             total_frames=n,
             source_OS=src_OS,

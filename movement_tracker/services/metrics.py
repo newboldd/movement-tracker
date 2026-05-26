@@ -23,6 +23,144 @@ logger = logging.getLogger(__name__)
 CROP_HALF = 24  # 48x48 px crop around finger tips
 
 
+# ── Distance-trace cleanup helpers ────────────────────────────────
+#
+# Two complementary sources of integer-frame error feed into the
+# auto-detection.  First, the combined-MP merge occasionally picks an
+# (OS, OD) source pair that triangulates to an aperture much smaller
+# or larger than its temporal neighbours -- a 1- to 2-frame spike that
+# the local-max scan mistakes for a real peak.  Second, even on clean
+# stretches the raw distance trace has ±0.5 mm noise, so the integer
+# location of argmax / argmin jitters by 1 frame between adjacent
+# values.  Both inflate the residual offset between the auto picks and
+# manually-saved events.  ``clean_distance_trace`` does a robust spike
+# removal (MAD z-score + velocity gate); an optional Gaussian smooth
+# is available but defaults off because even a small sigma shifts
+# the integer location of argmax / argmin on asymmetric peaks and
+# ends up hurting more exact matches than it helps.
+
+def _interp_nans_1d(arr: np.ndarray) -> np.ndarray:
+    """Replace NaN values with linear interpolation between the nearest
+    finite samples.  Edge NaNs extend the nearest finite value."""
+    out = np.asarray(arr, dtype=float).copy()
+    mask = np.isnan(out)
+    if mask.all() or not mask.any():
+        return out
+    idx = np.arange(out.size)
+    out[mask] = np.interp(idx[mask], idx[~mask], out[~mask])
+    return out
+
+
+def _gaussian1d(arr: np.ndarray, sigma: float) -> np.ndarray:
+    """Tiny Gaussian smoothing.  ``sigma`` in samples; radius = ceil(3σ)."""
+    if sigma <= 0:
+        return np.asarray(arr, dtype=float)
+    radius = max(1, int(np.ceil(3 * sigma)))
+    t = np.arange(-radius, radius + 1)
+    k = np.exp(-(t ** 2) / (2 * sigma * sigma))
+    k = k / k.sum()
+    return np.convolve(np.asarray(arr, dtype=float), k, mode="same")
+
+
+def clean_distance_trace(
+    dist,
+    max_valid_dist: float = 200.0,
+    spike_window: int = 3,
+    spike_z: float = 3.5,
+    spike_velocity: float = 25.0,
+    smooth_sigma: float = 0.0,
+) -> np.ndarray:
+    """Return a cleaned, smoothed copy of a 1-D distance trace.
+
+    Pipeline:
+      1. Mark <0 / >max_valid_dist / NaN samples as NaN.
+      2. MAD-based spike filter: for each sample t compare it to a
+         ``±spike_window`` neighbourhood; if |z| > ``spike_z`` AND
+         either single-frame jump exceeds ``spike_velocity``, mark NaN.
+      3. Linear interpolation across NaN runs.
+      4. Light Gaussian smoothing with ``smooth_sigma``.
+
+    The combination removes the 1- to 2-frame outliers that combined-MP
+    occasionally produces without flattening genuine fast motion.
+    """
+    arr = np.asarray(dist, dtype=float).copy()
+    n = arr.size
+    if n == 0:
+        return arr
+    # 1. Range filter.
+    arr[~np.isfinite(arr)] = np.nan
+    arr[(arr < 0) | (arr > max_valid_dist)] = np.nan
+    # 2. MAD spike filter.  Compare each finite sample to its small
+    # neighbourhood; a |z| > spike_z _and_ a >spike_velocity jump on
+    # either side flags a real spike (vs noise on a stable stretch).
+    finite0 = np.isfinite(arr)
+    base = _interp_nans_1d(arr)   # interp once so window stats use neighbours
+    for t in range(n):
+        if not finite0[t]:
+            continue
+        lo, hi = max(0, t - spike_window), min(n, t + spike_window + 1)
+        win = base[lo:hi]
+        if win.size < 3:
+            continue
+        med = float(np.median(win))
+        mad = 1.4826 * float(np.median(np.abs(win - med)))
+        if mad < 1.0:
+            mad = 1.0   # floor — flat stretches shouldn't be hyper-sensitive
+        z = abs(base[t] - med) / mad
+        if z <= spike_z:
+            continue
+        dl = abs(base[t] - base[t - 1]) if t > 0 else 0.0
+        dr = abs(base[t + 1] - base[t]) if t < n - 1 else 0.0
+        if max(dl, dr) > spike_velocity:
+            arr[t] = np.nan
+    # 3. Re-interpolate NaNs.
+    out = _interp_nans_1d(arr)
+    # 4. Gaussian smooth.
+    return _gaussian1d(out, smooth_sigma)
+
+
+# ── Auto-detect calibration offsets ───────────────────────────────
+#
+# A small JSON file at ``<MT_DATA_DIR>/auto_detect_calibration.json``
+# stores per-event integer offsets to add to each auto-detected event
+# frame.  ``scripts/calibrate_auto_detect.py`` measures the median
+# (auto − saved) offset across every subject's saved events and writes
+# the file; ``auto_detect_from_distance`` reads it on each call.  Use
+# ``MT_DISABLE_AUTO_CAL=1`` to ignore the file (handy for re-measuring).
+
+_CALIBRATION_CACHE: dict | None = None
+_CALIBRATION_CACHE_MTIME: float = 0.0
+
+
+def _calibration_path() -> Path:
+    from ..config import DATA_DIR
+    return DATA_DIR / "auto_detect_calibration.json"
+
+
+def _load_calibration_offsets() -> dict:
+    """Return ``{open: int, peak: int, close: int}`` from disk (cached)."""
+    global _CALIBRATION_CACHE, _CALIBRATION_CACHE_MTIME
+    if os.environ.get("MT_DISABLE_AUTO_CAL"):
+        return {"open": 0, "peak": 0, "close": 0}
+    p = _calibration_path()
+    try:
+        st = p.stat()
+    except OSError:
+        _CALIBRATION_CACHE = {"open": 0, "peak": 0, "close": 0}
+        _CALIBRATION_CACHE_MTIME = 0.0
+        return _CALIBRATION_CACHE
+    if _CALIBRATION_CACHE is not None and st.st_mtime == _CALIBRATION_CACHE_MTIME:
+        return _CALIBRATION_CACHE
+    try:
+        data = json.loads(p.read_text())
+        out = {k: int(data.get(k, 0)) for k in ("open", "peak", "close")}
+    except (OSError, ValueError, TypeError):
+        out = {"open": 0, "peak": 0, "close": 0}
+    _CALIBRATION_CACHE = out
+    _CALIBRATION_CACHE_MTIME = st.st_mtime
+    return out
+
+
 # ── Metrics disk cache ────────────────────────────────────────────────────────
 
 
@@ -610,50 +748,47 @@ def auto_detect_from_distance(
     valley_thresh: float = 25.0,
     edge_margin: int = 2,
     edge_min_peak: float = 15.0,
+    pre_clean: bool = True,
+    smooth_sigma: float = 0.0,
+    calibration_offsets: dict | None = None,
 ) -> dict:
     """Distance-based event detection without session dependency.
 
     Extracts the core detection algorithm from the labeling endpoint so it can
     be reused by the results page (auto-detect fallback) and other callers.
 
+    When ``pre_clean`` is True (default), the input trace is first run
+    through ``clean_distance_trace`` (MAD spike filter + light Gaussian)
+    so 1-frame combined-MP outliers don't masquerade as peaks and the
+    integer location of argmax / argmin stops jittering on noise.  Pass
+    ``pre_clean=False`` when the caller has already cleaned the trace
+    (e.g. distances_clean from the combined npz).
+
+    ``calibration_offsets`` is ``{open: int, peak: int, close: int}``
+    integer frame shifts applied AFTER detection.  Defaults to the
+    on-disk calibration file (or zeros).
+
     Returns ``{open: [frames], peak: [frames], close: [frames]}``.
     """
-    # Clean raw distances: mark outliers as None, then linearly interpolate.
-    dist_clean: list[float | None] = []
-    for d in dist_raw:
-        if d is None or not (0 <= float(d) <= max_valid_dist):
-            dist_clean.append(None)
-        else:
-            dist_clean.append(float(d))
+    # Pre-clean: smooth + spike-filter so downstream extremum finders
+    # land on the same integer frame the user sees on the video.
+    if pre_clean:
+        cleaned = clean_distance_trace(dist_raw, max_valid_dist=max_valid_dist,
+                                         smooth_sigma=smooth_sigma)
+        dist = cleaned.tolist()
+        nan_mask = [False] * len(dist)
+    else:
+        # Caller supplied an already-cleaned trace; still range-filter
+        # and interpolate any residual NaNs so the rest of the code can
+        # assume a finite sequence.
+        arr = np.asarray(dist_raw, dtype=float).copy()
+        arr[~np.isfinite(arr)] = np.nan
+        arr[(arr < 0) | (arr > max_valid_dist)] = np.nan
+        nan_mask = [bool(m) for m in np.isnan(arr)]
+        arr = _interp_nans_1d(arr)
+        dist = arr.tolist()
 
-    nan_mask = [v is None for v in dist_clean]
-
-    # Linear interpolation over None runs
-    n = len(dist_clean)
-    for i in range(n):
-        if dist_clean[i] is not None:
-            continue
-        left_v = left_i = None
-        for j in range(i - 1, -1, -1):
-            if dist_clean[j] is not None:
-                left_v, left_i = dist_clean[j], j
-                break
-        right_v = right_i = None
-        for j in range(i + 1, n):
-            if dist_clean[j] is not None:
-                right_v, right_i = dist_clean[j], j
-                break
-        if left_v is not None and right_v is not None:
-            t = (i - left_i) / (right_i - left_i)
-            dist_clean[i] = left_v + t * (right_v - left_v)
-        elif left_v is not None:
-            dist_clean[i] = left_v
-        elif right_v is not None:
-            dist_clean[i] = right_v
-        else:
-            dist_clean[i] = 0.0
-
-    dist = [d if d is not None else 0.0 for d in dist_clean]
+    n = len(dist)
 
     # 4-frame and 1-frame velocity
     ddist1 = [0.0] * n
@@ -701,7 +836,16 @@ def auto_detect_from_distance(
             filtered[-1] = pk
     merged_peaks = filtered
 
-    # For each peak, find open onset and close
+    # For each peak, find open onset and close.
+    #
+    # Open gate: instead of "first k where ddist1[k] > open_start_thresh"
+    # (which trips on a single-frame noise tick before motion really
+    # starts and biases auto-opens 1–3 frames early), require positive
+    # velocity for 3 consecutive frames AND a real cumulative gain
+    # (≈1.5x the single-frame threshold) before declaring the onset.
+    SUSTAIN = 3
+    PER_FRAME_MIN = max(1.0, 0.5 * open_start_thresh)
+    CUM_MIN = 1.5 * open_start_thresh
     opens_raw: list[int] = []
     closes_raw: list[int] = []
     for idx, pk in enumerate(merged_peaks):
@@ -709,8 +853,11 @@ def auto_detect_from_distance(
         valley = min(range(search_start, pk + 1), key=lambda f: dist[f])
         open_frame = valley
         for k in range(valley, pk):
-            if ddist1[k] > open_start_thresh:
-                open_frame = k - 1
+            if k + SUSTAIN >= n:
+                break
+            if all(ddist1[k + j] > PER_FRAME_MIN for j in range(SUSTAIN)) \
+                    and (dist[k + SUSTAIN] - dist[k]) > CUM_MIN:
+                open_frame = k
                 break
         opens_raw.append(max(search_start, open_frame))
 
@@ -808,8 +955,25 @@ def auto_detect_from_distance(
                 valid_events["close"].append(frame)
                 expected_next = "open"
 
+    # Apply residual-offset calibration so the auto picks line up with
+    # the user's manual selections.  Offsets are integer frame shifts
+    # measured by scripts/calibrate_auto_detect.py and stored at
+    # ``<MT_DATA_DIR>/auto_detect_calibration.json``.
+    offsets = (calibration_offsets if calibration_offsets is not None
+               else _load_calibration_offsets())
+    max_frame = max((t.get("end_frame", 0) for t in trials), default=n - 1)
+    def _shift(seq, k):
+        if not k:
+            return list(seq)
+        out = []
+        for f in seq:
+            nf = f + k
+            if 0 <= nf <= max_frame:
+                out.append(nf)
+        return sorted(set(out))
+
     return {
-        "open": sorted(valid_events["open"]),
-        "peak": sorted(valid_events["peak"]),
-        "close": sorted(valid_events["close"]),
+        "open":  _shift(valid_events["open"],  int(offsets.get("open", 0))),
+        "peak":  _shift(valid_events["peak"],  int(offsets.get("peak", 0))),
+        "close": _shift(valid_events["close"], int(offsets.get("close", 0))),
     }
