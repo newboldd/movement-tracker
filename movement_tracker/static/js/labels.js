@@ -5117,11 +5117,16 @@ const manoViewer = (() => {
         }
 
         function _getMetricData(src, metric) {
-            if (metric.startsWith('Spread ')) return trialData[`spreads_${src}`]?.[metric];
-            if (metric.startsWith('Flex:') || metric.startsWith('Abd:') || metric.startsWith('Knuckle:')) return trialData[`angles_${src}`]?.[metric];
-            if (metric.startsWith('Pos:')) return trialData[`positions_${src}`]?.[metric];
-            if (metric.startsWith('Wrist ')) return trialData[`wrist_coords_${src}`]?.[metric];
-            return trialData[`distances_${src}`]?.[metric];
+            // The Skeleton v1 fit is exposed by the backend under the
+            // legacy ``_mano`` suffix (distances_mano / angles_mano /
+            // spreads_mano / positions_mano / wrist_coords_mano).  The
+            // UI talks about it as "skeleton".  Translate the suffix.
+            const suffix = (src === 'skeleton') ? 'mano' : src;
+            if (metric.startsWith('Spread ')) return trialData[`spreads_${suffix}`]?.[metric];
+            if (metric.startsWith('Flex:') || metric.startsWith('Abd:') || metric.startsWith('Knuckle:')) return trialData[`angles_${suffix}`]?.[metric];
+            if (metric.startsWith('Pos:')) return trialData[`positions_${suffix}`]?.[metric];
+            if (metric.startsWith('Wrist ')) return trialData[`wrist_coords_${suffix}`]?.[metric];
+            return trialData[`distances_${suffix}`]?.[metric];
         }
 
         function _inFrame(framePts, joints) {
