@@ -64,6 +64,21 @@ iconutil -c icns "$ICONSET" -o "$TMP/icon.icns"
 cp "$TMP/icon.icns" "$DEST"
 touch "$APP"
 
+# Also refresh icon.ico at the repo root — run.bat reads it on
+# first launch to set the IconLocation on the generated
+# "Movement Tracker.lnk" shortcut for Windows users.
+ICO="$REPO_ROOT/icon.ico"
+python3 - "$SRC" "$ICO" <<'PY'
+import sys
+from PIL import Image
+src, dst = sys.argv[1], sys.argv[2]
+img = Image.open(src).convert("RGBA")
+# Standard Windows shortcut icon sizes — Pillow writes all of them
+# into a single multi-resolution .ico.
+sizes = [(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)]
+img.save(dst, format="ICO", sizes=sizes)
+PY
+
 # Nudge Finder's icon cache so the new icon shows up without a relog.
 # (Best-effort — ignore failures.)
 if command -v killall >/dev/null 2>&1; then
@@ -71,4 +86,4 @@ if command -v killall >/dev/null 2>&1; then
   killall Dock   >/dev/null 2>&1 || true
 fi
 
-echo "Updated $DEST from $SRC"
+echo "Updated $DEST and $ICO from $SRC"
