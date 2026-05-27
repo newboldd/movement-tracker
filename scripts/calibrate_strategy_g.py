@@ -185,8 +185,10 @@ def main():
                 "saved_opens_global": saved_opens,
                 "saved_closes_global": saved_closes,
                 "reversal": (cm.get("reversal") if cm else None),
-                "motion_ssd": (cm.get("motion_ssd") if cm else None),
-                "per_cam_ssd": (cm.get("per_cam_ssd") if cm else None),
+                # Prefer phase-correlation flow over raw MSD; fall back
+                # to SSD for legacy cache entries that predate flow.
+                "motion_ssd": ((cm.get("motion_flow") or cm.get("motion_ssd")) if cm else None),
+                "per_cam_ssd": ((cm.get("per_cam_flow") or cm.get("per_cam_ssd")) if cm else None),
             })
     print(f"  collected {len(trial_inputs)} trials", file=sys.stderr)
 

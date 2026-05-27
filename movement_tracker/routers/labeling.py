@@ -1556,10 +1556,13 @@ def detect_events_v2(session_id: int, body: dict = Body(...)) -> dict:
     # Slice to trial range (local indices for detection)
     trial_dist = dist_raw[sf:ef + 1]
 
-    # Extract metrics (pre-computed or None)
+    # Extract metrics (pre-computed or None).  Prefer phase-correlation
+    # flow over MSD: flow tracks tip motion onset/offset better, giving
+    # noticeably more exact open matches at no cost to closes.  Falls
+    # back to SSD if the cache is from before motion_flow existed.
     reversal = metrics.get("reversal") if metrics else None
-    motion_ssd = metrics.get("motion_ssd") if metrics else None
-    per_cam_ssd = metrics.get("per_cam_ssd") if metrics else None
+    motion_ssd = (metrics.get("motion_flow") or metrics.get("motion_ssd")) if metrics else None
+    per_cam_ssd = (metrics.get("per_cam_flow") or metrics.get("per_cam_ssd")) if metrics else None
     settings = get_settings()
     cam_names = settings.camera_names
 

@@ -244,11 +244,22 @@ def _save_metrics_cache(subject_name: str, cache: dict):
 
 
 def get_cached_trial_metrics(subject_name: str, trial_name: str) -> dict | None:
-    """Return cached metrics for a single trial, or None if not cached/stale."""
+    """Return cached metrics for a single trial, or None if not cached/stale.
+
+    Entries from before ``motion_flow`` was added are treated as stale so
+    they get recomputed on next access.
+    """
     cache = _load_metrics_cache(subject_name)
     if cache is None:
         return None
-    return cache.get(trial_name)
+    entry = cache.get(trial_name)
+    if entry is None:
+        return None
+    # Schema check: require motion_flow (added when we switched from
+    # frame-MSD to phase-correlation flow for opens/closes detection).
+    if "motion_flow" not in entry:
+        return None
+    return entry
 
 
 def save_trial_metrics_to_cache(subject_name: str, trial_name: str, metrics: dict):
@@ -407,20 +418,56 @@ def compute_trial_metrics(subject_name: str, trial: dict, cam_names: list[str]) 
                 arr[local_idx] = metric_sum / n_valid
         return arr
 
+    def _compute_motion_flow(cam_filter=None):
+        """Phase-correlation flow magnitude: |translation(frame[i-1] → frame[i])|.
+
+        Empirically (see scripts/calibrate_strategy_g.py and the SSD vs
+        flow A/B in commit notes) flow tracks tip motion onset/offset
+        better than raw MSD, which gives ~20% relative improvement on
+        exact-open matches and is at least as good on closes.
+        """
+        arr = np.zeros(n_frames, dtype=np.float64)
+        cams = [cam_filter] if cam_filter else cam_names
+        for local_idx in range(1, n_frames):
+            metric_sum = 0.0
+            n_valid = 0
+            for cam in cams:
+                for bp in BODYPARTS:
+                    curr = crops.get((local_idx, cam, bp))
+                    prev = crops.get((local_idx - 1, cam, bp))
+                    if curr is None or prev is None or curr.shape != prev.shape:
+                        continue
+                    try:
+                        (dx, dy), _ = cv2.phaseCorrelate(prev, curr)
+                    except cv2.error:
+                        continue
+                    metric_sum += float(np.hypot(dx, dy))
+                    n_valid += 1
+            if n_valid > 0:
+                arr[local_idx] = metric_sum / n_valid
+        return arr
+
     # Compute combined metrics
     reversal = _compute_reversal()
     motion_ssd = _compute_motion_ssd()
+    motion_flow = _compute_motion_flow()
 
-    # Compute per-camera SSD
+    # Per-camera variants (used by detect_strategy_g's per-camera
+    # tip-search pass).  We keep both so old callers / debug views
+    # that still want SSD don't lose it.
     per_cam_ssd = {}
+    per_cam_flow = {}
     for cam in cam_names:
         per_cam_ssd[cam] = _compute_motion_ssd(cam_filter=cam)
+        per_cam_flow[cam] = _compute_motion_flow(cam_filter=cam)
 
     return {
         "distance": distance,
         "reversal": reversal.tolist(),
         "motion_ssd": motion_ssd.tolist(),
+        "motion_flow": motion_flow.tolist(),
         "per_cam_ssd": {cam: arr.tolist() for cam, arr in per_cam_ssd.items()},
+        "per_cam_flow": {cam: arr.tolist() for cam, arr in per_cam_flow.items()},
         "n_frames": n_frames,
     }
 
