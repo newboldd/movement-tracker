@@ -104,12 +104,35 @@ const eventsPage = (() => {
 
     // ── Initialisation ───────────────────────────────────
     async function init() {
-        // Parse session ID from URL
+        // Parse session ID from URL.  If absent, fall back to the
+        // most-recently-used subject and auto-create one — so the
+        // Events nav link from any other subject-aware page (Labels,
+        // Results, Analyze, …) lands on the same subject the user
+        // was just viewing.
         const params = new URLSearchParams(window.location.search);
         sessionId = parseInt(params.get('session'));
         if (!sessionId) {
-            alert('No session ID provided. Use ?session=N in the URL.');
-            return;
+            const navSid = (typeof getNavState === 'function')
+                ? getNavState().subjectId : null;
+            const subj = navSid
+                || parseInt(sessionStorage.getItem('dlc_lastSubjectId'))
+                || parseInt(localStorage.getItem('mt_lastSubjectId'))
+                || null;
+            if (!subj) {
+                alert('No subject context — open one from the Dashboard first.');
+                return;
+            }
+            try {
+                const session = await API.post(`/api/labeling/${subj}/sessions`,
+                                                { session_type: 'events' });
+                const url = new URL(window.location);
+                url.searchParams.set('session', String(session.id));
+                history.replaceState(null, '', url);
+                sessionId = session.id;
+            } catch (e) {
+                alert('Could not open events for subject ' + subj + ': ' + e.message);
+                return;
+            }
         }
 
         // Setup canvases

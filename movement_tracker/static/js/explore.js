@@ -541,7 +541,55 @@ function renderScatter() {
             _refitBestFitFromVisible();
             _wireBestFitListener();
             _applyAutoRangeInputs();
+            _wireSubjectClickPersistence('explorePlot');
         });
+}
+
+// Cached name → id map from /api/subjects, loaded lazily on first
+// click so we don't pay the round-trip on every Explore page load.
+let _exploreSubjectIdByName = null;
+async function _ensureExploreSubjectIdMap() {
+    if (_exploreSubjectIdByName) return _exploreSubjectIdByName;
+    try {
+        const subjects = await API.get('/api/subjects');
+        _exploreSubjectIdByName = {};
+        for (const s of (subjects || [])) _exploreSubjectIdByName[s.name] = s.id;
+    } catch (_) {
+        _exploreSubjectIdByName = {};
+    }
+    return _exploreSubjectIdByName;
+}
+
+/** Wire a plotly_click handler that persists the clicked dot's
+ *  subject (and a default trial of 0) into nav state, so navigating
+ *  from Explore to Labels / Events / Results / Analyze /
+ *  Oscillations lands on that subject. */
+function _wireSubjectClickPersistence(divId) {
+    const div = document.getElementById(divId);
+    if (!div || div._subjectClickWired) return;
+    div._subjectClickWired = true;
+    div.on('plotly_click', async (ev) => {
+        const pt = ev && ev.points && ev.points[0];
+        if (!pt) return;
+        let name = pt.text;
+        if (!name && typeof pt.customdata === 'string') name = pt.customdata;
+        if (!name || typeof name !== 'string') return;
+        const map = await _ensureExploreSubjectIdMap();
+        const id = map[name];
+        if (!id) return;
+        try {
+            sessionStorage.setItem('dlc_lastSubjectId', String(id));
+            if (typeof setLastSubject === 'function') setLastSubject(id);
+            if (typeof setNavState === 'function') {
+                setNavState({ subjectId: id, trialIdx: 0 });
+            }
+        } catch (_) {}
+        const hint = document.getElementById('exploreLinkedHint');
+        if (hint) {
+            hint.textContent = `Linked: ${name}`;
+            hint.style.display = 'inline';
+        }
+    });
 }
 
 // Recompute the best-fit line and the slope/R²/p annotation using
@@ -743,7 +791,10 @@ function renderBar() {
         plot_bgcolor: '#fff', paper_bgcolor: '#fff', bargap: 0.5,
     };
     Plotly.newPlot('explorePlot', [barTrace, dotTrace], layout, { responsive: true, displayModeBar: false })
-        .then(_applyAutoRangeInputs);
+        .then(() => {
+            _applyAutoRangeInputs();
+            _wireSubjectClickPersistence('explorePlot');
+        });
 }
 
 // ── Listeners ──────────────────────────────────────────────────

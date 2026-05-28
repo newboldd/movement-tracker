@@ -260,12 +260,39 @@ const labeler = (() => {
     const isMediaPipePage = window.location.pathname === '/mediapipe';
     const isEventsPage = window.location.pathname === '/events';
 
-    function init() {
+    async function init() {
         const params = new URLSearchParams(window.location.search);
         sessionId = parseInt(params.get('session'));
         if (!sessionId) {
-            alert('No session ID in URL. Go to Dashboard to start labeling.');
-            return;
+            // Auto-create a session for the persisted subject so the
+            // top-nav links (/labeling, /mediapipe, /events) carry
+            // subject context across pages.
+            const navSid = (typeof getNavState === 'function')
+                ? getNavState().subjectId : null;
+            const subj = navSid
+                || parseInt(sessionStorage.getItem('dlc_lastSubjectId'))
+                || parseInt(localStorage.getItem('mt_lastSubjectId'))
+                || null;
+            const stype = isMediaPipePage ? 'mediapipe'
+                        : isEventsPage    ? 'events'
+                                          : 'dlc';
+            if (subj) {
+                try {
+                    const session = await API.post(
+                        `/api/labeling/${subj}/sessions`,
+                        { session_type: stype });
+                    const url = new URL(window.location);
+                    url.searchParams.set('session', String(session.id));
+                    history.replaceState(null, '', url);
+                    sessionId = session.id;
+                } catch (e) {
+                    alert('Could not open session for subject ' + subj + ': ' + e.message);
+                    return;
+                }
+            } else {
+                alert('No subject context — open one from the Dashboard first.');
+                return;
+            }
         }
 
         canvas = document.getElementById('labelCanvas');

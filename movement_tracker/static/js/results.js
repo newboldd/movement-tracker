@@ -3976,6 +3976,28 @@ function highlightSubject(name) {
     document.getElementById('highlightedSubject').textContent =
         highlightedSubject ? `Highlighted: ${highlightedSubject}` : '';
 
+    // Persist the highlighted subject (and a sensible trial pick)
+    // into nav state so navigating to Labels / Events / Analyze /
+    // Individual Results / Oscillations lands on the same one.
+    if (highlightedSubject) {
+        const subj = (subjects || []).find(s => s.name === highlightedSubject);
+        if (subj && subj.id) {
+            sessionStorage.setItem('dlc_lastSubjectId', String(subj.id));
+            if (typeof setLastSubject === 'function') setLastSubject(subj.id);
+            if (typeof setNavState === 'function') {
+                // Pick the trial index that matches the current
+                // hand/trial selectors: "first"/"average" → first
+                // trial in the chosen-hand subset (idx 0 means the
+                // landing page falls back to its own default), "last"
+                // → leave it null so the landing page picks naturally.
+                // We don't have per-subject trial maps here, so just
+                // anchor on 0 (= the first trial); the landing page
+                // can map it through its own data.
+                setNavState({ subjectId: subj.id, trialIdx: 0 });
+            }
+        }
+    }
+
     // Re-render all group plots to update highlighting
     renderGroupPlots();
 }
