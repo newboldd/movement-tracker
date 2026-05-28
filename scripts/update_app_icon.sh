@@ -63,6 +63,7 @@ done
 iconutil -c icns "$ICONSET" -o "$TMP/icon.icns"
 cp "$TMP/icon.icns" "$DEST"
 touch "$APP"
+touch "$APP/Contents/Info.plist"
 
 # Also refresh icon.ico at the repo root — run.bat reads it on
 # first launch to set the IconLocation on the generated
@@ -79,11 +80,26 @@ sizes = [(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)]
 img.save(dst, format="ICO", sizes=sizes)
 PY
 
-# Nudge Finder's icon cache so the new icon shows up without a relog.
-# (Best-effort — ignore failures.)
+# ── Force macOS to actually reload the icon ───────────────────
+# macOS aggressively caches app icons in the IconServices store.
+# Just touching the bundle + restarting Dock/Finder usually isn't
+# enough — re-register the bundle with LaunchServices, blow away
+# the per-user IconServices cache, and restart its daemons.
+LSREG="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
+if [ -x "$LSREG" ]; then
+  "$LSREG" -v -f "$APP" >/dev/null 2>&1 || true
+fi
+rm -rf "$HOME/Library/Caches/com.apple.iconservices.store" 2>/dev/null || true
 if command -v killall >/dev/null 2>&1; then
-  killall Finder >/dev/null 2>&1 || true
-  killall Dock   >/dev/null 2>&1 || true
+  killall iconservicesd          >/dev/null 2>&1 || true
+  killall iconservicesagent      >/dev/null 2>&1 || true
+  killall com.apple.iconservices >/dev/null 2>&1 || true
+  killall Dock                   >/dev/null 2>&1 || true
+  killall Finder                 >/dev/null 2>&1 || true
 fi
 
 echo "Updated $DEST and $ICO from $SRC"
+echo
+echo "If the Dock/Finder icon still looks stale, drag the .app to the"
+echo "Trash (don't empty), drag it back, and relaunch Finder.  Some"
+echo "icon caches are only refreshed on application identity change."
