@@ -418,6 +418,12 @@ const manoViewer = (() => {
     // both pick it up.
     let seriesMode = 'position';
     const posJointStates = new Map(); // joint_idx → {colorX, colorY, colorZ}
+    // MCP-Index-Pinky span: when active, the SVG shows X/Y/Z axis
+    // labels next to the across-knuckle dotted line.  Each label toggles
+    // a metric like 'MCP: Index-Pinky X'.  Colors persist across
+    // toggles so re-activating the segment reuses prior axis colors.
+    let mcpSpanActive = false;
+    let mcpSpanAxisColors = { X: null, Y: null, Z: null };
     // Maps joint index to its finger's metacarpal anchor [proximal, distal]
     const JOINT_FINGER_ANCHOR_JS = {1:[0,1],2:[0,1],3:[0,1],5:[0,5],6:[0,5],7:[0,5],9:[0,9],10:[0,9],11:[0,9],13:[0,13],14:[0,13],15:[0,13],17:[0,17],18:[0,17],19:[0,17]};
 
@@ -2103,17 +2109,31 @@ const manoViewer = (() => {
             });
         });
 
-        // MCP distance line clicks → toggle MCP distance metric
+        // MCP-Index-Pinky line clicks → toggle the across-knuckle axis
+        // affordance.  First click "activates" the segment and selects
+        // the X axis (yz-plane angle).  Clicking again with no axes
+        // active deactivates it.  Per-axis selection happens via the
+        // X/Y/Z labels rendered next to the line in _updatePlotHighlight.
         document.querySelectorAll('#handDiagramPlot .mcp-dist, #handDiagramPlot .mcp-dist-hit').forEach(el => {
             el.addEventListener('click', e => {
                 e.stopPropagation();
-                const name = el.dataset.mcp || el.previousElementSibling?.dataset?.mcp;
-                if (!name) return;
-                if (selectedMetrics.has(name)) {
-                    selectedMetrics.delete(name);
-                } else {
-                    selectedMetrics.set(name, _nextMetricColor());
+                const axes = ['MCP: Index-Pinky X', 'MCP: Index-Pinky Y', 'MCP: Index-Pinky Z'];
+                const anyActive = axes.some(n => selectedMetrics.has(n));
+                if (mcpSpanActive && !anyActive) {
+                    // Already shown but no axis ticked → collapse it.
+                    mcpSpanActive = false;
+                } else if (!mcpSpanActive) {
+                    // Activating: assign colors and turn the X axis on.
+                    mcpSpanActive = true;
+                    if (!mcpSpanAxisColors.X) mcpSpanAxisColors.X = _nextMetricColor();
+                    if (!mcpSpanAxisColors.Y) mcpSpanAxisColors.Y = _nextMetricColor();
+                    if (!mcpSpanAxisColors.Z) mcpSpanAxisColors.Z = _nextMetricColor();
+                    selectedMetrics.set('MCP: Index-Pinky X', mcpSpanAxisColors.X);
                     _enforceSourceConstraint();
+                } else {
+                    // Active with some axes selected → clear all axes.
+                    for (const n of axes) selectedMetrics.delete(n);
+                    mcpSpanActive = false;
                 }
                 renderDistanceTrace();
                 _updatePlotHighlight();
@@ -2298,7 +2318,14 @@ const manoViewer = (() => {
             // Distance / aperture / MCP dist highlights
             for (const [metric, color] of selectedMetrics) {
                 if (metric.startsWith('Flex:') || metric.startsWith('Abd:')) continue;
-                // MCP distance lines
+                // MCP across-knuckle line: any X/Y/Z axis metric lights
+                // the single 'MCP: Index-Pinky' segment.
+                if (metric.startsWith('MCP: Index-Pinky')) {
+                    svg.querySelectorAll('.mcp-dist').forEach(el => {
+                        if (el.dataset.mcp === 'MCP: Index-Pinky') el.classList.add('selected-dist');
+                    });
+                    continue;
+                }
                 if (metric.startsWith('MCP:')) {
                     svg.querySelectorAll('.mcp-dist').forEach(el => {
                         if (el.dataset.mcp === metric) el.classList.add('selected-dist');
@@ -2448,6 +2475,53 @@ const manoViewer = (() => {
                 lbl.style.display = 'inline';
                 lbl.style.fill = (name && selectedMetrics.has(name)) ? selectedMetrics.get(name) : '#555';
             });
+            // MCP-Index-Pinky axis labels (X/Y/Z near the line midpoint).
+            // Shown whenever the segment is active.  Plane mapping:
+            // X-label → angle in YZ plane, Y → XZ, Z → XY (each is a
+            // rotation about the corresponding axis), in degrees,
+            // referenced to the per-frame median orientation.
+            if (mcpSpanActive) {
+                const mcpLine = svg.querySelector('.mcp-dist[data-mcp="MCP: Index-Pinky"]');
+                if (mcpLine) {
+                    const x1 = parseFloat(mcpLine.getAttribute('x1'));
+                    const y1 = parseFloat(mcpLine.getAttribute('y1'));
+                    const x2 = parseFloat(mcpLine.getAttribute('x2'));
+                    const y2 = parseFloat(mcpLine.getAttribute('y2'));
+                    const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+                    const axes = [['X', mcpSpanAxisColors.X, -10],
+                                  ['Y', mcpSpanAxisColors.Y,   0],
+                                  ['Z', mcpSpanAxisColors.Z,  10]];
+                    for (const [axLabel, color, dx] of axes) {
+                        const metricName = `MCP: Index-Pinky ${axLabel}`;
+                        const isActive = selectedMetrics.has(metricName);
+                        const lbl = document.createElementNS(ns, 'text');
+                        lbl.classList.add('pos-label');
+                        lbl.setAttribute('x', mx + dx);
+                        lbl.setAttribute('y', my - 8);
+                        lbl.style.fontSize = '8px';
+                        lbl.style.fontWeight = 'bold';
+                        lbl.style.fill = color;
+                        lbl.style.opacity = isActive ? '1' : '0.35';
+                        lbl.style.cursor = 'pointer';
+                        lbl.style.pointerEvents = 'all';
+                        lbl.style.userSelect = 'none';
+                        lbl.textContent = axLabel;
+                        lbl.addEventListener('click', ev => {
+                            ev.stopPropagation();
+                            if (selectedMetrics.has(metricName)) {
+                                selectedMetrics.delete(metricName);
+                            } else {
+                                selectedMetrics.set(metricName, color);
+                                _enforceSourceConstraint();
+                            }
+                            renderDistanceTrace();
+                            _updatePlotHighlight();
+                        });
+                        svg.appendChild(lbl);
+                    }
+                }
+            }
+
             // Position mode: show X/Y/Z labels next to selected joints
             if (plotMode === 'position') {
                 for (const [j, state] of posJointStates) {
@@ -5094,6 +5168,7 @@ const manoViewer = (() => {
         function _getRequiredJoints(metric) {
             if (metric === 'Knuckle: I-M-R') return [5, 9, 13];
             if (metric === 'Knuckle: M-R-P') return [9, 13, 17];
+            if (metric.startsWith('MCP: Index-Pinky')) return [5, 17];
             if (metric.startsWith('MCP:')) return MCP_JOINT_MAP[metric] || [];
             if (metric.startsWith('Pos:')) {
                 // "Pos: Wrist X" → joint 0, "Pos: I_MCP Y" → joint 5, etc.
@@ -5131,11 +5206,60 @@ const manoViewer = (() => {
             // spreads_mano / positions_mano / wrist_coords_mano).  The
             // UI talks about it as "skeleton".  Translate the suffix.
             const suffix = (src === 'skeleton') ? 'mano' : src;
+            // Across-knuckle (Index MCP → Pinky MCP) angular position
+            // about the X/Y/Z axes, in degrees, referenced to the
+            // per-trial median orientation.  Computed from joints_3d.
+            if (metric.startsWith('MCP: Index-Pinky ')) {
+                const ax = metric.slice('MCP: Index-Pinky '.length);
+                return _mcpIPSpanAngle(src, ax);
+            }
             if (metric.startsWith('Spread ')) return trialData[`spreads_${suffix}`]?.[metric];
             if (metric.startsWith('Flex:') || metric.startsWith('Abd:') || metric.startsWith('Knuckle:')) return trialData[`angles_${suffix}`]?.[metric];
             if (metric.startsWith('Pos:')) return trialData[`positions_${suffix}`]?.[metric];
             if (metric.startsWith('Wrist ')) return trialData[`wrist_coords_${suffix}`]?.[metric];
             return trialData[`distances_${suffix}`]?.[metric];
+        }
+
+        // Source → joints_3d field name in trialData.
+        function _jointsField(src) {
+            if (src === 'skeleton') return 'skeleton_joints_3d';
+            return `${src}_joints_3d`;
+        }
+
+        // Compute the X/Y/Z plane-projection angle of the Index-MCP →
+        // Pinky-MCP segment, minus its per-trial median (degrees).
+        // X = atan2(z, y),  Y = atan2(x, z),  Z = atan2(y, x).
+        function _mcpIPSpanAngle(src, axisLabel) {
+            const pts = trialData[_jointsField(src)];
+            if (!pts || !pts.length) return null;
+            const n = pts.length;
+            const angles = new Array(n).fill(null);
+            for (let i = 0; i < n; i++) {
+                const a = pts[i]?.[5];
+                const b = pts[i]?.[17];
+                if (!a || !b) continue;
+                const vx = b[0] - a[0], vy = b[1] - a[1], vz = b[2] - a[2];
+                if (!isFinite(vx) || !isFinite(vy) || !isFinite(vz)) continue;
+                let θ;
+                if (axisLabel === 'X')      θ = Math.atan2(vz, vy);
+                else if (axisLabel === 'Y') θ = Math.atan2(vx, vz);
+                else if (axisLabel === 'Z') θ = Math.atan2(vy, vx);
+                else continue;
+                angles[i] = θ * 180 / Math.PI;
+            }
+            const finite = angles.filter(v => v != null).slice().sort((a, b) => a - b);
+            if (!finite.length) return null;
+            const m = Math.floor(finite.length / 2);
+            const median = finite.length % 2 ? finite[m] : (finite[m - 1] + finite[m]) / 2;
+            // Subtract median and wrap each value to (-180, 180].
+            for (let i = 0; i < n; i++) {
+                if (angles[i] == null) continue;
+                let d = angles[i] - median;
+                while (d >  180) d -= 360;
+                while (d <= -180) d += 360;
+                angles[i] = d;
+            }
+            return angles;
         }
 
         function _getMetricData(src, metric) {
@@ -5172,7 +5296,7 @@ const manoViewer = (() => {
         let distDataMin = Infinity, distDataMax = -Infinity;
         let angDataMin = Infinity, angDataMax = -Infinity;
         for (const [metric] of selectedMetrics) {
-            const isAng = metric.startsWith('Flex:') || metric.startsWith('Abd:') || metric.startsWith('Spread ') || metric.startsWith('Knuckle:');
+            const isAng = metric.startsWith('Flex:') || metric.startsWith('Abd:') || metric.startsWith('Spread ') || metric.startsWith('Knuckle:') || metric.startsWith('MCP: Index-Pinky ');
             const skeleton = _getMetricData('skeleton', metric);
             const v2d  = _getMetricData('skel_v2', metric);
             const legacyd = _getMetricData('skel_legacy', metric);
@@ -5407,7 +5531,7 @@ const manoViewer = (() => {
         const _boneDevThreshold = _bl.threshold;
 
         for (const [metric, metricColor] of selectedMetrics) {
-            const isAng = metric.startsWith('Flex:') || metric.startsWith('Abd:') || metric.startsWith('Spread ') || metric.startsWith('Knuckle:');
+            const isAng = metric.startsWith('Flex:') || metric.startsWith('Abd:') || metric.startsWith('Spread ') || metric.startsWith('Knuckle:') || metric.startsWith('MCP: Index-Pinky ');
             if (isAng) hasAngle = true; else hasDist = true;
             const toY = isAng ? toYAngle : toYDist;
             const joints = _getRequiredJoints(metric);
@@ -5954,7 +6078,7 @@ const manoViewer = (() => {
             if (!info || !info.data) continue;
             const val = info.data[fn];
             if (val == null) continue;
-            const isAng = metric.startsWith('Flex:') || metric.startsWith('Abd:') || metric.startsWith('Spread ') || metric.startsWith('Knuckle:');
+            const isAng = metric.startsWith('Flex:') || metric.startsWith('Abd:') || metric.startsWith('Spread ') || metric.startsWith('Knuckle:') || metric.startsWith('MCP: Index-Pinky ');
             const unit = isAng ? '°' : metric.startsWith('Pos:') ? 'mm' : 'mm';
             // Short label: strip prefix
             const label = metric.replace('Flex: ', 'F:').replace('Abd: ', 'A:').replace('MCP: ', '').replace('Pos: ', '');
@@ -8976,6 +9100,7 @@ const manoViewer = (() => {
     function resetPlotSelection() {
         selectedMetrics.clear();
         posJointStates.clear();
+        mcpSpanActive = false;
         plotJointStates.clear();
         _tiaIsDefault = true;
         if (plotMode === 'angle') {
@@ -9035,6 +9160,7 @@ const manoViewer = (() => {
         selectedMetrics.clear();
         plotJointStates.clear();
         posJointStates.clear();
+        mcpSpanActive = false;
         wristPanelOpen = false;
         _tiaIsDefault = true;
         if (plotMode === 'angle') {
@@ -9155,6 +9281,7 @@ const manoViewer = (() => {
                 selectedMetrics.clear();
                 plotJointStates.clear();
                 posJointStates.clear();
+        mcpSpanActive = false;
                 _constraintFocusMetric = null;
 
                 const c1 = _nextMetricColor();
