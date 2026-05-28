@@ -941,6 +941,60 @@ const eventsPage = (() => {
         return null;
     }
 
+    /** Bulk-delete every event of the currently-visible types from the
+     *  active trial.  Hidden types are untouched; events on other
+     *  trials are untouched.  Saved events are also wiped on disk
+     *  via a PUT to /events (auto events were never persisted, so
+     *  removing them from eventMarkers is enough). */
+    async function deleteAllPlottedInTrial() {
+        if (currentEventTrialIdx < 0) return;
+        const trial = trials[currentEventTrialIdx];
+        const range = getTrialFrameRange(currentEventTrialIdx);
+        const visibleTypes = EVENT_TYPES.filter(t => eventVisibility[t]);
+        if (visibleTypes.length === 0) return;
+        // Count what we're about to remove so the confirm dialog can
+        // tell the user the scope (saved + auto, this trial only).
+        let nSaved = 0, nAuto = 0;
+        for (const t of visibleTypes) {
+            for (const f of (eventMarkers[t] || [])) {
+                if (f < range.start || f > range.end) continue;
+                if ((savedEventFrames[t] || new Set()).has(f)) nSaved++;
+                else nAuto++;
+            }
+        }
+        if (nSaved + nAuto === 0) return;
+        const trialName = trial.trial_name || `trial ${currentEventTrialIdx + 1}`;
+        const label = visibleTypes.join('/');
+        if (!confirm(`Delete ${nSaved} saved + ${nAuto} auto ${label} event(s) from ${trialName}?`)) return;
+
+        const snapshot = snapshotEventMarkers();
+        for (const t of visibleTypes) {
+            eventMarkers[t] = (eventMarkers[t] || []).filter(
+                f => f < range.start || f > range.end);
+            const sf = savedEventFrames[t] || new Set();
+            for (const f of [...sf]) {
+                if (f >= range.start && f <= range.end) sf.delete(f);
+            }
+            savedEventFrames[t] = sf;
+        }
+        pushEventUndo(snapshot);
+
+        // Persist by replaying the standard save-events PUT (which
+        // writes only visible types — exactly the scope we want).
+        try {
+            const body = {};
+            visibleTypes.forEach(t => { body[t] = eventMarkers[t]; });
+            await API.put(`/api/labeling/sessions/${sessionId}/events`, body);
+            setStatus(`Deleted ${nSaved + nAuto} event(s) from ${trialName}.`);
+        } catch (e) {
+            alert('Error deleting events: ' + e.message);
+        }
+
+        updateEventCounts();
+        updateTrialButtons();
+        renderDistanceTrace();
+    }
+
     function deleteEvent() {
         const type = _plottedTypeAtFrame();
         if (!type) return;
@@ -1251,13 +1305,16 @@ const eventsPage = (() => {
         distCtx.lineWidth = 1.5;
         distCtx.stroke();
 
-        // Event markers
+        // Event markers — show ONLY the current trial.  Out-of-trial
+        // markers used to render dimmed; we now skip them outright so
+        // the plot reads as "what's labeled on this trial".
         const trialRange = getTrialFrameRange(currentEventTrialIdx);
         EVENT_TYPES.forEach(etype => {
             if (!eventVisibility[etype]) return;
             const color = EVENT_COLORS[etype];
             eventMarkers[etype].forEach(f => {
                 if (f < vStart || f >= vEnd) return;
+                if (f < trialRange.start || f > trialRange.end) return;
                 const x = fToX(f);
                 let y;
                 if (distances && f < distances.length && distances[f] !== null) {
@@ -1265,8 +1322,7 @@ const eventsPage = (() => {
                 } else {
                     y = padT + plotH * 0.5;
                 }
-                const inCurrentTrial = f >= trialRange.start && f <= trialRange.end;
-                distCtx.globalAlpha = inCurrentTrial ? 1.0 : 0.25;
+                distCtx.globalAlpha = 1.0;
 
                 // Diamond marker: filled = saved, outline = pending
                 const r = 5;
@@ -1844,7 +1900,29 @@ const eventsPage = (() => {
                 stableDistRange = null;
                 if (distances) computeStableDistRange();
                 _resetYRangeSlidersForCurrentTrial();
+                // If the current trial has any AUTO-detected (unsaved)
+                // events, those came from the previous source and are
+                // now stale — purge them and re-run detection against
+                // the new source.  Saved events stay put.
+                let hadAuto = false;
+                if (currentEventTrialIdx >= 0) {
+                    const range = getTrialFrameRange(currentEventTrialIdx);
+                    for (const t of EVENT_TYPES) {
+                        const saved = savedEventFrames[t] || new Set();
+                        const cleaned = (eventMarkers[t] || []).filter(f => {
+                            if (f < range.start || f > range.end) return true;
+                            if (saved.has(f)) return true;
+                            hadAuto = true;
+                            return false;
+                        });
+                        eventMarkers[t] = cleaned;
+                    }
+                }
                 renderDistanceTrace();
+                updateEventCounts();
+                if (hadAuto && typeof runDetection === 'function') {
+                    Promise.resolve().then(() => runDetection('all')).catch(() => {});
+                }
             });
         }
         // Y range sliders: override the auto-derived min/max bounds
@@ -1873,6 +1951,7 @@ const eventsPage = (() => {
 
         // Sidebar buttons
         $('deleteEventBtn').addEventListener('click', deleteEvent);
+        $('deleteAllEventsBtn')?.addEventListener('click', deleteAllPlottedInTrial);
         $('shiftLeftBtn').addEventListener('click', () => shiftEvent(-1));
         $('shiftRightBtn').addEventListener('click', () => shiftEvent(1));
         $('prevEventBtn').addEventListener('click', prevEvent);

@@ -129,6 +129,16 @@
             <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">Show events:</div>
             <div id="eventVisToggles" style="display:flex;flex-direction:column;gap:3px;"></div>
 
+            <!-- Bulk-delete the events of the currently-visible types
+                 on the active trial.  Doesn't touch hidden event
+                 types, or events on other trials.  Persists to disk
+                 immediately (no separate save click needed). -->
+            <button class="btn btn-sm" id="deleteAllEventsBtn"
+                    title="Delete all events of currently-checked types from this trial (saved + auto, current trial only)"
+                    style="width:100%;margin-top:6px;color:#ff7575;border-color:rgba(255,117,117,0.55);">
+                Delete all plotted (this trial)
+            </button>
+
             <!-- Save events -->
             <button class="btn btn-sm btn-success" id="saveEventsBtn" style="width:100%;margin-top:8px;">Save Events</button>
 
@@ -329,6 +339,6 @@
 
     <script src="/static/js/nav.js?v=9"></script>
     <script src="/static/js/api.js?v=10"></script>
-    <script src="/static/js/events.js?v=7"></script>
+    <script src="/static/js/events.js?v=8"></script>
 </body>
 </html>
