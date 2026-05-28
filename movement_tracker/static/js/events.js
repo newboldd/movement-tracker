@@ -623,8 +623,20 @@ const eventsPage = (() => {
     }
 
     function updateFrameDisplay() {
-        $('frameDisplay').textContent = currentFrame;
-        const trial = trials[getTrialForFrame(currentFrame)];
+        // Display frames as LOCAL to the current trial (0-based) so
+        // each trial reads as 'Frame N / trial_count'.  Falls back to
+        // the global counter when no trial owns the current frame.
+        const tIdx = (currentEventTrialIdx >= 0)
+            ? currentEventTrialIdx : getTrialForFrame(currentFrame);
+        const trial = trials[tIdx];
+        const local = trial ? Math.max(0, currentFrame - trial.start_frame) : currentFrame;
+        $('frameDisplay').textContent = local;
+        const totalEl = document.getElementById('totalFrames');
+        if (totalEl && trial) {
+            totalEl.textContent = (trial.end_frame - trial.start_frame + 1);
+        } else if (totalEl) {
+            totalEl.textContent = totalFrames;
+        }
         $('trialName').textContent = trial ? _shortTrialName(trial.trial_name) : '-';
     }
 
@@ -1221,13 +1233,24 @@ const eventsPage = (() => {
         distCanvas.height = h;
 
         if (totalFrames === 0) return;
-        const effectiveViewFrames = (distViewFrames > 0 && distViewFrames < totalFrames)
-            ? distViewFrames : totalFrames;
+        // Plot is scoped to the current trial only — the distance
+        // trace and event markers never bleed into adjacent trials.
+        const _tRange = (currentEventTrialIdx >= 0)
+            ? getTrialFrameRange(currentEventTrialIdx)
+            : { start: 0, end: totalFrames - 1 };
+        const _trialLen = _tRange.end - _tRange.start + 1;
+        let effectiveViewFrames = (distViewFrames > 0 && distViewFrames < totalFrames)
+            ? distViewFrames : _trialLen;
+        if (effectiveViewFrames > _trialLen) effectiveViewFrames = _trialLen;
 
         if (distAutoScroll) ensureFrameVisible();
 
-        const vStart = distViewStart;
-        const vEnd = Math.min(vStart + effectiveViewFrames, totalFrames);
+        let vStart = distViewStart;
+        if (vStart < _tRange.start) vStart = _tRange.start;
+        if (vStart > _tRange.end - effectiveViewFrames + 1) {
+            vStart = Math.max(_tRange.start, _tRange.end - effectiveViewFrames + 1);
+        }
+        const vEnd = Math.min(vStart + effectiveViewFrames, _tRange.end + 1);
 
         const padL = 40, padR = 8, padT = 16, padB = 14;
         const plotW = w - padL - padR;
@@ -1277,17 +1300,30 @@ const eventsPage = (() => {
             distCtx.stroke();
         }
 
-        // Trial boundaries
-        for (const t of trials) {
-            if (t.start_frame >= vStart && t.start_frame < vEnd) {
-                const x = fToX(t.start_frame);
-                distCtx.beginPath();
-                distCtx.moveTo(x, padT);
-                distCtx.lineTo(x, h - padB);
-                distCtx.strokeStyle = 'rgba(42, 58, 92, 0.8)';
-                distCtx.lineWidth = 1;
-                distCtx.stroke();
-            }
+        // Trial boundaries removed — the plot is scoped to a single
+        // trial now, so vertical separators no longer make sense.
+
+        // X-axis tick labels in LOCAL frame numbers (0 at trial start).
+        distCtx.fillStyle = '#8892a0';
+        distCtx.font = '9px sans-serif';
+        distCtx.textAlign = 'center';
+        const _localLen = vEnd - vStart;
+        const _step = _localLen > 600 ? 200
+                     : _localLen > 300 ? 100
+                     : _localLen > 120 ? 50
+                     : _localLen > 60  ? 20
+                                       : 10;
+        for (let lf = 0; lf <= _localLen; lf += _step) {
+            const gf = vStart + lf;
+            if (gf > _tRange.end) break;
+            const x = fToX(gf);
+            distCtx.fillText(String(lf), x, h - 3);
+            distCtx.strokeStyle = 'rgba(42, 58, 92, 0.4)';
+            distCtx.lineWidth = 0.5;
+            distCtx.beginPath();
+            distCtx.moveTo(x, padT);
+            distCtx.lineTo(x, h - padB);
+            distCtx.stroke();
         }
 
         // Distance line
