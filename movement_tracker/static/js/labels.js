@@ -411,6 +411,12 @@ const manoViewer = (() => {
     const SPREAD_JOINT_PAIRS = [[0, 2, 5], [0, 5, 9], [0, 9, 13], [0, 13, 17]];
     const COORD_NAMES = ['Wrist X', 'Wrist Y', 'Wrist Z'];
     let plotMode = 'angle'; // 'angle' or 'position'
+    // Whether every plotted series is shown as its raw value
+    // ('position') or as a per-frame finite-difference velocity
+    // ('velocity') scaled by the current trial's fps.  Applied
+    // uniformly in _getMetricData so the autoY range + drawn lines
+    // both pick it up.
+    let seriesMode = 'position';
     const posJointStates = new Map(); // joint_idx → {colorX, colorY, colorZ}
     // Maps joint index to its finger's metacarpal anchor [proximal, distal]
     const JOINT_FINGER_ANCHOR_JS = {1:[0,1],2:[0,1],3:[0,1],5:[0,5],6:[0,5],7:[0,5],9:[0,9],10:[0,9],11:[0,9],13:[0,13],14:[0,13],15:[0,13],17:[0,17],18:[0,17],19:[0,17]};
@@ -5080,7 +5086,10 @@ const manoViewer = (() => {
         const camW = (cameraMode === 'stereo') ? midline : vidW;
         const isLeft = currentSide === cameraNames[0];
 
-        const MCP_JOINT_MAP = { 'MCP: Thumb-Index': [0,1,5], 'MCP: Index-Middle': [5,9], 'MCP: Middle-Ring': [9,13], 'MCP: Ring-Pinky': [13,17] };
+        // Across-knuckle MCP segment.  Joints 5 (Index MCP) and 17
+        // (Pinky MCP); used for the "knuckle orientation relative to
+        // median" metric.
+        const MCP_JOINT_MAP = { 'MCP: Index-Pinky': [5, 17] };
 
         function _getRequiredJoints(metric) {
             if (metric === 'Knuckle: I-M-R') return [5, 9, 13];
@@ -5116,7 +5125,7 @@ const manoViewer = (() => {
             }
         }
 
-        function _getMetricData(src, metric) {
+        function _rawMetricData(src, metric) {
             // The Skeleton v1 fit is exposed by the backend under the
             // legacy ``_mano`` suffix (distances_mano / angles_mano /
             // spreads_mano / positions_mano / wrist_coords_mano).  The
@@ -5127,6 +5136,10 @@ const manoViewer = (() => {
             if (metric.startsWith('Pos:')) return trialData[`positions_${suffix}`]?.[metric];
             if (metric.startsWith('Wrist ')) return trialData[`wrist_coords_${suffix}`]?.[metric];
             return trialData[`distances_${suffix}`]?.[metric];
+        }
+
+        function _getMetricData(src, metric) {
+            return _xformSeries(_rawMetricData(src, metric));
         }
 
         function _inFrame(framePts, joints) {
@@ -5169,7 +5182,7 @@ const manoViewer = (() => {
             const stt  = _getMetricData('static', metric);
             const cmb  = _getMetricData('combined', metric);
             const vis  = _getMetricData('vision', metric);
-            const dlc  = isAng ? null : trialData.distances_dlc?.[metric];
+            const dlc  = isAng ? null : _xformSeries(trialData.distances_dlc?.[metric]);
             const chk = (arr, isA) => {
                 if (!arr) return;
                 for (const v of arr) {
@@ -5421,7 +5434,7 @@ const manoViewer = (() => {
             const rawStatic   = _getMetricData('static',    metric);
             const rawCombined = _getMetricData('combined',  metric);
             const rawVis     = _getMetricData('vision',      metric);
-            const rawDlc   = isAng ? null : trialData.distances_dlc?.[metric];
+            const rawDlc   = isAng ? null : _xformSeries(trialData.distances_dlc?.[metric]);
 
             const v2Mask   = _makeInFrameMask(trialData.skel_v2_proj_L, trialData.skel_v2_proj_R, joints);
 
@@ -5896,7 +5909,11 @@ const manoViewer = (() => {
 
         // Update Y-axis sidebar labels — distance label left, angle label right
         const yLabel = $('yAxisLabel');
-        if (yLabel) yLabel.textContent = 'Distance (mm)';
+        if (yLabel) yLabel.textContent = (seriesMode === 'velocity')
+            ? 'Distance (mm/s)' : 'Distance (mm)';
+        const yLabelA = $('yAxisLabelAngle');
+        if (yLabelA) yLabelA.textContent = (seriesMode === 'velocity')
+            ? 'Angle (°/s)' : 'Angle (°)';
         const distYAxisWrap = $('distYAxisWrap');
         if (distYAxisWrap) distYAxisWrap.style.visibility = hasDist ? 'visible' : 'hidden';
 
@@ -8981,6 +8998,36 @@ const manoViewer = (() => {
             `<span style="${optB === activeVal ? actStyle : inaStyle}">${optB}</span>`;
     }
 
+    /** Centred-difference velocity in original_units / second.  Same
+     *  length as input; endpoints fall back to forward/backward
+     *  difference.  Nulls are skipped (resulting cell becomes null).
+     *  Pass-through when not in velocity mode. */
+    function _xformSeries(arr) {
+        if (seriesMode !== 'velocity' || !arr) return arr;
+        const fps = (trialData && trialData.fps) || 30;
+        const n = arr.length;
+        const out = new Array(n).fill(null);
+        for (let i = 0; i < n; i++) {
+            const a = (i > 0)     ? arr[i - 1] : null;
+            const b = (i < n - 1) ? arr[i + 1] : null;
+            if (a != null && b != null) {
+                out[i] = (b - a) * fps / 2;
+            } else if (b != null && arr[i] != null) {
+                out[i] = (b - arr[i]) * fps;
+            } else if (a != null && arr[i] != null) {
+                out[i] = (arr[i] - a) * fps;
+            }
+        }
+        return out;
+    }
+
+    function toggleSeriesMode() {
+        seriesMode = (seriesMode === 'position') ? 'velocity' : 'position';
+        _renderDualToggle('seriesModeToggle', 'Pos', 'Vel',
+                          seriesMode === 'position' ? 'Pos' : 'Vel');
+        renderDistanceTrace();
+    }
+
     function togglePlotMode() {
         plotMode = plotMode === 'angle' ? 'position' : 'angle';
         _renderDualToggle('plotModeToggle', 'Angle', 'Position',
@@ -9223,7 +9270,7 @@ const manoViewer = (() => {
         closeConstraintsEditor();
     }
 
-    return { goToFrame, togglePlay, toggleSide, resetZoom, toggleTrackingZoom, prevSubject, nextSubject, getExportContext, runStage1, renderDistanceTrace, resetFitDefaults, resetPlotSelection, togglePlotMode, runFitV2, resetFitV2Defaults, runFitLegacy, resetFitLegacyDefaults, saveErrors, openConstraintsEditor, saveConstraints, resetConstraints, closeConstraintsEditor, cancelConstraintsEditor };
+    return { goToFrame, togglePlay, toggleSide, resetZoom, toggleTrackingZoom, prevSubject, nextSubject, getExportContext, runStage1, renderDistanceTrace, resetFitDefaults, resetPlotSelection, togglePlotMode, toggleSeriesMode, runFitV2, resetFitV2Defaults, runFitLegacy, resetFitLegacyDefaults, saveErrors, openConstraintsEditor, saveConstraints, resetConstraints, closeConstraintsEditor, cancelConstraintsEditor };
 })();
 
 // Expose on window for cross-module access (labels.js is an ES module)

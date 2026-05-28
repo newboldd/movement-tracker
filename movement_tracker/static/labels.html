@@ -1039,14 +1039,12 @@
                     #handDiagramPlot.pos-mode .tip-joint { display:inline; }
                 </style>
                 <!-- MCP distance lines (behind joints) -->
-                <line class="mcp-dist" data-mcp="MCP: Thumb-Index" x1="38" y1="100" x2="53" y2="91" stroke="#60c0e0"/>
-                <line class="mcp-dist-hit" data-mcp="MCP: Thumb-Index" x1="38" y1="100" x2="53" y2="91"/>
-                <line class="mcp-dist" data-mcp="MCP: Index-Middle" x1="42" y1="72" x2="64" y2="69" stroke="#60c0e0"/>
-                <line class="mcp-dist-hit" data-mcp="MCP: Index-Middle" x1="42" y1="72" x2="64" y2="69"/>
-                <line class="mcp-dist" data-mcp="MCP: Middle-Ring" x1="64" y1="69" x2="86" y2="72" stroke="#60c0e0"/>
-                <line class="mcp-dist-hit" data-mcp="MCP: Middle-Ring" x1="64" y1="69" x2="86" y2="72"/>
-                <line class="mcp-dist" data-mcp="MCP: Ring-Pinky" x1="86" y1="72" x2="107" y2="76" stroke="#60c0e0"/>
-                <line class="mcp-dist-hit" data-mcp="MCP: Ring-Pinky" x1="86" y1="72" x2="107" y2="76"/>
+                <!-- One dotted MCP span: Index MCP (5) → Pinky MCP (17).
+                     In Angle mode this is a single click target for the
+                     across-knuckle orientation metric; the individual
+                     inter-MCP segments are no longer plotted. -->
+                <line class="mcp-dist" data-mcp="MCP: Index-Pinky" x1="42" y1="72" x2="107" y2="76" stroke="#60c0e0"/>
+                <line class="mcp-dist-hit" data-mcp="MCP: Index-Pinky" x1="42" y1="72" x2="107" y2="76"/>
                 <g data-finger="thumb"><line class="bone" data-j1="0" data-j2="1" x1="70" y1="120" x2="38" y2="100" stroke="#60c0e0"/><line class="bone" data-j1="1" data-j2="2" x1="38" y1="100" x2="22" y2="88" stroke="#60c0e0"/><line class="bone" data-j1="2" data-j2="3" x1="22" y1="88" x2="10" y2="74" stroke="#60c0e0"/><line class="bone" data-j1="3" data-j2="4" x1="10" y1="74" x2="4" y2="63" stroke="#60c0e0"/><circle class="joint" data-joint="1" cx="38" cy="100" r="3" fill="#60c0e0"/><circle class="joint" data-joint="2" cx="22" cy="88" r="3" fill="#60c0e0"/><circle class="joint" data-joint="3" cx="10" cy="74" r="3" fill="#60c0e0"/></g>
                 <g data-finger="index"><line class="bone" data-j1="0" data-j2="5" x1="70" y1="120" x2="42" y2="72" stroke="#60c0e0"/><line class="bone" data-j1="5" data-j2="6" x1="42" y1="72" x2="36" y2="46" stroke="#60c0e0"/><line class="bone" data-j1="6" data-j2="7" x1="36" y1="46" x2="33" y2="22" stroke="#60c0e0"/><line class="bone" data-j1="7" data-j2="8" x1="33" y1="22" x2="31" y2="2" stroke="#60c0e0"/><circle class="joint" data-joint="5" cx="42" cy="72" r="3" fill="#60c0e0"/><circle class="joint" data-joint="6" cx="36" cy="46" r="3" fill="#60c0e0"/><circle class="joint" data-joint="7" cx="33" cy="22" r="3" fill="#60c0e0"/></g>
                 <g data-finger="middle"><line class="bone" data-j1="0" data-j2="9" x1="70" y1="120" x2="64" y2="69" stroke="#60c0e0"/><line class="bone" data-j1="9" data-j2="10" x1="64" y1="69" x2="62" y2="43" stroke="#60c0e0"/><line class="bone" data-j1="10" data-j2="11" x1="62" y1="43" x2="61" y2="19" stroke="#60c0e0"/><line class="bone" data-j1="11" data-j2="12" x1="61" y1="19" x2="60" y2="-3" stroke="#60c0e0"/><circle class="joint" data-joint="9" cx="64" cy="69" r="3" fill="#60c0e0"/><circle class="joint" data-joint="10" cx="62" cy="43" r="3" fill="#60c0e0"/><circle class="joint" data-joint="11" cx="61" cy="19" r="3" fill="#60c0e0"/></g>
@@ -1118,7 +1116,12 @@
                 <button class="btn btn-sm" id="exportVideoBtn" style="padding:2px 6px;">Export Video</button>
             </div>
             <select id="distanceSelect" style="display:none;"></select>
-            <div id="plotFlexRow" style="display:flex;flex-shrink:0;height:var(--plot-h,115px);">
+            <div id="plotFlexRow" style="display:flex;flex-shrink:0;height:var(--plot-h,115px);position:relative;">
+                <button id="seriesModeToggle"
+                        title="Toggle between raw values and per-frame velocity for ALL plotted series"
+                        onclick="manoViewer.toggleSeriesMode()"
+                        style="position:absolute;left:0;bottom:-18px;font-size:9px;padding:1px 5px;cursor:pointer;background:var(--surface2);border:1px solid var(--border);color:var(--text-muted);border-radius:3px;line-height:1.4;z-index:3;"
+                ><span style="color:var(--text);font-weight:bold;">Pos</span><span style="opacity:0.35;margin:0 3px;">|</span><span>Vel</span></button>
                 <div id="distYAxisWrap" style="display:flex;align-items:center;flex-shrink:0;">
                     <span id="yAxisLabel" style="writing-mode:vertical-rl;transform:rotate(180deg);font-size:10px;color:var(--text-muted);white-space:nowrap;padding:0 2px;">Distance (mm)</span>
                 </div>
@@ -1189,7 +1192,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=377" type="module"></script>
+    <script src="/static/js/labels.js?v=378" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {
