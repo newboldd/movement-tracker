@@ -892,6 +892,116 @@ def _movement_similarity_per_trial(distances: list, trials: list[dict],
     return result
 
 
+def _movement_residuals_per_trial(distances: list, trials: list[dict],
+                                    all_movements: list[dict],
+                                    grid: int = 120) -> dict:
+    """Per-trial RMSE of each movement relative to the trial's reference
+    curve, averaged across movements.  Two flavours of reference:
+
+      • ``mean``   — per-frame mean across movements
+      • ``median`` — per-frame median across movements (robust to outliers)
+
+    Movements are aligned the same way as the ``corr`` similarity score
+    (peak-seeded cross-correlation) and resampled onto a shared grid so
+    every movement contributes to every grid point it covers.  The
+    returned value for each trial is the mean of per-movement RMSE
+    against that trial's reference, in distance units (mm).
+
+    Returns ``{trial_idx: {'mean': r1, 'median': r2}}``.  Trials with
+    fewer than two valid movements yield ``{'mean': None, 'median': None}``.
+    """
+    movs_by_trial: dict[int, list] = {}
+    for m in all_movements:
+        if (m.get("open_frame_local") is None
+                or m.get("close_frame_local") is None):
+            continue
+        if not _movement_is_valid(m, distances, "whole"):
+            continue
+        movs_by_trial.setdefault(int(m["trial_idx"]), []).append(m)
+
+    result: dict[int, dict] = {}
+    n_dist = len(distances)
+    for ti, trial in enumerate(trials):
+        movs = movs_by_trial.get(ti, [])
+        if len(movs) < 2:
+            result[ti] = {"mean": None, "median": None}
+            continue
+        fps = float(trial.get("fps", 60) or 60)
+        s_start = int(trial["start_frame"])
+        s_end = int(trial["end_frame"])
+
+        segs = []
+        global_max_t = 0.0
+        for m in movs:
+            o_loc = max(0, int(m["open_frame_local"]))
+            c_loc = int(m["close_frame_local"])
+            o_g = s_start + o_loc
+            c_g = min(s_end, s_start + c_loc)
+            if c_g <= o_g:
+                continue
+            xs = []; ys = []
+            for f in range(o_g, c_g + 1):
+                if f < 0 or f >= n_dist:
+                    continue
+                v = distances[f]
+                if v is None:
+                    continue
+                xs.append((f - o_g) / fps)
+                ys.append(float(v))
+            if len(xs) < 2:
+                continue
+            p_loc = m.get("peak_frame_local")
+            peak_g = (s_start + int(p_loc)) if p_loc is not None else o_g
+            peak_g = max(o_g, min(c_g, peak_g))
+            segs.append({
+                "xs": xs, "ys": ys,
+                "peakT": (peak_g - o_g) / fps,
+                "closeT": (c_g  - o_g) / fps,
+            })
+            if xs[-1] > global_max_t:
+                global_max_t = xs[-1]
+
+        if len(segs) < 2 or global_max_t <= 0:
+            result[ti] = {"mean": None, "median": None}
+            continue
+
+        x_max = max(0.5, math.ceil(global_max_t * 1.05 * 10) / 10)
+        shifts = _movement_corr_shifts(segs, x_max)
+        arrs = [_resample_seg_to_grid(
+                    [x + shifts[i] for x in segs[i]["xs"]],
+                    segs[i]["ys"], -x_max / 2, x_max / 2, grid)
+                for i in range(len(segs))]
+        stack = np.vstack(arrs)                    # (n_segs, grid)
+        # Per-frame reference curves.  Require at least 2 (and ≥ 25% of
+        # segments) finite samples per frame, matching the labeler.
+        n_segs = stack.shape[0]
+        valid = np.isfinite(stack).sum(axis=0)
+        min_count = max(2, int(math.ceil(n_segs * 0.25)))
+        keep = valid >= min_count
+        if not keep.any():
+            result[ti] = {"mean": None, "median": None}
+            continue
+        ref_mean   = np.nanmean(stack[:, keep], axis=0)
+        ref_median = np.nanmedian(stack[:, keep], axis=0)
+        sub = stack[:, keep]
+        rmses_mean = []
+        rmses_median = []
+        for i in range(n_segs):
+            row = sub[i]
+            mask = np.isfinite(row)
+            if int(mask.sum()) < 5:
+                continue
+            d1 = row[mask] - ref_mean[mask]
+            d2 = row[mask] - ref_median[mask]
+            rmses_mean.append(float(np.sqrt((d1 * d1).mean())))
+            rmses_median.append(float(np.sqrt((d2 * d2).mean())))
+        result[ti] = {
+            "mean":   float(np.mean(rmses_mean))   if rmses_mean   else None,
+            "median": float(np.mean(rmses_median)) if rmses_median else None,
+        }
+    return result
+
+
 def _linreg_fit(x: list[float], y: list[float]) -> tuple[float, float] | None:
     """OLS fit of y on x → (slope, R²).  None if < 2 valid points."""
     pairs = [(xi, yi) for xi, yi in zip(x, y)
@@ -1421,6 +1531,8 @@ def get_group_comparison(include_auto: bool = Query(False),
             # to live compute if any cached subject is missing them.
             if subjs and "movement_similarity" not in subjs[0]:
                 raise RuntimeError("cache missing movement_similarity")
+            if subjs and "residual_vs_mean" not in subjs[0]:
+                raise RuntimeError("cache missing residual_vs_mean")
             return data
         except Exception:
             pass
@@ -1453,8 +1565,8 @@ def get_group_comparison(include_auto: bool = Query(False),
             # Gated by MT_EXPORT_CACHE so the live app is unaffected.
             ckey = (subject_name, source, bool(include_auto))
             cached = _EXPORT_MOVE_CACHE.get(ckey) if _EXPORT_CACHE_ON else None
-            if cached is not None and len(cached) >= 4:
-                trials, all_movements, event_source, similarities = cached
+            if cached is not None and len(cached) >= 5:
+                trials, all_movements, event_source, similarities, residuals = cached
             else:
                 distances, trials, _src = _load_distances_and_trials(subject_name, source)
                 if include_auto:
@@ -1468,9 +1580,14 @@ def get_group_comparison(include_auto: bool = Query(False),
                 # over hand+trial selection happens below.
                 similarities = _movement_similarity_per_trial(
                     distances, trials, all_movements)
+                # Per-trial mean RMSE against the per-frame mean / median
+                # reference curve (corr-aligned).  Same caching scope.
+                residuals = _movement_residuals_per_trial(
+                    distances, trials, all_movements)
                 if _EXPORT_CACHE_ON:
                     _EXPORT_MOVE_CACHE[ckey] = (trials, all_movements,
-                                                  event_source, similarities)
+                                                  event_source, similarities,
+                                                  residuals)
             # Larger / Smaller SE: pick which hand based on each hand's
             # last-trial sequence-effect slope (amplitude key, current
             # seq_mode) before applying the standard trial selector.
@@ -1519,6 +1636,19 @@ def get_group_comparison(include_auto: bool = Query(False),
             vals = []
             for ti in sel_idx:
                 v = (similarities.get(ti) or {}).get(align_key)
+                if v is not None and math.isfinite(v):
+                    vals.append(float(v))
+            entry[out_key] = round(float(np.mean(vals)), 4) if vals else None
+
+        # Per-trial mean RMSE against the trial reference curve
+        # (corr-aligned), averaged across trials in the current
+        # hand/trial selection.  Two flavours: vs per-frame mean and
+        # vs per-frame median.  In distance units (mm).
+        for out_key, ref_key in (("residual_vs_mean",   "mean"),
+                                  ("residual_vs_median", "median")):
+            vals = []
+            for ti in sel_idx:
+                v = (residuals.get(ti) or {}).get(ref_key)
                 if v is not None and math.isfinite(v):
                     vals.append(float(v))
             entry[out_key] = round(float(np.mean(vals)), 4) if vals else None
@@ -1599,6 +1729,8 @@ def _explore_variable_catalog() -> list[dict]:
         ("movement_similarity_open",  "Movement Similarity (open)"),
         ("movement_similarity_peak",  "Movement Similarity (peak)"),
         ("movement_similarity_close", "Movement Similarity (close)"),
+        ("residual_vs_mean",   "Residual vs Mean (mm)"),
+        ("residual_vs_median", "Residual vs Median (mm)"),
     ):
         out.append({"key": k, "label": lbl, "category": "movement",
                     "aggregatable": False})
@@ -1611,7 +1743,8 @@ def _explore_value_keys() -> list[str]:
     for k in _MOVE_PARAM_LABELS:
         keys += [f"mean_{k}", f"variance_{k}", f"cv_{k}", f"seq_{k}", f"seqslope_{k}"]
     keys += ["movement_similarity", "movement_similarity_open",
-             "movement_similarity_peak", "movement_similarity_close"]
+             "movement_similarity_peak", "movement_similarity_close",
+             "residual_vs_mean", "residual_vs_median"]
     return keys
 
 
@@ -1710,6 +1843,9 @@ def get_explore_variables(include_auto: bool = Query(False),
             # values; fall through to live compute when missing.
             if subjs and "movement_similarity" not in (subjs[0].get("vars") or {}):
                 raise RuntimeError("cache missing movement_similarity")
+            # Same for the residual-vs-reference fields.
+            if subjs and "residual_vs_mean" not in (subjs[0].get("vars") or {}):
+                raise RuntimeError("cache missing residual_vs_mean")
             return data
         except Exception:
             pass    # corrupt cache → recompute
