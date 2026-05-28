@@ -208,6 +208,13 @@
                     <label title="Color each cluster distinctly on the shape plot, peak markers, and matrix tick labels.">
                         <input type="checkbox" id="shapeClusterColors"> Colors
                     </label>
+                    <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
+                    <label title="Color each movement by how much it deviates from the trial's reference curve (green = low RMSE, red = high).  Disables cluster colors.">
+                        <input type="checkbox" id="shapeDeviationColors"> Deviation
+                    </label>
+                    <label title="Use the per-frame median instead of mean for the reference curve and RMSE computation.  More robust to outlier movements.">
+                        <input type="checkbox" id="shapeUseMedian"> Median
+                    </label>
                 </div>
                 <div id="shapeOverlayPlots"
                      style="display:flex;flex-wrap:nowrap;gap:12px;overflow-x:auto;align-items:flex-start;"></div>
@@ -341,6 +348,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=11"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=98"></script>
+    <script src="/static/js/results.js?v=99"></script>
 </body>
 </html>

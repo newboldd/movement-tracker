@@ -759,6 +759,12 @@ function _buildShapeOverlayCells() {
         moveLabel.appendChild(nextBtn);
 
         title.appendChild(moveLabel);
+        // Small readout for RMSE relative to the trial reference (mean or
+        // median).  Populated by _redrawOneTrial each draw.
+        const rmseSpan = document.createElement('span');
+        rmseSpan.id = `shapeRmse_${idx}`;
+        rmseSpan.style.cssText = 'font-size:11px;font-weight:400;color:var(--text-muted);margin-left:auto;';
+        title.appendChild(rmseSpan);
         cell.appendChild(title);
 
         const plotDiv = document.createElement('div');
@@ -994,12 +1000,6 @@ function _redrawOneTrial(idx) {
         const fallbackBase = dimmed
             ? 'rgba(31,119,180,0.15)'
             : 'rgba(31,119,180,0.45)';
-        const lineColor = (mi) => {
-            if (_movColors && _movColors[mi]) {
-                return _hexToRgba(_movColors[mi], dimmed ? 0.25 : 0.75);
-            }
-            return fallbackBase;
-        };
         // Cluster filter: when a tick label was clicked, only show
         // movements in that cluster.  null = show all.
         const activeCluster = _shapeClusterFilter[idx];
@@ -1008,6 +1008,128 @@ function _redrawOneTrial(idx) {
             if (activeCluster == null) return true;
             if (!clusterOfArr) return true;
             return clusterOfArr[mi] === activeCluster;
+        };
+
+        // ── Reference curve + per-segment RMSE ──────────────────
+        // Build a per-frame mean (or median) over the visible
+        // segments resampled to a shared grid; then each segment's
+        // RMSE = sqrt(mean((seg − ref)^2)) over the overlapping
+        // valid points.  Used for the readout in the header and for
+        // optional "Deviation"-mode coloring.
+        const _useMedian = !!document.getElementById('shapeUseMedian')?.checked;
+        const _devColorsOn = !!document.getElementById('shapeDeviationColors')?.checked;
+        const _refN = 200;
+        const _refGridX = (i) => xLo + (i / (_refN - 1)) * (xHi - xLo);
+        const _refCurve = new Array(_refN).fill(null);
+        const _resampled = new Array(trial.segments.length).fill(null);
+        const _inFilterIdx = [];
+        for (let mi = 0; mi < trial.segments.length; mi++) {
+            if (!inFilter(mi)) continue;
+            const s = trial.segments[mi];
+            _resampled[mi] = _resampleXY(shiftedX(s, mi), s.ys, xLo, xHi, _refN);
+            _inFilterIdx.push(mi);
+        }
+        if (_inFilterIdx.length >= 2) {
+            for (let i = 0; i < _refN; i++) {
+                const col = [];
+                for (const mi of _inFilterIdx) {
+                    const v = _resampled[mi][i];
+                    if (isFinite(v)) col.push(v);
+                }
+                if (col.length >= Math.max(2, _inFilterIdx.length * 0.25)) {
+                    if (_useMedian) {
+                        col.sort((a, b) => a - b);
+                        const m = Math.floor(col.length / 2);
+                        _refCurve[i] = col.length % 2 ? col[m] : (col[m - 1] + col[m]) / 2;
+                    } else {
+                        let sum = 0;
+                        for (const v of col) sum += v;
+                        _refCurve[i] = sum / col.length;
+                    }
+                }
+            }
+        }
+        // Per-segment RMSE relative to the reference curve.
+        const _rmse = new Array(trial.segments.length).fill(null);
+        for (const mi of _inFilterIdx) {
+            const r = _resampled[mi];
+            let ssum = 0, n = 0;
+            for (let i = 0; i < _refN; i++) {
+                const v = r[i], ref = _refCurve[i];
+                if (!isFinite(v) || ref == null) continue;
+                const d = v - ref;
+                ssum += d * d;
+                n += 1;
+            }
+            if (n >= 5) _rmse[mi] = Math.sqrt(ssum / n);
+        }
+        const _rmseVals = _rmse.filter(v => v != null && isFinite(v));
+        let _meanRmse = null;
+        if (_rmseVals.length) {
+            let s = 0;
+            for (const v of _rmseVals) s += v;
+            _meanRmse = s / _rmseVals.length;
+        }
+        // Update the per-trial RMSE readout.  Shows mean across all
+        // in-filter movements, and — when a movement is highlighted —
+        // also that movement's individual RMSE.
+        const _rmseEl = document.getElementById(`shapeRmse_${idx}`);
+        if (_rmseEl) {
+            const refLabel = _useMedian ? 'median' : 'mean';
+            const parts = [];
+            if (_meanRmse != null) {
+                parts.push(`RMSE vs ${refLabel}: <b>${_meanRmse.toFixed(2)} mm</b>`);
+            }
+            if (hiIdx > 0) {
+                const hiSeg = trial.segments.findIndex(s => s.origMovIdx === hiIdx - 1);
+                if (hiSeg >= 0 && _rmse[hiSeg] != null) {
+                    parts.push(`#${hiIdx}: <b>${_rmse[hiSeg].toFixed(2)} mm</b>`);
+                }
+            }
+            _rmseEl.innerHTML = parts.join('  ·  ');
+        }
+        // Deviation coloring: green (low) → yellow → red (high).
+        // Overrides cluster coloring when both are checked.
+        if (_devColorsOn && _rmseVals.length >= 2) {
+            const lo = Math.min(..._rmseVals);
+            const hi = Math.max(..._rmseVals);
+            const rng = Math.max(1e-9, hi - lo);
+            const colorAt = (t) => {
+                // t in [0,1].  Two-segment ramp: green→yellow→red.
+                const tt = Math.max(0, Math.min(1, t));
+                let r, g, b;
+                if (tt < 0.5) {
+                    const u = tt / 0.5;
+                    r = Math.round(46 + (255 - 46) * u);
+                    g = Math.round(160 + (193 - 160) * u);
+                    b = Math.round(67 + (7 - 67) * u);
+                } else {
+                    const u = (tt - 0.5) / 0.5;
+                    r = Math.round(255 + (211 - 255) * u);
+                    g = Math.round(193 + (47 - 193) * u);
+                    b = Math.round(7 + (47 - 7) * u);
+                }
+                return `#${[r,g,b].map(x => x.toString(16).padStart(2,'0')).join('')}`;
+            };
+            _movColors = new Array(trial.segments.length).fill(null);
+            for (const mi of _inFilterIdx) {
+                if (_rmse[mi] == null) continue;
+                _movColors[mi] = colorAt((_rmse[mi] - lo) / rng);
+            }
+            // Also push these into the peak_frame map so peak markers
+            // and other plots pick up the same coloring.
+            const _pfMap = {};
+            for (let mi = 0; mi < trial.segments.length; mi++) {
+                const pf = trial.segments[mi].peak_frame;
+                if (pf != null && _movColors[mi]) _pfMap[pf] = _movColors[mi];
+            }
+            _shapeClusterColors[idx] = _pfMap;
+        }
+        const lineColor = (mi) => {
+            if (_movColors && _movColors[mi]) {
+                return _hexToRgba(_movColors[mi], dimmed ? 0.25 : 0.75);
+            }
+            return fallbackBase;
         };
 
         const traces = trial.segments.map((s, mi) => ({
@@ -1021,11 +1143,25 @@ function _redrawOneTrial(idx) {
             hoverinfo: 'skip', showlegend: false,
         }));
 
-        // Average trace(s).  When Colors is on we draw one mean per
-        // visible cluster (each in its cluster color); otherwise a
+        // Average trace(s).  When Colors is on AND median is OFF we
+        // draw one mean per visible cluster (each in its cluster
+        // color).  When median is on we draw a single black median
+        // curve (the same _refCurve used for RMSE).  Otherwise a
         // single global mean in black.  Drawn before any highlighted
         // movement so the highlight sits on top.
-        if (showMean) {
+        if (showMean && _useMedian) {
+            const xs = [], ys = [];
+            for (let i = 0; i < _refN; i++) {
+                if (_refCurve[i] != null) { xs.push(_refGridX(i)); ys.push(_refCurve[i]); }
+            }
+            if (xs.length >= 2) {
+                traces.push({
+                    x: xs, y: ys, type: 'scatter', mode: 'lines',
+                    line: { width: 3.5, color: '#000' },
+                    hoverinfo: 'skip', showlegend: false,
+                });
+            }
+        } else if (showMean) {
             const N = 200;
             const _gridX = (i) => xLo + (i / (N - 1)) * (xHi - xLo);
 
@@ -1795,6 +1931,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (cluCb) cluCb.addEventListener('change', _drawShapeOverlayPlots);
     const colCb = document.getElementById('shapeClusterColors');
     if (colCb) colCb.addEventListener('change', _drawShapeOverlayPlots);
+    const devCb = document.getElementById('shapeDeviationColors');
+    if (devCb) devCb.addEventListener('change', _drawShapeOverlayPlots);
+    const medCb = document.getElementById('shapeUseMedian');
+    if (medCb) medCb.addEventListener('change', _drawShapeOverlayPlots);
     const subCb = document.getElementById('shapeSubtractAvg');
     if (subCb) subCb.addEventListener('change', _drawShapeOverlayPlots);
     document.querySelectorAll('input[name="shapeMetric"]').forEach(r =>
