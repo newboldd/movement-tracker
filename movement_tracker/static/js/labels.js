@@ -7672,8 +7672,35 @@ const manoViewer = (() => {
 
         // DLC
         _setLayerAvail('showDLC', hasDLC);
+        _setLayerAvail('showDLC3D', !!(trialData && trialData.dlc_joints_3d));
         if (!hasDLC) {
             if ($('showDLC')) { $('showDLC').checked = false; showDLC = false; }
+        }
+        if (!(trialData && trialData.dlc_joints_3d)) {
+            if ($('showDLC3D')) { $('showDLC3D').checked = false; showDLC3D = false; }
+        }
+
+        // MediaPipe variants — gated by the presence of their per-camera
+        // 2D arrays (npz file produced).  3D availability follows the
+        // 2D file since the triangulation is derived from it.
+        const _hasArr = (k) => {
+            const v = trialData && trialData[k];
+            return Array.isArray(v) && v.length > 0 && v.some(x => x != null);
+        };
+        const hasCropped  = _hasArr('cropped_tracked_L')  || _hasArr('cropped_tracked_R');
+        const hasReverse  = _hasArr('reverse_tracked_L')  || _hasArr('reverse_tracked_R');
+        const hasStatic   = _hasArr('static_tracked_L')   || _hasArr('static_tracked_R');
+        const hasCombined = _hasArr('combined_tracked_L') || _hasArr('combined_tracked_R');
+        const hasPose     = _hasArr('pose_tracked_L')     || _hasArr('pose_tracked_R');
+        for (const [id, ok] of [
+            ['showCropped2D',  hasCropped],  ['showCropped3D',  hasCropped],
+            ['showReverse2D',  hasReverse],  ['showReverse3D',  hasReverse],
+            ['showStatic2D',   hasStatic],   ['showStatic3D',   hasStatic],
+            ['showCombined2D', hasCombined], ['showCombined3D', hasCombined],
+            ['showPose2D',     hasPose],     ['showPose3D',     hasPose],
+        ]) {
+            _setLayerAvail(id, ok);
+            if (!ok && $(id)) { $(id).checked = false; }
         }
 
         _syncAllSkelCheckboxes();
@@ -7695,26 +7722,46 @@ const manoViewer = (() => {
         const el = $(id);
         if (!el) return;
         el.disabled = !available;
-        el.style.opacity = available ? '' : '0.15';
-        // Also dim the model name span (previous sibling in the grid that's a span with text)
-        let prev = el.previousElementSibling;
-        while (prev && prev.tagName === 'INPUT') prev = prev.previousElementSibling;
-        if (prev && prev.tagName === 'SPAN' && prev.textContent.trim()) {
-            prev.style.opacity = available ? '' : '0.15';
+        // Hide the whole row when this model isn't available instead
+        // of dimming it.  The sidebar uses a 4-column grid of
+        // [name, 2D, 3D, err] cells with no per-row wrapper, so we
+        // walk back from the 2D checkbox to the name span and forward
+        // through the next three cells, toggling each.
+        let name = el.previousElementSibling;
+        while (name && name.tagName === 'INPUT') name = name.previousElementSibling;
+        if (name && name.tagName === 'SPAN' && name.textContent.trim()) {
+            const cells = [name];
+            let n = name.nextElementSibling;
+            for (let i = 0; i < 3 && n; i++) {
+                cells.push(n);
+                n = n.nextElementSibling;
+            }
+            const disp = available ? '' : 'none';
+            for (const c of cells) c.style.display = disp;
+        } else {
+            // Fallback for rows whose structure doesn't match (e.g.
+            // hidden master inputs): just toggle the input directly.
+            el.style.display = available ? '' : 'none';
         }
     }
 
-    // Dim / collapse a multi-stage model's parent toggle (e.g. "Skeleton v3",
-    // "HRnet") when the underlying model hasn't been run on this trial.
-    // When ``available`` is false:
-    //   - the parent label is dimmed
-    //   - clicking it doesn't expand the sub-stage rows (pointer-events: none)
-    //   - if it was expanded, force it collapsed
+    // Hide / collapse a multi-stage model's parent toggle (e.g.
+    // "Skeleton v3", "HRnet") when the underlying model hasn't been
+    // run on this trial.  When ``available`` is false the whole row
+    // (toggle + the next three grid cells that pad it out) is
+    // display:none-d, and an expanded panel is forced collapsed so
+    // its stage rows go away too.
     function _setModelToggleAvail(group, available) {
         const el = document.querySelector(`.model-toggle[data-group="${group}"]`);
         if (!el) return;
-        el.style.opacity = available ? '' : '0.3';
-        el.style.pointerEvents = available ? '' : 'none';
+        const cells = [el];
+        let n = el.nextElementSibling;
+        for (let i = 0; i < 3 && n; i++) {
+            cells.push(n);
+            n = n.nextElementSibling;
+        }
+        const disp = available ? '' : 'none';
+        for (const c of cells) c.style.display = disp;
         if (!available) {
             if (group === 'v3' && _v3Expanded) _setV3Expanded(false);
             if (group === 'heatmap' && _heatmapExpanded) _setHeatmapExpanded(false);
