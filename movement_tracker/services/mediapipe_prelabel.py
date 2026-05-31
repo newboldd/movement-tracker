@@ -1127,13 +1127,25 @@ def build_combined_mp_npz_for_trial(subject_name: str, trial_stem: str) -> str |
     src_OS = np.zeros(n, dtype=np.uint8)
     src_OD = np.zeros(n, dtype=np.uint8)
 
+    # Maximum tolerated Y-disparity (mm).  Pairs whose worst-tip
+    # Y-disparity exceeds this are excluded — UNLESS no other pair
+    # is under it, in which case we fall back to the cleanest of
+    # the high-disparity options so we don't drop the frame entirely.
+    MAX_Y_DISP_MM = 10.0
+    # Focal length for the pixel→mm Y conversion.  The OS and OD
+    # intrinsics are essentially identical for a calibrated stereo
+    # rig, so OS's fy is a safe single number to use.
+    fy = (float(calib["K1"][1, 1]) if calib is not None
+                                     and "K1" in calib else None)
+
     for f in range(n):
         os_codes = [c for c in os_lm if (_valid(os_lm[c], f, THUMB_TIP)
                                           and _valid(os_lm[c], f, INDEX_TIP))]
         od_codes = [c for c in od_lm if (_valid(od_lm[c], f, THUMB_TIP)
                                           and _valid(od_lm[c], f, INDEX_TIP))]
         os_pick = od_pick = COMBINED_SRC_NONE
-        best_d = float("inf")
+        # candidates[i] = (tip_distance_mm, y_disp_mm, oc, dc).
+        candidates = []
         for oc in os_codes:
             for dc in od_codes:
                 tip_t = _tri(os_lm[oc][f, THUMB_TIP],
@@ -1143,9 +1155,31 @@ def build_combined_mp_npz_for_trial(subject_name: str, trial_stem: str) -> str |
                 if tip_t is None or tip_i is None:
                     continue
                 d = float(np.linalg.norm(tip_t - tip_i))
-                if d < best_d:
-                    best_d = d
-                    os_pick, od_pick = oc, dc
+                # Per-tip Y-disparity in mm = pixel disparity × Z / fy.
+                # When fy is missing we use +inf so the filter is a
+                # no-op (every candidate stays in the "high-disparity
+                # fallback" pool, but the tip-distance sort still
+                # chooses the best).
+                if fy is not None and fy > 0:
+                    dy_t_px = abs(float(os_lm[oc][f, THUMB_TIP, 1])
+                                  - float(od_lm[dc][f, THUMB_TIP, 1]))
+                    dy_i_px = abs(float(os_lm[oc][f, INDEX_TIP, 1])
+                                  - float(od_lm[dc][f, INDEX_TIP, 1]))
+                    Zt = abs(float(tip_t[2])); Zi = abs(float(tip_i[2]))
+                    dy_mm = max(dy_t_px * Zt / fy, dy_i_px * Zi / fy)
+                else:
+                    dy_mm = float("inf")
+                candidates.append((d, dy_mm, oc, dc))
+
+        if candidates:
+            # Prefer candidates with Y-disparity < threshold.  Only
+            # fall back to the full pool if NONE pass the filter —
+            # this matches the user's request to keep at least one
+            # candidate so the frame still gets labels.
+            good = [c for c in candidates if c[1] < MAX_Y_DISP_MM]
+            pool = good if good else candidates
+            pool.sort(key=lambda c: c[0])
+            os_pick, od_pick = pool[0][2], pool[0][3]
 
         # When tip-based selection didn't run for a camera (no
         # candidate had both tips), fall back to "use whichever
