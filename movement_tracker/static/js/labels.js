@@ -7710,12 +7710,35 @@ const manoViewer = (() => {
             return false;
         };
 
-        // DLC — fall back to a tracked-data check so trials with
-        // hand-corrected DLC labels appear even when the backend's
-        // ``has_dlc`` flag is stale or session-scoped.
+        // DLC tip data is stored as flat (N, 2) per-joint arrays —
+        // dlc_thumb_OS / _OD and dlc_index_OS / _OD — not the (N, 21,
+        // 2) tracked layout the MediaPipe layers use.  Look for any
+        // finite (x, y) pair across all four keys.
+        const _hasFlatPts = (k) => {
+            const v = trialData && trialData[k];
+            if (!Array.isArray(v) || !v.length) return false;
+            for (const pt of v) {
+                if (Array.isArray(pt) && pt.length >= 2
+                    && Number.isFinite(pt[0]) && Number.isFinite(pt[1])) return true;
+            }
+            return false;
+        };
         const hasDLCData = hasDLC
-            || _hasTracked('dlc_tracked_L') || _hasTracked('dlc_tracked_R');
-        const hasDLC3D = _hasJoints3D('dlc_joints_3d');
+            || _hasFlatPts('dlc_thumb_OS') || _hasFlatPts('dlc_thumb_OD')
+            || _hasFlatPts('dlc_index_OS') || _hasFlatPts('dlc_index_OD');
+        // DLC 3D is exposed as dlc_3d_thumb / dlc_3d_index (flat
+        // (N, 3) arrays), again per-joint rather than (N, 21, 3).
+        const _hasFlat3D = (k) => {
+            const v = trialData && trialData[k];
+            if (!Array.isArray(v) || !v.length) return false;
+            for (const pt of v) {
+                if (Array.isArray(pt) && pt.length >= 3
+                    && Number.isFinite(pt[0]) && Number.isFinite(pt[1])
+                    && Number.isFinite(pt[2])) return true;
+            }
+            return false;
+        };
+        const hasDLC3D = _hasFlat3D('dlc_3d_thumb') || _hasFlat3D('dlc_3d_index');
         _setLayerAvail('showDLC', hasDLCData);
         _setLayerAvail('showDLC3D', hasDLC3D);
         if (!hasDLCData) {
