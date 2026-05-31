@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import csv as _csv
 import json
+import logging
+import math
 from pathlib import Path
 from typing import List
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import FileResponse, Response
@@ -1534,27 +1538,48 @@ def detect_events_v2(session_id: int, body: dict = Body(...)) -> dict:
             return ld.get("distances") if ld else None
         return None
 
+    # Caller can short-circuit the disk load and pass a per-trial
+    # distance series directly — used by the Events page's
+    # smoothing slider so detection runs against exactly what the
+    # user sees, not the raw stage file.  ``distances_override`` is
+    # the trial-local slice (length = trial frame count).
+    trial_dist = None
+    override = body.get("distances_override")
+    if isinstance(override, list) and override:
+        expected_len = ef - sf + 1
+        if len(override) == expected_len:
+            trial_dist = [float(d) if (d is not None
+                                        and isinstance(d, (int, float))
+                                        and math.isfinite(float(d)))
+                          else None
+                          for d in override]
+        else:
+            logger.warning(
+                "detect_events_v2: distances_override length %d ≠ trial %d (%d frames); ignoring",
+                len(override), trial_index, expected_len)
+
     dist_raw = None
-    if source != "auto":
-        dist_raw = _load_source(source)
-    else:
-        for stage in ("corrections", "mp", "refine", "dlc", "labels"):
-            candidate = _load_source(stage)
-            if not candidate:
-                continue
-            valid_count = sum(1 for d in candidate if d is not None)
-            if valid_count > len(candidate) * 0.5:
-                dist_raw = candidate
-                break
+    if trial_dist is None:
+        if source != "auto":
+            dist_raw = _load_source(source)
+        else:
+            for stage in ("corrections", "mp", "refine", "dlc", "labels"):
+                candidate = _load_source(stage)
+                if not candidate:
+                    continue
+                valid_count = sum(1 for d in candidate if d is not None)
+                if valid_count > len(candidate) * 0.5:
+                    dist_raw = candidate
+                    break
 
-    if not dist_raw:
-        raise HTTPException(
-            400,
-            f"No distance data available for auto-detection (source={source})",
-        )
+        if not dist_raw:
+            raise HTTPException(
+                400,
+                f"No distance data available for auto-detection (source={source})",
+            )
 
-    # Slice to trial range (local indices for detection)
-    trial_dist = dist_raw[sf:ef + 1]
+        # Slice to trial range (local indices for detection)
+        trial_dist = dist_raw[sf:ef + 1]
 
     # Extract metrics (pre-computed or None).  Prefer phase-correlation
     # flow over MSD: flow tracks tip motion onset/offset better, giving

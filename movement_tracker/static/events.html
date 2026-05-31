@@ -104,6 +104,22 @@
             <!-- Events section -->
             <div class="sidebar-section">Events</div>
 
+            <!-- Smoothing slider — for each frame we fit a 2-order
+                 polynomial to the 8 surrounding samples, rank every
+                 frame by |raw − interp|, and iteratively replace the
+                 largest deviations with their interpolated values.
+                 The slider value (0 ... 100) is interpreted as a
+                 percent of the trial's frame count.  All downstream
+                 auto-detection runs against the smoothed series. -->
+            <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);margin-bottom:6px;"
+                   title="Iteratively replace the most-deviating samples with their 4-frames-each-side 2nd-order polynomial interpolation.  0 = raw, 100 = up to all frames replaced.">
+                Smooth
+                <input type="range" id="smoothSlider"
+                       min="0" max="100" step="1" value="0"
+                       style="flex:1;height:5px;cursor:pointer;min-width:0;accent-color:var(--lime);">
+                <span id="smoothVal" style="min-width:28px;text-align:right;color:var(--text);">0</span>
+            </label>
+
             <!-- Auto-detect -->
             <button class="btn btn-sm" id="detectEventsBtn" style="width:100%;margin-bottom:8px;">Auto-detect...</button>
 
@@ -339,6 +355,6 @@
 
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js?v=10"></script>
-    <script src="/static/js/events.js?v=10"></script>
+    <script src="/static/js/events.js?v=11"></script>
 </body>
 </html>

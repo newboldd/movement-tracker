@@ -49,8 +49,15 @@ const eventsPage = (() => {
     let dragStartX = 0, dragStartY = 0;
     let panStartOX = 0, panStartOY = 0;
 
-    // Distance data
+    // Distance data.  ``distances`` is the source-of-truth raw trace
+    // loaded from the chosen source stage.  ``smoothedDistances`` is
+    // a derived copy with the slider's iterative
+    // largest-deviation-first polynomial fill applied; it's what
+    // every plot AND every auto-detect call sees.  Falls back to the
+    // raw array when the slider is at 0.
     let distances = null;
+    let smoothedDistances = null;
+    let smoothSliderValue = 0;
     let distViewStart = 0;
     let distViewFrames = 0;
     let distAutoScroll = true;
@@ -323,8 +330,90 @@ const eventsPage = (() => {
     // page refresh + subject switch within the session.
     let _sourceOverride = sessionStorage.getItem('events_sourceOverride') || 'auto';
 
+    /** Fit a degree-2 polynomial to the 8 samples surrounding frame
+     *  ``i`` (4 each side, ``i`` itself excluded) and return its
+     *  value at ``i``.  Returns null when fewer than 3 valid neighbours
+     *  are available or the design matrix is singular. */
+    function _polyInterp(arr, i, half) {
+        const xs = [], ys = [];
+        for (let k = i - half; k <= i + half; k++) {
+            if (k === i) continue;
+            if (k < 0 || k >= arr.length) continue;
+            const v = arr[k];
+            if (v == null || !Number.isFinite(v)) continue;
+            xs.push(k - i);   // center on i so x-values stay small
+            ys.push(v);
+        }
+        if (xs.length < 3) return null;
+        let S0 = xs.length, S1 = 0, S2 = 0, S3 = 0, S4 = 0;
+        let T0 = 0, T1 = 0, T2 = 0;
+        for (let k = 0; k < xs.length; k++) {
+            const x = xs[k], y = ys[k];
+            S1 += x; S2 += x*x; S3 += x*x*x; S4 += x*x*x*x;
+            T0 += y; T1 += x*y; T2 += x*x*y;
+        }
+        const det = S0*(S2*S4 - S3*S3) - S1*(S1*S4 - S2*S3) + S2*(S1*S3 - S2*S2);
+        if (Math.abs(det) < 1e-12) return null;
+        // We evaluate at x = 0 (the missing center sample), which is
+        // exactly the intercept ``a`` of y = a + b·x + c·x².
+        const a = (T0*(S2*S4 - S3*S3) - S1*(T1*S4 - S3*T2) + S2*(T1*S3 - S2*T2)) / det;
+        return a;
+    }
+
+    /** Iterative spike replacement: at each step replace the most-
+     *  deviating sample (|raw − interp|) with its interpolated value,
+     *  then recompute interpolations for the ±half-frame neighbours
+     *  (the only frames whose windows touched the just-replaced
+     *  index).  Slider 0-100 is a percent of frame count.
+     *  Mutation is on a copy; the source array is left intact. */
+    function _smoothDistances(raw, percent) {
+        if (!raw || percent <= 0) return raw ? raw.slice() : null;
+        const half = 4;
+        const arr = raw.slice();
+        const n = arr.length;
+        const nReplace = Math.min(n, Math.max(0, Math.round(n * percent / 100)));
+        if (nReplace === 0) return arr;
+        const replaced = new Uint8Array(n);
+        const interp = new Array(n).fill(null);
+        const dev = new Float64Array(n);
+        const _recomputeOne = (k) => {
+            const v = arr[k];
+            if (v == null || !Number.isFinite(v)) { dev[k] = -1; return; }
+            const ip = _polyInterp(arr, k, half);
+            interp[k] = ip;
+            dev[k] = (ip == null) ? -1 : Math.abs(v - ip);
+        };
+        for (let i = 0; i < n; i++) _recomputeOne(i);
+        for (let iter = 0; iter < nReplace; iter++) {
+            let best = -1, bestDev = -1;
+            for (let i = 0; i < n; i++) {
+                if (replaced[i]) continue;
+                if (dev[i] > bestDev) { bestDev = dev[i]; best = i; }
+            }
+            if (best < 0 || bestDev <= 0) break;
+            arr[best] = interp[best];
+            replaced[best] = 1;
+            // Only frames within ±half of ``best`` have their poly
+            // input changed; recomputing them is enough.
+            const lo = Math.max(0, best - half);
+            const hi = Math.min(n - 1, best + half);
+            for (let k = lo; k <= hi; k++) _recomputeOne(k);
+        }
+        return arr;
+    }
+
+    /** Recompute smoothedDistances from the current ``distances`` and
+     *  ``smoothSliderValue``, then re-render the plot.  Cheap to call
+     *  on every slider input event for trials up to a few thousand
+     *  frames (we only iterate ``percent × n`` times). */
+    function _applySmoothing() {
+        smoothedDistances = _smoothDistances(distances, smoothSliderValue);
+        renderDistanceTrace();
+    }
+
     async function loadDistances() {
         distances = null;
+        smoothedDistances = null;
         try {
             const stagesResult = await API.get(`/api/labeling/sessions/${sessionId}/available_stages`);
             const available = stagesResult.stages || [];
@@ -337,6 +426,10 @@ const eventsPage = (() => {
                     const data = await API.get(`/api/labeling/sessions/${sessionId}/stage_data?stage=${stage}`);
                     if (data && data.distances && data.distances.some(d => d !== null)) {
                         distances = data.distances;
+                        // Recompute the smoothed mirror for the current
+                        // slider position so plot + auto-detect both
+                        // see the same series after a source change.
+                        smoothedDistances = _smoothDistances(distances, smoothSliderValue);
                         _updateSourceDropdownLabel(stage);
                         return;
                     }
@@ -395,8 +488,9 @@ const eventsPage = (() => {
     }
 
     function computeStableDistRange() {
-        if (!distances) return;
-        const valid = distances.filter(d => d !== null && d !== undefined && isFinite(d));
+        const arr = smoothedDistances || distances;
+        if (!arr) return;
+        const valid = arr.filter(d => d !== null && d !== undefined && isFinite(d));
         if (valid.length === 0) return;
         const sorted = [...valid].sort((a, b) => a - b);
         const p02 = sorted[Math.floor(sorted.length * 0.02)];
@@ -1061,11 +1155,12 @@ const eventsPage = (() => {
     }
 
     function _resetYRangeSlidersForCurrentTrial() {
-        if (!distances || currentEventTrialIdx < 0) return;
+        const _src = smoothedDistances || distances;
+        if (!_src || currentEventTrialIdx < 0) return;
         const r = getTrialFrameRange(currentEventTrialIdx);
         const slice = [];
-        for (let f = r.start; f <= r.end && f < distances.length; f++) {
-            const d = distances[f];
+        for (let f = r.start; f <= r.end && f < _src.length; f++) {
+            const d = _src[f];
             if (d !== null && d !== undefined && isFinite(d)) slice.push(d);
         }
         if (slice.length === 0) {
@@ -1270,7 +1365,8 @@ const eventsPage = (() => {
             minD = stableDistRange.min;
             maxD = stableDistRange.max;
         } else {
-            const valid = distances.filter(d => d !== null && d !== undefined && isFinite(d));
+            const _src = smoothedDistances || distances;
+            const valid = _src.filter(d => d !== null && d !== undefined && isFinite(d));
             if (valid.length === 0) return;
             const sorted = [...valid].sort((a, b) => a - b);
             minD = Math.max(0, sorted[Math.floor(sorted.length * 0.02)] - 5);
@@ -1326,11 +1422,13 @@ const eventsPage = (() => {
             distCtx.stroke();
         }
 
-        // Distance line
+        // Distance line — plot what the smoothing slider has produced
+        // (== ``distances`` itself when slider is at 0).
+        const _plotSrc = smoothedDistances || distances;
         distCtx.beginPath();
         let started = false;
-        for (let f = Math.max(0, vStart - 1); f < vEnd + 1 && f < distances.length; f++) {
-            const d = distances[f];
+        for (let f = Math.max(0, vStart - 1); f < vEnd + 1 && f < _plotSrc.length; f++) {
+            const d = _plotSrc[f];
             if (d === null || d === undefined) { started = false; continue; }
             const x = fToX(f);
             const y = dToY(d);
@@ -1353,8 +1451,8 @@ const eventsPage = (() => {
                 if (f < trialRange.start || f > trialRange.end) return;
                 const x = fToX(f);
                 let y;
-                if (distances && f < distances.length && distances[f] !== null) {
-                    y = Math.max(padT + 5, Math.min(padT + plotH - 5, dToY(distances[f])));
+                if (_plotSrc && f < _plotSrc.length && _plotSrc[f] !== null) {
+                    y = Math.max(padT + 5, Math.min(padT + plotH - 5, dToY(_plotSrc[f])));
                 } else {
                     y = padT + plotH * 0.5;
                 }
@@ -1806,6 +1904,17 @@ const eventsPage = (() => {
             }
         }
 
+        // Smoothed-trace override: send the per-trial slice of
+        // smoothedDistances so the backend runs detection against
+        // what the user sees, not the raw stage file.  When the
+        // slider is at 0, smoothedDistances === distances (modulo a
+        // copy), so this is a no-op vs. the old behaviour.
+        let distancesOverride = null;
+        if (smoothedDistances && currentEventTrialIdx >= 0) {
+            const _r = getTrialFrameRange(currentEventTrialIdx);
+            distancesOverride = smoothedDistances.slice(_r.start, _r.end + 1);
+        }
+
         try {
             const result = await API.post(`/api/labeling/sessions/${sessionId}/detect_events_v2`, {
                 trial_index: currentEventTrialIdx,
@@ -1816,6 +1925,7 @@ const eventsPage = (() => {
                 params,
                 steps,
                 metrics,
+                distances_override: distancesOverride,
             });
 
             // typesToReplace: which event arrays this phase wrote.
@@ -1926,6 +2036,16 @@ const eventsPage = (() => {
         // so the choice survives reload + subject switch.  Reset
         // stableDistRange so the new source's value range drives the
         // y-axis defaults.
+        // Smooth slider: iterative spike-replacement on the distance
+        // trace.  Real-time render on every input event.
+        const _smSl = $('smoothSlider'); const _smVal = $('smoothVal');
+        if (_smSl) {
+            _smSl.addEventListener('input', () => {
+                smoothSliderValue = parseInt(_smSl.value) || 0;
+                if (_smVal) _smVal.textContent = String(smoothSliderValue);
+                _applySmoothing();
+            });
+        }
         const _srcSel = $('sourceSelect');
         if (_srcSel) {
             _srcSel.value = _sourceOverride;
