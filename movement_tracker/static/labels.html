@@ -226,6 +226,19 @@
                 <input type="checkbox" id="showCombined3D" style="margin:0;justify-self:center;">
                 <span></span>
 
+                <!-- 1a'''. Smoothed — spike-suppressed sibling of
+                     Combined.  Same shape, but frames whose
+                     thumb-index aperture jumps far from neighbours
+                     have the offending camera's 21-joint set
+                     NaN'd and linearly interpolated. -->
+                <span style="color:var(--text-muted);padding-left:18px;"
+                      title="Combined with aperture-spike frames repaired by camera-blame + interpolation. Saved to <trial>/mediapipe_smoothed.npz.">
+                    <span class="layer-swatch" style="background:#fff176;"></span> Smoothed
+                </span>
+                <input type="checkbox" id="showSmoothed2D" style="margin:0;justify-self:center;">
+                <input type="checkbox" id="showSmoothed3D" style="margin:0;justify-self:center;">
+                <span></span>
+
                 <!-- 1b. Stereo — partner-camera MP label translated by
                      image-content phase-correlation.  2D only. -->
                 <span style="color:var(--text-muted);padding-left:18px;"><span class="layer-swatch" style="background:#e91e63;"></span> Stereo</span>
@@ -1192,7 +1205,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=382" type="module"></script>
+    <script src="/static/js/labels.js?v=383" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

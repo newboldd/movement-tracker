@@ -43,10 +43,13 @@ const manoViewer = (() => {
     let showStatic3D = false;
     let showCombined2D = false;
     let showCombined3D = false;
+    let showSmoothed2D = false;
+    let showSmoothed3D = false;
     let showReverseSkel = true;
     let showCroppedSkel = true;
     let showStaticSkel = true;
     let showCombinedSkel = true;
+    let showSmoothedSkel = true;
     // Stereo (cross-camera image-alignment) overlay.  Only 2D —
     // there's no 3D representation; the partner-camera MP label is
     // translated into the current view by the per-frame per-joint
@@ -601,7 +604,7 @@ const manoViewer = (() => {
 
     // Three.js
     let scene, camera3d, renderer;
-    let manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup;
+    let manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, smoothedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup;
     let camera3dInit = false;
 
     // Scene-space orbit: rotate content around hand center while camera stays fixed
@@ -1579,6 +1582,7 @@ const manoViewer = (() => {
         $('showCropped2D')?.addEventListener('change', e => { showCropped2D = e.target.checked; updateLayerFlags(); });
         $('showStatic2D')?.addEventListener('change', e => { showStatic2D = e.target.checked; updateLayerFlags(); });
         $('showCombined2D')?.addEventListener('change', e => { showCombined2D = e.target.checked; updateLayerFlags(); });
+        $('showSmoothed2D')?.addEventListener('change', e => { showSmoothed2D = e.target.checked; updateLayerFlags(); });
         // Helper: clear the selected-joint marker if none of the three
         // Stereo variants is visible anymore.
         const _maybeClearStereoSelected = () => {
@@ -1768,6 +1772,7 @@ const manoViewer = (() => {
         $('showCropped3D')?.addEventListener('change', e => { showCropped3D = e.target.checked; updateLayerFlags(); });
         $('showStatic3D')?.addEventListener('change', e => { showStatic3D = e.target.checked; updateLayerFlags(); });
         $('showCombined3D')?.addEventListener('change', e => { showCombined3D = e.target.checked; updateLayerFlags(); });
+        $('showSmoothed3D')?.addEventListener('change', e => { showSmoothed3D = e.target.checked; updateLayerFlags(); });
         $('showMano2D').addEventListener('change', e => { showMano2D = e.target.checked; updateLayerFlags(); _updateHandDiagramColor(); });
         $('showMano3D').addEventListener('change', e => { showMano3D = e.target.checked; updateLayerFlags(); _updateHandDiagramColor(); });
         $('showSkelV2_2D').addEventListener('change', e => {
@@ -3929,6 +3934,10 @@ const manoViewer = (() => {
         const combinedKp = isLeft
             ? trialData.combined_tracked_L
             : trialData.combined_tracked_R;
+        // Smoothed MediaPipe layer (spike-suppressed sibling of Combined).
+        const smoothedKp = isLeft
+            ? trialData.smoothed_tracked_L
+            : trialData.smoothed_tracked_R;
 
         // All 2D data is in camera-half coords — no offset needed
         const manoXOff = 0;
@@ -4045,6 +4054,18 @@ const manoViewer = (() => {
                         combinedKp[fn][j][0] * pixelScale,
                         combinedKp[fn][j][1] * pixelScale,
                         '#ffa726', 1.5, 0.5
+                    );
+                }
+                // Smoothed (yellow) — Combined with aperture-spike
+                // frames repaired.
+                if (showSmoothedSkel && showSmoothed2D
+                    && smoothedKp?.[fn]?.[i] && smoothedKp[fn][j]) {
+                    drawLine(
+                        smoothedKp[fn][i][0] * pixelScale,
+                        smoothedKp[fn][i][1] * pixelScale,
+                        smoothedKp[fn][j][0] * pixelScale,
+                        smoothedKp[fn][j][1] * pixelScale,
+                        '#fff176', 1.5, 0.5
                     );
                 }
 
@@ -4232,6 +4253,16 @@ const manoViewer = (() => {
                 const x = combinedKp[fn][j][0] * pixelScale;
                 const y = combinedKp[fn][j][1] * pixelScale;
                 drawCross(x, y, '#ffa726', 4);
+            }
+        }
+
+        // Smoothed-pass joint markers (yellow).
+        if (showSmoothed2D && smoothedKp && smoothedKp[fn]) {
+            for (let j = 0; j < 21; j++) {
+                if (!isJointVisible(j) || !smoothedKp[fn][j]) continue;
+                const x = smoothedKp[fn][j][0] * pixelScale;
+                const y = smoothedKp[fn][j][1] * pixelScale;
+                drawCross(x, y, '#fff176', 4);
             }
         }
 
@@ -5313,6 +5344,7 @@ const manoViewer = (() => {
             const rev  = _getMetricData('reverse', metric);
             const stt  = _getMetricData('static', metric);
             const cmb  = _getMetricData('combined', metric);
+            const smd  = _getMetricData('smoothed', metric);
             const vis  = _getMetricData('vision', metric);
             const dlc  = isAng ? null : _xformSeries(trialData.distances_dlc?.[metric]);
             const chk = (arr, isA) => {
@@ -5331,6 +5363,7 @@ const manoViewer = (() => {
             if (showReverse2D || showReverse3D) chk(rev, isAng);
             if (showStatic2D || showStatic3D) chk(stt, isAng);
             if (showCombined2D || showCombined3D) chk(cmb, isAng);
+            if (showSmoothed2D || showSmoothed3D) chk(smd, isAng);
             if (showVision2D || showVision3D) chk(vis, isAng);
             if (showDLC || showDLC3D) chk(dlc, isAng);
             if (showHeatmap2D || showHeatmap3D) chk(_getMetricData('heatmap', metric), isAng);
@@ -5502,7 +5535,7 @@ const manoViewer = (() => {
         const SOURCE_COLORS = {
             skeleton: 'lime', skel_v2: '#ff9800', skel_legacy: '#e040fb',
             mp: '#00cccc', cropped: '#7cb342', reverse: '#e040fb',
-            static: '#26c6da', combined: '#ffa726',
+            static: '#26c6da', combined: '#ffa726', smoothed: '#fff176',
             vision: '#2196f3', dlc: '#ff4444',
             prev: '#b35b00', heatmap: '#ff6600',
             hrnet_centroid:  '#ff9966',
@@ -5554,6 +5587,7 @@ const manoViewer = (() => {
             const crpMask  = _makeInFrameMask(trialData.cropped_tracked_L, trialData.cropped_tracked_R, joints);
             const sttMask  = _makeInFrameMask(trialData.static_tracked_L, trialData.static_tracked_R, joints);
             const cmbMask  = _makeInFrameMask(trialData.combined_tracked_L, trialData.combined_tracked_R, joints);
+            const smdMask  = _makeInFrameMask(trialData.smoothed_tracked_L, trialData.smoothed_tracked_R, joints);
             const manoMask = _makeInFrameMask(trialData.skeleton_proj_L,      trialData.skeleton_proj_R,      joints);
             const visMask  = _makeInFrameMask(trialData.vision_tracked_L, trialData.vision_tracked_R, joints);
 
@@ -5565,6 +5599,7 @@ const manoViewer = (() => {
             const rawReverse = _getMetricData('reverse',     metric);
             const rawStatic   = _getMetricData('static',    metric);
             const rawCombined = _getMetricData('combined',  metric);
+            const rawSmoothed = _getMetricData('smoothed',  metric);
             const rawVis     = _getMetricData('vision',      metric);
             const rawDlc   = isAng ? null : _xformSeries(trialData.distances_dlc?.[metric]);
 
@@ -5589,6 +5624,7 @@ const manoViewer = (() => {
             if (showReverse2D || showReverse3D)       drawSeries(_applyMask(rawReverse, revMask), useSourceColor ? SOURCE_COLORS.reverse     : metricColor, 'reverse',     toY, abdDash);
             if (showStatic2D || showStatic3D)         drawSeries(_applyMask(rawStatic, sttMask),   useSourceColor ? SOURCE_COLORS.static    : metricColor, 'static',      toY, abdDash);
             if (showCombined2D || showCombined3D)     drawSeries(_applyMask(rawCombined, cmbMask), useSourceColor ? SOURCE_COLORS.combined  : metricColor, 'combined',    toY, abdDash);
+            if (showSmoothed2D || showSmoothed3D)     drawSeries(_applyMask(rawSmoothed, smdMask), useSourceColor ? SOURCE_COLORS.smoothed  : metricColor, 'smoothed',    toY, abdDash);
             if (showVision2D || showVision3D)         drawSeries(_applyMask(rawVis,   visMask),  useSourceColor ? SOURCE_COLORS.vision      : metricColor, 'vision',      toY, abdDash);
             if (showDLC || showDLC3D)                 drawSeries(rawDlc,                                                     useSourceColor ? SOURCE_COLORS.dlc         : metricColor, 'dlc',         toY, abdDash);
             if (showHeatmap2D || showHeatmap3D) {
@@ -6139,12 +6175,13 @@ const manoViewer = (() => {
         reverseGroup = new THREE.Group();
         staticGroup = new THREE.Group();
         combinedGroup = new THREE.Group();
+        smoothedGroup = new THREE.Group();
         visionGroup = new THREE.Group();
         dlcGroup = new THREE.Group();
         poseGroup = new THREE.Group();
         heatmapGroup = new THREE.Group();
         angleArcGroup = new THREE.Group();
-        scene.add(manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup);
+        scene.add(manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, smoothedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup);
 
         renderer.render(scene, camera3d);
 
@@ -6449,7 +6486,7 @@ const manoViewer = (() => {
         let arcSrcKey = null;
 
         // Clear groups
-        [manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup].forEach(g => {
+        [manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, smoothedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup].forEach(g => {
             while (g.children.length) {
                 const child = g.children[0];
                 g.remove(child);
@@ -7062,6 +7099,30 @@ const manoViewer = (() => {
             }
         }
 
+        // Smoothed-pass joints (yellow).
+        const smoothed3d = trialData.smoothed_joints_3d?.[fn];
+        if (showSmoothed3D && smoothed3d) {
+            const smdMat = new THREE.MeshPhongMaterial({ color: 0xfff176, emissive: 0xa68f00 });
+            const smdBoneMat = new THREE.MeshPhongMaterial({ color: 0xfff176, emissive: 0x806c00 });
+            for (let j = 0; j < 21; j++) {
+                if (!isJointVisible(j) || !smoothed3d[j]) continue;
+                const sphere = new THREE.Mesh(sphereGeom, smdMat);
+                sphere.position.copy(orbitPt(getScenePos(smoothed3d, j)));
+                smoothedGroup.add(sphere);
+            }
+            if (showSmoothedSkel && trialData.skeleton) {
+                trialData.skeleton.forEach(([i, j]) => {
+                    if (!isBoneVisible(i, j) || !smoothed3d[i] || !smoothed3d[j]) return;
+                    const bone = makeBone(
+                        orbitPt(getScenePos(smoothed3d, i)),
+                        orbitPt(getScenePos(smoothed3d, j)),
+                        1.0, smdBoneMat
+                    );
+                    if (bone) smoothedGroup.add(bone);
+                });
+            }
+        }
+
         // Vision joints (light blue)
         if (showVision3D && vision3d) {
             const vMat = new THREE.MeshPhongMaterial({ color: 0x2196f3, emissive: 0x0d47a1 });
@@ -7397,6 +7458,7 @@ const manoViewer = (() => {
         reverseGroup.visible = showReverse3D;
         staticGroup.visible = showStatic3D;
         combinedGroup.visible = showCombined3D;
+        smoothedGroup.visible = showSmoothed3D;
         visionGroup.visible = showVision3D;
         dlcGroup.visible = showDLC3D;
 
@@ -7767,12 +7829,14 @@ const manoViewer = (() => {
         const hasReverse  = _hasTracked('reverse_tracked_L')  || _hasTracked('reverse_tracked_R');
         const hasStatic   = _hasTracked('static_tracked_L')   || _hasTracked('static_tracked_R');
         const hasCombined = _hasTracked('combined_tracked_L') || _hasTracked('combined_tracked_R');
+        const hasSmoothed = _hasTracked('smoothed_tracked_L') || _hasTracked('smoothed_tracked_R');
         const hasPose     = _hasTracked('pose_tracked_L')     || _hasTracked('pose_tracked_R');
         for (const [id, ok] of [
             ['showCropped2D',  hasCropped],  ['showCropped3D',  hasCropped],
             ['showReverse2D',  hasReverse],  ['showReverse3D',  hasReverse],
             ['showStatic2D',   hasStatic],   ['showStatic3D',   hasStatic],
             ['showCombined2D', hasCombined], ['showCombined3D', hasCombined],
+            ['showSmoothed2D', hasSmoothed], ['showSmoothed3D', hasSmoothed],
             ['showPose2D',     hasPose],     ['showPose3D',     hasPose],
         ]) {
             _setLayerAvail(id, ok);

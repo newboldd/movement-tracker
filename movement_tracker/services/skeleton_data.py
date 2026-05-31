@@ -1333,6 +1333,31 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
             combined_joints_3d[:, j, :] = triangulate_points(
                 combined_tracked_L[:, j, :], combined_tracked_R[:, j, :], calib)
 
+    # ── Load Smoothed pass (spike-cleaned sibling of Combined) ──
+    smoothed_tracked_L = np.full((N, 21, 2), np.nan)
+    smoothed_tracked_R = np.full((N, 21, 2), np.nan)
+    from .mediapipe_prelabel import load_mediapipe_smoothed_prelabels
+    smth = load_mediapipe_smoothed_prelabels(subject_name)
+    if smth is not None:
+        os_lm_sm = smth.get("OS_landmarks")
+        od_lm_sm = smth.get("OD_landmarks")
+        if os_lm_sm is not None:
+            end_sm = min(start_frame + N, os_lm_sm.shape[0])
+            if end_sm > start_frame:
+                n = end_sm - start_frame
+                smoothed_tracked_L[:n] = os_lm_sm[start_frame:end_sm]
+        if od_lm_sm is not None:
+            end_sm = min(start_frame + N, od_lm_sm.shape[0])
+            if end_sm > start_frame:
+                n = end_sm - start_frame
+                smoothed_tracked_R[:n] = od_lm_sm[start_frame:end_sm]
+
+    smoothed_joints_3d = np.full((N, 21, 3), np.nan)
+    if has_calib:
+        for j in range(21):
+            smoothed_joints_3d[:, j, :] = triangulate_points(
+                smoothed_tracked_L[:, j, :], smoothed_tracked_R[:, j, :], calib)
+
     # ── Load Vision (Apple Vision) landmarks ───────────────────
     vision_tracked_L = np.full((N, 21, 2), np.nan)
     vision_tracked_R = np.full((N, 21, 2), np.nan)
@@ -1523,6 +1548,7 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
     distances_reverse = _compute_distances(reverse_joints_3d)
     distances_static = _compute_distances(static_joints_3d)
     distances_combined = _compute_distances(combined_joints_3d)
+    distances_smoothed = _compute_distances(smoothed_joints_3d)
     distances_vision = _compute_distances(vision_joints_3d)
     # Parse the HRnet peaks JSON once and reuse for every kind below
     # (refined / raw / centroid / yzc / zsmooth / hungarian + the response
@@ -1570,6 +1596,7 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
     distances_reverse.update(_compute_mcp_distances(reverse_joints_3d))
     distances_static.update(_compute_mcp_distances(static_joints_3d))
     distances_combined.update(_compute_mcp_distances(combined_joints_3d))
+    distances_smoothed.update(_compute_mcp_distances(smoothed_joints_3d))
     distances_vision.update(_compute_mcp_distances(vision_joints_3d))
 
     # Compute joint angle traces
@@ -1833,6 +1860,11 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
         "combined_joints_3d": _points_to_list(combined_joints_3d),
         "has_combined_mp": bool(np.any(~np.isnan(combined_tracked_L))
                                  or np.any(~np.isnan(combined_tracked_R))),
+        "smoothed_tracked_L": _points_to_list(smoothed_tracked_L),
+        "smoothed_tracked_R": _points_to_list(smoothed_tracked_R),
+        "smoothed_joints_3d": _points_to_list(smoothed_joints_3d),
+        "has_smoothed_mp": bool(np.any(~np.isnan(smoothed_tracked_L))
+                                 or np.any(~np.isnan(smoothed_tracked_R))),
         # Stereo (image-based cross-camera alignment) — populated below
         # if a saved ``stereo_align.npz`` exists for this trial.
         "stereo_tracked_L": None,
@@ -1894,6 +1926,7 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
         "distances_reverse": distances_reverse,
         "distances_static": distances_static,
         "distances_combined": distances_combined,
+        "distances_smoothed": distances_smoothed,
         "distances_vision": distances_vision,
         "distances_heatmap": distances_heatmap,
         "distances_hrnet_centroid":  distances_hrnet_centroid,

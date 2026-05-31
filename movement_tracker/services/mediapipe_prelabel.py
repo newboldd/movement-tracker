@@ -1321,20 +1321,6 @@ def build_combined_mp_npz_for_trial(subject_name: str, trial_stem: str) -> str |
         src_OS[f] = os_pick
         src_OD[f] = od_pick
 
-    # Spike cleanup: aperture-trace outliers usually come from a
-    # 2D-mislabeled frame on one camera.  For each spike, blame
-    # whichever camera's thumb/index tips jumped harder than the
-    # other relative to the spike's previous and next non-spike
-    # neighbors, NaN out that camera's full 21-joint set on that
-    # frame, then linearly interpolate every joint coordinate over
-    # the NaN'd frames.  If BOTH cameras look bad (or neither
-    # clearly worse), NaN out both — the gap interpolates.
-    if calib is not None:
-        try:
-            _spike_clean_combined(OS_combined, OD_combined, calib)
-        except Exception as e:
-            logger.warning(f"spike clean failed for {subject_name}/{trial_stem}: {e}")
-
     # Pre-compute distances + a cleaned (spike-filtered + smoothed)
     # variant so the labeler UI and the auto-detector can share the
     # exact same signal.  Raw distances are still recomputed at load
@@ -1388,6 +1374,14 @@ def build_combined_mp_npz_for_trial(subject_name: str, trial_stem: str) -> str |
         f"OS [{_counts(src_OS)}] | OD [{_counts(src_OD)}]"
     )
 
+    # Derived "Smoothed" layer: spike-suppressed version of Combined.
+    # Lives in its own npz so the labeler can show both side-by-side
+    # and the user can compare what was thrown out.
+    try:
+        build_smoothed_mp_npz_for_trial(subject_name, trial_stem)
+    except Exception as e:
+        logger.warning(f"smoothed build failed for {subject_name}/{trial_stem}: {e}")
+
     # Keep the subject's median hand sizes current — Combined-MP just
     # changed for this trial's hand.
     try:
@@ -1395,6 +1389,91 @@ def build_combined_mp_npz_for_trial(subject_name: str, trial_stem: str) -> str |
     except Exception as e:
         logger.warning(f"Hand-size update failed for {subject_name}: {e}")
 
+    return str(out_path)
+
+
+def build_smoothed_mp_npz_for_trial(subject_name: str, trial_stem: str) -> str | None:
+    """Spike-suppressed sibling of ``mediapipe_combined.npz``.
+
+    Loads the combined OS / OD arrays for this trial, applies
+    ``_spike_clean_combined`` to NaN-out 2D-mislabeled frames on the
+    offending camera(s) and linearly interpolate the gaps, then
+    writes ``mediapipe_smoothed.npz`` with refreshed distances and
+    the same metadata fields the combined file carries.
+    """
+    settings = get_settings()
+    trial_dir = settings.dlc_path / subject_name / trial_stem
+    combined_path = trial_dir / "mediapipe_combined.npz"
+    if not combined_path.exists():
+        return None
+    try:
+        src = np.load(str(combined_path))
+    except (OSError, ValueError) as e:
+        logger.warning(f"smoothed: skipping {combined_path} ({e})")
+        return None
+
+    OS = src["OS_landmarks"].copy()
+    OD = src["OD_landmarks"].copy()
+    conf_OS = src["confidence_OS"].copy() if "confidence_OS" in src.files else None
+    conf_OD = src["confidence_OD"].copy() if "confidence_OD" in src.files else None
+    start_frame = int(src["start_frame"]) if "start_frame" in src.files else 0
+    n = OS.shape[0]
+    src_OS = src["source_OS"].copy() if "source_OS" in src.files else np.zeros(n, dtype=np.uint8)
+    src_OD = src["source_OD"].copy() if "source_OD" in src.files else np.zeros(n, dtype=np.uint8)
+
+    try:
+        calib = get_calibration_for_subject(subject_name)
+    except Exception:
+        calib = None
+
+    # Apply spike cleanup in place.  No-op when calib is missing —
+    # the aperture trace it relies on isn't available without one.
+    if calib is not None:
+        try:
+            _spike_clean_combined(OS, OD, calib)
+        except Exception as e:
+            logger.warning(f"spike clean failed for {subject_name}/{trial_stem}: {e}")
+
+    distances = np.full(n, np.nan)
+    distances_clean = np.full(n, np.nan)
+    if calib is not None:
+        try:
+            distances = _compute_distances(OS, OD, calib)
+        except Exception:
+            distances = np.full(n, np.nan)
+    if not np.any(~np.isnan(distances)):
+        try:
+            distances = _compute_2d_distances(OS)
+        except Exception:
+            distances = np.full(n, np.nan)
+    if np.any(~np.isnan(distances)):
+        try:
+            from .metrics import clean_distance_trace
+            distances_clean = clean_distance_trace(distances)
+        except Exception as _e:
+            logger.warning(f"smoothed distances_clean failed for {subject_name}/{trial_stem}: {_e}")
+
+    out_path = trial_dir / "mediapipe_smoothed.npz"
+    try:
+        save_kwargs = {
+            "OS_landmarks": OS,
+            "OD_landmarks": OD,
+            "distances": distances,
+            "distances_clean": distances_clean,
+            "start_frame": start_frame,
+            "total_frames": n,
+            "source_OS": src_OS,
+            "source_OD": src_OD,
+        }
+        if conf_OS is not None:
+            save_kwargs["confidence_OS"] = conf_OS
+        if conf_OD is not None:
+            save_kwargs["confidence_OD"] = conf_OD
+        np.savez(str(out_path), **save_kwargs)
+    except OSError as e:
+        logger.warning(f"Failed to write {out_path}: {e}")
+        return None
+    logger.info(f"Smoothed MP for {subject_name}/{trial_stem} written")
     return str(out_path)
 
 
@@ -1555,6 +1634,14 @@ def load_mediapipe_cropped_prelabels(subject_name: str) -> dict | None:
     return load_mediapipe_prelabels(
         subject_name,
         filename="mediapipe_cropped.npz",
+    )
+
+
+def load_mediapipe_smoothed_prelabels(subject_name: str) -> dict | None:
+    """Load the spike-suppressed sibling of the Combined npz."""
+    return load_mediapipe_prelabels(
+        subject_name,
+        filename="mediapipe_smoothed.npz",
     )
 
 
