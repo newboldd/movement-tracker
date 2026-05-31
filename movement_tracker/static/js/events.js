@@ -857,20 +857,17 @@ const eventsPage = (() => {
             }
         }
 
-        // Check if video ended (beyond trial end)
+        // End of trial → pause.  The Events page renders one trial
+        // at a time; rolling into the next trial during playback
+        // would silently change the user's context.  They can switch
+        // trials explicitly via the trial buttons.
         if (globalFrame > trial.end_frame) {
-            // Move to next trial or stop
-            const nextTrialIdx = getTrialForFrame(trial.end_frame) + 1;
-            if (nextTrialIdx < trials.length) {
-                currentFrame = trials[nextTrialIdx].start_frame;
-                videoPlaying = false;
-                videoEl.pause();
-                startVideoPlayback();
-            } else {
-                stopVideoPlayback();
-                playing = false;
-                $('playBtn').innerHTML = '&#9654;';
-            }
+            currentFrame = trial.end_frame;
+            stopVideoPlayback();
+            playing = false;
+            $('playBtn').innerHTML = '&#9654;';
+            updateFrameDisplay();
+            renderDistanceTrace();
             return;
         }
 
@@ -883,7 +880,11 @@ const eventsPage = (() => {
         playTimer = setInterval(async () => {
             if (!playing) { clearInterval(playTimer); return; }
             const next = currentFrame + 1;
-            if (next >= totalFrames) {
+            // Stop at the end of the current trial OR the subject —
+            // matches the per-trial scoping the rest of the page uses.
+            const trial = trials[currentEventTrialIdx];
+            const trialEnd = trial ? trial.end_frame : (totalFrames - 1);
+            if (next > trialEnd || next >= totalFrames) {
                 clearInterval(playTimer);
                 playing = false;
                 $('playBtn').innerHTML = '&#9654;';
