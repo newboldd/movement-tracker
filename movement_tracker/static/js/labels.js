@@ -7670,28 +7670,73 @@ const manoViewer = (() => {
             if ($('showVision3D')) { $('showVision3D').checked = false; showVision3D = false; }
         }
 
-        // DLC
-        _setLayerAvail('showDLC', hasDLC);
-        _setLayerAvail('showDLC3D', !!(trialData && trialData.dlc_joints_3d));
-        if (!hasDLC) {
+        // Helper: does this trial's data have at least one valid (x, y)
+        // pair anywhere in a per-frame 2D-tracked array?  Walks down
+        // into the (N, 21, 2) structure rather than trusting array
+        // length alone — a trial whose .npz is present but all-null
+        // for the current trial reads as "no data".
+        const _hasTracked = (k) => {
+            const v = trialData && trialData[k];
+            if (!Array.isArray(v) || !v.length) return false;
+            for (const frame of v) {
+                if (!Array.isArray(frame)) continue;
+                for (const pt of frame) {
+                    if (Array.isArray(pt) && pt.length >= 2
+                        && Number.isFinite(pt[0]) && Number.isFinite(pt[1])) return true;
+                }
+            }
+            return false;
+        };
+        // Same for (N, 21, 3) joints_3d arrays.
+        const _hasJoints3D = (k) => {
+            const v = trialData && trialData[k];
+            if (!Array.isArray(v) || !v.length) return false;
+            for (const frame of v) {
+                if (!Array.isArray(frame)) continue;
+                for (const pt of frame) {
+                    if (Array.isArray(pt) && pt.length >= 3
+                        && Number.isFinite(pt[0]) && Number.isFinite(pt[1])
+                        && Number.isFinite(pt[2])) return true;
+                }
+            }
+            return false;
+        };
+
+        // DLC — fall back to a tracked-data check so trials with
+        // hand-corrected DLC labels appear even when the backend's
+        // ``has_dlc`` flag is stale or session-scoped.
+        const hasDLCData = hasDLC
+            || _hasTracked('dlc_tracked_L') || _hasTracked('dlc_tracked_R');
+        const hasDLC3D = _hasJoints3D('dlc_joints_3d');
+        _setLayerAvail('showDLC', hasDLCData);
+        _setLayerAvail('showDLC3D', hasDLC3D);
+        if (!hasDLCData) {
             if ($('showDLC')) { $('showDLC').checked = false; showDLC = false; }
         }
-        if (!(trialData && trialData.dlc_joints_3d)) {
+        if (!hasDLC3D) {
             if ($('showDLC3D')) { $('showDLC3D').checked = false; showDLC3D = false; }
         }
 
-        // MediaPipe variants — gated by the presence of their per-camera
-        // 2D arrays (npz file produced).  3D availability follows the
-        // 2D file since the triangulation is derived from it.
-        const _hasArr = (k) => {
-            const v = trialData && trialData[k];
-            return Array.isArray(v) && v.length > 0 && v.some(x => x != null);
-        };
-        const hasCropped  = _hasArr('cropped_tracked_L')  || _hasArr('cropped_tracked_R');
-        const hasReverse  = _hasArr('reverse_tracked_L')  || _hasArr('reverse_tracked_R');
-        const hasStatic   = _hasArr('static_tracked_L')   || _hasArr('static_tracked_R');
-        const hasCombined = _hasArr('combined_tracked_L') || _hasArr('combined_tracked_R');
-        const hasPose     = _hasArr('pose_tracked_L')     || _hasArr('pose_tracked_R');
+        // Skeleton v1 (showMano* checkboxes) — gate by the actual v1
+        // joints_3d / 2D projections this trial has, not by the
+        // subject-level ``has_skeleton_v1`` flag.
+        const hasMano = _hasJoints3D('skeleton_joints_3d')
+                      || _hasTracked('skeleton_proj_L')
+                      || _hasTracked('skeleton_proj_R');
+        _setLayerAvail('showMano2D', hasMano);
+        _setLayerAvail('showMano3D', hasMano);
+        if (!hasMano) {
+            if ($('showMano2D')) { $('showMano2D').checked = false; showMano2D = false; }
+            if ($('showMano3D')) { $('showMano3D').checked = false; showMano3D = false; }
+        }
+
+        // MediaPipe variants — gated by the presence of valid (x, y)
+        // pairs in their per-camera tracked arrays for THIS trial.
+        const hasCropped  = _hasTracked('cropped_tracked_L')  || _hasTracked('cropped_tracked_R');
+        const hasReverse  = _hasTracked('reverse_tracked_L')  || _hasTracked('reverse_tracked_R');
+        const hasStatic   = _hasTracked('static_tracked_L')   || _hasTracked('static_tracked_R');
+        const hasCombined = _hasTracked('combined_tracked_L') || _hasTracked('combined_tracked_R');
+        const hasPose     = _hasTracked('pose_tracked_L')     || _hasTracked('pose_tracked_R');
         for (const [id, ok] of [
             ['showCropped2D',  hasCropped],  ['showCropped3D',  hasCropped],
             ['showReverse2D',  hasReverse],  ['showReverse3D',  hasReverse],
