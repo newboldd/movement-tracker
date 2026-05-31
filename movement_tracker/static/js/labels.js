@@ -8124,16 +8124,26 @@ const manoViewer = (() => {
         const orig = btn.textContent;
         btn.disabled = true;
         btn.textContent = 'Recombining…';
+        let ok = false;
         try {
             const res = await api(`/api/analyze/${subjectId}/recombine-mp`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ trial_stem: trial.trial_stem }),
             });
-            btn.textContent = res && res.ok ? 'Done' : 'Error';
+            ok = !!(res && res.ok);
+            btn.textContent = ok ? 'Done' : 'Error';
         } catch (e) {
             console.warn('[labels] re-combine failed:', e);
             btn.textContent = 'Error';
+        }
+        // Refresh the active trial in place so the new Combined +
+        // Smoothed npzs are picked up without a page reload.  Skip on
+        // error so the user can read the failure status.
+        if (ok) {
+            try { await loadTrial(currentTrialIdx); } catch (e) {
+                console.warn('[labels] reload after re-combine failed:', e);
+            }
         }
         setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1200);
     }
