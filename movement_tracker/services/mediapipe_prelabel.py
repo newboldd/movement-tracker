@@ -1034,6 +1034,109 @@ COMBINED_SRC_NAMES = {
 
 
 
+def _spike_clean_combined(OS: np.ndarray, OD: np.ndarray, calib: dict) -> None:
+    """In-place spike cleanup on the combined OS / OD (N, 21, 2) arrays.
+
+    Identifies frames whose triangulated thumb–index aperture is a
+    sharp outlier vs. its temporal neighbours, attributes the spike
+    to one or both cameras by comparing 2D tip jumps to a baseline,
+    NaN-s out the offending camera's full 21-joint set on those
+    frames, then linearly interpolates every joint coord in the
+    NaN'd frames from surrounding valid frames.
+    """
+    n = OS.shape[0]
+    if n < 5 or calib is None:
+        return
+    # Build the per-frame thumb-index aperture (skip the heavy cv2
+    # path when calib is absent; the caller already guards that).
+    try:
+        dist = _compute_distances(OS, OD, calib)
+    except Exception:
+        return
+    valid = ~np.isnan(dist)
+    if int(valid.sum()) < 5:
+        return
+
+    # Median-filtered baseline + MAD threshold for spike detection.
+    half = 3
+    smoothed = np.full(n, np.nan)
+    for i in range(n):
+        lo = max(0, i - half); hi = min(n, i + half + 1)
+        col = dist[lo:hi][~np.isnan(dist[lo:hi])]
+        if col.size:
+            smoothed[i] = float(np.median(col))
+    dev = np.abs(dist - smoothed)
+    mad = float(np.nanmedian(dev[valid])) if valid.any() else 0.0
+    thresh = max(8.0, 6.0 * mad)   # ≥8 mm OR 6× MAD, whichever is larger
+    spike = np.where(dev > thresh)[0]
+    if spike.size == 0:
+        return
+    spike_set = set(int(s) for s in spike)
+
+    def _norm_jump(arr, joint, p, c, q):
+        """Max 2D jump magnitude (p→c, c→q) for one joint.  Inf if
+        any of the three frames lacks a valid label."""
+        for k in (p, c, q):
+            if np.isnan(arr[k, joint, 0]) or np.isnan(arr[k, joint, 1]):
+                return float("inf")
+        a = arr[p, joint] - arr[c, joint]
+        b = arr[q, joint] - arr[c, joint]
+        return float(max(np.hypot(a[0], a[1]), np.hypot(b[0], b[1])))
+
+    def _baseline(arr, joint, p, q):
+        """Neighbour-to-neighbour jump — the size we'd expect if the
+        suspect frame were correctly labeled."""
+        if (np.isnan(arr[p, joint, 0]) or np.isnan(arr[q, joint, 0])):
+            return 1.0
+        d = arr[q, joint] - arr[p, joint]
+        return float(np.hypot(d[0], d[1])) + 1.0  # +1 keeps tiny baselines from exploding the ratio
+
+    K = 3.0          # how much bigger a tip jump must be vs baseline to blame a camera
+    for f in spike:
+        # Find closest non-spike neighbours each side, skipping other
+        # spikes so we don't trust a chained outlier as a reference.
+        p = int(f) - 1
+        while p >= 0 and p in spike_set: p -= 1
+        q = int(f) + 1
+        while q < n and q in spike_set: q += 1
+        if p < 0 or q >= n:
+            continue
+        # Tip-jump magnitude per camera, vs the p→q baseline.
+        os_jump = max(_norm_jump(OS, THUMB_TIP, p, int(f), q),
+                       _norm_jump(OS, INDEX_TIP, p, int(f), q))
+        od_jump = max(_norm_jump(OD, THUMB_TIP, p, int(f), q),
+                       _norm_jump(OD, INDEX_TIP, p, int(f), q))
+        os_base = max(_baseline(OS, THUMB_TIP, p, q),
+                       _baseline(OS, INDEX_TIP, p, q))
+        od_base = max(_baseline(OD, THUMB_TIP, p, q),
+                       _baseline(OD, INDEX_TIP, p, q))
+        os_bad = os_jump > K * os_base
+        od_bad = od_jump > K * od_base
+        # If neither camera looks clearly wrong (or both look fine
+        # but the aperture is still a strong outlier), wipe both —
+        # interpolation will fill the gap.
+        if not os_bad and not od_bad:
+            os_bad = od_bad = True
+        if os_bad:
+            OS[int(f), :, :] = np.nan
+        if od_bad:
+            OD[int(f), :, :] = np.nan
+
+    # Linear interpolation per (joint, axis) over the NaN'd frames.
+    idx = np.arange(n)
+    for arr in (OS, OD):
+        for j in range(arr.shape[1]):
+            for d in range(arr.shape[2]):
+                col = arr[:, j, d]
+                mask = ~np.isnan(col)
+                if int(mask.sum()) < 2:
+                    continue
+                # np.interp's left/right=NaN keeps the edges NaN if
+                # there's no valid neighbour on one side.
+                arr[:, j, d] = np.interp(idx, idx[mask], col[mask],
+                                          left=np.nan, right=np.nan)
+
+
 def build_combined_mp_npz_for_trial(subject_name: str, trial_stem: str) -> str | None:
     """Fuse up to four per-trial MP source npzs (forward, cropped,
     reverse, static) into a single ``mediapipe_combined.npz``.
@@ -1155,18 +1258,23 @@ def build_combined_mp_npz_for_trial(subject_name: str, trial_stem: str) -> str |
                 if tip_t is None or tip_i is None:
                     continue
                 d = float(np.linalg.norm(tip_t - tip_i))
-                # Per-tip Y-disparity in mm = pixel disparity × Z / fy.
-                # When fy is missing we use +inf so the filter is a
-                # no-op (every candidate stays in the "high-disparity
-                # fallback" pool, but the tip-distance sort still
-                # chooses the best).
+                # Y-disparity = max pixel disparity across ALL 21
+                # joints where both cameras have a valid label,
+                # converted to mm via the hand's representative depth
+                # (mean of the two tip depths).  This catches pairings
+                # where the thumb/index tips align nicely but the
+                # other fingers don't (e.g. wrong-handedness or a
+                # pose mismatch on the middle finger).
                 if fy is not None and fy > 0:
-                    dy_t_px = abs(float(os_lm[oc][f, THUMB_TIP, 1])
-                                  - float(od_lm[dc][f, THUMB_TIP, 1]))
-                    dy_i_px = abs(float(os_lm[oc][f, INDEX_TIP, 1])
-                                  - float(od_lm[dc][f, INDEX_TIP, 1]))
-                    Zt = abs(float(tip_t[2])); Zi = abs(float(tip_i[2]))
-                    dy_mm = max(dy_t_px * Zt / fy, dy_i_px * Zi / fy)
+                    Zref = (abs(float(tip_t[2])) + abs(float(tip_i[2]))) / 2.0
+                    os_arr = os_lm[oc][f]
+                    od_arr = od_lm[dc][f]
+                    both_valid = (~np.isnan(os_arr[:, 0])) & (~np.isnan(od_arr[:, 0]))
+                    if both_valid.any():
+                        dy_px = np.abs(os_arr[both_valid, 1] - od_arr[both_valid, 1])
+                        dy_mm = float(dy_px.max() * Zref / fy)
+                    else:
+                        dy_mm = float("inf")
                 else:
                     dy_mm = float("inf")
                 candidates.append((d, dy_mm, oc, dc))
@@ -1212,6 +1320,20 @@ def build_combined_mp_npz_for_trial(subject_name: str, trial_stem: str) -> str |
                 conf_OD[f] = cf[f]
         src_OS[f] = os_pick
         src_OD[f] = od_pick
+
+    # Spike cleanup: aperture-trace outliers usually come from a
+    # 2D-mislabeled frame on one camera.  For each spike, blame
+    # whichever camera's thumb/index tips jumped harder than the
+    # other relative to the spike's previous and next non-spike
+    # neighbors, NaN out that camera's full 21-joint set on that
+    # frame, then linearly interpolate every joint coordinate over
+    # the NaN'd frames.  If BOTH cameras look bad (or neither
+    # clearly worse), NaN out both — the gap interpolates.
+    if calib is not None:
+        try:
+            _spike_clean_combined(OS_combined, OD_combined, calib)
+        except Exception as e:
+            logger.warning(f"spike clean failed for {subject_name}/{trial_stem}: {e}")
 
     # Pre-compute distances + a cleaned (spike-filtered + smoothed)
     # variant so the labeler UI and the auto-detector can share the
