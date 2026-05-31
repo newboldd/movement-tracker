@@ -1505,15 +1505,37 @@ const eventsPage = (() => {
         distCtx.stroke();
     }
 
+    /** Same trial-clamped vStart/effectiveViewFrames the renderer
+     *  uses.  Returns null if no trial is active (or trial list is
+     *  empty), so callers can early-out. */
+    function _plotViewRange() {
+        if (currentEventTrialIdx < 0 || !trials[currentEventTrialIdx]) return null;
+        const r = getTrialFrameRange(currentEventTrialIdx);
+        const trialLen = r.end - r.start + 1;
+        let eff = (distViewFrames > 0 && distViewFrames < totalFrames)
+            ? distViewFrames : trialLen;
+        if (eff > trialLen) eff = trialLen;
+        let vStart = distViewStart;
+        if (vStart < r.start) vStart = r.start;
+        if (vStart > r.end - eff + 1) vStart = Math.max(r.start, r.end - eff + 1);
+        return { vStart, eff, range: r };
+    }
+
     function distXToFrame(clientX) {
         const rect = distCanvas.getBoundingClientRect();
         const x = clientX - rect.left;
         const padL = 40, padR = 8;
         const plotW = distCanvas.width - padL - padR;
-        const effectiveViewFrames = (distViewFrames > 0 && distViewFrames < totalFrames)
-            ? distViewFrames : totalFrames;
-        const f = distViewStart + ((x - padL) / plotW) * effectiveViewFrames;
-        return Math.max(0, Math.min(totalFrames - 1, Math.round(f)));
+        const v = _plotViewRange();
+        if (!v) {
+            const eff = (distViewFrames > 0 && distViewFrames < totalFrames)
+                ? distViewFrames : totalFrames;
+            const f = distViewStart + ((x - padL) / plotW) * eff;
+            return Math.max(0, Math.min(totalFrames - 1, Math.round(f)));
+        }
+        const f = v.vStart + ((x - padL) / plotW) * v.eff;
+        // Clamp to the current trial — the plot only shows that range.
+        return Math.max(v.range.start, Math.min(v.range.end, Math.round(f)));
     }
 
     function _findNearestEventMarker(clientX) {
@@ -1521,14 +1543,19 @@ const eventsPage = (() => {
         const x = clientX - rect.left;
         let best = null;
         let bestDist = 12; // pixel threshold
-        const effectiveViewFrames = (distViewFrames > 0 && distViewFrames < totalFrames)
-            ? distViewFrames : totalFrames;
+        const v = _plotViewRange();
+        const vStart = v ? v.vStart : distViewStart;
+        const eff = v ? v.eff
+                       : ((distViewFrames > 0 && distViewFrames < totalFrames)
+                           ? distViewFrames : totalFrames);
         const padL = 40, padR = 8;
         const plotW = distCanvas.width - padL - padR;
-        const fToX = (f) => padL + ((f - distViewStart) / effectiveViewFrames) * plotW;
+        const fToX = (f) => padL + ((f - vStart) / eff) * plotW;
         EVENT_TYPES.forEach(etype => {
             if (!eventVisibility[etype]) return;
             eventMarkers[etype].forEach(f => {
+                // Only consider markers visible in the current trial.
+                if (v && (f < v.range.start || f > v.range.end)) return;
                 const mx = fToX(f);
                 const d = Math.abs(mx - x);
                 if (d < bestDist) { bestDist = d; best = { frame: f, type: etype }; }
