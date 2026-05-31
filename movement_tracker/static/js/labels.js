@@ -1382,7 +1382,14 @@ const manoViewer = (() => {
         if (prevSel) {
             prevSel.innerHTML = '';
             const history = trialData?.v2_fit_history || [];
+            // Cells in the dropdown's sidebar row — hide the whole
+            // row when this trial has no historical fits.
+            const rowCells = [
+                prevSel.closest('span'),
+                $('prevCtrlSlot2D'), $('prevCtrlSlot3D'), $('prevCtrlSlotErr'),
+            ].filter(Boolean);
             if (history.length) {
+                for (const c of rowCells) c.style.display = '';
                 prevSel.disabled = false;
                 const _psk1 = $('showPrevSkel'); if (_psk1) _psk1.disabled = false;
                 prevSel.innerHTML = '<option value="">— select —</option>';
@@ -1394,6 +1401,7 @@ const manoViewer = (() => {
                     prevSel.appendChild(opt);
                 }
             } else {
+                for (const c of rowCells) c.style.display = 'none';
                 prevSel.innerHTML = '<option value="">No history</option>';
                 prevSel.disabled = true;
                 const _psk2 = $('showPrevSkel'); if (_psk2) _psk2.disabled = true;
