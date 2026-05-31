@@ -15,10 +15,18 @@ function setNavState(state) {
     if (state.side) sessionStorage.setItem('mt_side', state.side);
 }
 function getNavState() {
+    // parseInt(null) is NaN, and `NaN ?? null` is NaN (?? only
+    // catches null/undefined).  Normalise to null so downstream
+    // ``typeof x === 'number'`` checks don't accidentally accept
+    // a NaN that fails every subsequent range comparison silently.
+    const _intOrNull = (v) => {
+        const n = parseInt(v);
+        return Number.isFinite(n) ? n : null;
+    };
     return {
-        subjectId: parseInt(localStorage.getItem('mt_lastSubjectId')) || null,
-        trialIdx: parseInt(sessionStorage.getItem('mt_trialIdx')) ?? null,
-        frame: parseInt(sessionStorage.getItem('mt_frame')) ?? null,
+        subjectId: _intOrNull(localStorage.getItem('mt_lastSubjectId')),
+        trialIdx:  _intOrNull(sessionStorage.getItem('mt_trialIdx')),
+        frame:     _intOrNull(sessionStorage.getItem('mt_frame')),
         side: sessionStorage.getItem('mt_side') || null,
     };
 }
