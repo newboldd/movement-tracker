@@ -530,6 +530,18 @@ def get_available_stages(session_id: int) -> dict:
             stages.append(stage_name)
             stage_files[stage_name] = csv_files
 
+    # Skeleton-fit v1: any trial with a skeleton_v1.npz file counts.
+    try:
+        from ..services.skeleton_data import _skeleton_dir
+        skeleton_root = _skeleton_dir(subject_name)
+        if skeleton_root.is_dir():
+            for t_dir in skeleton_root.iterdir():
+                if (t_dir / "skeleton_v1.npz").exists():
+                    stages.append("skeleton_v1")
+                    break
+    except Exception:
+        pass
+
     return {"stages": stages, "stage_files": stage_files}
 
 
@@ -543,7 +555,7 @@ def get_stage_data(
     Response format matches mediapipe/dlc_predictions:
     {camera: {bodypart: [[x,y]|null, ...]}, distances: [...]}
     """
-    valid_stages = ("mp", "labels", "dlc", "refine", "corrections")
+    valid_stages = ("mp", "labels", "dlc", "refine", "corrections", "skeleton_v1")
     if stage not in valid_stages:
         raise HTTPException(400, f"stage must be one of {valid_stages}")
 
@@ -575,6 +587,40 @@ def get_stage_data(
     if stage == "corrections":
         data = get_corrections_with_dlc_fallback(subject_name)
         return data if data else {}
+
+    if stage == "skeleton_v1":
+        # Walk per-trial skeleton_v1.npz files, triangulate-distance is
+        # already baked in by build_distances_from_joints_3d-style logic
+        # but we just compute it inline since skeleton_v1.npz stores
+        # joints_3d directly.
+        try:
+            import numpy as np
+            from ..services.skeleton_data import _skeleton_dir
+            skeleton_root = _skeleton_dir(subject_name)
+            trials = build_trial_map(subject_name)
+            if not trials:
+                return {}
+            total = trials[-1]["end_frame"] + 1
+            distances = [None] * total
+            for t in trials:
+                npz_path = skeleton_root / t["trial_name"] / "skeleton_v1.npz"
+                if not npz_path.exists():
+                    continue
+                data = np.load(str(npz_path), allow_pickle=True)
+                j3d = data.get("joints_3d")
+                if j3d is None:
+                    continue
+                for i in range(j3d.shape[0]):
+                    gi = t["start_frame"] + i
+                    if gi >= total:
+                        break
+                    if (not np.isnan(j3d[i, 4, 0])
+                            and not np.isnan(j3d[i, 8, 0])):
+                        d = float(np.linalg.norm(j3d[i, 4] - j3d[i, 8]))
+                        distances[gi] = round(d, 2)
+            return {"distances": distances} if any(d is not None for d in distances) else {}
+        except Exception:
+            return {}
 
     # dlc, refine — load from specific directory
     data = get_dlc_predictions_for_stage(subject_name, stage)
@@ -1517,7 +1563,7 @@ def detect_events_v2(session_id: int, body: dict = Body(...)) -> dict:
     # refine → dlc → labels.  Anything else pins detection to that
     # single source so it matches what the user sees on the plot.
     source = body.get("source") or "auto"
-    if source not in ("auto", "corrections", "mp", "refine", "dlc", "labels"):
+    if source not in ("auto", "corrections", "mp", "refine", "dlc", "labels", "skeleton_v1"):
         source = "auto"
 
     def _load_source(stage: str):
@@ -1536,6 +1582,11 @@ def detect_events_v2(session_id: int, body: dict = Body(...)) -> dict:
                 return None
             ld = _committed_labels_to_array(subj_row)
             return ld.get("distances") if ld else None
+        if stage == "skeleton_v1":
+            # Reuse the same stage_data path so source-only requests
+            # match what the plot already loaded.
+            sd = get_stage_data(session_id, stage="skeleton_v1")
+            return sd.get("distances") if sd else None
         return None
 
     # Caller can short-circuit the disk load and pass a per-trial
