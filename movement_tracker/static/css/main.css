@@ -822,3 +822,141 @@ body.results-page .header .subject-select:disabled {
     min-height: 24px;
     margin-bottom: 12px;
 }
+
+/* ── Mobile: Results + Explore pages ─────────────────
+   Activated only at phone widths so the desktop UI is
+   untouched.  Touches only layout + spacing — no
+   functional removals. */
+@media (max-width: 640px) {
+    /* Header: stack the title row over the nav, drop the giant
+       horizontal padding, and let the subject selector breathe. */
+    body.results-page .header,
+    body.explore-page .header {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
+        padding: 8px 10px;
+    }
+    body.results-page .header > div:first-child,
+    body.explore-page .header > div:first-child {
+        flex-wrap: wrap;
+        gap: 6px 12px;
+        justify-content: space-between;
+    }
+    body.results-page .header h1 a,
+    body.explore-page .header h1 a {
+        font-size: 16px;
+    }
+    body.results-page .header .subject-select,
+    body.explore-page .header .subject-select {
+        flex: 1 1 100%;
+        min-width: 0;
+        font-size: 14px;
+    }
+    /* Nav: tighter gaps, smaller font, horizontal scroll if needed. */
+    body.results-page .header nav,
+    body.explore-page .header nav {
+        gap: 12px;
+        margin-left: 0;
+        font-size: 12px;
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+    }
+    body.results-page .header nav::-webkit-scrollbar,
+    body.explore-page .header nav::-webkit-scrollbar { display: none; }
+    body.results-page .header nav a,
+    body.explore-page .header nav a {
+        font-size: 12px;
+        white-space: nowrap;
+        padding-bottom: 1px;
+    }
+    /* Nav dropdowns: position with the viewport, not the trigger,
+       so they don't get clipped on narrow widths. */
+    .nav-dropdown-menu {
+        left: 0;
+        right: auto;
+        max-width: 80vw;
+    }
+
+    /* Control bars: wrap aggressively, drop separator pipes,
+       shrink labels.  These bars appear on Individual, Group
+       Comparison, the shape-overlay row, and Explore. */
+    .results-container { padding: 8px; }
+    .distance-controls,
+    .results-controls,
+    body.explore-page #exploreControls,
+    body.explore-page #subjList,
+    body.explore-page .controls-bar {
+        flex-wrap: wrap !important;
+        gap: 6px 8px !important;
+        font-size: 12px;
+    }
+    .distance-controls > span[style*="border-left"],
+    .results-controls > span[style*="border-left"],
+    body.explore-page .controls-bar > span[style*="border-left"] {
+        display: none;
+    }
+    .distance-controls label,
+    .results-controls label {
+        font-size: 12px;
+        gap: 4px;
+    }
+    .distance-controls select,
+    .results-controls select,
+    body.explore-page select {
+        min-width: 0 !important;
+        font-size: 13px;
+        padding: 4px 6px;
+    }
+    .distance-controls input[type="range"],
+    .results-controls input[type="range"] {
+        width: 100px !important;
+    }
+
+    /* Plots: full width, sane minimum height.  Plotly plots are
+       responsive already; this just unsticks any inline 800px or
+       fixed widths inherited from the controls row. */
+    #distancePlots, #movementPlots, #explorePlot,
+    #shapeOverlayPlots, .results-plot-grid {
+        max-width: 100%;
+        overflow-x: hidden;
+    }
+    .results-plot-grid {
+        grid-template-columns: 1fr !important;
+        gap: 12px;
+    }
+    /* Shape-overlay cells normally sit in a horizontal scroll row;
+       stack them on mobile so each trial gets full width. */
+    #shapeOverlayPlots {
+        flex-wrap: wrap !important;
+        overflow-x: hidden !important;
+    }
+    #shapeOverlayPlots > .results-plot-cell {
+        flex: 0 0 100% !important;
+        width: 100% !important;
+    }
+    /* Group plots panel: drop the side-by-side scatter columns. */
+    .group-grid {
+        grid-template-columns: 1fr !important;
+    }
+
+    /* Tab switcher: even though it's normally hidden, if any page
+       reveals it make the buttons tap-friendly. */
+    #tabSwitcher .btn { min-height: 36px; padding: 6px 12px; }
+
+    /* Explore page bits: subject checkbox grid is huge by default;
+       let it wrap. */
+    body.explore-page #subjList { max-height: 30vh; overflow-y: auto; }
+
+    /* Default tap targets — match the existing iPad media block so
+       buttons aren't smaller than a fingertip on phones either. */
+    .btn-sm { min-height: 32px; padding: 4px 10px; }
+    button, .btn { touch-action: manipulation; }
+    input[type="range"] { height: 24px; }
+    input[type="checkbox"] { width: 18px; height: 18px; }
+}
+
+/* Tag the explore page body so the mobile rules above apply. */
+body.explore-page { background: #ffffff; color: #333; }
