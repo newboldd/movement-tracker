@@ -983,27 +983,18 @@ def labeling_page(session: Optional[int] = None):
 
 @app.get("/events")
 def events_page(session: Optional[int] = None, subject: Optional[int] = None):
-    """Serve the standalone events page."""
-    if session:
-        return FileResponse(str(STATIC_DIR / "events.html"))
-    # No session — find a subject and redirect through labeling-select
-    from fastapi.responses import RedirectResponse
-    from .db import get_db_ctx
-    if subject is None:
-        # Use last subject from any active session, or first subject
-        with get_db_ctx() as db:
-            recent = db.execute(
-                "SELECT subject_id FROM label_sessions WHERE status = 'active' ORDER BY created_at DESC LIMIT 1"
-            ).fetchone()
-            if recent:
-                subject = recent["subject_id"]
-            else:
-                first = db.execute("SELECT id FROM subjects ORDER BY id LIMIT 1").fetchone()
-                if first:
-                    subject = first["id"]
-    if subject is not None:
-        return RedirectResponse(url=f"/labeling-select?mode=events&dest=events&subject={subject}", status_code=302)
-    return RedirectResponse(url="/", status_code=302)
+    """Serve the standalone events page.
+
+    Subject resolution happens client-side in events.js: it reads the
+    URL's session/subject query, then falls back through nav state
+    (mt_lastSubjectId / dlc_lastSubjectId) and auto-creates a session
+    for whichever subject the user was just viewing on the page they
+    came from.  Don't pick one server-side — that masks the JS path
+    and pins every navigation to whichever subject happens to have
+    the most recent active session in the DB (was always landing on
+    PD16 from any page).
+    """
+    return FileResponse(str(STATIC_DIR / "events.html"))
 
 
 @app.get("/mediapipe")
