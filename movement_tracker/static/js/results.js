@@ -1,15 +1,79 @@
 /* Results page: distance traces, movement parameters, group comparison */
 
-// Static-site mode: the SE-based hand groupings aren't pre-computed
-// into JSON files (they require live sequence-effect math per subject),
-// so hide them from the dropdown when STATIC_RESULTS is set.
+// Keep the hidden combined groupSeqModeSelect in sync with the two
+// visible Type + Window selects (the same split the Explore page uses).
+(function _wireSplitGroupSeqMode() {
+    const typeSel = document.getElementById('groupSeqTypeSelect');
+    const winSel  = document.getElementById('groupSeqWindowSelect');
+    const combined = document.getElementById('groupSeqModeSelect');
+    if (!typeSel || !winSel || !combined) return;
+    const sync = () => {
+        const t = typeSel.value;
+        const w = winSel.value;
+        if (t === 'none') {
+            combined.value = 'none';
+            winSel.disabled = true;
+            winSel.style.opacity = '0.4';
+        } else {
+            combined.value = `${t}_${w}`;
+            winSel.disabled = false;
+            winSel.style.opacity = '';
+        }
+        combined.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    typeSel.addEventListener('change', sync);
+    winSel.addEventListener('change',  sync);
+    const cur = combined.value || 'exp_multi';
+    if (cur === 'none') {
+        typeSel.value = 'none';
+    } else {
+        const m = cur.match(/^(linear|exp)_(full|first10|multi)$/);
+        if (m) { typeSel.value = m[1]; winSel.value = m[2]; }
+    }
+    sync();
+})();
+
+// Static-site mode: only a subset of source × seq_mode × (hand, trial)
+// combinations is exported as JSON, so hide what we don't ship.
 (function _trimStaticResultsControls() {
     if (!window.STATIC_RESULTS) return;
-    const sel = document.getElementById('groupHandSelect');
-    if (!sel) return;
-    Array.from(sel.options).forEach(opt => {
-        if (['larger_se', 'smaller_se'].includes(opt.value)) opt.remove();
-    });
+    const drop = (selectId, values) => {
+        const el = document.getElementById(selectId);
+        if (!el) return;
+        Array.from(el.options).forEach(opt => {
+            if (values.includes(opt.value)) opt.remove();
+        });
+    };
+    const rename = (selectId, map) => {
+        const el = document.getElementById(selectId);
+        if (!el) return;
+        Array.from(el.options).forEach(opt => {
+            if (map[opt.value]) opt.textContent = map[opt.value];
+        });
+    };
+    drop('groupHandSelect',        ['L', 'R', 'larger_se', 'smaller_se']);
+    drop('groupSeqTypeSelect',     ['none', 'linear']);
+    drop('groupSourceSelect',      ['mp_forward', 'skeleton_v1']);
+    drop('resultsSourceSelect',    ['mp_forward', 'skeleton_v1']);
+    rename('groupSourceSelect',    { corrections: 'DLC', mp_combined: 'MediaPipe' });
+    rename('resultsSourceSelect',  { corrections: 'DLC', mp_combined: 'MediaPipe' });
+    // Pair the Group hand+trial selects so they only allow the
+    // exported (more,last) / (less,last) / (average,average) combos.
+    const allowed = {
+        'more':    ['last'],
+        'less':    ['last'],
+        'average': ['average'],
+    };
+    const handSel  = document.getElementById('groupHandSelect');
+    const trialSel = document.getElementById('groupTrialSelect');
+    const applyPair = () => {
+        if (!handSel || !trialSel) return;
+        const ok = allowed[handSel.value] || [];
+        Array.from(trialSel.options).forEach(o => { o.hidden = !ok.includes(o.value); });
+        if (!ok.includes(trialSel.value)) trialSel.value = ok[0] || trialSel.value;
+    };
+    handSel?.addEventListener('change', applyPair);
+    applyPair();
 })();
 
 let subjects = [];

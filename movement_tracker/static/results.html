@@ -245,8 +245,19 @@
                         <option value="mp_forward">MP forward</option>
                     </select>
                 </label>
-                <label style="display:flex;align-items:center;gap:6px;margin:0;">Sequence effect:
-                    <select id="groupSeqModeSelect" style="min-width:150px;">
+                <label style="display:flex;align-items:center;gap:6px;margin:0;">Sequence:
+                    <select id="groupSeqTypeSelect" title="Curve fit type" style="min-width:90px;">
+                        <option value="none">None</option>
+                        <option value="linear">Linear</option>
+                        <option value="exp" selected>Exponential</option>
+                    </select>
+                    <select id="groupSeqWindowSelect" title="Tap-window used for the fit" style="min-width:100px;">
+                        <option value="full">Full</option>
+                        <option value="first10">First 10</option>
+                        <option value="multi" selected>Multi-seq</option>
+                    </select>
+                    <!-- Hidden combined value kept in sync by JS. -->
+                    <select id="groupSeqModeSelect" style="display:none;">
                         <option value="none">None</option>
                         <option value="linear_full">Linear (full)</option>
                         <option value="linear_first10">Linear (first 10)</option>
@@ -349,6 +360,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=101"></script>
+    <script src="/static/js/results.js?v=102"></script>
 </body>
 </html>

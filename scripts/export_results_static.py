@@ -31,24 +31,19 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-# Source distances/sequence modes the dropdowns expose — must match the
-# options in results.html.
-SOURCES = ["auto", "corrections", "mp_combined", "mp_forward"]
-SEQ_MODES = ["none", "linear_full", "linear_first10", "linear_multi",
-             "exp_full", "exp_first10", "exp_multi"]
-# Group-page hand + trial selectors.
-HANDS = ["more", "less", "L", "R", "average"]
-TRIALS = ["first", "last", "average"]
+# Combos shipped to the public site.  Match the sets in
+# movement_tracker/routers/results.py — anything not here is a 404
+# on the static deploy (live app handles it dynamically).
+SOURCES   = ["auto", "corrections", "mp_combined"]
+SEQ_MODES = ["exp_full", "exp_first10", "exp_multi"]
+# Explicit (hand, trial) pairs.  Not a cartesian product.
+HAND_TRIAL = [("more", "last"),
+              ("less", "last"),
+              ("average", "average")]
 
-# Explore-page combos.  Much smaller subset:
-#   - source locked to "auto"
-#   - drop seq_mode "none"
-#   - drop hand options L and R
-EXPLORE_SOURCES   = ["auto"]
-EXPLORE_SEQ_MODES = ["linear_full", "linear_first10", "linear_multi",
-                     "exp_full",    "exp_first10",    "exp_multi"]
-EXPLORE_HANDS     = ["more", "less", "average"]
-EXPLORE_TRIALS    = ["first", "last", "average"]
+EXPLORE_SOURCES   = ["auto", "corrections", "mp_combined"]
+EXPLORE_SEQ_MODES = SEQ_MODES
+EXPLORE_HAND_TRIAL = HAND_TRIAL
 
 
 def _flatten(url: str) -> str:
@@ -114,23 +109,20 @@ def main() -> None:
     subjects = dump("/api/subjects") or []
     print(f"  {len(subjects)} subjects")
 
-    # Group comparison: source × seq_mode × hand × trial (include_auto
-    # always true on the group page).
+    # Group comparison: source × seq_mode × explicit (hand, trial)
+    # pairs (include_auto always true on the group page).
     for src in SOURCES:
         for sm in SEQ_MODES:
-            for hd in HANDS:
-                for tr in TRIALS:
-                    dump(f"/api/results/group?include_auto=true&source={src}"
-                         f"&seq_mode={sm}&hand={hd}&trial={tr}")
+            for hd, tr in HAND_TRIAL:
+                dump(f"/api/results/group?include_auto=true&source={src}"
+                     f"&seq_mode={sm}&hand={hd}&trial={tr}")
 
-    # Explore (Variable Explorer) — source=auto only, no seq=none,
-    # drop L/R hands.  1 × 6 × 3 × 3 = 54 files.
+    # Explore (Variable Explorer) — same shape, narrower set.
     for src in EXPLORE_SOURCES:
         for sm in EXPLORE_SEQ_MODES:
-            for hd in EXPLORE_HANDS:
-                for tr in EXPLORE_TRIALS:
-                    dump(f"/api/results/explore?include_auto=true&source={src}"
-                         f"&seq_mode={sm}&hand={hd}&trial={tr}")
+            for hd, tr in EXPLORE_HAND_TRIAL:
+                dump(f"/api/results/explore?include_auto=true&source={src}"
+                     f"&seq_mode={sm}&hand={hd}&trial={tr}")
 
     # Per-subject traces + movements for every source.
     for subj in subjects:

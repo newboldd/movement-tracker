@@ -1753,31 +1753,45 @@ def _explore_value_keys() -> list[str]:
 # JSON instead of recomputing — same trade-off the static site makes.
 _SITE_DATA_DIR = Path(__file__).resolve().parents[2] / "site" / "data"
 
-# Group page: every combination is exported.
-_GROUP_STATIC_SOURCES   = {"auto", "corrections", "mp_combined", "mp_forward"}
-_GROUP_STATIC_SEQ_MODES = {"none", "linear_full", "linear_first10", "linear_multi",
-                            "exp_full",    "exp_first10",    "exp_multi"}
-_GROUP_STATIC_HANDS     = {"more", "less", "L", "R", "average"}
-_GROUP_STATIC_TRIALS    = {"first", "last", "average"}
+# Static-cache combos shipped to the public GitHub Pages site.
+# Hand × trial is NOT a cartesian product anymore — only the three
+# pairs the user actually wants are exported, since the explore +
+# group pages now use the same scoped (hand, trial) selection.
+_GROUP_STATIC_SOURCES   = {"auto", "corrections", "mp_combined"}
+_GROUP_STATIC_SEQ_MODES = {"exp_full", "exp_first10", "exp_multi"}
+_GROUP_STATIC_HAND_TRIAL = {("more", "last"),
+                             ("less", "last"),
+                             ("average", "average")}
 
-# Explore page: smaller subset (no source≠auto, no seq=none, no L/R hand).
-_EXPLORE_STATIC_SOURCES   = {"auto"}
-_EXPLORE_STATIC_SEQ_MODES = {"linear_full", "linear_first10", "linear_multi",
-                              "exp_full",    "exp_first10",    "exp_multi"}
-_EXPLORE_STATIC_HANDS     = {"more", "less", "average"}
-_EXPLORE_STATIC_TRIALS    = {"first", "last", "average"}
+_EXPLORE_STATIC_SOURCES   = {"auto", "corrections", "mp_combined"}
+_EXPLORE_STATIC_SEQ_MODES = {"exp_full", "exp_first10", "exp_multi"}
+_EXPLORE_STATIC_HAND_TRIAL = {("more", "last"),
+                               ("less", "last"),
+                               ("average", "average")}
+
+# Cartesian fallbacks (still referenced by _static_cache_path) — these
+# are deliberately the SAME as the *_HAND_TRIAL pair sets so the
+# old "is hand in set / is trial in set" path keeps working without
+# admitting combinations we don't actually export.
+_GROUP_STATIC_HANDS     = {h for h, _ in _GROUP_STATIC_HAND_TRIAL}
+_GROUP_STATIC_TRIALS    = {t for _, t in _GROUP_STATIC_HAND_TRIAL}
+_EXPLORE_STATIC_HANDS   = {h for h, _ in _EXPLORE_STATIC_HAND_TRIAL}
+_EXPLORE_STATIC_TRIALS  = {t for _, t in _EXPLORE_STATIC_HAND_TRIAL}
 
 
 def _static_cache_path(endpoint: str, include_auto: bool,
                         source: str, seq_mode: str, hand: str, trial: str,
-                        srcs: set, sms: set, hands: set, trials: set):
+                        srcs: set, sms: set, hand_trial: set):
     """Return Path to a cached JSON for the given combo, or None if the
-    combination wasn't exported (no cache to read)."""
+    combination wasn't exported (no cache to read).
+
+    ``hand_trial`` is the set of (hand, trial) tuples we actually ship —
+    e.g. (more, last), (less, last), (average, average) — so an
+    in-between like (more, average) doesn't pretend to have a cache."""
     if not include_auto: return None
     if source not in srcs: return None
     if seq_mode not in sms: return None
-    if hand not in hands: return None
-    if trial not in trials: return None
+    if (hand, trial) not in hand_trial: return None
     name = (f"api_results_{endpoint}_include_auto_true_source_{source}_"
             f"seq_mode_{seq_mode}_hand_{hand}_trial_{trial}.json")
     return _SITE_DATA_DIR / name
@@ -1786,13 +1800,13 @@ def _static_cache_path(endpoint: str, include_auto: bool,
 def _explore_cache_path(include_auto, source, seq_mode, hand, trial):
     return _static_cache_path("explore", include_auto, source, seq_mode, hand, trial,
                               _EXPLORE_STATIC_SOURCES, _EXPLORE_STATIC_SEQ_MODES,
-                              _EXPLORE_STATIC_HANDS, _EXPLORE_STATIC_TRIALS)
+                              _EXPLORE_STATIC_HAND_TRIAL)
 
 
 def _group_cache_path(include_auto, source, seq_mode, hand, trial):
     return _static_cache_path("group", include_auto, source, seq_mode, hand, trial,
                               _GROUP_STATIC_SOURCES, _GROUP_STATIC_SEQ_MODES,
-                              _GROUP_STATIC_HANDS, _GROUP_STATIC_TRIALS)
+                              _GROUP_STATIC_HAND_TRIAL)
 
 
 @router.get("/explore")

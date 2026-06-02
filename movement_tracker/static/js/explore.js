@@ -24,6 +24,46 @@ const AGG_PREFIX = { mean: 'Mean ', variance: 'Variance ', cv: 'CV ', seq: 'Seq.
 
 const $ = (id) => document.getElementById(id);
 
+// Keep the (hidden) combined exSeqModeSelect in sync with the two
+// visible Type + Window selects.  loadExplore() and a few other
+// places still read exSeqModeSelect.value, so changing both visible
+// selects writes back to it before any loaders run.
+(function _wireSplitSeqMode() {
+    const typeSel = document.getElementById('exSeqTypeSelect');
+    const winSel  = document.getElementById('exSeqWindowSelect');
+    const combined = document.getElementById('exSeqModeSelect');
+    if (!typeSel || !winSel || !combined) return;
+    const sync = () => {
+        const t = typeSel.value;
+        const w = winSel.value;
+        // When Type = None, the window selector doesn't matter — store
+        // 'none' and dim the window control to hint the user.
+        if (t === 'none') {
+            combined.value = 'none';
+            winSel.disabled = true;
+            winSel.style.opacity = '0.4';
+        } else {
+            combined.value = `${t}_${w}`;
+            winSel.disabled = false;
+            winSel.style.opacity = '';
+        }
+        // Mirror change so existing listeners on the hidden select fire.
+        combined.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    typeSel.addEventListener('change', sync);
+    winSel.addEventListener('change',  sync);
+    // Initialise from whatever the hidden select started with so the
+    // two visible controls match.
+    const cur = combined.value || 'exp_multi';
+    if (cur === 'none') {
+        typeSel.value = 'none';
+    } else {
+        const m = cur.match(/^(linear|exp)_(full|first10|multi)$/);
+        if (m) { typeSel.value = m[1]; winSel.value = m[2]; }
+    }
+    sync();
+})();
+
 // Static-site mode (GitHub Pages export): only a subset of source ×
 // seq_mode × hand × trial combinations is exported as JSON, so hide
 // the unsupported choices from the UI.
@@ -36,14 +76,44 @@ const $ = (id) => document.getElementById(id);
             if (values.includes(opt.value)) opt.remove();
         });
     };
-    // Source locked to "auto" — hide the whole control.
-    const srcSel = document.getElementById('exSourceSelect');
-    if (srcSel) {
-        srcSel.value = 'auto';
-        if (srcSel.parentElement) srcSel.parentElement.style.display = 'none';
-    }
-    drop('exSeqModeSelect', ['none']);
+    const rename = (selectId, map) => {
+        const el = document.getElementById(selectId);
+        if (!el) return;
+        Array.from(el.options).forEach(opt => {
+            if (map[opt.value]) opt.textContent = map[opt.value];
+        });
+    };
+    // Sources we publish: auto / corrections (relabel DLC) /
+    // mp_combined (relabel MediaPipe).  Drop mp_forward and others.
+    drop('exSourceSelect', ['mp_forward', 'skeleton_v1']);
+    rename('exSourceSelect', {
+        'corrections': 'DLC',
+        'mp_combined': 'MediaPipe',
+    });
+    // Seq Type: drop Linear (the public deploy only ships exp_*).
+    drop('exSeqTypeSelect', ['none', 'linear']);
+    // Hand: only the three pairs we ship.
     drop('exHandSelect',    ['L', 'R', 'larger_se', 'smaller_se']);
+    // Hand+Trial constraint: more/less only with last, average only
+    // with average.  Hide options on the Trial select that don't
+    // match the current Hand pick, and re-evaluate when Hand changes.
+    const handSel  = document.getElementById('exHandSelect');
+    const trialSel = document.getElementById('exTrialSelect');
+    const allowed = {
+        'more':    ['last'],
+        'less':    ['last'],
+        'average': ['average'],
+    };
+    function _applyTrialAllowed() {
+        if (!handSel || !trialSel) return;
+        const ok = allowed[handSel.value] || [];
+        Array.from(trialSel.options).forEach(opt => {
+            opt.hidden = !ok.includes(opt.value);
+        });
+        if (!ok.includes(trialSel.value)) trialSel.value = ok[0] || trialSel.value;
+    }
+    handSel?.addEventListener('change', _applyTrialAllowed);
+    _applyTrialAllowed();
 })();
 
 async function loadExplore() {
