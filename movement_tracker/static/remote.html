@@ -254,6 +254,17 @@
     </div>
 
     <div class="container">
+        <!-- Cache Results: per-page settings + cache size + rebuild -->
+        <div class="card" id="cacheResultsCard">
+            <h2 style="display:flex;align-items:center;gap:10px;">
+                Cache Results
+                <span id="cacheTotalLabel" style="font-size:12px;font-weight:400;color:var(--text-muted);"></span>
+            </h2>
+            <div id="cacheJobsRow" style="display:flex;flex-direction:column;gap:8px;">
+                <!-- Two job rows are populated by remote.js: Group Comparisons, Explore. -->
+            </div>
+        </div>
+
         <!-- Launch Job -->
         <div class="card">
             <h2>Launch Job</h2>
@@ -535,5 +546,6 @@
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js?v=13"></script>
     <script src="/static/js/remote.js?v=62"></script>
+    <script src="/static/js/cache_results.js?v=1"></script>
 </body>
 </html>

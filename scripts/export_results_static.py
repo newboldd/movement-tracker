@@ -31,19 +31,17 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-# Combos shipped to the public site.  Match the sets in
-# movement_tracker/routers/results.py — anything not here is a 404
-# on the static deploy (live app handles it dynamically).
-SOURCES   = ["auto", "corrections", "mp_combined"]
-SEQ_MODES = ["exp_full", "exp_first10", "exp_multi"]
-# Explicit (hand, trial) pairs.  Not a cartesian product.
-HAND_TRIAL = [("more", "last"),
-              ("less", "last"),
-              ("average", "average")]
-
-EXPLORE_SOURCES   = ["auto", "corrections", "mp_combined"]
-EXPLORE_SEQ_MODES = SEQ_MODES
-EXPLORE_HAND_TRIAL = HAND_TRIAL
+# Combos shipped to the public site come from cache_config.json
+# (managed via the Jobs page).  Lazy-load below in main() so the
+# config is read fresh on every run.
+def _load_combos():
+    from movement_tracker.services.cache_config import get_page_combos
+    g = get_page_combos("group")
+    e = get_page_combos("explore")
+    return (
+        g["sources"], g["seq_modes"], [(h, t) for h, t in g["hand_trial"]],
+        e["sources"], e["seq_modes"], [(h, t) for h, t in e["hand_trial"]],
+    )
 
 
 def _flatten(url: str) -> str:
@@ -109,27 +107,32 @@ def main() -> None:
     subjects = dump("/api/subjects") or []
     print(f"  {len(subjects)} subjects")
 
+    (G_SOURCES, G_SEQ_MODES, G_HAND_TRIAL,
+     E_SOURCES, E_SEQ_MODES, E_HAND_TRIAL) = _load_combos()
+
     # Group comparison: source × seq_mode × explicit (hand, trial)
     # pairs (include_auto always true on the group page).
-    for src in SOURCES:
-        for sm in SEQ_MODES:
-            for hd, tr in HAND_TRIAL:
+    for src in G_SOURCES:
+        for sm in G_SEQ_MODES:
+            for hd, tr in G_HAND_TRIAL:
                 dump(f"/api/results/group?include_auto=true&source={src}"
                      f"&seq_mode={sm}&hand={hd}&trial={tr}")
 
     # Explore (Variable Explorer) — same shape, narrower set.
-    for src in EXPLORE_SOURCES:
-        for sm in EXPLORE_SEQ_MODES:
-            for hd, tr in EXPLORE_HAND_TRIAL:
+    for src in E_SOURCES:
+        for sm in E_SEQ_MODES:
+            for hd, tr in E_HAND_TRIAL:
                 dump(f"/api/results/explore?include_auto=true&source={src}"
                      f"&seq_mode={sm}&hand={hd}&trial={tr}")
 
-    # Per-subject traces + movements for every source.
+    # Per-subject traces + movements — once per source the user picked
+    # for either page (union, since traces are page-agnostic).
+    per_subj_sources = sorted(set(G_SOURCES) | set(E_SOURCES))
     for subj in subjects:
         sid = subj.get("id")
         if sid is None:
             continue
-        for src in SOURCES:
+        for src in per_subj_sources:
             dump(f"/api/results/{sid}/traces?source={src}")
             dump(f"/api/results/{sid}/movements?source={src}")
         # Legacy no-source movements call (hidden tab) — alias to auto.

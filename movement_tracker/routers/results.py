@@ -1753,30 +1753,15 @@ def _explore_value_keys() -> list[str]:
 # JSON instead of recomputing — same trade-off the static site makes.
 _SITE_DATA_DIR = Path(__file__).resolve().parents[2] / "site" / "data"
 
-# Static-cache combos shipped to the public GitHub Pages site.
-# Hand × trial is NOT a cartesian product anymore — only the three
-# pairs the user actually wants are exported, since the explore +
-# group pages now use the same scoped (hand, trial) selection.
-_GROUP_STATIC_SOURCES   = {"auto", "corrections", "mp_combined"}
-_GROUP_STATIC_SEQ_MODES = {"exp_full", "exp_first10", "exp_multi"}
-_GROUP_STATIC_HAND_TRIAL = {("more", "last"),
-                             ("less", "last"),
-                             ("average", "average")}
+# Static-cache combos come from cache_config.json now, via
+# services/cache_config.py.  Both the Jobs-page "Cache Results"
+# UI and this module hit the same source of truth, so changing one
+# updates the other without code edits.
+from ..services.cache_config import get_page_combos as _get_page_combos
 
-_EXPLORE_STATIC_SOURCES   = {"auto", "corrections", "mp_combined"}
-_EXPLORE_STATIC_SEQ_MODES = {"exp_full", "exp_first10", "exp_multi"}
-_EXPLORE_STATIC_HAND_TRIAL = {("more", "last"),
-                               ("less", "last"),
-                               ("average", "average")}
 
-# Cartesian fallbacks (still referenced by _static_cache_path) — these
-# are deliberately the SAME as the *_HAND_TRIAL pair sets so the
-# old "is hand in set / is trial in set" path keeps working without
-# admitting combinations we don't actually export.
-_GROUP_STATIC_HANDS     = {h for h, _ in _GROUP_STATIC_HAND_TRIAL}
-_GROUP_STATIC_TRIALS    = {t for _, t in _GROUP_STATIC_HAND_TRIAL}
-_EXPLORE_STATIC_HANDS   = {h for h, _ in _EXPLORE_STATIC_HAND_TRIAL}
-_EXPLORE_STATIC_TRIALS  = {t for _, t in _EXPLORE_STATIC_HAND_TRIAL}
+def _group_combos() -> dict:  return _get_page_combos("group")
+def _explore_combos() -> dict: return _get_page_combos("explore")
 
 
 def _static_cache_path(endpoint: str, include_auto: bool,
@@ -1797,16 +1782,22 @@ def _static_cache_path(endpoint: str, include_auto: bool,
     return _SITE_DATA_DIR / name
 
 
+def _as_pair_set(pairs):
+    return {tuple(p) for p in pairs}
+
+
 def _explore_cache_path(include_auto, source, seq_mode, hand, trial):
+    c = _explore_combos()
     return _static_cache_path("explore", include_auto, source, seq_mode, hand, trial,
-                              _EXPLORE_STATIC_SOURCES, _EXPLORE_STATIC_SEQ_MODES,
-                              _EXPLORE_STATIC_HAND_TRIAL)
+                              set(c["sources"]), set(c["seq_modes"]),
+                              _as_pair_set(c["hand_trial"]))
 
 
 def _group_cache_path(include_auto, source, seq_mode, hand, trial):
+    c = _group_combos()
     return _static_cache_path("group", include_auto, source, seq_mode, hand, trial,
-                              _GROUP_STATIC_SOURCES, _GROUP_STATIC_SEQ_MODES,
-                              _GROUP_STATIC_HAND_TRIAL)
+                              set(c["sources"]), set(c["seq_modes"]),
+                              _as_pair_set(c["hand_trial"]))
 
 
 @router.get("/explore")

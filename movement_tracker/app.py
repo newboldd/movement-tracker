@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 
 from .config import get_settings
 from .db import init_db
-from .routers import subjects, labeling, pipeline, jobs, results, settings, filebrowser, video_tools, batch, remote_jobs, skeleton, export, camera_setups, updater, deidentify, analyze, preproc
+from .routers import subjects, labeling, pipeline, jobs, results, settings, filebrowser, video_tools, batch, remote_jobs, skeleton, export, camera_setups, updater, deidentify, analyze, preproc, cache_results
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -64,6 +64,7 @@ app.include_router(filebrowser.router)
 app.include_router(video_tools.router)
 app.include_router(batch.router)
 app.include_router(remote_jobs.router)
+app.include_router(cache_results.router)
 
 app.include_router(skeleton.router)
 app.include_router(export.router)
