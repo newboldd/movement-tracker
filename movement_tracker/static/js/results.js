@@ -133,6 +133,10 @@ let _collapsedTrials = new Set();
 // here as a module-level state object so a re-render of a single
 // plot still picks the line back up.
 let _clickHL = null;            // { trialIdx, time }  or  null
+// Saved tapping events for the current subject — { open, peak, close,
+// pause } each a list of GLOBAL video-frame indices.  Used by the
+// Pause overlay on per-trial distance plots.
+let _savedEvents = null;
 const _baseShapeCount = {};     // divId → shapes.length right after newPlot
 function _registerClickPlot(divId) {
     const div = document.getElementById(divId);
@@ -170,34 +174,41 @@ function _handlePlotClick(divId, ev) {
 
 function _applyHighlightAll() {
     if (!_clickHL) return;
-    const { trialIdx } = _clickHL;
-    _applyHighlightTo(`distPlot_${trialIdx}`);
-    _applyHighlightTo(`velPlot_${trialIdx}`);
-    document.querySelectorAll('[id^="movPlot_"]').forEach(d => _applyHighlightTo(d.id));
+    // Apply to every distance/velocity plot (all trials) and every
+    // movement plot (subplot per trial).
+    document.querySelectorAll('[id^="distPlot_"], [id^="velPlot_"], [id^="movPlot_"]')
+        .forEach(d => _applyHighlightTo(d.id));
 }
 
 function _applyHighlightTo(divId) {
     if (!_clickHL) return;
     const div = document.getElementById(divId);
     if (!div || !div.layout) return;
-    const { trialIdx, time } = _clickHL;
+    const { time } = _clickHL;
     const base = _baseShapeCount[divId] || 0;
     const shapes = (div.layout.shapes || []).slice(0, base);
-    // Movement plots reference the trial's per-subplot xaxis; dist/vel
-    // plots only have one xaxis ('x').
-    let axId = 'x';
+    const lineStyle = { color: 'rgba(0,0,0,0.45)', width: 1, dash: 'dot' };
     if (divId.startsWith('movPlot_')) {
-        axId = trialIdx === 0 ? 'x' : 'x' + (trialIdx + 1);
+        // Movement plots have one subplot per trial — paint the line
+        // in EVERY subplot's x-axis.
+        const xaxes = Object.keys(div.layout)
+            .filter(k => /^xaxis(\d+)?$/.test(k))
+            .map(k => k === 'xaxis' ? 'x' : 'x' + k.slice('xaxis'.length));
+        xaxes.forEach(axId => {
+            shapes.push({
+                type: 'line', xref: axId, yref: 'paper',
+                x0: time, x1: time, y0: 0, y1: 1,
+                line: lineStyle, layer: 'above',
+            });
+        });
+    } else {
+        // Dist/Vel plots — single xaxis 'x'.
+        shapes.push({
+            type: 'line', xref: 'x', yref: 'paper',
+            x0: time, x1: time, y0: 0, y1: 1,
+            line: lineStyle, layer: 'above',
+        });
     }
-    shapes.push({
-        type: 'line',
-        xref: axId,
-        yref: 'paper',
-        x0: time, x1: time,
-        y0: 0, y1: 1,
-        line: { color: 'rgba(0,0,0,0.45)', width: 1, dash: 'dot' },
-        layer: 'above',
-    });
     try { Plotly.relayout(divId, { shapes }); } catch (_) {}
 }
 let currentTab = 'distances';
@@ -363,13 +374,17 @@ async function loadDistances(subjectId) {
         || document.getElementById('distSourceSelect')?.value || 'auto';
 
     try {
-        // Load traces and movements in parallel
-        const [traceData, movData] = await Promise.all([
+        // Load traces, movements, and saved events in parallel.
+        // Saved events power the Pause overlay (pauses aren't tied to
+        // a movement object the way Open/Close are).
+        const [traceData, movData, evData] = await Promise.all([
             API.get(`/api/results/${subjectId}/traces?source=${selectedSource}`),
             API.get(`/api/results/${subjectId}/movements?source=${selectedSource}`).catch(() => null),
+            API.get(`/api/skeleton/${subjectId}/events`).catch(() => null),
         ]);
 
         cachedTraces = traceData;
+        _savedEvents = evData || null;
         _resetYOverrides();   // new subject/source → fresh full-range sliders
 
         // Update source selector with available sources
@@ -2174,6 +2189,7 @@ function renderAllDistancePlots() {
     const overlayPeakDist = document.getElementById('overlayPeakDist').checked;
     const overlayOpen = document.getElementById('overlayOpen')?.checked;
     const overlayClose = document.getElementById('overlayClose')?.checked;
+    const overlayPause = document.getElementById('overlayPause')?.checked;
     const overlayPeakOpenVel = document.getElementById('overlayPeakOpenVel').checked;
     const overlayPeakCloseVel = document.getElementById('overlayPeakCloseVel').checked;
 
@@ -2247,11 +2263,19 @@ function renderAllDistancePlots() {
         const titleSpan = document.createElement('span');
         const trialKey = trial.name || `trial_${idx}`;
         const isCollapsed = _collapsedTrials.has(trialKey);
+        // Chevron in a fixed-width slot so '▾' and '▸' (different
+        // glyph widths) don't shift the trial-name text horizontally.
+        const chevSpan = document.createElement('span');
+        chevSpan.style.cssText = 'display:inline-block;width:12px;text-align:center;';
+        const labelSpan = document.createElement('span');
+        labelSpan.style.marginLeft = '4px';
         const _renderTitle = () => {
-            const arrow = _collapsedTrials.has(trialKey) ? '▸' : '▾';
-            titleSpan.textContent = `${arrow} Trial: ${_trialPartOf(trial)}`;
+            chevSpan.textContent = _collapsedTrials.has(trialKey) ? '▸' : '▾';
+            labelSpan.textContent = `Trial: ${_trialPartOf(trial)}`;
         };
         _renderTitle();
+        titleSpan.appendChild(chevSpan);
+        titleSpan.appendChild(labelSpan);
         titleSpan.style.cssText = 'font-size:13px;color:#666;font-weight:600;cursor:pointer;user-select:none;';
         titleSpan.title = 'Click to collapse/expand this trial\'s distance + velocity plots';
         titleSpan.addEventListener('click', () => {
@@ -2371,6 +2395,34 @@ function renderAllDistancePlots() {
         };
         if (overlayOpen) _evMarkers('open', 'open_frame', '#2ca02c', 'Open');
         if (overlayClose) _evMarkers('close', 'close_frame', '#d62728', 'Close');
+
+        // Pause overlay — pauses live in saved events (events.csv),
+        // not in the per-movement dicts.  Pause frames are GLOBAL
+        // video frame indices; convert with trial.start_frame.
+        if (overlayPause && _savedEvents && Array.isArray(_savedEvents.pause)
+                && trial.distances && trial.start_frame != null) {
+            const sf = trial.start_frame;
+            const ef = (trial.end_frame != null)
+                ? trial.end_frame
+                : (sf + trial.distances.length - 1);
+            const fpsT = trial.fps || fps;
+            const xs = [], ys = [];
+            _savedEvents.pause.forEach(gf => {
+                if (!Number.isFinite(gf) || gf < sf || gf > ef) return;
+                const local = gf - sf;
+                const v = trial.distances[local];
+                if (v == null || !isFinite(v)) return;
+                xs.push(+(local / fpsT).toFixed(3));
+                ys.push(v);
+            });
+            if (xs.length) {
+                distOverlays.push({
+                    x: xs, y: ys, type: 'scatter', mode: 'markers',
+                    marker: { color: '#cc66ff', size: 7, symbol: 'circle' },
+                    name: 'Pause', hoverinfo: 'skip', showlegend: false,
+                });
+            }
+        }
 
         // Sequence shading
         if (showSequences && seqAssignments && seqAssignments.byTrial[idx]) {
@@ -4321,7 +4373,7 @@ function _syncImiRefVisibility() {
 _syncImiRefVisibility();
 
 // Overlay controls: re-render distance/velocity plots
-['overlayPeakDist', 'overlayOpen', 'overlayClose', 'overlayPeakOpenVel', 'overlayPeakCloseVel'].forEach(id => {
+['overlayPeakDist', 'overlayOpen', 'overlayClose', 'overlayPause', 'overlayPeakOpenVel', 'overlayPeakCloseVel'].forEach(id => {
     document.getElementById(id).addEventListener('change', () => {
         if (cachedTraces) renderAllDistancePlots();
     });

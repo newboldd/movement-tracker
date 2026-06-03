@@ -1402,6 +1402,8 @@ def get_traces(subject_id: int, source: str = Query("auto")) -> dict:
         result_trials.append({
             "name": t["trial_name"],
             "fps": fps,
+            "start_frame": int(t["start_frame"]),
+            "end_frame": int(t["end_frame"]),
             "distances": trial_dist,
             "velocities": trial_vel,
         })
