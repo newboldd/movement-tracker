@@ -80,12 +80,14 @@ OPTION_LABELS = {
 # sets so first-run behaviour is unchanged.
 _DEFAULT_CFG: dict = {
     "group": {
-        "sources":   ["auto", "corrections", "mp_combined"],
+        # Skeleton fit v1 is now a first-class source for head-to-head
+        # comparison with DLC and MP on the Group Comparison page.
+        "sources":   ["auto", "corrections", "mp_combined", "skeleton_v1"],
         "seq_modes": ["exp_full", "exp_first10", "exp_multi"],
         "hand_trial": [["more", "last"], ["less", "last"], ["average", "average"]],
     },
     "explore": {
-        "sources":   ["auto", "corrections", "mp_combined"],
+        "sources":   ["auto", "corrections", "mp_combined", "skeleton_v1"],
         "seq_modes": ["exp_full", "exp_first10", "exp_multi"],
         "hand_trial": [["more", "last"], ["less", "last"], ["average", "average"]],
     },

@@ -330,13 +330,27 @@
         <!-- Group Comparison Tab -->
         <div id="tabGroup" class="results-tab">
             <div class="results-controls" id="groupControls">
-                <label style="display:flex;align-items:center;gap:6px;margin:0;">Source:
-                    <select id="groupSourceSelect" style="min-width:140px;">
-                        <option value="auto" selected>Auto</option>
-                        <option value="corrections">DLC (corrected)</option>
-                        <option value="mp_combined">MP combined</option>
-                        <option value="mp_forward">MP forward</option>
-                    </select>
+                <label style="display:flex;flex-direction:column;align-items:flex-start;gap:4px;margin:0;">
+                    <span style="display:inline-flex;align-items:center;gap:6px;">Source:
+                        <select id="groupSourceSelect" style="min-width:140px;">
+                            <option value="auto" selected>Auto</option>
+                            <option value="corrections">DLC (corrected)</option>
+                            <option value="mp_combined">MP combined</option>
+                            <option value="mp_forward">MP forward</option>
+                            <option value="skeleton_v1">Skel fit v1</option>
+                        </select>
+                    </span>
+                    <!-- DLC group filter — visible only when Source is
+                         mp_combined / mp_forward / skeleton_v1.  When
+                         checked, the plotted group is restricted to
+                         subjects that also have DLC (corrected) data
+                         available, so the non-DLC source can be
+                         compared head-to-head with DLC on the SAME
+                         set of subjects. -->
+                    <label id="groupDlcFilterWrap" style="display:none;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;margin:0;"
+                           title="Restrict the group to subjects that have DLC (corrected) data available — for head-to-head source comparison.">
+                        <input type="checkbox" id="groupDlcFilter"> DLC group
+                    </label>
                 </label>
                 <label style="display:flex;align-items:center;gap:6px;margin:0;">Sequence:
                     <select id="groupSeqTypeSelect" title="Curve fit type" style="min-width:90px;">
@@ -453,6 +467,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=121"></script>
+    <script src="/static/js/results.js?v=122"></script>
 </body>
 </html>

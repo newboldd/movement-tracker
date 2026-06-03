@@ -95,10 +95,13 @@
     };
     drop('groupHandSelect',        ['L', 'R', 'larger_se', 'smaller_se']);
     drop('groupSeqTypeSelect',     ['none', 'linear']);
-    drop('groupSourceSelect',      ['mp_forward', 'skeleton_v1']);
-    drop('resultsSourceSelect',    ['mp_forward', 'skeleton_v1']);
-    rename('groupSourceSelect',    { corrections: 'DLC', mp_combined: 'MediaPipe' });
-    rename('resultsSourceSelect',  { corrections: 'DLC', mp_combined: 'MediaPipe' });
+    // Skeleton-fit v1 is now part of the default static cache, so
+    // keep it in the dropdown; mp_forward still isn't exported and
+    // stays trimmed in static mode.
+    drop('groupSourceSelect',      ['mp_forward']);
+    drop('resultsSourceSelect',    ['mp_forward']);
+    rename('groupSourceSelect',    { corrections: 'DLC', mp_combined: 'MediaPipe', skeleton_v1: 'Skel fit v1' });
+    rename('resultsSourceSelect',  { corrections: 'DLC', mp_combined: 'MediaPipe', skeleton_v1: 'Skel fit v1' });
     // Pair the Group hand+trial selects so they only allow the
     // exported (more,last) / (less,last) / (average,average) combos.
     const allowed = {
@@ -4579,6 +4582,10 @@ async function loadGroup() {
             `/api/results/group?include_auto=true&source=${src}&seq_mode=${seqMode}` +
             `&hand=${hand}&trial=${trial}`);
         _initGroupSubjectChecked();
+        // If the user has the DLC-group filter on for a non-DLC
+        // source, pre-fetch the DLC subject set so the first render
+        // reflects the filter immediately.
+        if (_dlcFilterActive()) await _ensureDlcSubjectSet();
         renderGroupPlots();
     } catch (e) {
         container.innerHTML = `<div class="results-no-data" style="grid-column:1/-1;color:#d32f2f;">${e.message}</div>`;
@@ -4608,9 +4615,58 @@ function _onIncludeAutoChanged() {
     renderGroupPlots();
 }
 
+// Subjects that the DLC (corrections) source would include for the
+// current (seq_mode, hand, trial, include_auto) combination.
+// Populated lazily by _ensureDlcSubjectSet() when the "DLC group"
+// checkbox is in play.  Cleared on any control change so we re-fetch
+// for the new parameter combo.
+let _dlcSubjectNames = null;
+let _dlcSubjectKey   = null;   // signature of the combo it was fetched for
+
+function _isNonDlcSource(src) {
+    return src === 'mp_combined' || src === 'mp_forward' || src === 'skeleton_v1';
+}
+
+function _dlcFilterActive() {
+    const src = document.getElementById('groupSourceSelect')?.value || 'auto';
+    if (!_isNonDlcSource(src)) return false;
+    return !!document.getElementById('groupDlcFilter')?.checked;
+}
+
+async function _ensureDlcSubjectSet() {
+    // Build a per-combo cache key from the controls that affect which
+    // subjects the API would return.
+    const seqMode = document.getElementById('groupSeqModeSelect')?.value || 'linear_full';
+    const hand    = document.getElementById('groupHandSelect')?.value    || 'more';
+    const trial   = document.getElementById('groupTrialSelect')?.value   || 'last';
+    const includeAuto = document.getElementById('includeAutoToggle')?.checked ? '1' : '0';
+    const key = [seqMode, hand, trial, includeAuto].join('|');
+    if (_dlcSubjectNames && _dlcSubjectKey === key) return _dlcSubjectNames;
+    try {
+        const data = await API.get(
+            `/api/results/group?include_auto=true&source=corrections&seq_mode=${seqMode}`
+          + `&hand=${hand}&trial=${trial}`);
+        const subs = (data && data.subjects) || [];
+        // /api/results/group only returns subjects that produced
+        // at least two movements under the requested source — so
+        // the response list IS the "subjects with DLC data" set.
+        _dlcSubjectNames = new Set(subs.map(s => s.name).filter(Boolean));
+        _dlcSubjectKey = key;
+    } catch (_) {
+        _dlcSubjectNames = new Set();
+        _dlcSubjectKey = key;
+    }
+    return _dlcSubjectNames;
+}
+
 function _activeGroupSubjects() {
     if (!cachedGroup || !cachedGroup.subjects) return [];
-    return cachedGroup.subjects.filter(s => _groupSubjectChecked[s.name]);
+    const dlcOn = _dlcFilterActive();
+    return cachedGroup.subjects.filter(s => {
+        if (!_groupSubjectChecked[s.name]) return false;
+        if (dlcOn && _dlcSubjectNames && !_dlcSubjectNames.has(s.name)) return false;
+        return true;
+    });
 }
 
 function _renderGroupSubjectList() {
@@ -5393,19 +5449,41 @@ document.getElementById('groupRegenerateBtn')?.addEventListener('click', async (
 
 // Group-tab source + sequence-effect dropdowns — re-fetch the group
 // data with the new parameters.
+function _syncDlcFilterVisibility() {
+    const wrap = document.getElementById('groupDlcFilterWrap');
+    const src  = document.getElementById('groupSourceSelect')?.value || 'auto';
+    if (!wrap) return;
+    wrap.style.display = _isNonDlcSource(src) ? 'inline-flex' : 'none';
+}
+_syncDlcFilterVisibility();
+
 document.getElementById('groupSourceSelect')?.addEventListener('change', () => {
+    _syncDlcFilterVisibility();
     cachedGroup = null;
     loadGroup();
 });
 document.getElementById('groupSeqModeSelect')?.addEventListener('change', () => {
+    // The DLC subject set is keyed on seq_mode too — invalidate.
+    _dlcSubjectNames = null; _dlcSubjectKey = null;
     cachedGroup = null;
     loadGroup();
 });
 ['groupHandSelect', 'groupTrialSelect'].forEach(id =>
     document.getElementById(id)?.addEventListener('change', () => {
+        _dlcSubjectNames = null; _dlcSubjectKey = null;
         cachedGroup = null;
         loadGroup();
     }));
+
+// "DLC group" filter checkbox — restrict the current non-DLC source
+// to subjects that have DLC data available, for head-to-head
+// comparison on the same set of subjects.
+document.getElementById('groupDlcFilter')?.addEventListener('change', async () => {
+    if (_dlcFilterActive()) {
+        await _ensureDlcSubjectSet();
+    }
+    if (cachedGroup) renderGroupPlots();
+});
 // R²/Slope for the Sequence-Effect row — both values are already in the
 // loaded data, so just re-render (no re-fetch).
 document.querySelectorAll('#groupSeqMetric input').forEach(r =>
