@@ -402,6 +402,16 @@ def run_skeleton_v1_fit(
         n_frames=N,
         stage=1,
         fit_type="skeleton",
+        # Persist the fit weights inside the npz too so the Labels
+        # page can repopulate the slider settings even if the
+        # sibling skeleton_v1_params.json is missing (e.g. older
+        # fits that pre-date the sidecar, or after a copy that
+        # only carried the npz).
+        w_reproj=float(w_reproj),
+        w_bone=float(w_bone),
+        w_smooth=float(w_smooth),
+        snap_bones=bool(snap_bones),
+        w_angle=float(w_angle),
     )
 
     # Save fitting parameters alongside the npz

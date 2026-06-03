@@ -974,13 +974,35 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
         mp_weights_L = v1.get("mp_weights_L")
         mp_weights_R = v1.get("mp_weights_R")
         has_skeleton_fit = True
-        # Load saved fit parameters
+        # Load saved fit parameters.  Prefer the JSON sidecar (has
+        # the richest record); fall back to the params embedded in
+        # the npz when the sidecar is missing (older fits + fits
+        # that survived a copy that only carried the npz).  The
+        # frontend reads ``params`` from this payload, so the shape
+        # must match either path.
         v1_params_path = skeleton_trial_dir / "skeleton_v1_params.json"
         if v1_params_path.exists():
             try:
                 v1_fit_params = json.loads(v1_params_path.read_text())
             except Exception:
                 pass
+        if v1_fit_params is None:
+            # Build the same shape the sidecar would produce
+            # ({"params": {...}}) from npz scalars when present.
+            params_from_npz = {}
+            for k in ("w_reproj", "w_bone", "w_smooth", "w_angle"):
+                if k in v1:
+                    try:
+                        params_from_npz[k] = float(np.asarray(v1[k]).item())
+                    except Exception:
+                        pass
+            if "snap_bones" in v1:
+                try:
+                    params_from_npz["snap_bones"] = bool(np.asarray(v1["snap_bones"]).item())
+                except Exception:
+                    pass
+            if params_from_npz:
+                v1_fit_params = {"params": params_from_npz}
 
     # ── Load v2 skeleton fit (skeleton_v3.npz) ─────────────────
     v2_joints_3d = None
