@@ -1109,6 +1109,25 @@
                            title="Timeline X scale (1 = full trial, >1 scrolls)"
                            style="width:80px;cursor:pointer;height:5px;">
                 </label>
+                <!-- Events: four side-by-side sub-buttons toggling per-type
+                     marker visibility on the distance plot.  Colors match
+                     the Events page.  Off by default. -->
+                <span id="eventToggleGroup"
+                      title="Toggle event-type markers on the distance plot"
+                      style="display:inline-flex;align-items:stretch;border:1px solid var(--border);border-radius:3px;overflow:hidden;height:18px;">
+                    <button class="event-toggle-btn" data-evt="open"
+                            title="Open events"
+                            style="padding:0 8px;font-size:10px;line-height:18px;background:transparent;color:#00cc44;border:none;border-right:1px solid var(--border);cursor:pointer;">O</button>
+                    <button class="event-toggle-btn" data-evt="peak"
+                            title="Peak events"
+                            style="padding:0 8px;font-size:10px;line-height:18px;background:transparent;color:#ffcc00;border:none;border-right:1px solid var(--border);cursor:pointer;">P</button>
+                    <button class="event-toggle-btn" data-evt="close"
+                            title="Close events"
+                            style="padding:0 8px;font-size:10px;line-height:18px;background:transparent;color:#ff4444;border:none;border-right:1px solid var(--border);cursor:pointer;">C</button>
+                    <button class="event-toggle-btn" data-evt="pause"
+                            title="Pause events"
+                            style="padding:0 8px;font-size:10px;line-height:18px;background:transparent;color:#cc66ff;border:none;cursor:pointer;">Pa</button>
+                </span>
                 <span>Frame: <strong id="frameDisplay">0</strong> / <span id="totalFrames">0</span></span>
                 <span id="plotValues" style="font-size:11px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
                 <strong id="fitError" style="display:none;"></strong>
@@ -1192,7 +1211,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=385" type="module"></script>
+    <script src="/static/js/labels.js?v=386" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

@@ -411,6 +411,19 @@ const manoViewer = (() => {
     const SPREAD_JOINT_PAIRS = [[0, 2, 5], [0, 5, 9], [0, 9, 13], [0, 13, 17]];
     const COORD_NAMES = ['Wrist X', 'Wrist Y', 'Wrist Z'];
     let plotMode = 'angle'; // 'angle' or 'position'
+
+    // Events overlay state.  ``savedEvents`` is the subject-level
+    // events.csv contents — { open: [globalFrame…], peak, close, pause }.
+    // ``showEvents`` flips one event type's markers on/off on the
+    // distance plot; all OFF by default to match the user's request.
+    let savedEvents = null;
+    const showEvents = { open: false, peak: false, close: false, pause: false };
+    const EVENT_COLORS = {
+        open:  '#00cc44',
+        peak:  '#ffcc00',
+        close: '#ff4444',
+        pause: '#cc66ff',
+    };
     // Whether every plotted series is shown as its raw value
     // ('position') or as a per-frame finite-difference velocity
     // ('velocity') scaled by the current trial's fps.  Applied
@@ -1250,6 +1263,14 @@ const manoViewer = (() => {
         } catch {
             trials = [];
         }
+        // Fetch saved tapping events (events.csv) so the four-segment
+        // Events toggle can plot them on the distance trace.  Missing
+        // file → empty arrays; the toggle just won't draw anything.
+        try {
+            savedEvents = await api(`/api/skeleton/${sid}/events`);
+        } catch {
+            savedEvents = null;
+        }
 
         const trialBtns = $('trialBtns');
         trialBtns.innerHTML = '';
@@ -1516,6 +1537,30 @@ const manoViewer = (() => {
                 _scrollDistToFrame(currentFrame, true);
             });
         }
+        // Four-segment Events toggle: per-type marker visibility on
+        // the distance plot.  Active segments get a tinted background
+        // of their color so the on/off state is obvious.
+        const _tint = (hex, a) => {
+            const h = hex.replace('#', '');
+            const r = parseInt(h.slice(0, 2), 16);
+            const g = parseInt(h.slice(2, 4), 16);
+            const b = parseInt(h.slice(4, 6), 16);
+            return `rgba(${r},${g},${b},${a})`;
+        };
+        document.querySelectorAll('.event-toggle-btn').forEach(btn => {
+            const t = btn.dataset.evt;
+            const _paint = () => {
+                const on = !!showEvents[t];
+                btn.style.background = on ? _tint(EVENT_COLORS[t], 0.25) : 'transparent';
+                btn.style.fontWeight = on ? '700' : '400';
+            };
+            _paint();
+            btn.addEventListener('click', () => {
+                showEvents[t] = !showEvents[t];
+                _paint();
+                renderDistanceTrace();
+            });
+        });
         // Sidebar toggle for iPad / narrow screens
         const sidebarToggle = $('sidebarToggle');
         const manoSidebar = $('manoSidebar');
@@ -6071,6 +6116,37 @@ const manoViewer = (() => {
             distCtx.moveTo(x, plotH);
             distCtx.lineTo(x, plotH + 3);
             distCtx.stroke();
+        }
+
+        // Saved-event markers — vertical lines colored by event type,
+        // gated on the four-segment Events toggle.  ``savedEvents``
+        // holds GLOBAL frame numbers; subtract trial.start_frame to
+        // get the local index that maps through ``toX``.
+        if (savedEvents && currentTrialIdx >= 0 && trials[currentTrialIdx]) {
+            const trial = trials[currentTrialIdx];
+            const sf = trial.start_frame;
+            const ef = trial.end_frame;
+            const padT_marker = 0;
+            const plotBottom = plotH;
+            for (const t of ['open', 'peak', 'close', 'pause']) {
+                if (!showEvents[t]) continue;
+                const frames = savedEvents[t];
+                if (!Array.isArray(frames) || !frames.length) continue;
+                distCtx.strokeStyle = EVENT_COLORS[t];
+                distCtx.lineWidth = 1;
+                distCtx.globalAlpha = 0.8;
+                distCtx.setLineDash([]);
+                for (const gf of frames) {
+                    if (gf < sf || gf > ef) continue;
+                    const lf = gf - sf;
+                    const x = toX(lf);
+                    distCtx.beginPath();
+                    distCtx.moveTo(x, padT_marker);
+                    distCtx.lineTo(x, plotBottom);
+                    distCtx.stroke();
+                }
+            }
+            distCtx.globalAlpha = 1.0;
         }
 
         _updatePlotValues();

@@ -53,6 +53,21 @@ def get_trials(subject_id: int) -> list[dict]:
     return list_skeleton_trials(name)
 
 
+@router.get("/{subject_id}/events")
+def get_subject_events(subject_id: int) -> dict:
+    """Return saved tapping events for the subject's events.csv.
+
+    Same shape as the session-scoped /api/labeling/sessions/{id}/events
+    endpoint — ``{open: [frames], peak: [...], close: [...], pause: [...]}``
+    — but keyed by subject so the Labels page can plot them without
+    needing an events session.  Returns empty arrays when the file is
+    missing.
+    """
+    from .labeling import _read_events_csv
+    name = _subject_name(subject_id)
+    return _read_events_csv(name)
+
+
 @router.get("/{subject_id}/trial/{trial_idx}/data")
 def get_trial_data(subject_id: int, trial_idx: int) -> Response:
     """Load bulk Skeleton viewer data for a trial.
