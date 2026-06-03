@@ -77,11 +77,24 @@
                 </label>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
                 <label title="When checked, the Y-range sliders on any trial control every trial's plots of the same type."><input type="checkbox" id="lockYAxis" checked> Lock Y-axis</label>
+                <!-- Force a wrap so the event-marker row sits on its
+                     own line under the X-scale / Source / Lock Y
+                     controls.  Requires flex-wrap on the parent
+                     (.distance-controls already has it). -->
+                <div style="flex-basis:100%;height:0;margin:0;padding:0;"></div>
+                <label><input type="checkbox" id="overlayPeakDist"> Peak</label>
+                <label><input type="checkbox" id="overlayOpen"> Open</label>
+                <label><input type="checkbox" id="overlayClose"> Close</label>
+                <label><input type="checkbox" id="overlayPause"> Pause</label>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
-                <!-- IMI reference radios.  Drive the compressed IMI
-                     strip between every per-trial distance/velocity
-                     pair (and the per-parameter IMI plot below).
-                     'off' hides both. -->
+                <label><input type="checkbox" id="overlayPeakOpenVel"> Peak Open Vel</label>
+                <label><input type="checkbox" id="overlayPeakCloseVel"> Peak Close Vel</label>
+                <span id="overlayR2" style="font-size:11px;color:#666;font-weight:600;"></span>
+                <!-- Third row: Interval radios — drive the compressed
+                     strip between every per-trial dist/vel pair and
+                     the per-parameter IMI plot below.  'off' hides
+                     both. -->
+                <div style="flex-basis:100%;height:0;margin:0;padding:0;"></div>
                 <span id="imiRefRow" style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);">
                     Interval:
                     <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Open to Open">
@@ -103,19 +116,6 @@
                         <input type="radio" name="imiRef" value="off"> off
                     </label>
                 </span>
-                <!-- Force a wrap so the event-marker row sits on its
-                     own line under the X-scale / Source / Lock Y /
-                     IMI-ref controls.  Requires flex-wrap on the
-                     parent (.distance-controls already has it). -->
-                <div style="flex-basis:100%;height:0;margin:0;padding:0;"></div>
-                <label><input type="checkbox" id="overlayPeakDist"> Peak</label>
-                <label><input type="checkbox" id="overlayOpen"> Open</label>
-                <label><input type="checkbox" id="overlayClose"> Close</label>
-                <label><input type="checkbox" id="overlayPause"> Pause</label>
-                <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
-                <label><input type="checkbox" id="overlayPeakOpenVel"> Peak Open Vel</label>
-                <label><input type="checkbox" id="overlayPeakCloseVel"> Peak Close Vel</label>
-                <span id="overlayR2" style="font-size:11px;color:#666;font-weight:600;"></span>
             </div>
             <div id="distancePlots">
                 <div class="results-no-data">Select a subject to view distance traces</div>
@@ -418,6 +418,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=115"></script>
+    <script src="/static/js/results.js?v=116"></script>
 </body>
 </html>
