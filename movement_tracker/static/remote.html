@@ -6,6 +6,12 @@
     <title>Movement Tracker</title>
     <link rel="stylesheet" href="/static/css/main.css">
     <style>
+        /* Cache Results steps hide only the per-job pickers — never
+           the step-button row, the Queue card, or Job History.  The
+           hidden elements are explicitly tagged below. */
+        body.cache-step [data-cache-hide] { display: none !important; }
+    </style>
+    <style>
         /* Highlight the currently-selected step button on the Jobs page —
            matches the light-blue selected-button styling used on the Auto
            page (--blue). */
@@ -306,7 +312,7 @@
                     </div>
                 </div>
             </div>
-            <div class="toolbar" style="flex-wrap:wrap;">
+            <div class="toolbar" data-cache-hide style="flex-wrap:wrap;">
                 <label style="font-size:13px;color:var(--text-muted);">Target:</label>
                 <div class="target-radios">
                     <div class="target-radio">
@@ -333,10 +339,10 @@
             </div>
 
             <!-- Inline warning area -->
-            <div id="jobWarning" style="display:none;padding:8px 12px;border-radius:4px;margin-bottom:12px;font-size:13px;"></div>
+            <div id="jobWarning" data-cache-hide style="display:none;padding:8px 12px;border-radius:4px;margin-bottom:12px;font-size:13px;"></div>
 
             <!-- Subject Selection -->
-            <div style="margin-bottom:12px;">
+            <div data-cache-hide style="margin-bottom:12px;">
                 <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:6px;">Subjects:</label>
                 <div id="subjectGrid" class="subject-grid">
                     <span class="empty-state">Loading subjects...</span>
@@ -389,7 +395,7 @@
             </div>
 
             <!-- Submit Button -->
-            <div style="display:flex;justify-content:flex-end;gap:8px;">
+            <div data-cache-hide style="display:flex;justify-content:flex-end;gap:8px;">
                 <button class="btn" onclick="submitBatch()"
                         title="HRnet: upload all videos + MP data once, then launch a single long-lived runner on the remote (survives local-server restarts).  MediaPipe: submit one job per selected subject so each appears as its own queue row.">Submit Batch</button>
                 <button class="btn btn-primary" onclick="submitJob()">Submit Processing Job</button>
@@ -546,7 +552,7 @@
 
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js?v=13"></script>
-    <script src="/static/js/remote.js?v=63"></script>
+    <script src="/static/js/remote.js?v=64"></script>
     <script src="/static/js/cache_results.js?v=2"></script>
 </body>
 </html>
