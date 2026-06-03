@@ -631,16 +631,24 @@ function _showHoverButton(trialIdx, intervalIdx) {
     // Update march/stop label.
     const march = btn.querySelector('.iv-march');
     if (march) march.textContent = iv.marched ? 'Stop march' : 'March across';
-    // Position centered over the interval on the distance plot —
-    // the wrapper is the offset parent and the dist plot is its
-    // first child, so x in wrapper coords == x in dist-plot coords.
+    // Position centered over the interval on the distance plot.
+    // The wrapper is the offset parent; the distance plot now sits
+    // inside an inner flex row with a sticky y-axis column to its
+    // left, so add the dist plot's offsetLeft within the wrapper.
     const dist = document.getElementById(`distPlot_${trialIdx}`);
-    if (!dist || !dist._fullLayout || !dist._fullLayout.xaxis) return;
+    const wrapper = document.getElementById(`trialWrap_${trialIdx}`);
+    if (!dist || !wrapper || !dist._fullLayout || !dist._fullLayout.xaxis) return;
     const ax = dist._fullLayout.xaxis;
     if (ax._offset == null) return;
     const mid = (iv.x0 + iv.x1) / 2;
     const pxMid = ax.d2p(mid) + ax._offset;
-    btn.style.left = pxMid + 'px';
+    // Walk offset chain to find dist's x position relative to wrapper.
+    let leftWithin = 0, el = dist;
+    while (el && el !== wrapper) {
+        leftWithin += el.offsetLeft;
+        el = el.offsetParent;
+    }
+    btn.style.left = (leftWithin + pxMid) + 'px';
     btn.style.display = 'inline-flex';
 }
 function _updateHoverButtonForTrial(trialIdx) {
@@ -2881,24 +2889,54 @@ function renderAllDistancePlots() {
         // content; min-width:0 lets the 1fr track stay 1fr.
         wrapper.style.minWidth = '0';
 
+        // Static y-axis column INSIDE the wrapper — position:sticky
+        // keeps it pinned to the wrapper's left edge while the plot
+        // body scrolls horizontally.  Each kind gets its own narrow
+        // plotly plot that draws ONLY the y-axis line, ticks, labels,
+        // and title.  Width Y_AXIS_W matches what the data plots used
+        // to spend on margin.l before the split.
+        const Y_AXIS_W = 60;
+        const innerFlex = document.createElement('div');
+        innerFlex.style.cssText = 'display:flex;min-width:max-content;align-items:flex-start;';
+        const stickyY = document.createElement('div');
+        stickyY.style.cssText = `position:sticky;left:0;z-index:5;flex:0 0 ${Y_AXIS_W}px;background:#fff;`;
+        const yDistDiv = document.createElement('div');
+        yDistDiv.id = `yAxisDist_${idx}`;
+        yDistDiv.style.cssText = `width:${Y_AXIS_W}px;height:${DIST_H}px;`;
+        stickyY.appendChild(yDistDiv);
+        const yImiDiv = document.createElement('div');
+        yImiDiv.id = `yAxisImi_${idx}`;
+        yImiDiv.style.cssText = `width:${Y_AXIS_W}px;height:${IMI_H}px;`;
+        stickyY.appendChild(yImiDiv);
+        const yVelDiv = document.createElement('div');
+        yVelDiv.id = `yAxisVel_${idx}`;
+        yVelDiv.style.cssText = `width:${Y_AXIS_W}px;height:${VEL_H}px;`;
+        stickyY.appendChild(yVelDiv);
+
+        const plotCol = document.createElement('div');
+        plotCol.style.cssText = 'flex:0 0 auto;';
+
         // Distance plot
         const distDiv = document.createElement('div');
         distDiv.id = `distPlot_${idx}`;
         distDiv.style.height = DIST_H + 'px';
-        wrapper.appendChild(distDiv);
+        plotCol.appendChild(distDiv);
 
         // Compressed IMI strip between distance and velocity.
         const imiDiv = document.createElement('div');
         imiDiv.id = `imiPlot_${idx}`;
         imiDiv.style.height = IMI_H + 'px';
-        wrapper.appendChild(imiDiv);
+        plotCol.appendChild(imiDiv);
 
         // Velocity plot
         const velDiv = document.createElement('div');
         velDiv.id = `velPlot_${idx}`;
         velDiv.style.height = VEL_H + 'px';
-        wrapper.appendChild(velDiv);
+        plotCol.appendChild(velDiv);
 
+        innerFlex.appendChild(stickyY);
+        innerFlex.appendChild(plotCol);
+        wrapper.appendChild(innerFlex);
         block.appendChild(wrapper);
         container.appendChild(block);
 
@@ -3071,14 +3109,27 @@ function renderAllDistancePlots() {
         }
 
         renderDistancePlot(distDiv.id, trial, _effYRange('dist', idx), plotWidth, distOverlays, distShapes);
+        renderYAxisOnly(`yAxisDist_${idx}`, _effYRange('dist', idx), 'dist',
+                        DIST_H, DIST_MT, DIST_MB, Y_AXIS_W);
         const _imiRefVal = (document.querySelector('input[name="imiRef"]:checked')?.value) || 'pp';
         const _imiOff = _imiRefVal === 'off';
         imiDiv.style.display = _imiOff ? 'none' : '';
         imiSpacer.style.display = _imiOff ? 'none' : '';
+        yImiDiv.style.display = _imiOff ? 'none' : '';
         if (!_imiOff) {
-            renderIMIPlot(imiDiv.id, trial, trialStart, trialMovs, fps, _imiRefVal, plotWidth);
+            // IMI plot autoranges its y-axis; render the strip first,
+            // then mirror the resulting range onto the sticky y-axis
+            // so labels match the data.
+            renderIMIPlot(imiDiv.id, trial, trialStart, trialMovs, fps, _imiRefVal, plotWidth)
+                .then(() => {
+                    const r = imiDiv._fullLayout?.yaxis?.range || null;
+                    renderYAxisOnly(`yAxisImi_${idx}`, r, 'imi',
+                                    IMI_H, IMI_MT, IMI_MB, Y_AXIS_W);
+                });
         }
         renderVelocityPlot(velDiv.id, trial, _effYRange('vel', idx), plotWidth, velOverlays, distShapes);
+        renderYAxisOnly(`yAxisVel_${idx}`, _effYRange('vel', idx), 'vel',
+                        VEL_H, VEL_MT, VEL_MB, Y_AXIS_W);
     });
 }
 
@@ -3180,13 +3231,21 @@ function _onYSlider(el) {
 // re-render, so it's instant).  When locked (idx === null) it hits
 // every plot of this kind and syncs all sibling sliders + fills.
 function _applyYRange(kind, idx) {
-    const prefix = kind === 'dist' ? 'distPlot_' : 'velPlot_';
+    const prefix  = kind === 'dist' ? 'distPlot_'  : 'velPlot_';
+    const yPrefix = kind === 'dist' ? 'yAxisDist_' : 'yAxisVel_';
+    const _relayout = (selector, r) => {
+        document.querySelectorAll(selector).forEach(div => {
+            if (window.Plotly) {
+                try { Plotly.relayout(div, { 'yaxis.range': r }); } catch {}
+            }
+        });
+    };
     if (idx === null) {
         const range = _yLocked[kind];
         const r = [range.min, range.max];
-        document.querySelectorAll(`[id^="${prefix}"]`).forEach(div => {
-            if (window.Plotly) { try { Plotly.relayout(div, { 'yaxis.range': r }); } catch {} }
-        });
+        _relayout(`[id^="${prefix}"]`, r);
+        // Mirror to the sticky y-axis plots so their labels match.
+        _relayout(`[id^="${yPrefix}"]`, r);
         document.querySelectorAll(`.y-range-wrap[data-kind="${kind}"]`).forEach(w => {
             const mn = w.querySelector('.ysl.min');
             const mx = w.querySelector('.ysl.max');
@@ -3196,8 +3255,11 @@ function _applyYRange(kind, idx) {
         });
     } else {
         const range = _yTrial[kind][idx];
+        const r = [range.min, range.max];
         const div = document.getElementById(`${prefix}${idx}`);
-        if (div && window.Plotly) { try { Plotly.relayout(div, { 'yaxis.range': [range.min, range.max] }); } catch {} }
+        if (div && window.Plotly) { try { Plotly.relayout(div, { 'yaxis.range': r }); } catch {} }
+        const yDiv = document.getElementById(`${yPrefix}${idx}`);
+        if (yDiv && window.Plotly) { try { Plotly.relayout(yDiv, { 'yaxis.range': r }); } catch {} }
     }
 }
 
@@ -3342,6 +3404,45 @@ async function _copyMovementPlot(param, btn) {
     return _copyPlotsAsPng([div], `${_currentSubjectName()}_${param}`, btn);
 }
 
+// Tiny plot whose only job is to draw the y-axis (line + ticks +
+// labels + title) for one of the data plots beside it.  Lives in
+// the sticky column inside the wrapper so the axis stays pinned to
+// the wrapper's left edge while the data plot scrolls horizontally.
+function renderYAxisOnly(divId, yRange, kind, height, mTop, mBot, width) {
+    const styles = {
+        dist: { color: '#2196F3', title: 'Distance (mm)', nticks: undefined },
+        imi:  { color: '#9C27B0', title: 'Interval (s)',  nticks: 3 },
+        vel:  { color: '#4CAF50', title: 'Velocity (mm/s)', nticks: undefined },
+    };
+    const s = styles[kind] || styles.dist;
+    // A single invisible point seeds plotly's coordinate system.
+    // y goes within the configured range; x is irrelevant.
+    const seedY = yRange ? (yRange[0] + yRange[1]) / 2 : 0;
+    const trace = {
+        x: [0], y: [seedY],
+        type: 'scatter', mode: 'markers',
+        marker: { opacity: 0 }, hoverinfo: 'skip',
+    };
+    const layout = {
+        margin: { t: mTop, b: mBot, l: 52, r: 0 },
+        xaxis: { visible: false, range: [0, 1], fixedrange: true },
+        yaxis: {
+            color: s.color, gridcolor: '#f0f0f0', zeroline: false,
+            title: { text: s.title, font: { size: kind === 'imi' ? 10 : 11, color: s.color } },
+            side: 'left', fixedrange: true,
+            tickfont: { size: kind === 'imi' ? 9 : 10 },
+            ...(s.nticks ? { nticks: s.nticks } : {}),
+            ...(yRange ? { range: yRange, autorange: false } : { autorange: true }),
+        },
+        plot_bgcolor: '#fff', paper_bgcolor: '#fff',
+        showlegend: false, dragmode: false,
+        width, height,
+    };
+    return Plotly.newPlot(divId, [trace], layout, {
+        responsive: false, displayModeBar: false,
+    });
+}
+
 function renderDistancePlot(divId, trial, yRange, width, overlayTraces, shapes) {
     const fps = trial.fps || 60;
     const n = trial.distances.length;
@@ -3364,7 +3465,11 @@ function renderDistancePlot(divId, trial, yRange, width, overlayTraces, shapes) 
     // (so it stays anchored when the user scrolls long plots).  No
     // Plotly title here — top margin shrunk to reclaim the space.
     const layout = {
-        margin: { t: 10, b: 5, l: 55, r: 20 },
+        // l = 0 because the y-axis is rendered in a separate
+        // sticky-positioned column to the left of the wrapper — see
+        // renderYAxisOnly.  The data plot's own y-axis is hidden so
+        // it doesn't scroll out of view with the trace.
+        margin: { t: 10, b: 5, l: 0, r: 20 },
         // Custom drag-to-mark gesture replaces zoom — see _wireIntervalDrag.
         dragmode: false,
         // Pin the X range to the trace extent so toggling the peak
@@ -3374,10 +3479,11 @@ function renderDistancePlot(divId, trial, yRange, width, overlayTraces, shapes) 
             range: [times[0] || 0, times[n - 1] || 0], autorange: false,
         },
         yaxis: {
-            title: { text: 'Distance (mm)', font: { size: 11, color: '#2196F3' } },
-            color: '#2196F3',
-            gridcolor: '#f0f0f0',
-            zeroline: false,
+            // Title / labels / axis line all live on the sticky
+            // y-axis plot to the left; keep just the gridcolor.
+            showticklabels: false, ticks: '', showline: false,
+            title: { text: '' },
+            color: '#2196F3', gridcolor: '#f0f0f0', zeroline: false,
         },
         plot_bgcolor: '#fff',
         paper_bgcolor: '#fff',
@@ -3451,26 +3557,26 @@ function renderIMIPlot(divId, trial, trialStart, trialMovs, fps, refVal, width) 
     const n = trial.distances.length;
     const tEnd = n > 0 ? (n - 1) / fpsT : 1;
     const layout = {
+        // l = 0 — the y-axis is in the sticky column on the left.
         // Zero top/bottom margins so the strip butts up against the
         // distance plot above and the velocity plot below.
-        margin: { t: 0, b: 0, l: 55, r: 20 },
+        margin: { t: 0, b: 0, l: 0, r: 20 },
         dragmode: false,
         xaxis: {
             showticklabels: false, color: '#666', gridcolor: '#eee',
             range: [0, tEnd], autorange: false,
         },
         yaxis: {
-            title: { text: 'Interval (s)', font: { size: 10, color: '#9C27B0' }, standoff: 4 },
+            showticklabels: false, ticks: '', showline: false,
+            title: { text: '' },
             color: '#9C27B0', gridcolor: '#f0f0f0',
-            zeroline: false,
-            tickfont: { size: 9 },
-            nticks: 3,
+            zeroline: false, nticks: 3,
         },
         plot_bgcolor: '#fff', paper_bgcolor: '#fff',
         showlegend: false, hovermode: 'x unified',
         width: width,
     };
-    Plotly.newPlot(divId, [trace], layout, {
+    return Plotly.newPlot(divId, [trace], layout, {
         responsive: false, displayModeBar: false,
     }).then(() => _registerClickPlot(divId));
 }
@@ -3494,7 +3600,8 @@ function renderVelocityPlot(divId, trial, yRange, width, overlayTraces, shapes) 
     const hasOverlays = (overlayTraces || []).length > 0;
 
     const layout = {
-        margin: { t: 5, b: 35, l: 55, r: 20 },
+        // l = 0 — the y-axis is in the sticky column on the left.
+        margin: { t: 5, b: 35, l: 0, r: 20 },
         dragmode: false,
         // Pin the X range to the trace extent so toggling the peak
         // overlays can't rescale the axis.
@@ -3503,7 +3610,8 @@ function renderVelocityPlot(divId, trial, yRange, width, overlayTraces, shapes) 
             range: [times[0] || 0, times[n - 1] || 0], autorange: false,
         },
         yaxis: {
-            title: { text: 'Velocity (mm/s)', font: { size: 11, color: '#4CAF50' } },
+            showticklabels: false, ticks: '', showline: false,
+            title: { text: '' },
             color: '#4CAF50',
             gridcolor: '#f0f0f0',
             zeroline: true,
