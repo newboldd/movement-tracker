@@ -149,10 +149,17 @@ def _signal_bone(init_3d, mp_L, mp_R, bones, bone_k: float,
 
 
 def _signal_ydisp(mp_L, mp_R, calib, ydisp_px: float):
-    """Y-disparity per joint.  Undistort both points; |y_R − y_L| > k px.
+    """Y-disparity per joint, relative to the trial baseline.
 
-    Flags BOTH cameras when triggered (we can't know which side has the
-    wrong Y purely from the disparity).  No calib → no-op.
+    For each joint, compute the signed undistorted Y disparity
+    dy[t, j] = y_R_und[t, j] − y_L_und[t, j], then take its
+    per-joint median across the trial as the "expected" baseline
+    (this absorbs the systematic Y offset from non-rectified
+    calibration — see the /stereo_disparity diagnostic).  Flag a
+    frame when |dy[t, j] − median_j| > ydisp_px.
+
+    Flags BOTH cameras when triggered (the disparity can't tell us
+    which side moved).  No calib → no-op.
     """
     N, J = mp_L.shape[0], mp_L.shape[1]
     out = np.zeros((N, J, 2), dtype=bool)
@@ -160,13 +167,16 @@ def _signal_ydisp(mp_L, mp_R, calib, ydisp_px: float):
         return out
     K1 = calib["K1"]; d1 = calib["dist1"]
     K2 = calib["K2"]; d2 = calib["dist2"]
-    # Flatten to (N*J, 1, 2), undistort, reshape back.
     L = mp_L.reshape(-1, 1, 2).astype(np.float64)
     R = mp_R.reshape(-1, 1, 2).astype(np.float64)
     L_und = cv2.undistortPoints(L, K1, d1, P=K1).reshape(N, J, 2)
     R_und = cv2.undistortPoints(R, K2, d2, P=K2).reshape(N, J, 2)
-    dy = np.abs(R_und[..., 1] - L_und[..., 1])
-    flag = np.where(np.isfinite(dy), dy > ydisp_px, False)
+    dy = R_und[..., 1] - L_und[..., 1]                       # (N, J), signed
+    # Per-joint trial baseline.  np.nanmedian so missing frames
+    # (NaN MP detections) don't contaminate it.
+    baseline = np.nanmedian(dy, axis=0, keepdims=True)        # (1, J)
+    dy_dev = np.abs(dy - baseline)
+    flag = np.where(np.isfinite(dy_dev), dy_dev > ydisp_px, False)
     out[..., 0] = flag
     out[..., 1] = flag
     return out
