@@ -657,7 +657,7 @@
                         <label style="color:var(--text-muted);">Reprojection</label>
                         <span id="fitWReproj" style="color:var(--text-muted);font-weight:bold;">1.0</span>
                     </div>
-                    <input type="range" id="fitSliderReproj" min="0" max="20" step="0.5" value="1"
+                    <input type="range" id="fitSliderReproj" min="0.1" max="5" step="0.1" value="1"
                            style="width:100%;cursor:pointer;height:5px;">
                 </div>
                 <div style="font-size:11px;margin-bottom:4px;">
@@ -665,7 +665,7 @@
                         <label style="color:var(--text-muted);">Bone Length</label>
                         <span id="fitWBone" style="color:var(--text-muted);font-weight:bold;">5.0</span>
                     </div>
-                    <input type="range" id="fitSliderBone" min="0" max="20" step="0.5" value="5"
+                    <input type="range" id="fitSliderBone" min="0" max="50" step="0.5" value="5"
                            style="width:100%;cursor:pointer;height:5px;">
                 </div>
                 <div style="font-size:11px;margin-bottom:4px;">
@@ -673,7 +673,7 @@
                         <label style="color:var(--text-muted);">Smoothness</label>
                         <span id="fitWSmooth" style="color:var(--text-muted);font-weight:bold;">1.0</span>
                     </div>
-                    <input type="range" id="fitSliderSmooth" min="0" max="5" step="0.1" value="1"
+                    <input type="range" id="fitSliderSmooth" min="0" max="20" step="0.1" value="1"
                            style="width:100%;cursor:pointer;height:5px;">
                 </div>
                 <label style="display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:4px;cursor:pointer;">
@@ -1206,7 +1206,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=388" type="module"></script>
+    <script src="/static/js/labels.js?v=389" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

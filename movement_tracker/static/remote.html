@@ -417,7 +417,7 @@
                             <label style="color:var(--text-muted);">Reprojection weight</label>
                             <span id="skelfitWReproj" style="color:var(--text-muted);font-weight:bold;">1.0</span>
                         </div>
-                        <input type="range" id="skelfitSliderReproj" min="0" max="20" step="0.5" value="1"
+                        <input type="range" id="skelfitSliderReproj" min="0.1" max="5" step="0.1" value="1"
                                style="width:100%;cursor:pointer;height:5px;">
                     </div>
                     <div style="font-size:11px;">
@@ -425,7 +425,7 @@
                             <label style="color:var(--text-muted);">Bone-length weight</label>
                             <span id="skelfitWBone" style="color:var(--text-muted);font-weight:bold;">5.0</span>
                         </div>
-                        <input type="range" id="skelfitSliderBone" min="0" max="20" step="0.5" value="5"
+                        <input type="range" id="skelfitSliderBone" min="0" max="50" step="0.5" value="5"
                                style="width:100%;cursor:pointer;height:5px;">
                     </div>
                     <div style="font-size:11px;">
@@ -433,7 +433,7 @@
                             <label style="color:var(--text-muted);">Smoothness weight</label>
                             <span id="skelfitWSmooth" style="color:var(--text-muted);font-weight:bold;">1.0</span>
                         </div>
-                        <input type="range" id="skelfitSliderSmooth" min="0" max="5" step="0.1" value="1"
+                        <input type="range" id="skelfitSliderSmooth" min="0" max="20" step="0.1" value="1"
                                style="width:100%;cursor:pointer;height:5px;">
                     </div>
                     <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);cursor:pointer;">
@@ -601,7 +601,7 @@
 
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js?v=13"></script>
-    <script src="/static/js/remote.js?v=67"></script>
+    <script src="/static/js/remote.js?v=68"></script>
     <script src="/static/js/cache_results.js?v=2"></script>
 </body>
 </html>
