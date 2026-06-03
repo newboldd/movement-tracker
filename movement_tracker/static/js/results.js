@@ -324,20 +324,30 @@ function _edgeLine(x) {
         line: { color: 'rgba(33,150,243,0.55)', width: 1 }, layer: 'below',
     };
 }
-// Tile the trial forward from iv.x0 with bands of width (iv.x1-iv.x0),
-// alternating two fills so each repetition is visually distinct.
+// Tile the trial in BOTH directions from [iv.x0, iv.x1] with bands of
+// width dt = iv.x1 - iv.x0, alternating two fills so each repetition
+// is visually distinct.  k = 0 is the source band (centered at the
+// original interval); k = +1, +2, ... extend forward; k = -1, -2, …
+// extend backward to the start of the trial.
 function _marchedShapes(iv, div) {
     const dt = iv.x1 - iv.x0;
     if (!(dt > 0)) return [];
     const fl = div._fullLayout;
-    const xMax = (fl && fl.xaxis && fl.xaxis.range)
-        ? fl.xaxis.range[1]
-        : (iv.x1 + dt * 50);
+    const ax = fl && fl.xaxis;
+    const xMin = (ax && ax.range) ? ax.range[0] : 0;
+    const xMax = (ax && ax.range) ? ax.range[1] : (iv.x1 + dt * 50);
+    // Compute the smallest k whose band's RIGHT edge sits above xMin
+    // and the largest k whose band's LEFT edge sits below xMax.
+    const kMin = Math.ceil((xMin - iv.x1) / dt);
+    const kMax = Math.floor((xMax - iv.x0) / dt);
     const out = [];
-    let k = 0;
-    for (let s = iv.x0; s < xMax; s += dt, k++) {
-        const e = Math.min(s + dt, xMax);
-        const col = (k % 2 === 0)
+    for (let k = kMin; k <= kMax; k++) {
+        const s = Math.max(xMin, iv.x0 + k * dt);
+        const e = Math.min(xMax, iv.x0 + (k + 1) * dt);
+        if (e <= s) continue;
+        // JS modulo is signed — Math.abs keeps the parity stable
+        // across negative k so adjacent bands always alternate.
+        const col = (Math.abs(k) % 2 === 0)
             ? 'rgba(33,150,243,0.22)'
             : 'rgba(33,150,243,0.06)';
         out.push(_bandShape(s, e, col));
@@ -376,23 +386,58 @@ function _wireIntervalDrag(divId) {
         const yax = div._fullLayout.yaxis;
         if (yax && yax._offset != null
                 && (py < yax._offset || py > yax._offset + yax._length)) return;
-        down = {
-            clientX0: e.clientX,
-            startData: ax.p2c(px - ax._offset),
-            ax,
-            additive: !!(e.shiftKey || e.ctrlKey || e.metaKey),
-        };
+        // First check whether the press landed on the edge of an
+        // existing interval — if so, enter resize mode.
+        const hit = _hitTestIntervalEdge(trialIdx, ax, px);
+        if (hit) {
+            down = {
+                mode: 'resize', clientX0: e.clientX,
+                intervalIdx: hit.intervalIdx, edge: hit.edge, ax,
+            };
+            _hideHoverButton(trialIdx);
+        } else {
+            down = {
+                mode: 'new', clientX0: e.clientX,
+                startData: ax.p2c(px - ax._offset), ax,
+                additive: !!(e.shiftKey || e.ctrlKey || e.metaKey),
+            };
+        }
         try { div.setPointerCapture(e.pointerId); } catch (_) {}
         e.preventDefault();
     });
 
     div.addEventListener('pointermove', (e) => {
-        if (!down) return;
+        if (!down) {
+            // No drag in progress — update cursor based on edge
+            // proximity so the user can see what's grabbable.
+            const ax = div._fullLayout && div._fullLayout.xaxis;
+            if (!ax || ax._offset == null) return;
+            const rect = div.getBoundingClientRect();
+            const px = e.clientX - rect.left;
+            const hover = _hitTestIntervalEdge(trialIdx, ax, px);
+            div.style.cursor = hover ? 'col-resize' : '';
+            return;
+        }
         const rect = div.getBoundingClientRect();
         const cur = down.ax.p2c(e.clientX - rect.left - down.ax._offset);
-        const x0 = Math.min(down.startData, cur);
-        const x1 = Math.max(down.startData, cur);
-        _previewInterval(trialIdx, x0, x1);
+        if (down.mode === 'resize') {
+            const list = _intervals[trialIdx] || [];
+            const iv = list[down.intervalIdx];
+            if (!iv) return;
+            if (down.edge === 'x0') {
+                // Keep x0 strictly below x1 with a 1 px floor on width.
+                const minW = down.ax.p2c(1) - down.ax.p2c(0);
+                iv.x0 = Math.min(cur, iv.x1 - Math.abs(minW || 0.01));
+            } else {
+                const minW = down.ax.p2c(1) - down.ax.p2c(0);
+                iv.x1 = Math.max(cur, iv.x0 + Math.abs(minW || 0.01));
+            }
+            _rebuildShapesForTrial(trialIdx);
+        } else {
+            const x0 = Math.min(down.startData, cur);
+            const x1 = Math.max(down.startData, cur);
+            _previewInterval(trialIdx, x0, x1);
+        }
     });
 
     const finish = (e) => {
@@ -401,6 +446,14 @@ function _wireIntervalDrag(divId) {
         const rect = div.getBoundingClientRect();
         const cur = ax.p2c(e.clientX - rect.left - ax._offset);
         const movedPx = Math.abs(e.clientX - down.clientX0);
+        if (down.mode === 'resize') {
+            down = null;
+            // Suppress the trailing native-click for this gesture.
+            div._suppressClickUntil = performance.now() + 250;
+            // Final rebuild — pointermove already updated bands live.
+            _rebuildShapesForTrial(trialIdx);
+            return;
+        }
         const additive = down.additive;
         const startData = down.startData;
         down = null;
@@ -414,18 +467,46 @@ function _wireIntervalDrag(divId) {
         const list = additive ? (_intervals[trialIdx] || []) : [];
         list.push({ x0, x1, marched: false });
         _intervals[trialIdx] = list;
-        // Suppress the trailing native-click for this same gesture.
         div._suppressClickUntil = performance.now() + 250;
         _rebuildShapesForTrial(trialIdx);
     };
     div.addEventListener('pointerup', finish);
     div.addEventListener('pointercancel', () => {
         down = null; _clearPreview(trialIdx);
+        div.style.cursor = '';
     });
 
     // Hover detection for the per-interval action button.
     div.addEventListener('mousemove', (e) => _onIntervalHover(divId, e));
-    div.addEventListener('mouseleave', () => _scheduleHoverHide(trialIdx));
+    div.addEventListener('mouseleave', () => {
+        _scheduleHoverHide(trialIdx);
+        if (!down) div.style.cursor = '';
+    });
+}
+
+// Return { intervalIdx, edge } if the plot-pixel `px` lies within
+// the 6-px hit zone of any interval edge on this trial; otherwise
+// null.  Used by the drag handler and the cursor-hint move handler.
+function _hitTestIntervalEdge(trialIdx, ax, px) {
+    const list = _intervals[trialIdx] || [];
+    if (!list.length) return null;
+    const TOL = 6;
+    let best = null, bestDist = TOL + 1;
+    list.forEach((iv, i) => {
+        const px0 = ax.d2p(iv.x0) + ax._offset;
+        const px1 = ax.d2p(iv.x1) + ax._offset;
+        const d0 = Math.abs(px - px0);
+        const d1 = Math.abs(px - px1);
+        if (d0 <= TOL && d0 < bestDist) { best = { intervalIdx: i, edge: 'x0' }; bestDist = d0; }
+        if (d1 <= TOL && d1 < bestDist) { best = { intervalIdx: i, edge: 'x1' }; bestDist = d1; }
+    });
+    return best;
+}
+
+function _hideHoverButton(trialIdx) {
+    const wrapper = document.getElementById(`trialWrap_${trialIdx}`);
+    const btn = wrapper && wrapper.querySelector(':scope > .interval-actions');
+    if (btn) btn.style.display = 'none';
 }
 
 function _previewInterval(trialIdx, x0, x1) {
