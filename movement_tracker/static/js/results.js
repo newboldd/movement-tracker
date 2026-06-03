@@ -2,6 +2,48 @@
 
 // Keep the hidden combined groupSeqModeSelect in sync with the two
 // visible Type + Window selects (the same split the Explore page uses).
+// Individual-tab Sequence Calculation: two sets of radios (Type +
+// Window) keep the hidden combined #distSequenceMode select in sync
+// so renderDistMovementPlots and the sequence-effect math (which
+// already read .value off the select) don't need to change.
+(function _wireSplitDistSeqMode() {
+    const typeRadios = document.querySelectorAll('input[name="distSeqType"]');
+    const winRadios  = document.querySelectorAll('input[name="distSeqWindow"]');
+    const combined   = document.getElementById('distSequenceMode');
+    if (!typeRadios.length || !winRadios.length || !combined) return;
+    const getChecked = (rs, fallback) =>
+        Array.from(rs).find(r => r.checked)?.value || fallback;
+    const sync = () => {
+        const t = getChecked(typeRadios, 'exp');
+        const w = getChecked(winRadios, 'multi');
+        // When Type = None, the window doesn't matter — mirror that
+        // visually by dimming + disabling the window radios.
+        const isNone = (t === 'none');
+        winRadios.forEach(r => {
+            r.disabled = isNone;
+            const lbl = r.closest('label');
+            if (lbl) lbl.style.opacity = isNone ? '0.4' : '';
+        });
+        combined.value = isNone ? 'none' : `${t}_${w}`;
+        combined.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    typeRadios.forEach(r => r.addEventListener('change', sync));
+    winRadios.forEach(r  => r.addEventListener('change', sync));
+    // Initialise the radios from whatever the hidden select started
+    // with so a saved/default 'exp_multi' lights up the right buttons.
+    const cur = combined.value || 'exp_multi';
+    if (cur === 'none') {
+        typeRadios.forEach(r => r.checked = (r.value === 'none'));
+    } else {
+        const m = cur.match(/^(linear|exp)_(full|first10|multi)$/);
+        if (m) {
+            typeRadios.forEach(r => r.checked = (r.value === m[1]));
+            winRadios.forEach(r  => r.checked = (r.value === m[2]));
+        }
+    }
+    sync();
+})();
+
 (function _wireSplitGroupSeqMode() {
     const typeSel = document.getElementById('groupSeqTypeSelect');
     const winSel  = document.getElementById('groupSeqWindowSelect');
