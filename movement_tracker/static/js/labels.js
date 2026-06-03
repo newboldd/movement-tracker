@@ -905,10 +905,10 @@ const manoViewer = (() => {
             renderDistanceTrace();
         });
         $('mpFilterResetBtn')?.addEventListener('click', _resetMpFilterDefaults);
-        ['mpFilterSliderAccelK', 'mpFilterSliderBoneK', 'mpFilterSliderKmax'].forEach(id => {
-            const el = $(id);
-            if (el) el.addEventListener('input', () => _refreshMpFilterMask());
-        });
+        // Per-signal slider + checkbox wiring lives in
+        // _wireMpFilterControls (covers all 8 signals + their
+        // value display formatting).
+        _wireMpFilterControls();
         // Filtered model-row toggles.  Turning either on triggers a
         // mask fetch if we don'\''t already have one cached.
         $('showFiltered2D')?.addEventListener('change', e => {
@@ -8539,31 +8539,57 @@ const manoViewer = (() => {
         if (el && val != null) { el.value = val; el.dispatchEvent(new Event('input')); }
     }
 
-    // Fetch the MP-Filter outlier mask for the current trial using
-    // the MP Filter panel'\''s current threshold sliders.  Debounced
-    // (80 ms); race-guarded so a late response from an earlier
-    // slider position can'\''t overwrite a newer one.  Refreshes
-    // regardless of whether the panel is open (the Filtered model
-    // row needs the mask even with the panel closed).
+    // ── Multi-signal MP Filter ─────────────────────────────────
+    // Each signal: id → { enableCb, slider, valSpan, countSpan,
+    // fmt, paramKeys }.  fmt formats the numeric value for display.
+    // paramKeys maps the signal'\''s slider value into the
+    // /outlier_preview request body.
+    const _MPF_SIGNALS = [
+        { id: 'vel',    fmt: v => v.toFixed(1), keys: ['enable_vel',    'vel_k'] },
+        { id: 'accel',  fmt: v => v.toFixed(1), keys: ['enable_accel',  'accel_k'] },
+        { id: 'bone',   fmt: v => v.toFixed(1), keys: ['enable_bone',   'bone_k'] },
+        { id: 'ydisp',  fmt: v => v.toFixed(1), keys: ['enable_ydisp',  'ydisp_px'] },
+        { id: 'z',      fmt: v => v.toFixed(1), keys: ['enable_z',      'z_k'] },
+        { id: 'mpconf', fmt: v => v.toFixed(2), keys: ['enable_mpconf', 'mpconf_min'] },
+        { id: 'stereo', fmt: v => v.toFixed(1), keys: ['enable_stereo', 'stereo_px'] },
+        { id: 'hrnet',  fmt: v => v.toFixed(2), keys: ['enable_hrnet',  'hrnet_min'] },
+    ];
+    const _MPF_CAP = id => id.charAt(0).toUpperCase() + id.slice(1);
+    function _mpfEl(id, kind) {
+        const tag = ({
+            slider:  'mpfSlider', val: 'mpfVal', count: 'mpfCount', enable: 'mpfEnable',
+        })[kind];
+        return $(tag + _MPF_CAP(id));
+    }
+    function _mpfReadParams() {
+        const out = {};
+        for (const sig of _MPF_SIGNALS) {
+            const enab = _mpfEl(sig.id, 'enable')?.checked;
+            const val  = parseFloat(_mpfEl(sig.id, 'slider')?.value ?? 0);
+            out[sig.keys[0]] = !!enab;
+            out[sig.keys[1]] = isFinite(val) ? val : 0;
+        }
+        return out;
+    }
+
+    // Fetch the MP-Filter outlier mask for the current trial.
+    // Debounced 80 ms; race-guarded.  Skips the network call when
+    // neither the panel nor any Filtered row needs the mask.
     function _refreshMpFilterMask({force = false} = {}) {
         if (_mpFilterPreviewT) clearTimeout(_mpFilterPreviewT);
         if (!subjectId || currentTrialIdx < 0 || !trials?.[currentTrialIdx]) return;
-        // Skip the network call entirely when nothing needs the mask:
-        // the panel is closed AND the Filtered row toggles are all off.
         const needsMask = force || _mpFilterPanelOpen
                        || showFiltered2D || showFiltered3D;
         if (!needsMask) return;
         const trialIdx = trials[currentTrialIdx].trial_idx;
-        const accel_k = parseFloat($('mpFilterSliderAccelK')?.value ?? 6);
-        const bone_k  = parseFloat($('mpFilterSliderBoneK')?.value  ?? 6);
-        const k_max   = parseInt($('mpFilterSliderKmax')?.value     ?? 30);
+        const params = _mpfReadParams();
         const seq = ++_mpFilterPreviewSeq;
         _mpFilterPreviewT = setTimeout(async () => {
             try {
                 const data = await api(`/api/skeleton/${subjectId}/outlier_preview`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ trial_idx: trialIdx, accel_k, bone_k, k_max }),
+                    body: JSON.stringify({ trial_idx: trialIdx, ...params }),
                 });
                 if (seq !== _mpFilterPreviewSeq) return;
                 _mpFilterMask = data?.joint_mask || null;
@@ -8573,6 +8599,18 @@ const manoViewer = (() => {
                     countEl.textContent =
                         `${data.n_frames_masked} frames · ${data.n_cells_masked} cells · `
                       + `L=${data.n_cam_L_masked} R=${data.n_cam_R_masked}`;
+                }
+                // Per-signal flag counts under each slider row.
+                const ps = data?.per_signal || {};
+                const lookup = {
+                    vel: 'velocity', accel: 'acceleration', bone: 'bone',
+                    ydisp: 'ydisp', z: 'z_outlier', mpconf: 'mp_confidence',
+                    stereo: 'stereo_reproj', hrnet: 'hrnet',
+                };
+                for (const sig of _MPF_SIGNALS) {
+                    const cnt = ps[lookup[sig.id]];
+                    const el = _mpfEl(sig.id, 'count');
+                    if (el) el.textContent = (cnt != null) ? `${cnt}` : '';
                 }
                 renderDistanceTrace();
                 render();
@@ -8584,6 +8622,37 @@ const manoViewer = (() => {
     }
     // Legacy name kept for the loadTrial call site; just delegates.
     function _refreshV1OutlierPreview() { _refreshMpFilterMask(); }
+
+    function _wireMpFilterControls() {
+        for (const sig of _MPF_SIGNALS) {
+            const slider = _mpfEl(sig.id, 'slider');
+            const val    = _mpfEl(sig.id, 'val');
+            const enab   = _mpfEl(sig.id, 'enable');
+            if (slider && val) {
+                const sync = () => { val.textContent = sig.fmt(parseFloat(slider.value)); };
+                slider.addEventListener('input', () => { sync(); _refreshMpFilterMask(); });
+                sync();
+            }
+            if (enab) enab.addEventListener('change', () => _refreshMpFilterMask({force: true}));
+        }
+    }
+    function _resetMpFilterDefaults() {
+        const defaults = {
+            vel: [false, 6.0],   accel: [true, 6.0],  bone: [true, 6.0],
+            ydisp: [false, 5.0], z: [false, 6.0],     mpconf: [false, 0.5],
+            stereo: [false, 5.0], hrnet: [false, 0.2],
+        };
+        for (const sig of _MPF_SIGNALS) {
+            const [en, v] = defaults[sig.id];
+            const enab = _mpfEl(sig.id, 'enable');
+            const slid = _mpfEl(sig.id, 'slider');
+            const valE = _mpfEl(sig.id, 'val');
+            if (enab) enab.checked = en;
+            if (slid) slid.value = v;
+            if (valE) valE.textContent = sig.fmt(v);
+        }
+        _refreshMpFilterMask({force: true});
+    }
 
     // Restore sliders from saved fit params (called when panel opens)
     function _restoreV1Params() {
@@ -8705,10 +8774,8 @@ const manoViewer = (() => {
             { id: 'fitSliderReproj',      display: 'fitWReproj' },
             { id: 'fitSliderBone',         display: 'fitWBone' },
             { id: 'fitSliderSmooth',       display: 'fitWSmooth' },
-            // MP Filter sliders (separate panel).
-            { id: 'mpFilterSliderAccelK',  display: 'mpFilterWAccelK' },
-            { id: 'mpFilterSliderBoneK',   display: 'mpFilterWBoneK' },
-            { id: 'mpFilterSliderKmax',    display: 'mpFilterWKmax' },
+            // MP Filter sliders are wired separately by
+            // _wireMpFilterControls() (per-signal value formatting).
             // v2
             { id: 'v2SliderMediapipe',     display: 'v2WMediapipe' },
             { id: 'v2SliderVision',        display: 'v2WVision' },

@@ -395,27 +395,42 @@ def stereo_disparity_by_name(
 
 class OutlierPreviewRequest(BaseModel):
     trial_idx: int
+    # Each signal has an `enable_<name>` flag and one or more
+    # threshold parameters.  Disabled signals are skipped.
+    enable_vel: bool = False
+    vel_k: float = 6.0
+    enable_accel: bool = True
     accel_k: float = 6.0
+    enable_bone: bool = True
     bone_k: float = 6.0
-    k_max: int = 30
+    enable_ydisp: bool = False
+    ydisp_px: float = 5.0
+    enable_z: bool = False
+    z_k: float = 6.0
+    enable_mpconf: bool = False
+    mpconf_min: float = 0.5
+    enable_stereo: bool = False
+    stereo_px: float = 5.0
+    enable_hrnet: bool = False
+    hrnet_min: float = 0.2
 
 
 @router.post("/{subject_id}/outlier_preview")
 def outlier_preview(subject_id: int, req: OutlierPreviewRequest) -> dict:
-    """Run the Skel Fit v1 outlier detector on the requested trial
-    and return the per-(frame, joint) and per-(frame, joint, camera)
-    masks.  Used by the Labels page to live-preview which MP-combined
-    frames will be filtered out under the current threshold sliders.
+    """Run the multi-signal MP-Filter detector on the requested trial.
 
-    Cheap: runs the same triangulation + detector the fit'\''s pre-pass
-    uses (~50-200 ms per trial); no optimization."""
+    Returns the OR'd (frame, joint) and (frame, joint, camera) masks
+    plus a per-signal count so the Labels-page MP Filter panel can
+    show which signals fired and live-preview the result.
+    """
     import numpy as np
     from ..services.calibration import get_calibration_for_subject, triangulate_points
-    from ..services.skeleton_data import _load_trial_calibration
-    from ..services.skeleton_v1 import _detect_outlier_per_joint, BONES
+    from ..services.skeleton_data import _load_trial_calibration, _skeleton_dir, _load_hrnet_peaks_json
+    from ..services.skeleton_v1 import BONES
     from ..services.mediapipe_prelabel import (
         load_mediapipe_combined_prelabels, load_mediapipe_prelabels,
     )
+    from ..services.mp_filter import detect_mask
 
     name = _subject_name(subject_id)
     tmap = build_trial_map(name)
@@ -437,32 +452,76 @@ def outlier_preview(subject_id: int, req: OutlierPreviewRequest) -> dict:
     mp_R = od_lm[start:end].copy()
     N_total = mp_L.shape[0]
 
+    # MP confidence — hand-level scalar per (frame, camera).  Saved
+    # by the combined+forward pipelines under confidence_OS / _OD.
+    conf_L = prelabels.get("confidence_OS")
+    conf_R = prelabels.get("confidence_OD")
+    if conf_L is not None: conf_L = conf_L[start:end]
+    if conf_R is not None: conf_R = conf_R[start:end]
+
     calib = _load_trial_calibration(name, trial_stem)
     if calib is None:
         calib = get_calibration_for_subject(name)
-    if calib is None:
-        raise HTTPException(404, "No stereo calibration for subject")
+    # Calib is optional now — only the ydisp / stereo signals need it.
 
-    # Triangulate per joint, then build init_3d on valid frames the
-    # same way the fit does (wrist fallback for stray NaNs).
+    # HRnet peak scores per (frame, joint, camera).  Best-effort load
+    # from the per-trial peaks JSON; absent for trials without HRnet.
+    hrnet_L = None
+    hrnet_R = None
+    try:
+        if calib is not None:
+            sk_root = _skeleton_dir(name)
+            sk_trial = sk_root / trial_stem
+            peaks = _load_hrnet_peaks_json(sk_trial)
+            if peaks and "refined" in peaks:
+                ref = peaks["refined"]
+                # Expected layout: ref[cam][frame_str] = {joint_idx_str: [x, y, score]}
+                def _scores_array(cam_key):
+                    arr = np.full((N_total, 21), np.nan, dtype=np.float64)
+                    cam = ref.get(cam_key) or {}
+                    for fstr, jdict in cam.items():
+                        try: f = int(fstr)
+                        except Exception: continue
+                        if not (0 <= f < N_total): continue
+                        if not isinstance(jdict, dict): continue
+                        for jstr, val in jdict.items():
+                            try: j = int(jstr)
+                            except Exception: continue
+                            if not (0 <= j < 21): continue
+                            if isinstance(val, (list, tuple)) and len(val) >= 3:
+                                try: arr[f, j] = float(val[2])
+                                except Exception: pass
+                    return arr
+                if all(k in ref for k in ("L", "OS")):
+                    pass
+                hrnet_L = _scores_array("L" if "L" in ref else "OS")
+                hrnet_R = _scores_array("R" if "R" in ref else "OD")
+    except Exception:
+        hrnet_L = None
+        hrnet_R = None
+
+    # Triangulate per joint to build init_3d.
     mp_3d = np.full((N_total, 21, 3), np.nan)
-    for j in range(21):
-        mp_3d[:, j, :] = triangulate_points(mp_L[:, j, :], mp_R[:, j, :], calib)
+    if calib is not None:
+        for j in range(21):
+            mp_3d[:, j, :] = triangulate_points(mp_L[:, j, :], mp_R[:, j, :], calib)
     valid_mask = (
         ~np.isnan(mp_L[:, 0, 0])
         & ~np.isnan(mp_R[:, 0, 0])
-        & ~np.isnan(mp_3d[:, 0, 0])
     )
+    if calib is not None:
+        valid_mask = valid_mask & ~np.isnan(mp_3d[:, 0, 0])
     valid_idx = np.where(valid_mask)[0]
     n_valid = len(valid_idx)
-    if n_valid < 5:
+    if n_valid < 3:
         return {
             "n_frames": int(N_total), "n_valid": int(n_valid),
-            "joint_mask": [], "frame_mask": [],
+            "joint_mask": [], "frame_mask": [], "camera_mask": [],
             "n_cells_masked": 0, "n_frames_masked": 0,
             "n_cam_L_masked": 0, "n_cam_R_masked": 0,
+            "per_signal": {},
         }
-    init_3d = mp_3d[valid_idx].copy()
+    init_3d = mp_3d[valid_idx].copy() if calib is not None else np.full((n_valid, 21, 3), np.nan)
     for i in range(n_valid):
         for j in range(21):
             if np.isnan(init_3d[i, j, 0]):
@@ -471,32 +530,45 @@ def outlier_preview(subject_id: int, req: OutlierPreviewRequest) -> dict:
                 else:
                     init_3d[i, j] = [0.0, 0.0, 500.0]
 
-    joint_mask_v, cam_mask_v = _detect_outlier_per_joint(
-        init_3d, mp_L[valid_idx], mp_R[valid_idx], BONES,
-        K_max=int(req.k_max), accel_k=float(req.accel_k),
-        bone_k=float(req.bone_k),
-        k_blame_joint=2.0, k_blame_camera=2.0,
-    )
-    # Lift to full-trial coordinates (frames dropped from valid_idx
-    # are reported as unmasked here — they have no MP data anyway,
-    # so the Labels page just plots nothing there).
-    joint_mask_full = np.zeros((N_total, 21), dtype=bool)
-    joint_mask_full[valid_idx] = joint_mask_v
-    cam_mask_full = np.zeros((N_total, 21, 2), dtype=bool)
-    cam_mask_full[valid_idx] = cam_mask_v
-    frame_mask_full = joint_mask_full.any(axis=1)
+    def _slice(a):
+        if a is None: return None
+        return np.asarray(a)[valid_idx]
 
+    joint_v, cam_v, per_signal = detect_mask(
+        init_3d,
+        mp_L[valid_idx], mp_R[valid_idx],
+        BONES,
+        calib=calib,
+        confidence_L=_slice(conf_L), confidence_R=_slice(conf_R),
+        hrnet_L=_slice(hrnet_L),    hrnet_R=_slice(hrnet_R),
+        enable_vel=req.enable_vel,        vel_k=req.vel_k,
+        enable_accel=req.enable_accel,    accel_k=req.accel_k,
+        enable_bone=req.enable_bone,      bone_k=req.bone_k,
+        enable_ydisp=req.enable_ydisp,    ydisp_px=req.ydisp_px,
+        enable_z=req.enable_z,            z_k=req.z_k,
+        enable_mpconf=req.enable_mpconf,  mpconf_min=req.mpconf_min,
+        enable_stereo=req.enable_stereo,  stereo_px=req.stereo_px,
+        enable_hrnet=req.enable_hrnet,    hrnet_min=req.hrnet_min,
+    )
+    joint_full = np.zeros((N_total, 21), dtype=bool)
+    cam_full = np.zeros((N_total, 21, 2), dtype=bool)
+    joint_full[valid_idx] = joint_v
+    cam_full[valid_idx] = cam_v
+    frame_full = joint_full.any(axis=1)
     return {
         "n_frames": int(N_total),
         "n_valid": int(n_valid),
-        # Per (frame, joint) bool, transposed to a list of N arrays
-        # of length 21 for JSON compactness.
-        "joint_mask": joint_mask_full.astype(bool).tolist(),
-        "frame_mask": frame_mask_full.astype(bool).tolist(),
-        "n_cells_masked":   int(joint_mask_full.sum()),
-        "n_frames_masked":  int(frame_mask_full.sum()),
-        "n_cam_L_masked":   int(cam_mask_full[:, :, 0].sum()),
-        "n_cam_R_masked":   int(cam_mask_full[:, :, 1].sum()),
+        "joint_mask": joint_full.astype(bool).tolist(),
+        "camera_mask": cam_full.astype(bool).tolist(),
+        "frame_mask": frame_full.astype(bool).tolist(),
+        "n_cells_masked":   int(joint_full.sum()),
+        "n_frames_masked":  int(frame_full.sum()),
+        "n_cam_L_masked":   int(cam_full[:, :, 0].sum()),
+        "n_cam_R_masked":   int(cam_full[:, :, 1].sum()),
+        "per_signal": per_signal,
+        "has_calib":      calib is not None,
+        "has_mp_conf":    (conf_L is not None or conf_R is not None),
+        "has_hrnet":      (hrnet_L is not None or hrnet_R is not None),
     }
 
 

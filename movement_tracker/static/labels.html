@@ -795,32 +795,64 @@
                     Outlier pre-filter
                     <span id="mpFilterCount" style="float:right;font-weight:400;"></span>
                 </div>
-                <div style="font-size:11px;margin-bottom:4px;"
-                     title="Per-joint 3D acceleration z-score threshold for run-boundary detection.  Lower = more aggressive masking.  6 ≈ 99.7% of Gaussian tail.">
-                    <div style="display:flex;justify-content:space-between;align-items:center;">
-                        <label style="color:var(--text-muted);">Accel sensitivity (MAD)</label>
-                        <span id="mpFilterWAccelK" style="color:var(--text-muted);font-weight:bold;">6.0</span>
-                    </div>
-                    <input type="range" id="mpFilterSliderAccelK" min="0.5" max="12" step="0.1" value="6"
-                           style="width:100%;cursor:pointer;height:5px;">
+                <!-- Each signal: enable checkbox + threshold slider +
+                     live value + per-signal flag count.  All signals
+                     OR'd into the final mask. -->
+                <div class="mp-filter-signal" data-signal="vel"
+                     title="Per-joint 3D velocity z-score (MAD).  Lower = more aggressive.  Genuine fast hand motion has high velocity too — use sparingly.">
+                    <label><input type="checkbox" id="mpfEnableVel"> Velocity (MAD)</label>
+                    <span class="mpf-val" id="mpfValVel">6.0</span>
+                    <span class="mpf-count" id="mpfCountVel"></span>
+                    <input type="range" id="mpfSliderVel" min="0.5" max="20" step="0.1" value="6">
                 </div>
-                <div style="font-size:11px;margin-bottom:4px;"
-                     title="Per-bone length z-score threshold.  A bone counts as anomalous when its length is this many MAD away from the trial median.  Lower = more aggressive.">
-                    <div style="display:flex;justify-content:space-between;align-items:center;">
-                        <label style="color:var(--text-muted);">Bone sensitivity (MAD)</label>
-                        <span id="mpFilterWBoneK" style="color:var(--text-muted);font-weight:bold;">6.0</span>
-                    </div>
-                    <input type="range" id="mpFilterSliderBoneK" min="0.5" max="12" step="0.1" value="6"
-                           style="width:100%;cursor:pointer;height:5px;">
+                <div class="mp-filter-signal" data-signal="accel"
+                     title="Per-joint 3D acceleration z-score (MAD).  Catches run-boundary spikes.">
+                    <label><input type="checkbox" id="mpfEnableAccel" checked> Acceleration (MAD)</label>
+                    <span class="mpf-val" id="mpfValAccel">6.0</span>
+                    <span class="mpf-count" id="mpfCountAccel"></span>
+                    <input type="range" id="mpfSliderAccel" min="0.5" max="20" step="0.1" value="6">
                 </div>
-                <div style="font-size:11px;margin-bottom:4px;"
-                     title="Maximum number of frames between paired opposite-direction acceleration spikes.  Caps the run length the detector can match.  At 60 fps, 30 ≈ 0.5 s.">
-                    <div style="display:flex;justify-content:space-between;align-items:center;">
-                        <label style="color:var(--text-muted);">Max run length (frames)</label>
-                        <span id="mpFilterWKmax" style="color:var(--text-muted);font-weight:bold;">30</span>
-                    </div>
-                    <input type="range" id="mpFilterSliderKmax" min="5" max="60" step="1" value="30"
-                           style="width:100%;cursor:pointer;height:5px;">
+                <div class="mp-filter-signal" data-signal="bone"
+                     title="Per-bone length z-score (MAD).  Anomalous bone length on a frame, blame propagated to the endpoint that moved.">
+                    <label><input type="checkbox" id="mpfEnableBone" checked> Bone length (MAD)</label>
+                    <span class="mpf-val" id="mpfValBone">6.0</span>
+                    <span class="mpf-count" id="mpfCountBone"></span>
+                    <input type="range" id="mpfSliderBone" min="0.5" max="20" step="0.1" value="6">
+                </div>
+                <div class="mp-filter-signal" data-signal="ydisp"
+                     title="Per-joint Y disparity between undistorted L and R.  Pixels.  Detects epipolar inconsistency.">
+                    <label><input type="checkbox" id="mpfEnableYdisp"> Y disparity (px)</label>
+                    <span class="mpf-val" id="mpfValYdisp">5.0</span>
+                    <span class="mpf-count" id="mpfCountYdisp"></span>
+                    <input type="range" id="mpfSliderYdisp" min="0.5" max="30" step="0.5" value="5">
+                </div>
+                <div class="mp-filter-signal" data-signal="z"
+                     title="Per-joint Z (depth) z-score (MAD).  Detects unrealistic depth jumps.">
+                    <label><input type="checkbox" id="mpfEnableZ"> Z outlier (MAD)</label>
+                    <span class="mpf-val" id="mpfValZ">6.0</span>
+                    <span class="mpf-count" id="mpfCountZ"></span>
+                    <input type="range" id="mpfSliderZ" min="0.5" max="20" step="0.1" value="6">
+                </div>
+                <div class="mp-filter-signal" data-signal="mpconf"
+                     title="Per-camera MP confidence below this threshold flags every joint on that camera, that frame.">
+                    <label><input type="checkbox" id="mpfEnableMpconf"> MP confidence (≥)</label>
+                    <span class="mpf-val" id="mpfValMpconf">0.50</span>
+                    <span class="mpf-count" id="mpfCountMpconf"></span>
+                    <input type="range" id="mpfSliderMpconf" min="0" max="1" step="0.01" value="0.5">
+                </div>
+                <div class="mp-filter-signal" data-signal="stereo"
+                     title="Per-(frame, joint) stereo reprojection error in pixels.  Triangulate then reproject; flag the camera with the larger residual.">
+                    <label><input type="checkbox" id="mpfEnableStereo"> Stereo reproj (px)</label>
+                    <span class="mpf-val" id="mpfValStereo">5.0</span>
+                    <span class="mpf-count" id="mpfCountStereo"></span>
+                    <input type="range" id="mpfSliderStereo" min="0.5" max="30" step="0.5" value="5">
+                </div>
+                <div class="mp-filter-signal" data-signal="hrnet"
+                     title="Per-joint HRnet peak score; below the threshold means HRnet wasn'\''t confident.  Requires HRnet to have been run on this trial.">
+                    <label><input type="checkbox" id="mpfEnableHrnet"> HRnet (≥)</label>
+                    <span class="mpf-val" id="mpfValHrnet">0.20</span>
+                    <span class="mpf-count" id="mpfCountHrnet"></span>
+                    <input type="range" id="mpfSliderHrnet" min="0" max="1" step="0.01" value="0.2">
                 </div>
                 <div style="display:flex;gap:4px;margin-top:6px;">
                     <button class="btn btn-sm" id="mpFilterResetBtn" style="font-size:10px;padding:2px 6px;">Reset</button>
@@ -828,6 +860,14 @@
                 </div>
             </div>
             <div id="mpFilterStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
+            <style>
+                .mp-filter-signal { display: grid; grid-template-columns: 1fr auto auto; column-gap: 6px; row-gap: 2px; align-items: center; padding: 4px 0; font-size: 11px; border-top: 1px solid var(--border); }
+                .mp-filter-signal:first-of-type { border-top: 0; padding-top: 2px; }
+                .mp-filter-signal label { color: var(--text-muted); cursor: pointer; display: inline-flex; align-items: center; gap: 4px; }
+                .mp-filter-signal input[type="range"] { grid-column: 1 / -1; width: 100%; height: 5px; cursor: pointer; }
+                .mp-filter-signal .mpf-val { color: var(--text-muted); font-weight: bold; min-width: 36px; text-align: right; }
+                .mp-filter-signal .mpf-count { color: var(--text-muted); font-size: 10px; min-width: 32px; text-align: right; opacity: 0.7; }
+            </style>
 
             <!-- Skeleton v3 — FK parameterisation, multi-source -->
             <button class="btn btn-sm" id="fitSkeletonV2Btn" style="width:100%;margin-top:6px;">Fit Skeleton (v3)</button>
@@ -1271,7 +1311,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=392" type="module"></script>
+    <script src="/static/js/labels.js?v=393" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

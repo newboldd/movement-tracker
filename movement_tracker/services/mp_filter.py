@@ -1,0 +1,333 @@
+"""Multi-signal MediaPipe outlier filter.
+
+A library of independent per-(frame, joint, camera) flagging signals
+that get OR'd together to produce the final outlier mask.  Each
+signal exposes its own thresholds; the caller can enable any subset.
+
+Signals:
+  - velocity:    per-joint 3D step  ‖x[t,j] − x[t-1,j]‖  z-score
+  - acceleration: per-joint 3D       ‖x[t+1,j] − 2x[t,j] + x[t-1,j]‖  z-score
+  - bone:        per-bone length    |z| > k_bone  with per-endpoint blame
+  - ydisp:       per-joint per-cam  |v_R_undist − v_L_undist|  pixels
+                 (epipolar Y residual when cameras are nominally aligned)
+  - z_outlier:   per-joint 3D Z (depth) z-score
+  - mpconf:      per-frame per-camera MP confidence below threshold
+                 → flags every joint on that camera, that frame
+  - stereo:      per-(frame, joint) stereo reprojection error (px)
+                 → flags whichever camera has the larger residual
+  - hrnet:       per-(frame, joint, camera) HRnet peak score below threshold
+
+Each signal returns a (N, 21, 2) bool tensor.  When disabled the
+signal is skipped and contributes nothing.  Camera attribution
+for 3D signals uses the 2D step-magnitude ratio (k_blame_camera
+default 2.0), same convention as the previous v1 detector.
+"""
+from __future__ import annotations
+
+import numpy as np
+import cv2
+
+
+# ──────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────
+
+def _robust_z(values: np.ndarray, axis: int = 0):
+    """Robust z = |value - median| / (MAD · 1.4826), per-axis."""
+    med = np.median(values, axis=axis, keepdims=True)
+    mad = np.median(np.abs(values - med), axis=axis, keepdims=True) * 1.4826
+    mad = np.maximum(mad, np.finfo(np.float64).eps)
+    return np.abs(values - med) / mad, med, mad
+
+
+def _camera_blame_from_2d_step(
+    mp_L: np.ndarray, mp_R: np.ndarray,
+    joint_mask: np.ndarray,
+    k_blame: float = 2.0,
+) -> np.ndarray:
+    """Distribute a per-(frame, joint) flag onto the L/R cameras.
+
+    Comparable 2D step magnitudes → both cameras.  NaN-safe.
+    """
+    N, J = mp_L.shape[0], mp_L.shape[1]
+    out = np.zeros((N, J, 2), dtype=bool)
+    if N < 2:
+        return out
+    # Per-(frame, joint) 2D step magnitudes.
+    step_L = np.zeros((N, J), dtype=np.float64)
+    step_R = np.zeros((N, J), dtype=np.float64)
+    step_L[1:] = np.linalg.norm(mp_L[1:] - mp_L[:-1], axis=-1)
+    step_R[1:] = np.linalg.norm(mp_R[1:] - mp_R[:-1], axis=-1)
+    tj = np.argwhere(joint_mask)
+    for t, j in tj:
+        dL = step_L[t, j]
+        dR = step_R[t, j]
+        if np.isnan(dL) and np.isnan(dR):
+            out[t, j, 0] = True; out[t, j, 1] = True
+        elif np.isnan(dL):
+            out[t, j, 1] = True
+        elif np.isnan(dR):
+            out[t, j, 0] = True
+        elif dL > k_blame * dR:
+            out[t, j, 0] = True
+        elif dR > k_blame * dL:
+            out[t, j, 1] = True
+        else:
+            out[t, j, 0] = True; out[t, j, 1] = True
+    return out
+
+
+def _project_with_distortion(pts3d, K, dist, R=None, T=None):
+    """OpenCV projectPoints for an (M, 3) point set → (M, 2)."""
+    if R is None:
+        rvec = np.zeros(3)
+        tvec = np.zeros(3)
+    else:
+        rvec = cv2.Rodrigues(R)[0]
+        tvec = T.reshape(3, 1)
+    pts = np.asarray(pts3d, dtype=np.float64).reshape(-1, 1, 3)
+    out, _ = cv2.projectPoints(pts, rvec, tvec, K, dist)
+    return out.reshape(-1, 2)
+
+
+# ──────────────────────────────────────────────────────────────────
+# Individual signals  — each returns (N, 21, 2) bool
+# ──────────────────────────────────────────────────────────────────
+
+def _signal_velocity(init_3d, mp_L, mp_R, vel_k: float, k_blame_camera: float):
+    """Per-joint 3D velocity z-score > vel_k → flag (any camera per blame)."""
+    N, J = init_3d.shape[0], init_3d.shape[1]
+    if N < 2:
+        return np.zeros((N, J, 2), dtype=bool)
+    v = np.linalg.norm(init_3d[1:] - init_3d[:-1], axis=-1)   # (N-1, J)
+    z, _, _ = _robust_z(v, axis=0)
+    flag = np.zeros((N, J), dtype=bool)
+    flag[1:] = z > vel_k
+    return _camera_blame_from_2d_step(mp_L, mp_R, flag, k_blame_camera)
+
+
+def _signal_acceleration(init_3d, mp_L, mp_R, accel_k: float, k_blame_camera: float):
+    """Per-joint 3D acceleration z-score > accel_k → flag."""
+    N, J = init_3d.shape[0], init_3d.shape[1]
+    if N < 3:
+        return np.zeros((N, J, 2), dtype=bool)
+    a = init_3d[2:] - 2 * init_3d[1:-1] + init_3d[:-2]       # (N-2, J, 3)
+    am = np.linalg.norm(a, axis=-1)                          # (N-2, J)
+    z, _, _ = _robust_z(am, axis=0)
+    flag = np.zeros((N, J), dtype=bool)
+    flag[1:-1] = z > accel_k
+    return _camera_blame_from_2d_step(mp_L, mp_R, flag, k_blame_camera)
+
+
+def _signal_bone(init_3d, mp_L, mp_R, bones, bone_k: float,
+                 k_blame_joint: float, k_blame_camera: float):
+    """Per-bone z-score → per-endpoint blame via 3D step → cam attr."""
+    N, J = init_3d.shape[0], init_3d.shape[1]
+    n_b = len(bones)
+    bone_lens = np.zeros((N, n_b), dtype=np.float64)
+    for b, (j1, j2) in enumerate(bones):
+        bone_lens[:, b] = np.linalg.norm(init_3d[:, j2] - init_3d[:, j1], axis=1)
+    z, _, _ = _robust_z(bone_lens, axis=0)
+    bone_bad = z > bone_k
+    # Per-(frame, joint) 3D step for blame disambiguation.
+    step_3d = np.zeros((N, J), dtype=np.float64)
+    if N > 1:
+        step_3d[1:] = np.linalg.norm(init_3d[1:] - init_3d[:-1], axis=-1)
+    joint_flag = np.zeros((N, J), dtype=bool)
+    bad_t, bad_b = np.where(bone_bad)
+    for t, b in zip(bad_t, bad_b):
+        j1, j2 = bones[b]
+        v1 = float(step_3d[t, j1]); v2 = float(step_3d[t, j2])
+        if v1 > k_blame_joint * v2:
+            joint_flag[t, j1] = True
+        elif v2 > k_blame_joint * v1:
+            joint_flag[t, j2] = True
+        else:
+            joint_flag[t, j1] = True
+            joint_flag[t, j2] = True
+    return _camera_blame_from_2d_step(mp_L, mp_R, joint_flag, k_blame_camera)
+
+
+def _signal_ydisp(mp_L, mp_R, calib, ydisp_px: float):
+    """Y-disparity per joint.  Undistort both points; |y_R − y_L| > k px.
+
+    Flags BOTH cameras when triggered (we can't know which side has the
+    wrong Y purely from the disparity).  No calib → no-op.
+    """
+    N, J = mp_L.shape[0], mp_L.shape[1]
+    out = np.zeros((N, J, 2), dtype=bool)
+    if calib is None or N == 0:
+        return out
+    K1 = calib["K1"]; d1 = calib["dist1"]
+    K2 = calib["K2"]; d2 = calib["dist2"]
+    # Flatten to (N*J, 1, 2), undistort, reshape back.
+    L = mp_L.reshape(-1, 1, 2).astype(np.float64)
+    R = mp_R.reshape(-1, 1, 2).astype(np.float64)
+    L_und = cv2.undistortPoints(L, K1, d1, P=K1).reshape(N, J, 2)
+    R_und = cv2.undistortPoints(R, K2, d2, P=K2).reshape(N, J, 2)
+    dy = np.abs(R_und[..., 1] - L_und[..., 1])
+    flag = np.where(np.isfinite(dy), dy > ydisp_px, False)
+    out[..., 0] = flag
+    out[..., 1] = flag
+    return out
+
+
+def _signal_z_outlier(init_3d, mp_L, mp_R, z_k: float, k_blame_camera: float):
+    """Per-joint Z (depth) z-score > z_k → flag, with cam attribution."""
+    N, J = init_3d.shape[0], init_3d.shape[1]
+    z = init_3d[..., 2]                                     # (N, J)
+    z_score, _, _ = _robust_z(z, axis=0)
+    flag = np.where(np.isfinite(z_score), z_score > z_k, False)
+    return _camera_blame_from_2d_step(mp_L, mp_R, flag, k_blame_camera)
+
+
+def _signal_mpconf(confidence_L, confidence_R, N, J, mpconf_min: float):
+    """Per-frame per-camera MP confidence below threshold.
+
+    MP confidence is HAND-LEVEL (one scalar per frame per camera),
+    so we flag ALL joints on the offending camera at that frame.
+    """
+    out = np.zeros((N, J, 2), dtype=bool)
+    if confidence_L is not None:
+        bad_L = (np.asarray(confidence_L) < mpconf_min) & np.isfinite(confidence_L)
+        # bad_L[:N] in case of length mismatch.
+        m = min(N, len(bad_L))
+        out[:m, :, 0] = bad_L[:m][:, None]
+    if confidence_R is not None:
+        bad_R = (np.asarray(confidence_R) < mpconf_min) & np.isfinite(confidence_R)
+        m = min(N, len(bad_R))
+        out[:m, :, 1] = bad_R[:m][:, None]
+    return out
+
+
+def _signal_stereo_reproj(init_3d, mp_L, mp_R, calib, stereo_px: float):
+    """Per-(frame, joint) stereo reprojection error in pixels.
+
+    Reproject init_3d through calibration; per camera, residual against
+    its MP detection.  Flag the camera whose residual exceeds threshold;
+    if both exceed, flag both.  No calib → no-op.
+    """
+    N, J = init_3d.shape[0], init_3d.shape[1]
+    out = np.zeros((N, J, 2), dtype=bool)
+    if calib is None or N == 0:
+        return out
+    K1 = calib["K1"]; d1 = calib["dist1"]
+    K2 = calib["K2"]; d2 = calib["dist2"]
+    R = np.asarray(calib["R"])
+    T = np.asarray(calib["T"]).reshape(3, 1)
+    rvecR, _ = cv2.Rodrigues(R)
+    pts = init_3d.reshape(-1, 1, 3).astype(np.float64)
+    valid = np.isfinite(pts[..., 0]).ravel()
+    if not valid.any():
+        return out
+    pL_2d, _ = cv2.projectPoints(pts[valid], np.zeros(3), np.zeros(3), K1, d1)
+    pR_2d, _ = cv2.projectPoints(pts[valid], rvecR, T, K2, d2)
+    proj_L = np.full((N * J, 2), np.nan)
+    proj_R = np.full((N * J, 2), np.nan)
+    proj_L[valid] = pL_2d.reshape(-1, 2)
+    proj_R[valid] = pR_2d.reshape(-1, 2)
+    proj_L = proj_L.reshape(N, J, 2)
+    proj_R = proj_R.reshape(N, J, 2)
+    res_L = np.linalg.norm(proj_L - mp_L, axis=-1)         # (N, J)
+    res_R = np.linalg.norm(proj_R - mp_R, axis=-1)
+    out[..., 0] = np.where(np.isfinite(res_L), res_L > stereo_px, False)
+    out[..., 1] = np.where(np.isfinite(res_R), res_R > stereo_px, False)
+    return out
+
+
+def _signal_hrnet(hrnet_L, hrnet_R, N, J, hrnet_min: float):
+    """Per-(frame, joint, camera) HRnet score below threshold."""
+    out = np.zeros((N, J, 2), dtype=bool)
+    if hrnet_L is not None:
+        H = np.asarray(hrnet_L)
+        if H.ndim == 2 and H.shape[1] == J:
+            m = min(N, H.shape[0])
+            out[:m, :, 0] = (H[:m] < hrnet_min) & np.isfinite(H[:m])
+    if hrnet_R is not None:
+        H = np.asarray(hrnet_R)
+        if H.ndim == 2 and H.shape[1] == J:
+            m = min(N, H.shape[0])
+            out[:m, :, 1] = (H[:m] < hrnet_min) & np.isfinite(H[:m])
+    return out
+
+
+# ──────────────────────────────────────────────────────────────────
+# Composer
+# ──────────────────────────────────────────────────────────────────
+
+def detect_mask(
+    init_3d: np.ndarray,
+    mp_L: np.ndarray,
+    mp_R: np.ndarray,
+    bones,
+    *,
+    calib=None,
+    confidence_L=None,
+    confidence_R=None,
+    hrnet_L=None,
+    hrnet_R=None,
+    # Velocity
+    enable_vel: bool = False,
+    vel_k: float = 6.0,
+    # Acceleration
+    enable_accel: bool = True,
+    accel_k: float = 6.0,
+    # Bone length
+    enable_bone: bool = True,
+    bone_k: float = 6.0,
+    # Y disparity (px)
+    enable_ydisp: bool = False,
+    ydisp_px: float = 5.0,
+    # Z outlier
+    enable_z: bool = False,
+    z_k: float = 6.0,
+    # MP confidence (≥)
+    enable_mpconf: bool = False,
+    mpconf_min: float = 0.5,
+    # Stereo reproj (px)
+    enable_stereo: bool = False,
+    stereo_px: float = 5.0,
+    # HRnet (≥)
+    enable_hrnet: bool = False,
+    hrnet_min: float = 0.2,
+    # Blame disambiguation
+    k_blame_joint: float = 2.0,
+    k_blame_camera: float = 2.0,
+):
+    """Run all enabled signals and OR their (N, 21, 2) masks.
+
+    Returns
+    -------
+    joint_mask : (N, 21) bool        — any-camera reduction
+    camera_mask : (N, 21, 2) bool    — per (frame, joint, camera)
+    per_signal : dict[str, int]      — per-signal flag count for the UI
+    """
+    N, J = init_3d.shape[0], init_3d.shape[1]
+    cam = np.zeros((N, J, 2), dtype=bool)
+    per_signal: dict[str, int] = {}
+
+    def _add(name, m):
+        nonlocal cam
+        per_signal[name] = int(m.sum())
+        cam |= m
+
+    if enable_vel and N >= 2:
+        _add("velocity",     _signal_velocity(init_3d, mp_L, mp_R, vel_k, k_blame_camera))
+    if enable_accel and N >= 3:
+        _add("acceleration", _signal_acceleration(init_3d, mp_L, mp_R, accel_k, k_blame_camera))
+    if enable_bone:
+        _add("bone",         _signal_bone(init_3d, mp_L, mp_R, bones, bone_k,
+                                          k_blame_joint, k_blame_camera))
+    if enable_ydisp and calib is not None:
+        _add("ydisp",        _signal_ydisp(mp_L, mp_R, calib, ydisp_px))
+    if enable_z:
+        _add("z_outlier",    _signal_z_outlier(init_3d, mp_L, mp_R, z_k, k_blame_camera))
+    if enable_mpconf and (confidence_L is not None or confidence_R is not None):
+        _add("mp_confidence", _signal_mpconf(confidence_L, confidence_R, N, J, mpconf_min))
+    if enable_stereo and calib is not None:
+        _add("stereo_reproj", _signal_stereo_reproj(init_3d, mp_L, mp_R, calib, stereo_px))
+    if enable_hrnet and (hrnet_L is not None or hrnet_R is not None):
+        _add("hrnet",        _signal_hrnet(hrnet_L, hrnet_R, N, J, hrnet_min))
+
+    joint = cam.any(axis=-1)
+    return joint, cam, per_signal
