@@ -143,6 +143,12 @@ function _registerClickPlot(divId) {
     if (!div || div._clickHLBound) return;
     div._clickHLBound = true;
     div.on('plotly_click', ev => _handlePlotClick(divId, ev));
+    // Native-click fallback.  plotly_click only fires when the
+    // cursor hits a data marker — the per-parameter movement
+    // scatters are sparse so most clicks miss.  Catch the underlying
+    // DOM event and convert pixel coords → data coords via the
+    // subplot's xaxis directly.
+    div.addEventListener('click', e => _handleNativeClick(divId, e));
     // Lock in how many shapes the plot started with so the highlight
     // append/strip cycle doesn't accumulate.
     _baseShapeCount[divId] = (div.layout?.shapes || []).length;
@@ -169,6 +175,49 @@ function _handlePlotClick(divId, ev) {
     } else return;
     if (!Number.isFinite(trialIdx) || trialIdx < 0) return;
     _clickHL = { trialIdx, time: x };
+    // Tell the native-click listener to skip the same gesture.
+    const div = document.getElementById(divId);
+    if (div) div._lastPlotlyClickAt = performance.now();
+    _applyHighlightAll();
+}
+
+function _handleNativeClick(divId, e) {
+    const div = document.getElementById(divId);
+    if (!div || !div._fullLayout) return;
+    // plotly_click fires before the native click on a marker hit —
+    // skip the trailing native handler so we don't re-process.
+    if (div._lastPlotlyClickAt && (performance.now() - div._lastPlotlyClickAt) < 200) return;
+    const rect = div.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    const fl = div._fullLayout;
+    // Find which subplot xaxis the click pixel falls inside.
+    let chosenAx = null, chosenN = 1;
+    Object.keys(fl).forEach(k => {
+        const m = k.match(/^xaxis(\d*)$/);
+        if (!m) return;
+        const ax = fl[k];
+        if (!ax || ax._offset == null || ax._length == null) return;
+        if (px >= ax._offset && px <= ax._offset + ax._length) {
+            chosenAx = ax;
+            chosenN = m[1] ? parseInt(m[1]) : 1;
+        }
+    });
+    if (!chosenAx || typeof chosenAx.p2c !== 'function') return;
+    // Bound on yaxis so clicks in title / margin area don't count.
+    const yax = fl.yaxis;
+    if (yax && yax._offset != null
+            && (py < yax._offset || py > yax._offset + yax._length)) return;
+    const dataX = chosenAx.p2c(px - chosenAx._offset);
+    if (!isFinite(dataX)) return;
+    let trialIdx = null;
+    if (divId.startsWith('distPlot_') || divId.startsWith('velPlot_')) {
+        trialIdx = parseInt(divId.split('_')[1]);
+    } else if (divId.startsWith('movPlot_') || divId.startsWith('distMovPlot_')) {
+        trialIdx = chosenN - 1;
+    } else return;
+    if (!Number.isFinite(trialIdx) || trialIdx < 0) return;
+    _clickHL = { trialIdx, time: dataX };
     _applyHighlightAll();
 }
 
