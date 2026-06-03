@@ -790,6 +790,8 @@ body.results-page .header .subject-select:disabled {
 
 .distance-controls {
     display: flex;
+    flex-wrap: wrap;
+    row-gap: 6px;
     align-items: center;
     gap: 12px;
     margin-bottom: 12px;

@@ -777,6 +777,9 @@ function getDistCheckedParams() {
     const checks = document.querySelectorAll('#distMovementControls input[data-dparam]');
     const params = [];
     checks.forEach(cb => { if (cb.checked) params.push(cb.dataset.dparam); });
+    // Top-bar IMI ref = 'off' globally hides every IMI plot.
+    const imiRef = document.querySelector('input[name="imiRef"]:checked')?.value;
+    if (imiRef === 'off') return params.filter(p => p !== 'imi');
     return params;
 }
 
@@ -2868,7 +2871,12 @@ function renderAllDistancePlots() {
 
         renderDistancePlot(distDiv.id, trial, _effYRange('dist', idx), plotWidth, distOverlays, distShapes);
         const _imiRefVal = (document.querySelector('input[name="imiRef"]:checked')?.value) || 'peak';
-        renderIMIPlot(imiDiv.id, trial, trialStart, trialMovs, fps, _imiRefVal, plotWidth);
+        const _imiOff = _imiRefVal === 'off';
+        imiDiv.style.display = _imiOff ? 'none' : '';
+        imiSpacer.style.display = _imiOff ? 'none' : '';
+        if (!_imiOff) {
+            renderIMIPlot(imiDiv.id, trial, trialStart, trialMovs, fps, _imiRefVal, plotWidth);
+        }
         renderVelocityPlot(velDiv.id, trial, _effYRange('vel', idx), plotWidth, velOverlays, distShapes);
     });
 }
