@@ -415,6 +415,55 @@ class OutlierPreviewRequest(BaseModel):
     hrnet_min: float = 0.2
 
 
+def _mp_filter_params_path(subject_name: str, trial_stem: str):
+    from ..services.skeleton_data import _skeleton_dir
+    return _skeleton_dir(subject_name) / trial_stem / "mp_filter_params.json"
+
+
+@router.post("/{subject_id}/trial/{trial_idx}/mp_filter_save")
+def mp_filter_save(subject_id: int, trial_idx: int,
+                   req: OutlierPreviewRequest) -> dict:
+    """Persist the user's MP Filter slider state as
+    ``mp_filter_params.json`` alongside the trial's skeleton data.
+
+    The same sidecar is read by run_skeleton_v1_fit so the v1 fit
+    uses the saved (and live-tuned) filter instead of running its
+    own internal detector.
+    """
+    name = _subject_name(subject_id)
+    tmap = build_trial_map(name)
+    if trial_idx < 0 or trial_idx >= len(tmap):
+        raise HTTPException(404, f"Trial index {trial_idx} out of range")
+    trial_stem = tmap[trial_idx]["trial_name"]
+    payload = req.model_dump() if hasattr(req, "model_dump") else req.dict()
+    payload.pop("trial_idx", None)
+    payload["_saved_at"] = json_now_iso()
+    path = _mp_filter_params_path(name, trial_stem)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2))
+    return {"ok": True, "path": str(path), "params": payload}
+
+
+@router.delete("/{subject_id}/trial/{trial_idx}/mp_filter_save")
+def mp_filter_save_delete(subject_id: int, trial_idx: int) -> dict:
+    """Delete the saved MP Filter sidecar for the trial."""
+    name = _subject_name(subject_id)
+    tmap = build_trial_map(name)
+    if trial_idx < 0 or trial_idx >= len(tmap):
+        raise HTTPException(404, f"Trial index {trial_idx} out of range")
+    trial_stem = tmap[trial_idx]["trial_name"]
+    path = _mp_filter_params_path(name, trial_stem)
+    existed = path.exists()
+    if existed:
+        path.unlink()
+    return {"ok": True, "existed": existed}
+
+
+def json_now_iso() -> str:
+    from datetime import datetime
+    return datetime.now().isoformat(timespec="seconds")
+
+
 @router.get("/{subject_id}/trial/{trial_idx}/mp_filter_data")
 def mp_filter_data(subject_id: int, trial_idx: int) -> dict:
     """Precompute every MP-Filter signal's raw per-(frame, joint[, camera])
@@ -549,6 +598,15 @@ def mp_filter_data(subject_id: int, trial_idx: int) -> dict:
             shapes[k] = list(v.shape)
         else:
             encoded[k] = v
+    # Read any previously-saved MP Filter sidecar so the UI can
+    # restore the user's tuned thresholds on panel open.
+    saved_params = None
+    try:
+        sidecar = _mp_filter_params_path(name, trial_stem)
+        if sidecar.exists():
+            saved_params = json.loads(sidecar.read_text())
+    except Exception:
+        saved_params = None
     return {
         "N": arrays["N"],
         "J": arrays["J"],
@@ -559,6 +617,7 @@ def mp_filter_data(subject_id: int, trial_idx: int) -> dict:
         "has_calib":   calib is not None,
         "has_mp_conf": (conf_L is not None or conf_R is not None),
         "has_hrnet":   (hrnet_L is not None or hrnet_R is not None),
+        "saved_params": saved_params,
     }
 
 

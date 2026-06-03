@@ -260,17 +260,73 @@ def run_skeleton_v1_fit(
     #   3. Per-joint per-camera 2D-pixel step magnitudes
     #      attribute blame to L, R, or both (k_blame_camera =
     #      2.0) for each masked joint.
-    joint_outlier_mask, camera_mask = _detect_outlier_per_joint(
-        init_3d, mp_L[valid_idx], mp_R[valid_idx], BONES,
-        K_max=int(k_max), accel_k=float(accel_k), bone_k=float(bone_k),
-        k_blame_joint=2.0, k_blame_camera=2.0,
-    )
+    # Prefer the user's saved MP Filter sidecar when present —
+    # that's the per-trial filter they tuned and "saved" from the
+    # Labels page.  Falls back to the legacy internal detector
+    # when no sidecar exists.
+    skeleton_trial_dir = _skeleton_dir(subject_name) / trial_stem
+    mp_filter_sidecar = skeleton_trial_dir / "mp_filter_params.json"
+    if mp_filter_sidecar.exists():
+        import json as _json
+        try:
+            _mpf = _json.loads(mp_filter_sidecar.read_text())
+        except Exception:
+            _mpf = {}
+        # Build the multi-signal mask from the saved thresholds.
+        from .mp_filter import detect_mask
+        # MP confidence and HRnet data — best-effort, optional.
+        _conf_L = prelabels.get("confidence_OS") if hasattr(prelabels, "get") else None
+        _conf_R = prelabels.get("confidence_OD") if hasattr(prelabels, "get") else None
+        if _conf_L is not None: _conf_L = _conf_L[start_frame:end][valid_idx]
+        if _conf_R is not None: _conf_R = _conf_R[start_frame:end][valid_idx]
+        # HRnet peak scores from heatmaps.npz (max over spatial dims).
+        _hr_L = None; _hr_R = None
+        try:
+            _hm_path = skeleton_trial_dir / "hrnet_w18_heatmaps.npz"
+            if _hm_path.exists():
+                with np.load(str(_hm_path), allow_pickle=False) as _hm:
+                    if "heatmaps_L" in _hm.files:
+                        _hr_L = _hm["heatmaps_L"].max(axis=(2, 3))[valid_idx].astype(np.float32)
+                    if "heatmaps_R" in _hm.files:
+                        _hr_R = _hm["heatmaps_R"].max(axis=(2, 3))[valid_idx].astype(np.float32)
+        except Exception:
+            _hr_L = None; _hr_R = None
+        joint_outlier_mask, camera_mask, _per_sig = detect_mask(
+            init_3d, mp_L[valid_idx], mp_R[valid_idx], BONES,
+            calib=calib,
+            confidence_L=_conf_L, confidence_R=_conf_R,
+            hrnet_L=_hr_L,        hrnet_R=_hr_R,
+            enable_vel=bool(_mpf.get("enable_vel", False)),
+            vel_k=float(_mpf.get("vel_k", 6.0)),
+            enable_accel=bool(_mpf.get("enable_accel", True)),
+            accel_k=float(_mpf.get("accel_k", 6.0)),
+            enable_bone=bool(_mpf.get("enable_bone", True)),
+            bone_k=float(_mpf.get("bone_k", 6.0)),
+            enable_ydisp=bool(_mpf.get("enable_ydisp", False)),
+            ydisp_px=float(_mpf.get("ydisp_px", 5.0)),
+            enable_z=bool(_mpf.get("enable_z", False)),
+            z_k=float(_mpf.get("z_k", 6.0)),
+            enable_mpconf=bool(_mpf.get("enable_mpconf", False)),
+            mpconf_min=float(_mpf.get("mpconf_min", 0.5)),
+            enable_stereo=bool(_mpf.get("enable_stereo", False)),
+            stereo_px=float(_mpf.get("stereo_px", 5.0)),
+            enable_hrnet=bool(_mpf.get("enable_hrnet", False)),
+            hrnet_min=float(_mpf.get("hrnet_min", 0.2)),
+        )
+        logger.info(f"  Outlier pre-filter: USING SAVED MP FILTER ({mp_filter_sidecar.name})")
+    else:
+        joint_outlier_mask, camera_mask = _detect_outlier_per_joint(
+            init_3d, mp_L[valid_idx], mp_R[valid_idx], BONES,
+            K_max=int(k_max), accel_k=float(accel_k), bone_k=float(bone_k),
+            k_blame_joint=2.0, k_blame_camera=2.0,
+        )
+        logger.info("  Outlier pre-filter: internal detector (no MP Filter sidecar)")
     n_joint_outliers = int(joint_outlier_mask.sum())
     n_frames_any = int(joint_outlier_mask.any(axis=1).sum())
     n_cam_L = int(camera_mask[:, :, 0].sum())
     n_cam_R = int(camera_mask[:, :, 1].sum())
     logger.info(
-        f"  Outlier pre-filter: {n_joint_outliers} (joint, frame) cells masked "
+        f"  → {n_joint_outliers} (joint, frame) cells masked "
         f"across {n_frames_any}/{n_valid} frames; "
         f"camera attribution L={n_cam_L} R={n_cam_R}"
     )

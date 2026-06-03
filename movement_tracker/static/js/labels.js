@@ -893,11 +893,14 @@ const manoViewer = (() => {
             $('mpFilterBtn').classList.toggle('active', open);
             _mpFilterPanelOpen = open;
             if (open) {
+                // Re-apply any cached saved-on-disk slider state in
+                // case the user clicked Reset earlier (which only
+                // affects the live UI, not the sidecar).
+                if (_mpFilterData && _mpFilterData.savedParams) {
+                    _applyMpFilterSavedToUI(_mpFilterData.savedParams);
+                }
                 _refreshMpFilterMask({force: true});
             } else {
-                // Live-preview on the Combined trace goes away when
-                // the panel closes.  The Filtered model row keeps its
-                // mask if its checkboxes are on.
                 renderDistanceTrace();
             }
         });
@@ -908,6 +911,7 @@ const manoViewer = (() => {
             renderDistanceTrace();
         });
         $('mpFilterResetBtn')?.addEventListener('click', _resetMpFilterDefaults);
+        $('mpFilterSaveBtn')?.addEventListener('click', _saveMpFilter);
         // Per-signal slider + checkbox wiring lives in
         // _wireMpFilterControls (covers all 8 signals + their
         // value display formatting).
@@ -8610,7 +8614,13 @@ const manoViewer = (() => {
                 has_calib:   !!res.has_calib,
                 has_mp_conf: !!res.has_mp_conf,
                 has_hrnet:   !!res.has_hrnet,
+                savedParams: res.saved_params || null,
             };
+            // Restore any saved-on-disk slider state into the UI.
+            // Skips silently when nothing'\''s been saved for this trial.
+            if (_mpFilterData.savedParams) {
+                _applyMpFilterSavedToUI(_mpFilterData.savedParams);
+            }
             return _mpFilterData;
         })();
         _mpFilterDataFetch = { trialIdx, promise: p };
@@ -8836,6 +8846,51 @@ const manoViewer = (() => {
             if (enab) enab.addEventListener('change', () => _refreshMpFilterMask({force: true}));
         }
     }
+    // Push a {enable_*, *_k, *_px, *_min} dict back into the UI:
+    // checkboxes for the enables, sliders + live-value spans for the
+    // thresholds.  Tolerates missing keys.
+    function _applyMpFilterSavedToUI(saved) {
+        if (!saved || typeof saved !== 'object') return;
+        for (const sig of _MPF_SIGNALS) {
+            const [enKey, thKey] = sig.keys;
+            const enab = _mpfEl(sig.id, 'enable');
+            const slid = _mpfEl(sig.id, 'slider');
+            const valE = _mpfEl(sig.id, 'val');
+            if (enab && typeof saved[enKey] === 'boolean') enab.checked = saved[enKey];
+            if (slid && Number.isFinite(saved[thKey])) {
+                slid.value = saved[thKey];
+                if (valE) valE.textContent = sig.fmt(parseFloat(slid.value));
+            }
+        }
+    }
+
+    async function _saveMpFilter() {
+        if (!subjectId || currentTrialIdx < 0 || !trials?.[currentTrialIdx]) return;
+        const trialIdx = trials[currentTrialIdx].trial_idx;
+        const statusEl = $('mpFilterStatus');
+        const body = { trial_idx: trialIdx, ..._mpfReadParams() };
+        try {
+            await api(`/api/skeleton/${subjectId}/trial/${trialIdx}/mp_filter_save`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            // Cache the saved snapshot so re-opening the panel
+            // without a trial change keeps the saved state.
+            if (_mpFilterData && _mpFilterData.trialIdx === trialIdx) {
+                _mpFilterData.savedParams = body;
+            }
+            if (statusEl) {
+                statusEl.textContent = 'Saved — Skel Fit v1 will use this filter';
+                setTimeout(() => {
+                    if (statusEl.textContent.startsWith('Saved')) statusEl.textContent = '';
+                }, 3000);
+            }
+        } catch (e) {
+            if (statusEl) statusEl.textContent = 'Save failed: ' + (e && e.message ? e.message : e);
+        }
+    }
+
     function _resetMpFilterDefaults() {
         const defaults = {
             vel: [false, 6.0],   accel: [true, 6.0],  bone: [true, 6.0],
@@ -8958,14 +9013,9 @@ const manoViewer = (() => {
         const snap = $('fitSnapBones');
         if (snap) snap.checked = false;
     }
-    function _resetMpFilterDefaults() {
-        _setSlider('mpFilterSliderAccelK', 6);
-        _setSlider('mpFilterSliderBoneK',  6);
-        _setSlider('mpFilterSliderKmax',  30);
-        _refreshMpFilterMask({force: true});
-    }
-
-
+    // (legacy _resetMpFilterDefaults referring to old AccelK/BoneK/Kmax
+    // sliders removed — the live version near _MPF_SIGNALS handles
+    // all 8 signals.)
 
     // Fitting parameter slider display updates
     function setupFitSliders() {

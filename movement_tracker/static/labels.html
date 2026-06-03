@@ -855,8 +855,9 @@
                     <input type="range" id="mpfSliderHrnet" min="0" max="1" step="0.01" value="0.2">
                 </div>
                 <div style="display:flex;gap:4px;margin-top:6px;">
+                    <button class="btn btn-sm btn-success" id="mpFilterSaveBtn" style="font-size:10px;padding:2px 6px;flex:1;">Save</button>
                     <button class="btn btn-sm" id="mpFilterResetBtn" style="font-size:10px;padding:2px 6px;">Reset</button>
-                    <button class="btn btn-sm" id="mpFilterCloseBtn" style="font-size:10px;padding:2px 6px;flex:1;">Close</button>
+                    <button class="btn btn-sm" id="mpFilterCloseBtn" style="font-size:10px;padding:2px 6px;">Close</button>
                 </div>
             </div>
             <div id="mpFilterStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
@@ -1311,7 +1312,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=396" type="module"></script>
+    <script src="/static/js/labels.js?v=397" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {
