@@ -3446,7 +3446,7 @@ async function _copyPlotsAsPng(plotDivs, filename, btn, opts) {
         // Optional header band with the column title.
         const TITLE_H = title ? 32 * SCALE : 0;
         const H = TITLE_H + imgs.reduce((s, i) => s + i.height, 0);
-        const cv = document.createElement('canvas');
+        let cv = document.createElement('canvas');
         cv.width = W; cv.height = H;
         const ctx = cv.getContext('2d');
         ctx.fillStyle = '#fff';
@@ -3462,6 +3462,24 @@ async function _copyPlotsAsPng(plotDivs, filename, btn, opts) {
         for (const img of imgs) {
             ctx.drawImage(img, Math.round((W - img.width) / 2), y);
             y += img.height;
+        }
+        // Optional output-height target: rescale the composite so
+        // the clipboard PNG matches a fixed pixel height (e.g. for
+        // pasting into a Keynote slide at a known size).  Width is
+        // scaled proportionally.
+        const targetH = (opts && opts.outputHeight) || 0;
+        if (targetH > 0 && cv.height !== targetH) {
+            const scale = targetH / cv.height;
+            const out = document.createElement('canvas');
+            out.width = Math.round(cv.width * scale);
+            out.height = targetH;
+            const octx = out.getContext('2d');
+            octx.imageSmoothingEnabled = true;
+            octx.imageSmoothingQuality = 'high';
+            octx.fillStyle = '#fff';
+            octx.fillRect(0, 0, out.width, out.height);
+            octx.drawImage(cv, 0, 0, out.width, out.height);
+            cv = out;
         }
         const blob = await new Promise(r => cv.toBlob(r, 'image/png'));
         const stem = (filename || 'plot').replace(/[^A-Za-z0-9_-]+/g, '_');
@@ -3495,7 +3513,10 @@ window._copyGroupColumn = function(paramId, kind, btn) {
         ? m.name + (m.mean && m.mean.unit ? ' (' + m.mean.unit + ')' : '')
         : paramId;
     const stem = (kind === 'dose' ? 'levodopa_' : 'group_') + paramId;
-    return _copyPlotsAsPng(divs, stem, btn, { title: titleText });
+    // Keynote slides on this project are 1024x768 with the title
+    // banner cropped; 963 px is the target height the user pastes
+    // into.  Force the clipboard image to that exact pixel height.
+    return _copyPlotsAsPng(divs, stem, btn, { title: titleText, outputHeight: 963 });
 };
 
 /** Copy the distance + velocity plots for one trial.  Filename
