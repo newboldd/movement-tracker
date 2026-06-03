@@ -2870,7 +2870,7 @@ function renderAllDistancePlots() {
         }
 
         renderDistancePlot(distDiv.id, trial, _effYRange('dist', idx), plotWidth, distOverlays, distShapes);
-        const _imiRefVal = (document.querySelector('input[name="imiRef"]:checked')?.value) || 'peak';
+        const _imiRefVal = (document.querySelector('input[name="imiRef"]:checked')?.value) || 'pp';
         const _imiOff = _imiRefVal === 'off';
         imiDiv.style.display = _imiOff ? 'none' : '';
         imiSpacer.style.display = _imiOff ? 'none' : '';
@@ -3200,32 +3200,52 @@ function renderDistancePlot(divId, trial, yRange, width, overlayTraces, shapes) 
 // values (peak / open / close).  Each point is plotted at the
 // SECOND frame of the pair so it sits over the spot in time where
 // that interval ends.
-function renderIMIPlot(divId, trial, trialStart, trialMovs, fps, refKind, width) {
+// Resolve the Interval radio value to a {from, to} frame-field pair.
+//   pp/oo/cc → same frame on both sides (P-P, O-O, C-C)
+//   po       → peak of movement i → open of movement i+1
+//   co       → close of movement i → open of movement i+1
+//   off / unknown → null (caller should skip rendering).
+function _imiKeys(refVal) {
+    switch (refVal) {
+        case 'pp': return { from: 'peak_frame',  to: 'peak_frame'  };
+        case 'oo': return { from: 'open_frame',  to: 'open_frame'  };
+        case 'cc': return { from: 'close_frame', to: 'close_frame' };
+        case 'po': return { from: 'peak_frame',  to: 'open_frame'  };
+        case 'co': return { from: 'close_frame', to: 'open_frame'  };
+        default:   return null;
+    }
+}
+
+function renderIMIPlot(divId, trial, trialStart, trialMovs, fps, refVal, width) {
     const fpsT = trial.fps || fps || 60;
-    const refFrameKey = `${refKind}_frame`;
+    const keys = _imiKeys(refVal);
+    if (!keys) return;
     const xs = [], ys = [];
-    let prevLocal = null;
+    let prevFromLocal = null;
     (trialMovs || []).forEach(m => {
-        const f = m[refFrameKey];
-        if (f == null || !isFinite(f)) return;
-        const local = f - trialStart;
-        if (local < 0) return;
-        if (prevLocal != null) {
-            const dt = (local - prevLocal) / fpsT;
-            if (isFinite(dt) && dt > 0) {
-                xs.push(+(local / fpsT).toFixed(3));
-                ys.push(+dt.toFixed(3));
+        const fTo = m[keys.to];
+        if (prevFromLocal != null && fTo != null && isFinite(fTo)) {
+            const toLocal = fTo - trialStart;
+            if (toLocal >= 0) {
+                const dt = (toLocal - prevFromLocal) / fpsT;
+                if (isFinite(dt) && dt > 0) {
+                    xs.push(+(toLocal / fpsT).toFixed(3));
+                    ys.push(+dt.toFixed(3));
+                }
             }
         }
-        prevLocal = local;
+        const fFrom = m[keys.from];
+        prevFromLocal = (fFrom != null && isFinite(fFrom))
+            ? fFrom - trialStart
+            : null;
     });
     const trace = {
         x: xs, y: ys,
         type: 'scatter', mode: 'lines+markers',
         line: { color: '#9C27B0', width: 1 },
         marker: { color: '#9C27B0', size: 4 },
-        hovertemplate: '%{x:.2f}s<br>IMI %{y:.2f}s<extra></extra>',
-        name: 'IMI',
+        hovertemplate: `%{x:.2f}s<br>${(refVal || '').toUpperCase()} %{y:.2f}s<extra></extra>`,
+        name: 'Interval',
     };
     const n = trial.distances.length;
     const tEnd = n > 0 ? (n - 1) / fpsT : 1;
@@ -3239,7 +3259,7 @@ function renderIMIPlot(divId, trial, trialStart, trialMovs, fps, refKind, width)
             range: [0, tEnd], autorange: false,
         },
         yaxis: {
-            title: { text: 'IMI (s)', font: { size: 10, color: '#9C27B0' }, standoff: 4 },
+            title: { text: 'Interval (s)', font: { size: 10, color: '#9C27B0' }, standoff: 4 },
             color: '#9C27B0', gridcolor: '#f0f0f0',
             zeroline: false,
             tickfont: { size: 9 },
@@ -3481,10 +3501,11 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
     // IMI honors the inline 'peak / open / close' radio so the user
     // can switch which event drives the inter-movement interval.
     const _imiRef = (document.querySelector('input[name="imiRef"]:checked')?.value)
-                    || 'peak';
+                    || 'pp';
+    const _imiKeyPair = _imiKeys(_imiRef);
     const frameField = param === 'peak_open_vel'  ? 'peak_open_vel_frame'
                      : param === 'peak_close_vel' ? 'peak_close_vel_frame'
-                     : param === 'imi'            ? `${_imiRef}_frame`
+                     : param === 'imi'            ? (_imiKeyPair?.to || 'peak_frame')
                                                   : 'peak_frame';
     const frameMeta = _trialFrameMeta();
 
@@ -3547,15 +3568,18 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
         const x = rawX;
         let y;
         if (param === 'imi') {
-            // IMI = time between consecutive movements measured at
-            // ``frameField`` (peak / open / close, picked by the
-            // inline radio).  First movement gets null since there's
-            // no prior reference frame.
+            // Inter-movement interval — see _imiKeys for the mapping
+            // from the Interval radio value to {from, to} frame
+            // fields.  For pp/oo/cc, from == to (same event on both
+            // movements).  For po/co, the previous movement's `from`
+            // event pairs with this movement's `to` event.  First
+            // movement is null (no prior reference).
             const meta = frameMeta[ti] || { fps: 60 };
+            const kp = _imiKeyPair || { from: 'peak_frame', to: 'peak_frame' };
             y = ms.map((m, i) => {
                 if (i === 0) return null;
-                const cur = m[frameField];
-                const prev = ms[i - 1][frameField];
+                const cur = m[kp.to];
+                const prev = ms[i - 1][kp.from];
                 if (cur == null || prev == null) return null;
                 if (!isFinite(cur) || !isFinite(prev)) return null;
                 return (cur - prev) / meta.fps;
