@@ -4509,16 +4509,11 @@ document.querySelectorAll('input[name="imiRef"]').forEach(r => {
     });
 });
 
-/** Show the inline imi-reference radios only when the IMI checkbox
- *  itself is checked.  Called on init and on IMI checkbox toggle. */
-function _syncImiRefVisibility() {
-    const row = document.getElementById('imiRefRow');
-    if (!row) return;
-    const imiCb = document.querySelector('#distMovementControls input[data-dparam="imi"]');
-    const on = !!(imiCb && imiCb.checked);
-    row.style.display = on ? 'inline-flex' : 'none';
-}
-_syncImiRefVisibility();
+/** No-op kept for the existing call site — the IMI reference
+ *  radios now live in the top overlay bar and also drive the
+ *  always-on compressed IMI strip between dist/vel plots, so they
+ *  stay visible regardless of the lower-bar IMI checkbox state. */
+function _syncImiRefVisibility() { /* intentionally empty */ }
 
 // Overlay controls: re-render distance/velocity plots
 ['overlayPeakDist', 'overlayOpen', 'overlayClose', 'overlayPause', 'overlayPeakOpenVel', 'overlayPeakCloseVel'].forEach(id => {
