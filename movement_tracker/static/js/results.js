@@ -921,11 +921,21 @@ function renderIntervalParamPlots() {
             if (i === 0) return;
             const prev = ms[i - 1][keys.from];
             const cur = m[keys.to];
-            const yv = m[yParam];
-            if (prev == null || cur == null || yv == null) return;
-            if (!isFinite(prev) || !isFinite(cur) || !isFinite(yv)) return;
+            if (prev == null || cur == null) return;
+            if (!isFinite(prev) || !isFinite(cur)) return;
             const dt = (cur - prev) / (meta.fps || 60);
             if (!(dt > 0)) return;
+            // Relative amplitude = m[i].amplitude / m[i-1].amplitude.
+            // For every other param, just read the field directly.
+            let yv;
+            if (yParam === 'relative_amplitude') {
+                const a = m.amplitude, ap = ms[i - 1].amplitude;
+                if (a == null || ap == null || !isFinite(a) || !isFinite(ap) || ap === 0) return;
+                yv = a / ap;
+            } else {
+                yv = m[yParam];
+                if (yv == null || !isFinite(yv)) return;
+            }
             xs.push(+dt.toFixed(4));
             ys.push(yv);
         });
@@ -960,13 +970,47 @@ function renderIntervalParamPlots() {
 
         const xLabel = `${xKey.toUpperCase()} (s)`;
         const yLabel = _ipYLabel(yParam);
-        Plotly.newPlot(plotDiv.id, [{
+        const traces = [{
             x: xs, y: ys,
             type: 'scatter', mode: 'markers',
             marker: { color: MOVEMENT_DOT_COLOR, size: 6,
                       line: { color: '#fff', width: 0.5 } },
             hovertemplate: `${xLabel.replace(' (s)', '')}: %{x:.3f}s<br>${yLabel.split(' (')[0]}: %{y:.2f}<extra></extra>`,
-        }], {
+        }];
+        const annotations = [];
+        // When the Slope toggle is on, append a best-fit line trace
+        // and a slope / R² / p annotation pinned to the upper-left of
+        // each per-trial plot.
+        if (_ipSlopeOn && xs.length >= 3) {
+            const stats = _linRegStatsP(xs, ys);
+            if (stats) {
+                const lo = Math.min(...xs), hi = Math.max(...xs);
+                traces.push({
+                    x: [lo, hi],
+                    y: [stats.intercept + stats.slope * lo,
+                        stats.intercept + stats.slope * hi],
+                    type: 'scatter', mode: 'lines',
+                    line: { color: '#c62828', width: 1.5, dash: 'solid' },
+                    hoverinfo: 'skip', showlegend: false,
+                });
+                const pStr = (stats.p < 1e-4)
+                    ? stats.p.toExponential(2)
+                    : stats.p.toFixed(4);
+                annotations.push({
+                    xref: 'paper', yref: 'paper', x: 0.02, y: 0.98,
+                    xanchor: 'left', yanchor: 'top',
+                    align: 'left', showarrow: false,
+                    text: `slope = ${stats.slope.toPrecision(3)}<br>`
+                        + `R² = ${stats.r2.toFixed(3)}<br>`
+                        + `p = ${pStr}<br>n = ${stats.n}`,
+                    font: { size: 10, color: '#333' },
+                    bgcolor: 'rgba(255,255,255,0.85)',
+                    bordercolor: 'rgba(0,0,0,0.15)', borderwidth: 1,
+                    borderpad: 4,
+                });
+            }
+        }
+        Plotly.newPlot(plotDiv.id, traces, {
             margin: { t: 8, b: 36, l: 52, r: 12 },
             xaxis: { title: { text: xLabel, font: { size: 10 } },
                      gridcolor: '#eee', tickfont: { size: 9 },
@@ -978,19 +1022,94 @@ function renderIntervalParamPlots() {
                      autorange: yRange ? false : true },
             plot_bgcolor: '#fff', paper_bgcolor: '#fff',
             showlegend: false, hovermode: 'closest', dragmode: false,
-            width: 320, height: 260,
+            width: 320, height: 260, annotations,
         }, { displayModeBar: false, responsive: false });
     });
 }
 
+// Linear regression with R² and t-distribution p-value — port of
+// _linRegStats / _studentT2Tail / _betai / _betacf / _lnGamma from
+// explore.js so the Slope toggle on the interval scatters can
+// surface the same slope / R² / p numbers as the Explore page.
+function _linRegStatsP(xs, ys) {
+    const n = xs.length;
+    if (n < 3) return null;
+    let mx = 0, my = 0;
+    for (let i = 0; i < n; i++) { mx += xs[i]; my += ys[i]; }
+    mx /= n; my /= n;
+    let sxx = 0, syy = 0, sxy = 0;
+    for (let i = 0; i < n; i++) {
+        const dx = xs[i] - mx, dy = ys[i] - my;
+        sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+    }
+    if (sxx <= 0 || syy <= 0) return null;
+    const slope = sxy / sxx;
+    const intercept = my - slope * mx;
+    const r = sxy / Math.sqrt(sxx * syy);
+    const r2 = r * r;
+    const df = n - 2;
+    const denom = Math.max(1 - r2, 1e-300);
+    const t = r * Math.sqrt(df / denom);
+    return { slope, intercept, r2, t, df, n, p: _ipStudentT2Tail(t, df) };
+}
+function _ipStudentT2Tail(t, df) {
+    const x = df / (df + t * t);
+    return _ipBetai(df / 2, 0.5, x);
+}
+function _ipBetai(a, b, x) {
+    if (x <= 0 || x >= 1) return x <= 0 ? 0 : 1;
+    const bt = Math.exp(_ipLnGamma(a + b) - _ipLnGamma(a) - _ipLnGamma(b)
+                       + a * Math.log(x) + b * Math.log(1 - x));
+    return (x < (a + 1) / (a + b + 2))
+        ? bt * _ipBetacf(a, b, x) / a
+        : 1 - bt * _ipBetacf(b, a, 1 - x) / b;
+}
+function _ipBetacf(a, b, x) {
+    const FPMIN = 1e-300, MAXIT = 200, EPS = 3e-7;
+    const qab = a + b, qap = a + 1, qam = a - 1;
+    let c = 1, d = 1 - qab * x / qap;
+    if (Math.abs(d) < FPMIN) d = FPMIN;
+    d = 1 / d;
+    let h = d;
+    for (let m = 1; m <= MAXIT; m++) {
+        const m2 = 2 * m;
+        let aa = m * (b - m) * x / ((qam + m2) * (a + m2));
+        d = 1 + aa * d; if (Math.abs(d) < FPMIN) d = FPMIN;
+        c = 1 + aa / c; if (Math.abs(c) < FPMIN) c = FPMIN;
+        d = 1 / d; h *= d * c;
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2));
+        d = 1 + aa * d; if (Math.abs(d) < FPMIN) d = FPMIN;
+        c = 1 + aa / c; if (Math.abs(c) < FPMIN) c = FPMIN;
+        d = 1 / d;
+        const del = d * c; h *= del;
+        if (Math.abs(del - 1) < EPS) break;
+    }
+    return h;
+}
+function _ipLnGamma(x) {
+    const cof = [76.18009172947146, -86.50532032941677, 24.01409824083091,
+                 -1.231739572450155, 0.1208650973866179e-2, -0.5395239384953e-5];
+    let y = x, tmp = x + 5.5;
+    tmp -= (x + 0.5) * Math.log(tmp);
+    let ser = 1.000000000190015;
+    for (let j = 0; j < 6; j++) { y += 1; ser += cof[j] / y; }
+    return -tmp + Math.log(2.5066282746310005 * ser / x);
+}
+
 function _ipYLabel(param) {
     return ({
-        amplitude:      'Amplitude (mm)',
-        peak_open_vel:  'Peak Open Vel (mm/s)',
-        peak_close_vel: 'Peak Close Vel (mm/s)',
-        power:          'Power',
+        amplitude:          'Amplitude (mm)',
+        relative_amplitude: 'Amplitude ratio (i / i-1)',
+        peak_open_vel:      'Peak Open Vel (mm/s)',
+        peak_close_vel:     'Peak Close Vel (mm/s)',
+        power:              'Power',
     })[param] || param;
 }
+
+// Toggle state for the Slope button on the Interval × Parameter
+// scatters.  Off by default; toggling on overlays a per-trial
+// best-fit line and a slope / R² / p annotation.
+let _ipSlopeOn = false;
 
 function renderDistMovementPlots() {
     const container = document.getElementById('distMovementPlots');
@@ -5180,6 +5299,29 @@ function _syncImiRefVisibility() { /* intentionally empty */ }
         if (cachedMovements) renderIntervalParamPlots();
     });
 });
+
+// Slope toggle — flips _ipSlopeOn, restyles the button to show
+// the active state, and re-renders the scatters with / without
+// best-fit lines + stats annotations.
+(() => {
+    const btn = document.getElementById('ipSlopeBtn');
+    if (!btn) return;
+    const _paint = () => {
+        if (_ipSlopeOn) {
+            btn.classList.add('btn-primary');
+            btn.setAttribute('aria-pressed', 'true');
+        } else {
+            btn.classList.remove('btn-primary');
+            btn.setAttribute('aria-pressed', 'false');
+        }
+    };
+    _paint();
+    btn.addEventListener('click', () => {
+        _ipSlopeOn = !_ipSlopeOn;
+        _paint();
+        if (cachedMovements) renderIntervalParamPlots();
+    });
+})();
 
 // X-scale slider for the movement plots (width multiplier).
 (() => {

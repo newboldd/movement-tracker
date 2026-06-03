@@ -142,11 +142,17 @@
                     Y (parameter):
                     <select id="ipYSelect">
                         <option value="amplitude" selected>Amplitude</option>
+                        <option value="relative_amplitude">Relative amplitude (i/i-1)</option>
                         <option value="peak_open_vel">Peak Open Vel</option>
                         <option value="peak_close_vel">Peak Close Vel</option>
                         <option value="power">Power</option>
                     </select>
                 </label>
+                <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
+                <button class="btn btn-sm" id="ipSlopeBtn" type="button"
+                        title="Toggle per-trial best-fit line and slope/R²/p annotation">
+                    Slope
+                </button>
             </div>
             <div id="ipPlots" style="display:flex;flex-wrap:nowrap;gap:12px;overflow-x:auto;align-items:flex-start;"></div>
 
@@ -447,6 +453,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=120"></script>
+    <script src="/static/js/results.js?v=121"></script>
 </body>
 </html>
