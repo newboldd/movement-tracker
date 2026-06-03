@@ -841,11 +841,16 @@ async function loadDistances(subjectId) {
             cachedMovements = movData;
             cachedSequenceAssignments = null;
             if (movControls) movControls.style.display = '';
+            renderIntervalParamPlots();
             renderDistMovementPlots();
             renderShapeOverlayPlots();
         } else {
             if (movControls) movControls.style.display = 'none';
             if (movContainer) movContainer.innerHTML = '';
+            const ipCtl = document.getElementById('ipPlotControls');
+            const ipC = document.getElementById('ipPlots');
+            if (ipCtl) ipCtl.style.display = 'none';
+            if (ipC) ipC.innerHTML = '';
             const shapeSec = document.getElementById('shapeOverlaySection');
             if (shapeSec) shapeSec.style.display = 'none';
         }
@@ -862,6 +867,99 @@ function getDistCheckedParams() {
     const imiRef = document.querySelector('input[name="imiRef"]:checked')?.value;
     if (imiRef === 'off') return params.filter(p => p !== 'imi');
     return params;
+}
+
+// One scatter plot per trial: chosen interval (x) vs chosen
+// movement parameter (y).  Each dot is one movement.  Sequence
+// assignments do NOT apply here — every movement is plotted with
+// the same marker style.  Driven by the ipXSelect / ipYSelect
+// dropdowns in the controls bar.
+function renderIntervalParamPlots() {
+    const data = cachedMovements;
+    const controls = document.getElementById('ipPlotControls');
+    const container = document.getElementById('ipPlots');
+    if (!container) return;
+    container.innerHTML = '';
+    if (!data || !data.movements || !data.movements.length) {
+        if (controls) controls.style.display = 'none';
+        return;
+    }
+    if (controls) controls.style.display = 'flex';
+
+    const xKey = document.getElementById('ipXSelect')?.value || 'pp';
+    const yParam = document.getElementById('ipYSelect')?.value || 'amplitude';
+    const keys = _imiKeys(xKey);
+    if (!keys) return;
+    const frameMeta = _trialFrameMeta();
+    const trialNames = data.trial_names || [];
+
+    // Group movements by trial (preserve per-trial insertion order).
+    const byTrial = {};
+    data.movements.forEach(m => {
+        const ti = m.trial_idx;
+        (byTrial[ti] = byTrial[ti] || []).push(m);
+    });
+    const trialKeys = Object.keys(byTrial).sort((a, b) => +a - +b);
+
+    trialKeys.forEach(ti => {
+        const ms = byTrial[ti];
+        const meta = frameMeta[ti] || { fps: 60 };
+        const xs = [], ys = [];
+        ms.forEach((m, i) => {
+            if (i === 0) return;
+            const prev = ms[i - 1][keys.from];
+            const cur = m[keys.to];
+            const yv = m[yParam];
+            if (prev == null || cur == null || yv == null) return;
+            if (!isFinite(prev) || !isFinite(cur) || !isFinite(yv)) return;
+            const dt = (cur - prev) / (meta.fps || 60);
+            if (!(dt > 0)) return;
+            xs.push(+dt.toFixed(4));
+            ys.push(yv);
+        });
+
+        const block = document.createElement('div');
+        block.style.cssText = 'flex:0 0 auto;display:flex;flex-direction:column;';
+        const head = document.createElement('div');
+        const trialName = (trialNames[ti] || '').toString();
+        head.textContent = `Trial: ${trialName.split('_').pop() || ti}`;
+        head.style.cssText = 'font-size:12px;color:#666;font-weight:600;padding:2px 8px;';
+        block.appendChild(head);
+
+        const plotDiv = document.createElement('div');
+        plotDiv.id = `ipPlot_${ti}`;
+        plotDiv.style.cssText = 'height:260px;width:320px;';
+        block.appendChild(plotDiv);
+        container.appendChild(block);
+
+        const xLabel = `${xKey.toUpperCase()} (s)`;
+        const yLabel = _ipYLabel(yParam);
+        Plotly.newPlot(plotDiv.id, [{
+            x: xs, y: ys,
+            type: 'scatter', mode: 'markers',
+            marker: { color: MOVEMENT_DOT_COLOR, size: 6,
+                      line: { color: '#fff', width: 0.5 } },
+            hovertemplate: `${xLabel.replace(' (s)', '')}: %{x:.3f}s<br>${yLabel.split(' (')[0]}: %{y:.2f}<extra></extra>`,
+        }], {
+            margin: { t: 8, b: 36, l: 52, r: 12 },
+            xaxis: { title: { text: xLabel, font: { size: 10 } },
+                     gridcolor: '#eee', tickfont: { size: 9 } },
+            yaxis: { title: { text: yLabel, font: { size: 10 } },
+                     gridcolor: '#eee', tickfont: { size: 9 } },
+            plot_bgcolor: '#fff', paper_bgcolor: '#fff',
+            showlegend: false, hovermode: 'closest', dragmode: false,
+            width: 320, height: 260,
+        }, { displayModeBar: false, responsive: false });
+    });
+}
+
+function _ipYLabel(param) {
+    return ({
+        amplitude:      'Amplitude (mm)',
+        peak_open_vel:  'Peak Open Vel (mm/s)',
+        peak_close_vel: 'Peak Close Vel (mm/s)',
+        power:          'Power',
+    })[param] || param;
 }
 
 function renderDistMovementPlots() {
@@ -4943,6 +5041,15 @@ function _syncImiRefVisibility() { /* intentionally empty */ }
         if (cachedTraces) renderAllDistancePlots();
     });
 })();
+
+// Interval × Parameter scatter dropdowns — re-render on change.
+['ipXSelect', 'ipYSelect'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', () => {
+        if (cachedMovements) renderIntervalParamPlots();
+    });
+});
 
 // X-scale slider for the movement plots (width multiplier).
 (() => {

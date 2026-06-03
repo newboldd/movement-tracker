@@ -121,6 +121,34 @@
                 <div class="results-no-data">Select a subject to view distance traces</div>
             </div>
 
+            <!-- Interval × Parameter scatters — one plot per trial.
+                 X: any interval (O-O / P-P / C-C / P-O / C-O);
+                 Y: any per-movement parameter.  Each dot is one
+                 movement.  Sequence assignments do NOT apply. -->
+            <div class="results-controls" id="ipPlotControls" style="margin-top:18px;display:none;flex-wrap:wrap;">
+                <label style="display:flex;align-items:center;gap:6px;margin:0;">
+                    X (interval):
+                    <select id="ipXSelect">
+                        <option value="oo">O-O</option>
+                        <option value="pp" selected>P-P</option>
+                        <option value="cc">C-C</option>
+                        <option value="po">P-O</option>
+                        <option value="co">C-O</option>
+                    </select>
+                </label>
+                <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
+                <label style="display:flex;align-items:center;gap:6px;margin:0;">
+                    Y (parameter):
+                    <select id="ipYSelect">
+                        <option value="amplitude" selected>Amplitude</option>
+                        <option value="peak_open_vel">Peak Open Vel</option>
+                        <option value="peak_close_vel">Peak Close Vel</option>
+                        <option value="power">Power</option>
+                    </select>
+                </label>
+            </div>
+            <div id="ipPlots" style="display:flex;flex-wrap:nowrap;gap:12px;overflow-x:auto;align-items:flex-start;"></div>
+
             <!-- Movement parameters (plotted below distance traces) -->
             <div class="results-controls" id="distMovementControls" style="margin-top:12px;display:none;flex-wrap:wrap;">
                 <label title="Drag right to stretch the movement plots out (fewer seconds per screen width)."
@@ -418,6 +446,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=117"></script>
+    <script src="/static/js/results.js?v=118"></script>
 </body>
 </html>
