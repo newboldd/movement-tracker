@@ -469,33 +469,43 @@ def mp_filter_data(subject_id: int, trial_idx: int) -> dict:
     if calib is None:
         calib = get_calibration_for_subject(name)
 
-    # HRnet best-effort load (same logic as outlier_preview).
+    # HRnet per-(frame, joint, camera) peak score, derived as
+    # max-over-spatial-dims of the saved heatmaps.  Loads
+    # hrnet_w18_heatmaps.npz lazily; absent → no HRnet signal.
     hrnet_L = None
     hrnet_R = None
     try:
         sk_root = _skeleton_dir(name)
         sk_trial = sk_root / trial_stem
-        peaks = _load_hrnet_peaks_json(sk_trial)
-        if peaks and "refined" in peaks:
-            ref = peaks["refined"]
-            def _scores_array(cam_key):
-                arr = np.full((N_total, 21), np.nan, dtype=np.float64)
-                cam = ref.get(cam_key) or {}
-                for fstr, jdict in cam.items():
-                    try: f = int(fstr)
-                    except Exception: continue
-                    if not (0 <= f < N_total) or not isinstance(jdict, dict): continue
-                    for jstr, val in jdict.items():
-                        try: j = int(jstr)
-                        except Exception: continue
-                        if not (0 <= j < 21): continue
-                        if isinstance(val, (list, tuple)) and len(val) >= 3:
-                            try: arr[f, j] = float(val[2])
-                            except Exception: pass
-                return arr
-            hrnet_L = _scores_array("L" if "L" in ref else "OS")
-            hrnet_R = _scores_array("R" if "R" in ref else "OD")
-    except Exception:
+        hm_path = sk_trial / "hrnet_w18_heatmaps.npz"
+        if hm_path.exists():
+            with np.load(str(hm_path), allow_pickle=False) as _hm:
+                if "heatmaps_L" in _hm.files:
+                    arrL = _hm["heatmaps_L"]
+                    if arrL.ndim == 4:
+                        # max over (H, W) → (n_frames_hm, 21)
+                        scores = arrL.max(axis=(2, 3)).astype(np.float32)
+                        sf = int(_hm["start_frame"]) if "start_frame" in _hm.files else start
+                        nf = scores.shape[0]
+                        hrnet_L = np.full((N_total, 21), np.nan, dtype=np.float64)
+                        rel = sf - start
+                        a0 = max(0, -rel); b0 = a0 + nf
+                        a1 = max(0, rel);  b1 = a1 + (nf - a0)
+                        if b1 > N_total: b1 = N_total
+                        hrnet_L[a1:b1, :] = scores[a0:a0 + (b1 - a1), :]
+                if "heatmaps_R" in _hm.files:
+                    arrR = _hm["heatmaps_R"]
+                    if arrR.ndim == 4:
+                        scores = arrR.max(axis=(2, 3)).astype(np.float32)
+                        sf = int(_hm["start_frame"]) if "start_frame" in _hm.files else start
+                        nf = scores.shape[0]
+                        hrnet_R = np.full((N_total, 21), np.nan, dtype=np.float64)
+                        rel = sf - start
+                        a0 = max(0, -rel); b0 = a0 + nf
+                        a1 = max(0, rel);  b1 = a1 + (nf - a0)
+                        if b1 > N_total: b1 = N_total
+                        hrnet_R[a1:b1, :] = scores[a0:a0 + (b1 - a1), :]
+    except Exception as _e:
         hrnet_L = None
         hrnet_R = None
 
