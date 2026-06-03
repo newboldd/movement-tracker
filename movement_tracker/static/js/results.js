@@ -120,6 +120,12 @@
 
 let subjects = [];
 
+// Trials whose distance + velocity plots are currently collapsed
+// (hidden) by user click on the trial title.  Keyed by trial.name so
+// the state survives re-renders and subject reloads of the same
+// subject.  Cleared when the subject changes.
+let _collapsedTrials = new Set();
+
 // ── Click-anywhere time-cursor across plots ──────────────────────
 // When the user clicks any per-trial plot (distance, velocity, any
 // of the movement-parameter scatters), we draw a faint vertical line
@@ -2231,7 +2237,7 @@ function renderAllDistancePlots() {
         block.style.alignItems = 'flex-start';
         block.style.marginBottom = '16px';
 
-        // Locked header: trial name (left) + Copy button (right).
+        // Locked header: trial name (clickable to collapse) + Copy button.
         const header = document.createElement('div');
         header.style.gridArea = 'header';
         header.style.display = 'flex';
@@ -2239,8 +2245,23 @@ function renderAllDistancePlots() {
         header.style.justifyContent = 'space-between';
         header.style.padding = '2px 8px 4px';
         const titleSpan = document.createElement('span');
-        titleSpan.textContent = `Trial: ${_trialPartOf(trial)}`;
-        titleSpan.style.cssText = 'font-size:13px;color:#666;font-weight:600;';
+        const trialKey = trial.name || `trial_${idx}`;
+        const isCollapsed = _collapsedTrials.has(trialKey);
+        const _renderTitle = () => {
+            const arrow = _collapsedTrials.has(trialKey) ? '▸' : '▾';
+            titleSpan.textContent = `${arrow} Trial: ${_trialPartOf(trial)}`;
+        };
+        _renderTitle();
+        titleSpan.style.cssText = 'font-size:13px;color:#666;font-weight:600;cursor:pointer;user-select:none;';
+        titleSpan.title = 'Click to collapse/expand this trial\'s distance + velocity plots';
+        titleSpan.addEventListener('click', () => {
+            if (_collapsedTrials.has(trialKey)) _collapsedTrials.delete(trialKey);
+            else _collapsedTrials.add(trialKey);
+            _renderTitle();
+            const nowCollapsed = _collapsedTrials.has(trialKey);
+            sliderCol.style.display = nowCollapsed ? 'none' : 'flex';
+            wrapper.style.display   = nowCollapsed ? 'none' : '';
+        });
         const copyBtn = _makeCopyBtn(b => _copyTrialPlots(idx, trial.name || '', b));
         header.appendChild(titleSpan);
         header.appendChild(copyBtn);
@@ -2249,7 +2270,7 @@ function renderAllDistancePlots() {
         // Slider column (does NOT scroll with the plots)
         const sliderCol = document.createElement('div');
         sliderCol.style.gridArea = 'slider';
-        sliderCol.style.display = 'flex';
+        sliderCol.style.display = isCollapsed ? 'none' : 'flex';
         sliderCol.style.flexDirection = 'column';
         sliderCol.appendChild(_buildYSliderCol('dist', idx, DIST_H, DIST_MT, DIST_MB));
         sliderCol.appendChild(_buildYSliderCol('vel', idx, VEL_H, VEL_MT, VEL_MB));
@@ -2259,6 +2280,7 @@ function renderAllDistancePlots() {
         const wrapper = document.createElement('div');
         wrapper.style.gridArea = 'wrapper';
         wrapper.style.overflowX = 'auto';
+        if (isCollapsed) wrapper.style.display = 'none';
         // CSS grid would otherwise let the wrapper grow to fit its
         // content; min-width:0 lets the 1fr track stay 1fr.
         wrapper.style.minWidth = '0';
@@ -4213,6 +4235,8 @@ document.getElementById('subjectSelect').addEventListener('change', (e) => {
     // Empty value = the "Select a subject" placeholder (used on the
     // group tab); nothing to show.
     if (!currentSubjectId) return;
+    // Trial-collapse state is per-subject — drop it on subject change.
+    _collapsedTrials = new Set();
 
     sessionStorage.setItem('dlc_lastSubjectId', String(currentSubjectId));
     if (typeof setLastSubject === 'function') setLastSubject(currentSubjectId);
