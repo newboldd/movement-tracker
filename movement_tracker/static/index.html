@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Movement Tracker</title>
     <link rel="stylesheet" href="/static/css/main.css?v=9">
+    <script src="/static/js/palette-apply.js?v=1"></script>
     <style>
         /* Subjects page: white top bar with purple text — overrides
            the universal dark-purple header from main.css.  Scoped to
@@ -56,6 +57,190 @@
     </div>
 
     <div class="container">
+
+        <!-- ── Palette editor (temporary, Subjects page only) ────────
+             A dev/design utility for tuning the app-wide color theme.
+             Every row binds one CSS custom property defined in
+             :root of main.css; changes call setProperty on
+             documentElement so every page element that uses
+             var(--name) updates live.
+             Save → localStorage; palette-apply.js re-applies on every
+             page load so the whole app picks up the saved palette.
+             Restore → wipe localStorage + revert to the shipped
+             defaults. -->
+        <div id="paletteEditor" class="card" style="padding:16px;margin-bottom:16px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                <div>
+                    <strong style="font-size:14px;">Palette editor</strong>
+                    <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">temporary — drives the app-wide CSS variables</span>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <span id="paletteStatus" style="font-size:11px;color:var(--text-muted);"></span>
+                    <button class="btn btn-sm btn-primary" id="paletteSaveBtn" type="button">Save</button>
+                    <button class="btn btn-sm" id="paletteRestoreBtn" type="button" title="Wipe saved palette and restore the shipped defaults">Restore defaults</button>
+                    <button class="btn btn-sm" id="paletteToggleBtn" type="button" title="Show / hide rows">Hide</button>
+                </div>
+            </div>
+            <div id="paletteRows" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:8px 16px;"></div>
+        </div>
+        <script>
+        (() => {
+            // Shipped defaults — mirror :root in main.css.  Keep in
+            // sync if main.css :root values change.  Restore button
+            // resets each var to the entry here AND clears
+            // localStorage so other pages also fall back to defaults.
+            const DEFAULT_PALETTE = {
+                '--bg':         '#1f0f3a',
+                '--bg-card':    '#2e1554',
+                '--bg-hover':   '#3a1d68',
+                '--text':       '#e0e0e0',
+                '--text-muted': '#aa9fbd',
+                '--accent':     '#5a1f8e',
+                '--blue':       '#a195c0',
+                '--border':     '#4a2a78',
+                '--green':      '#4caf50',
+                '--orange':     '#ff9800',
+                '--red':        '#f44336',
+                '--purple':     '#9c27b0',
+            };
+            const PALETTE_INFO = [
+                { name: '--bg',         label: 'Page background',     desc: 'Main page background behind cards and content.' },
+                { name: '--bg-card',    label: 'Card / header',       desc: 'Cards, header bar, modals, dropdown panels.' },
+                { name: '--bg-hover',   label: 'Hover background',    desc: 'Highlight for hovered rows and buttons.' },
+                { name: '--text',       label: 'Primary text',        desc: 'Default body text on the dark surfaces.' },
+                { name: '--text-muted', label: 'Muted text',          desc: 'Hints, captions, counts, secondary labels.' },
+                { name: '--accent',     label: 'Accent (primary)',    desc: 'Primary button fill, status badge fills.' },
+                { name: '--blue',       label: 'Link / active accent',desc: 'Links, active tab underline, focus rings.' },
+                { name: '--border',     label: 'Border / divider',    desc: 'Card borders, section dividers.' },
+                { name: '--green',      label: 'Success',             desc: 'Available / complete status badges.' },
+                { name: '--orange',     label: 'Warning',             desc: 'Pending / in-progress status badges.' },
+                { name: '--red',        label: 'Error',               desc: 'Failed / error indicators.' },
+                { name: '--purple',     label: 'Semantic purple',     desc: 'Pause-event markers and plot accents that need to stand out.' },
+            ];
+            const rowsHost = document.getElementById('paletteRows');
+            const status   = document.getElementById('paletteStatus');
+            const root     = document.documentElement;
+            const STORE_KEY = 'mt_palette';
+
+            // Helpers
+            const setStatus = (msg) => {
+                status.textContent = msg || '';
+                if (msg) setTimeout(() => { if (status.textContent === msg) status.textContent = ''; }, 2500);
+            };
+            const readSaved = () => {
+                try { return JSON.parse(localStorage.getItem(STORE_KEY) || '{}') || {}; }
+                catch (_) { return {}; }
+            };
+            const currentValue = (name) => {
+                // Inline override on documentElement wins over the
+                // computed cascade — but getComputedStyle reflects
+                // whichever currently applies, which is what we want.
+                return getComputedStyle(root).getPropertyValue(name).trim();
+            };
+            const toHex = (v) => {
+                if (!v) return '#000000';
+                if (v.startsWith('#')) {
+                    if (v.length === 4) return '#' + [...v.slice(1)].map(c => c + c).join('');
+                    return v.length === 7 ? v : v.slice(0, 7);
+                }
+                const m = v.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+                if (!m) return '#000000';
+                return '#' + [+m[1], +m[2], +m[3]].map(n => n.toString(16).padStart(2, '0')).join('');
+            };
+
+            // Build rows
+            const inputsByVar = {};
+            PALETTE_INFO.forEach(({ name, label, desc }) => {
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex;gap:10px;align-items:flex-start;padding:6px 8px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-card);';
+                const swatch = document.createElement('input');
+                swatch.type = 'color';
+                swatch.value = toHex(currentValue(name));
+                swatch.style.cssText = 'width:38px;height:38px;flex:0 0 auto;border:none;background:transparent;cursor:pointer;padding:0;';
+                const meta = document.createElement('div');
+                meta.style.cssText = 'flex:1;min-width:0;';
+                const top = document.createElement('div');
+                top.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:6px;';
+                const lbl = document.createElement('span');
+                lbl.innerHTML = `<code style="font-size:11px;color:var(--text-muted);">${name}</code> &middot; <strong style="font-size:12px;">${label}</strong>`;
+                const hex = document.createElement('input');
+                hex.type = 'text';
+                hex.maxLength = 7;
+                hex.value = swatch.value;
+                hex.style.cssText = 'font-family:ui-monospace,monospace;font-size:11px;width:72px;padding:2px 4px;background:var(--bg);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center;';
+                top.appendChild(lbl); top.appendChild(hex);
+                const d = document.createElement('div');
+                d.textContent = desc;
+                d.style.cssText = 'font-size:11px;color:var(--text-muted);margin-top:2px;line-height:1.3;';
+                meta.appendChild(top); meta.appendChild(d);
+                row.appendChild(swatch); row.appendChild(meta);
+                rowsHost.appendChild(row);
+                inputsByVar[name] = { swatch, hex };
+
+                const apply = (v) => {
+                    root.style.setProperty(name, v);
+                    swatch.value = toHex(v);
+                    hex.value = toHex(v);
+                };
+                swatch.addEventListener('input', () => apply(swatch.value));
+                hex.addEventListener('change', () => {
+                    let v = hex.value.trim();
+                    if (!v.startsWith('#')) v = '#' + v;
+                    if (/^#[0-9a-fA-F]{6}$/.test(v)) apply(v);
+                    else hex.value = toHex(currentValue(name));
+                });
+            });
+
+            // Apply any previously-saved palette to the inputs (the
+            // values are already on documentElement via
+            // palette-apply.js).
+            const saved = readSaved();
+            Object.keys(saved).forEach(k => {
+                if (inputsByVar[k]) {
+                    inputsByVar[k].swatch.value = toHex(saved[k]);
+                    inputsByVar[k].hex.value = toHex(saved[k]);
+                }
+            });
+            if (Object.keys(saved).length) setStatus('Loaded saved palette');
+
+            // Save: snapshot whatever's currently applied (the inputs
+            // already reflect documentElement.style overrides).
+            document.getElementById('paletteSaveBtn').addEventListener('click', () => {
+                const snap = {};
+                PALETTE_INFO.forEach(({ name }) => {
+                    snap[name] = inputsByVar[name].swatch.value;
+                });
+                localStorage.setItem(STORE_KEY, JSON.stringify(snap));
+                setStatus('Saved — every page will pick this up on next load');
+            });
+
+            // Restore: wipe localStorage and reset each var to the
+            // shipped default, both on documentElement (live) and in
+            // the editor inputs.
+            document.getElementById('paletteRestoreBtn').addEventListener('click', () => {
+                localStorage.removeItem(STORE_KEY);
+                Object.keys(DEFAULT_PALETTE).forEach(name => {
+                    const v = DEFAULT_PALETTE[name];
+                    root.style.removeProperty(name);
+                    root.style.setProperty(name, v);
+                    if (inputsByVar[name]) {
+                        inputsByVar[name].swatch.value = toHex(v);
+                        inputsByVar[name].hex.value = toHex(v);
+                    }
+                });
+                setStatus('Restored shipped defaults');
+            });
+
+            // Toggle visibility of the rows grid for tighter pages.
+            const toggleBtn = document.getElementById('paletteToggleBtn');
+            toggleBtn.addEventListener('click', () => {
+                const hidden = rowsHost.style.display === 'none';
+                rowsHost.style.display = hidden ? 'grid' : 'none';
+                toggleBtn.textContent = hidden ? 'Hide' : 'Show';
+            });
+        })();
+        </script>
+
         <!-- First-run banner (hidden by default) -->
         <div id="welcomeBanner" style="display:none;" class="card" role="alert">
             <div style="display:flex;align-items:center;gap:12px;">
