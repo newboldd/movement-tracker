@@ -25,8 +25,11 @@ const manoViewer = (() => {
     let _mpFilterMask = null;
     let _mpFilterCamMask = null;
     let _mpFilterPanelOpen = false;
-    let _mpFilterPreviewT = null;      // debounce timer
-    let _mpFilterPreviewSeq = 0;       // race-guard against late responses
+    // Cached precomputed signal arrays (one fetch per trial).
+    // Object: { trialIdx, N, J, bones, validMask, arrays:{vel_z,…},
+    // has_calib, has_mp_conf, has_hrnet }.
+    let _mpFilterData = null;
+    let _mpFilterDataFetch = null;     // in-flight Promise to dedupe
     // Filtered MediaPipe overlay toggles — independent of MP Filter
     // panel visibility.  When on, Filtered keypoints / wireframe /
     // distance trace are drawn using Combined-data-minus-mask.
@@ -1355,9 +1358,12 @@ const manoViewer = (() => {
     }
 
     function _clearV1OutlierPreview() {
-        if (_mpFilterPreviewT) { clearTimeout(_mpFilterPreviewT); _mpFilterPreviewT = null; }
         _mpFilterMask = null;
         _mpFilterCamMask = null;
+        // Drop the precomputed signal cache on trial change — its
+        // arrays are sized to a specific trial's N and bones list.
+        _mpFilterData = null;
+        _mpFilterDataFetch = null;
         const countEl = $('mpFilterCount');
         if (countEl) countEl.textContent = '';
     }
@@ -8572,55 +8578,249 @@ const manoViewer = (() => {
         return out;
     }
 
-    // Fetch the MP-Filter outlier mask for the current trial.
-    // Debounced 80 ms; race-guarded.  Skips the network call when
-    // neither the panel nor any Filtered row needs the mask.
+    // Decode a base64 Float32 payload into a (shape-aware) typed
+    // array.  Server uses Python's default little-endian, which
+    // matches JS Float32Array.
+    function _decodeF32(b64) {
+        const bin = atob(b64);
+        const len = bin.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+        return new Float32Array(bytes.buffer);
+    }
+
+    async function _ensureMpFilterData() {
+        if (!subjectId || currentTrialIdx < 0 || !trials?.[currentTrialIdx]) return null;
+        const trialIdx = trials[currentTrialIdx].trial_idx;
+        if (_mpFilterData && _mpFilterData.trialIdx === trialIdx) return _mpFilterData;
+        if (_mpFilterDataFetch && _mpFilterDataFetch.trialIdx === trialIdx) {
+            return _mpFilterDataFetch.promise;
+        }
+        const p = (async () => {
+            const res = await api(`/api/skeleton/${subjectId}/trial/${trialIdx}/mp_filter_data`);
+            const arr = {};
+            for (const [k, b64] of Object.entries(res.arrays_b64 || {})) {
+                arr[k] = typeof b64 === 'string' ? _decodeF32(b64) : b64;
+            }
+            _mpFilterData = {
+                trialIdx, N: res.N, J: res.J,
+                bones: res.bones || [],
+                validMask: res.valid_mask || null,
+                arrays: arr,
+                has_calib:   !!res.has_calib,
+                has_mp_conf: !!res.has_mp_conf,
+                has_hrnet:   !!res.has_hrnet,
+            };
+            return _mpFilterData;
+        })();
+        _mpFilterDataFetch = { trialIdx, promise: p };
+        try { return await p; }
+        finally { _mpFilterDataFetch = null; }
+    }
+
+    // Pure JS threshold + OR composer over the precomputed signal
+    // arrays.  No network.  Single-millisecond at N=1100, J=21.
+    function _composeMpFilterMaskLocal(data, p) {
+        const N = data.N, J = data.J;
+        const A = data.arrays;
+        const bones = data.bones;
+        const K_BLAME = 2.0;
+
+        // Flat per-(frame, joint, camera) Uint8 — packed L=0, R=1.
+        const cam = new Uint8Array(N * J * 2);
+        const perSignal = {};
+        const _addPerSignal = (name, cells) => { perSignal[name] = cells; };
+
+        // Helpers
+        const idx2 = (t, j) => t * J + j;
+        const idxC = (t, j, c) => (t * J + j) * 2 + c;
+        const isFin = (v) => Number.isFinite(v);
+
+        const attrib3D = (t, j) => {
+            const dL = A.step_2d_L ? A.step_2d_L[idx2(t, j)] : NaN;
+            const dR = A.step_2d_R ? A.step_2d_R[idx2(t, j)] : NaN;
+            const okL = isFin(dL), okR = isFin(dR);
+            if (!okL && !okR) { cam[idxC(t,j,0)] = 1; cam[idxC(t,j,1)] = 1; return 2; }
+            if (!okL) { cam[idxC(t,j,1)] = 1; return 1; }
+            if (!okR) { cam[idxC(t,j,0)] = 1; return 1; }
+            if (dL > K_BLAME * dR) { cam[idxC(t,j,0)] = 1; return 1; }
+            if (dR > K_BLAME * dL) { cam[idxC(t,j,1)] = 1; return 1; }
+            cam[idxC(t,j,0)] = 1; cam[idxC(t,j,1)] = 1; return 2;
+        };
+
+        // Per-signal thresholding.  Track per-signal cell counts
+        // (= the number of camera flags this signal added, before
+        // the OR with prior signals).  Same definition the backend
+        // used.
+        const _runSignalJoint = (name, arr, cmp) => {
+            if (!arr) { _addPerSignal(name, 0); return; }
+            let count = 0;
+            for (let t = 0; t < N; t++) {
+                for (let j = 0; j < J; j++) {
+                    if (cmp(arr[idx2(t, j)])) count += attrib3D(t, j);
+                }
+            }
+            _addPerSignal(name, count);
+        };
+
+        if (p.enable_vel)   _runSignalJoint('velocity',     A.vel_z,   v => isFin(v) && v > p.vel_k);
+        if (p.enable_accel) _runSignalJoint('acceleration', A.accel_z, v => isFin(v) && v > p.accel_k);
+        if (p.enable_z)     _runSignalJoint('z_outlier',    A.z_dev,   v => isFin(v) && v > p.z_k);
+
+        // Bone: per-bone z above threshold → blame one endpoint via
+        // 3D step (k_blame_joint = 2.0).  Falls back to "both" when
+        // ambiguous.
+        if (p.enable_bone && A.bone_z) {
+            const nB = bones.length;
+            const k_blame_joint = 2.0;
+            let count = 0;
+            for (let t = 0; t < N; t++) {
+                const rowBase = t * nB;
+                for (let b = 0; b < nB; b++) {
+                    if (!isFin(A.bone_z[rowBase + b]) || A.bone_z[rowBase + b] <= p.bone_k) continue;
+                    const j1 = bones[b][0], j2 = bones[b][1];
+                    const v1 = A.step_3d ? A.step_3d[idx2(t, j1)] : 0;
+                    const v2 = A.step_3d ? A.step_3d[idx2(t, j2)] : 0;
+                    if (v1 > k_blame_joint * v2)      count += attrib3D(t, j1);
+                    else if (v2 > k_blame_joint * v1) count += attrib3D(t, j2);
+                    else { count += attrib3D(t, j1); count += attrib3D(t, j2); }
+                }
+            }
+            _addPerSignal('bone', count);
+        }
+
+        if (p.enable_ydisp && A.ydisp_dev) {
+            let count = 0;
+            for (let t = 0; t < N; t++) {
+                for (let j = 0; j < J; j++) {
+                    const v = A.ydisp_dev[idx2(t, j)];
+                    if (isFin(v) && v > p.ydisp_px) {
+                        cam[idxC(t,j,0)] = 1; cam[idxC(t,j,1)] = 1; count += 2;
+                    }
+                }
+            }
+            _addPerSignal('ydisp', count);
+        }
+
+        if (p.enable_stereo) {
+            let count = 0;
+            const sL = A.stereo_dev_L, sR = A.stereo_dev_R;
+            for (let t = 0; t < N; t++) {
+                for (let j = 0; j < J; j++) {
+                    if (sL && isFin(sL[idx2(t,j)]) && sL[idx2(t,j)] > p.stereo_px) {
+                        cam[idxC(t,j,0)] = 1; count += 1;
+                    }
+                    if (sR && isFin(sR[idx2(t,j)]) && sR[idx2(t,j)] > p.stereo_px) {
+                        cam[idxC(t,j,1)] = 1; count += 1;
+                    }
+                }
+            }
+            _addPerSignal('stereo_reproj', count);
+        }
+
+        if (p.enable_mpconf) {
+            let count = 0;
+            const cL = A.mpconf_L, cR = A.mpconf_R;
+            for (let t = 0; t < N; t++) {
+                const badL = cL && isFin(cL[t]) && cL[t] < p.mpconf_min;
+                const badR = cR && isFin(cR[t]) && cR[t] < p.mpconf_min;
+                if (!badL && !badR) continue;
+                for (let j = 0; j < J; j++) {
+                    if (badL) { cam[idxC(t,j,0)] = 1; count += 1; }
+                    if (badR) { cam[idxC(t,j,1)] = 1; count += 1; }
+                }
+            }
+            _addPerSignal('mp_confidence', count);
+        }
+
+        if (p.enable_hrnet) {
+            let count = 0;
+            const hL = A.hrnet_L, hR = A.hrnet_R;
+            for (let t = 0; t < N; t++) {
+                for (let j = 0; j < J; j++) {
+                    if (hL && isFin(hL[idx2(t,j)]) && hL[idx2(t,j)] < p.hrnet_min) {
+                        cam[idxC(t,j,0)] = 1; count += 1;
+                    }
+                    if (hR && isFin(hR[idx2(t,j)]) && hR[idx2(t,j)] < p.hrnet_min) {
+                        cam[idxC(t,j,1)] = 1; count += 1;
+                    }
+                }
+            }
+            _addPerSignal('hrnet', count);
+        }
+
+        // Lift the flat typed-array into nested arrays the existing
+        // consumers expect (joint_mask[t][j] bool, camera_mask[t][j][c] bool).
+        const joint_mask = new Array(N);
+        const camera_mask = new Array(N);
+        let n_cells = 0, n_frames = 0, n_camL = 0, n_camR = 0;
+        for (let t = 0; t < N; t++) {
+            const jrow = new Array(J);
+            const crow = new Array(J);
+            let any = false;
+            for (let j = 0; j < J; j++) {
+                const cL = !!cam[idxC(t, j, 0)];
+                const cR = !!cam[idxC(t, j, 1)];
+                const flagged = cL || cR;
+                jrow[j] = flagged;
+                crow[j] = [cL, cR];
+                if (flagged) { n_cells += 1; any = true; }
+                if (cL) n_camL += 1;
+                if (cR) n_camR += 1;
+            }
+            joint_mask[t] = jrow;
+            camera_mask[t] = crow;
+            if (any) n_frames += 1;
+        }
+        return { joint_mask, camera_mask, perSignal,
+                 n_cells, n_frames, n_camL, n_camR };
+    }
+
+    // Compute the mask from cached data + current slider values and
+    // push it into the renderers.  Synchronous; no debounce.
+    function _applyMpFilterLocalCompute() {
+        if (!_mpFilterData) return;
+        const params = _mpfReadParams();
+        const out = _composeMpFilterMaskLocal(_mpFilterData, params);
+        _mpFilterMask = out.joint_mask;
+        _mpFilterCamMask = out.camera_mask;
+        const countEl = $('mpFilterCount');
+        if (countEl) {
+            countEl.textContent =
+                `${out.n_frames} frames · ${out.n_cells} cells · L=${out.n_camL} R=${out.n_camR}`;
+        }
+        const lookup = {
+            vel: 'velocity', accel: 'acceleration', bone: 'bone',
+            ydisp: 'ydisp', z: 'z_outlier', mpconf: 'mp_confidence',
+            stereo: 'stereo_reproj', hrnet: 'hrnet',
+        };
+        for (const sig of _MPF_SIGNALS) {
+            const cnt = out.perSignal[lookup[sig.id]];
+            const el = _mpfEl(sig.id, 'count');
+            if (el) el.textContent = (cnt != null) ? `${cnt}` : '';
+        }
+        renderDistanceTrace();
+        render();
+        update3D();
+    }
+
+    // Public-ish: ensure data is loaded, then compute.  Synchronous
+    // path when cached, async fetch only on first call per trial.
     function _refreshMpFilterMask({force = false} = {}) {
-        if (_mpFilterPreviewT) clearTimeout(_mpFilterPreviewT);
         if (!subjectId || currentTrialIdx < 0 || !trials?.[currentTrialIdx]) return;
         const needsMask = force || _mpFilterPanelOpen
                        || showFiltered2D || showFiltered3D;
         if (!needsMask) return;
-        const trialIdx = trials[currentTrialIdx].trial_idx;
-        const params = _mpfReadParams();
-        const seq = ++_mpFilterPreviewSeq;
-        _mpFilterPreviewT = setTimeout(async () => {
-            try {
-                const data = await api(`/api/skeleton/${subjectId}/outlier_preview`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ trial_idx: trialIdx, ...params }),
-                });
-                if (seq !== _mpFilterPreviewSeq) return;
-                _mpFilterMask = data?.joint_mask || null;
-                _mpFilterCamMask = data?.camera_mask || null;
-                const countEl = $('mpFilterCount');
-                if (countEl && data) {
-                    countEl.textContent =
-                        `${data.n_frames_masked} frames · ${data.n_cells_masked} cells · `
-                      + `L=${data.n_cam_L_masked} R=${data.n_cam_R_masked}`;
-                }
-                // Per-signal flag counts under each slider row.
-                const ps = data?.per_signal || {};
-                const lookup = {
-                    vel: 'velocity', accel: 'acceleration', bone: 'bone',
-                    ydisp: 'ydisp', z: 'z_outlier', mpconf: 'mp_confidence',
-                    stereo: 'stereo_reproj', hrnet: 'hrnet',
-                };
-                for (const sig of _MPF_SIGNALS) {
-                    const cnt = ps[lookup[sig.id]];
-                    const el = _mpfEl(sig.id, 'count');
-                    if (el) el.textContent = (cnt != null) ? `${cnt}` : '';
-                }
-                renderDistanceTrace();
-                render();
-                update3D();
-            } catch (e) {
-                console.warn('outlier preview failed:', e);
-            }
-        }, 80);
+        if (_mpFilterData
+            && _mpFilterData.trialIdx === trials[currentTrialIdx].trial_idx) {
+            _applyMpFilterLocalCompute();
+            return;
+        }
+        _ensureMpFilterData()
+            .then((d) => { if (d) _applyMpFilterLocalCompute(); })
+            .catch((e) => console.warn('mp_filter_data fetch failed:', e));
     }
-    // Legacy name kept for the loadTrial call site; just delegates.
+    // Legacy name kept for the loadTrial call site.
     function _refreshV1OutlierPreview() { _refreshMpFilterMask(); }
 
     function _wireMpFilterControls() {

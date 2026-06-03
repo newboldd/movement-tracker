@@ -415,6 +415,143 @@ class OutlierPreviewRequest(BaseModel):
     hrnet_min: float = 0.2
 
 
+@router.get("/{subject_id}/trial/{trial_idx}/mp_filter_data")
+def mp_filter_data(subject_id: int, trial_idx: int) -> dict:
+    """Precompute every MP-Filter signal's raw per-(frame, joint[, camera])
+    array for one trial and return them base64-encoded as Float32.
+
+    Used by the Labels-page MP Filter panel: fetched once when the
+    panel opens, cached in JS, then thresholded + OR'd entirely
+    client-side as the user moves sliders.  No round-trip per slider
+    tweak.
+
+    Payload sizes scale linearly with N: at N=1100, J=21 we ship
+    ~600 KB across all arrays.  Float32 NaN preserves through
+    base64 round-trip and reaches JS as JavaScript NaN, which the
+    client treats as "no signal" (never fires).
+    """
+    import base64
+    import numpy as np
+    from ..services.calibration import get_calibration_for_subject, triangulate_points
+    from ..services.skeleton_data import _load_trial_calibration, _skeleton_dir, _load_hrnet_peaks_json
+    from ..services.skeleton_v1 import BONES
+    from ..services.mediapipe_prelabel import (
+        load_mediapipe_combined_prelabels, load_mediapipe_prelabels,
+    )
+    from ..services.mp_filter import build_signal_data
+
+    name = _subject_name(subject_id)
+    tmap = build_trial_map(name)
+    if trial_idx < 0 or trial_idx >= len(tmap):
+        raise HTTPException(404, f"Trial index {trial_idx} out of range")
+    trial = tmap[trial_idx]
+    trial_stem = trial["trial_name"]
+    n_frames = trial["frame_count"]
+    start = trial.get("start_frame", 0)
+
+    prelabels = (load_mediapipe_combined_prelabels(name)
+                 or load_mediapipe_prelabels(name))
+    if prelabels is None:
+        raise HTTPException(404, "No MediaPipe prelabels for subject")
+    os_lm = prelabels["OS_landmarks"]
+    od_lm = prelabels["OD_landmarks"]
+    end = min(start + n_frames, os_lm.shape[0])
+    mp_L = os_lm[start:end].copy()
+    mp_R = od_lm[start:end].copy()
+    N_total = mp_L.shape[0]
+
+    conf_L = prelabels.get("confidence_OS")
+    conf_R = prelabels.get("confidence_OD")
+    if conf_L is not None: conf_L = conf_L[start:end]
+    if conf_R is not None: conf_R = conf_R[start:end]
+
+    calib = _load_trial_calibration(name, trial_stem)
+    if calib is None:
+        calib = get_calibration_for_subject(name)
+
+    # HRnet best-effort load (same logic as outlier_preview).
+    hrnet_L = None
+    hrnet_R = None
+    try:
+        sk_root = _skeleton_dir(name)
+        sk_trial = sk_root / trial_stem
+        peaks = _load_hrnet_peaks_json(sk_trial)
+        if peaks and "refined" in peaks:
+            ref = peaks["refined"]
+            def _scores_array(cam_key):
+                arr = np.full((N_total, 21), np.nan, dtype=np.float64)
+                cam = ref.get(cam_key) or {}
+                for fstr, jdict in cam.items():
+                    try: f = int(fstr)
+                    except Exception: continue
+                    if not (0 <= f < N_total) or not isinstance(jdict, dict): continue
+                    for jstr, val in jdict.items():
+                        try: j = int(jstr)
+                        except Exception: continue
+                        if not (0 <= j < 21): continue
+                        if isinstance(val, (list, tuple)) and len(val) >= 3:
+                            try: arr[f, j] = float(val[2])
+                            except Exception: pass
+                return arr
+            hrnet_L = _scores_array("L" if "L" in ref else "OS")
+            hrnet_R = _scores_array("R" if "R" in ref else "OD")
+    except Exception:
+        hrnet_L = None
+        hrnet_R = None
+
+    # Triangulate per joint (same path as outlier_preview).
+    mp_3d = np.full((N_total, 21, 3), np.nan)
+    if calib is not None:
+        for j in range(21):
+            mp_3d[:, j, :] = triangulate_points(mp_L[:, j, :], mp_R[:, j, :], calib)
+    valid = ~np.isnan(mp_L[:, 0, 0]) & ~np.isnan(mp_R[:, 0, 0])
+    if calib is not None:
+        valid = valid & ~np.isnan(mp_3d[:, 0, 0])
+    init_3d = mp_3d.copy() if calib is not None else np.full((N_total, 21, 3), np.nan)
+    # Wrist fallback on stray NaNs so the velocity/accel arrays
+    # don't carry NaN spikes at the boundaries of valid runs.
+    for i in range(N_total):
+        if not valid[i]:
+            init_3d[i, :, :] = np.nan
+            continue
+        for j in range(21):
+            if np.isnan(init_3d[i, j, 0]):
+                if not np.isnan(init_3d[i, 0, 0]):
+                    init_3d[i, j] = init_3d[i, 0]
+                else:
+                    init_3d[i, j] = [0.0, 0.0, 500.0]
+
+    arrays = build_signal_data(
+        init_3d, mp_L, mp_R, BONES,
+        calib=calib,
+        confidence_L=conf_L, confidence_R=conf_R,
+        hrnet_L=hrnet_L,    hrnet_R=hrnet_R,
+    )
+
+    # Encode each numpy array as a base64 Float32 blob.  Python's
+    # default byteorder on x86 / Apple Silicon matches JS
+    # Float32Array (little-endian), so no swap is needed.
+    encoded: dict = {}
+    shapes: dict = {}
+    for k, v in arrays.items():
+        if isinstance(v, np.ndarray):
+            encoded[k] = base64.b64encode(v.tobytes()).decode("ascii")
+            shapes[k] = list(v.shape)
+        else:
+            encoded[k] = v
+    return {
+        "N": arrays["N"],
+        "J": arrays["J"],
+        "valid_mask": valid.tolist(),
+        "bones": arrays["bones"],
+        "arrays_b64": encoded,
+        "shapes": shapes,
+        "has_calib":   calib is not None,
+        "has_mp_conf": (conf_L is not None or conf_R is not None),
+        "has_hrnet":   (hrnet_L is not None or hrnet_R is not None),
+    }
+
+
 @router.post("/{subject_id}/outlier_preview")
 def outlier_preview(subject_id: int, req: OutlierPreviewRequest) -> dict:
     """Run the multi-signal MP-Filter detector on the requested trial.

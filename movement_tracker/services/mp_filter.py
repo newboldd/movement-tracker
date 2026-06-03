@@ -278,7 +278,151 @@ def _signal_hrnet(hrnet_L, hrnet_R, N, J, hrnet_min: float):
 
 
 # ──────────────────────────────────────────────────────────────────
-# Composer
+# Precomputed signal arrays for the client-side composer
+# ──────────────────────────────────────────────────────────────────
+
+def build_signal_data(
+    init_3d: np.ndarray,
+    mp_L: np.ndarray,
+    mp_R: np.ndarray,
+    bones,
+    calib=None,
+    confidence_L=None,
+    confidence_R=None,
+    hrnet_L=None,
+    hrnet_R=None,
+) -> dict:
+    """Compute every signal's RAW per-(frame, joint[, camera]) array
+    once for a trial.  Returns float32 numpy arrays the caller can
+    base64-encode for the wire.
+
+    The returned arrays are in the SAME coordinate system (no
+    per-signal valid-frame slicing) so the client can threshold + OR
+    them with simple element-wise operations and no extra book-keeping.
+
+    Signals returning a single number per (frame, joint) come in the
+    same shape; 2-camera signals come as separate _L / _R arrays.
+    """
+    N, J = init_3d.shape[0], init_3d.shape[1]
+    f32 = np.float32
+
+    # ── Velocity z-score (3D step) ────────────────────────────
+    vel_mag = np.zeros((N, J), dtype=np.float64)
+    if N > 1:
+        vel_mag[1:] = np.linalg.norm(init_3d[1:] - init_3d[:-1], axis=-1)
+    vel_z, _, _ = _robust_z(vel_mag, axis=0)
+
+    # ── Acceleration z-score (3D second diff) ─────────────────
+    accel_mag = np.zeros((N, J), dtype=np.float64)
+    if N > 2:
+        a = init_3d[2:] - 2 * init_3d[1:-1] + init_3d[:-2]
+        accel_mag[1:-1] = np.linalg.norm(a, axis=-1)
+    accel_z, _, _ = _robust_z(accel_mag, axis=0)
+
+    # ── Bone-length z-score ───────────────────────────────────
+    n_b = len(bones)
+    bone_lens = np.zeros((N, n_b), dtype=np.float64)
+    for b, (j1, j2) in enumerate(bones):
+        bone_lens[:, b] = np.linalg.norm(init_3d[:, j2] - init_3d[:, j1], axis=1)
+    bone_z, _, _ = _robust_z(bone_lens, axis=0)
+
+    # ── Per-joint Z (depth) z-score ───────────────────────────
+    z_dev, _, _ = _robust_z(init_3d[..., 2], axis=0)
+
+    # ── Y-disparity Δ (px) — deviation from per-joint baseline ─
+    ydisp_dev = np.full((N, J), np.nan, dtype=np.float64)
+    if calib is not None:
+        K1 = calib["K1"]; d1 = calib["dist1"]
+        K2 = calib["K2"]; d2 = calib["dist2"]
+        L = mp_L.reshape(-1, 1, 2).astype(np.float64)
+        R = mp_R.reshape(-1, 1, 2).astype(np.float64)
+        L_und = cv2.undistortPoints(L, K1, d1, P=K1).reshape(N, J, 2)
+        R_und = cv2.undistortPoints(R, K2, d2, P=K2).reshape(N, J, 2)
+        dy = R_und[..., 1] - L_und[..., 1]
+        base = np.nanmedian(dy, axis=0, keepdims=True)
+        ydisp_dev = np.abs(dy - base)
+
+    # ── Stereo reproj Δ (px) — per-camera, baseline-relative ───
+    stereo_dev_L = np.full((N, J), np.nan, dtype=np.float64)
+    stereo_dev_R = np.full((N, J), np.nan, dtype=np.float64)
+    if calib is not None:
+        K1 = calib["K1"]; d1 = calib["dist1"]
+        K2 = calib["K2"]; d2 = calib["dist2"]
+        R = np.asarray(calib["R"]); T = np.asarray(calib["T"]).reshape(3, 1)
+        rvecR, _ = cv2.Rodrigues(R)
+        pts = init_3d.reshape(-1, 1, 3).astype(np.float64)
+        valid = np.isfinite(pts[..., 0]).ravel()
+        if valid.any():
+            pL_2d, _ = cv2.projectPoints(pts[valid], np.zeros(3), np.zeros(3), K1, d1)
+            pR_2d, _ = cv2.projectPoints(pts[valid], rvecR, T, K2, d2)
+            proj_L = np.full((N * J, 2), np.nan)
+            proj_R = np.full((N * J, 2), np.nan)
+            proj_L[valid] = pL_2d.reshape(-1, 2)
+            proj_R[valid] = pR_2d.reshape(-1, 2)
+            res_L = np.linalg.norm(proj_L.reshape(N, J, 2) - mp_L, axis=-1)
+            res_R = np.linalg.norm(proj_R.reshape(N, J, 2) - mp_R, axis=-1)
+            base_L = np.nanmedian(res_L, axis=0, keepdims=True)
+            base_R = np.nanmedian(res_R, axis=0, keepdims=True)
+            base_L = np.where(np.isfinite(base_L), base_L, 0.0)
+            base_R = np.where(np.isfinite(base_R), base_R, 0.0)
+            stereo_dev_L = res_L - base_L
+            stereo_dev_R = res_R - base_R
+
+    # ── Camera-attribution helpers (2D + 3D step magnitudes) ──
+    step_2d_L = np.zeros((N, J), dtype=np.float64)
+    step_2d_R = np.zeros((N, J), dtype=np.float64)
+    step_3d = np.zeros((N, J), dtype=np.float64)
+    if N > 1:
+        step_2d_L[1:] = np.linalg.norm(mp_L[1:] - mp_L[:-1], axis=-1)
+        step_2d_R[1:] = np.linalg.norm(mp_R[1:] - mp_R[:-1], axis=-1)
+        step_3d[1:] = np.linalg.norm(init_3d[1:] - init_3d[:-1], axis=-1)
+
+    # ── Per-camera scalars (MP conf / HRnet scores) ───────────
+    mpconf_L_arr = np.full(N, np.nan, dtype=np.float64)
+    mpconf_R_arr = np.full(N, np.nan, dtype=np.float64)
+    if confidence_L is not None:
+        m = min(N, len(confidence_L))
+        mpconf_L_arr[:m] = np.asarray(confidence_L[:m], dtype=np.float64)
+    if confidence_R is not None:
+        m = min(N, len(confidence_R))
+        mpconf_R_arr[:m] = np.asarray(confidence_R[:m], dtype=np.float64)
+    hrnet_L_arr = np.full((N, J), np.nan, dtype=np.float64)
+    hrnet_R_arr = np.full((N, J), np.nan, dtype=np.float64)
+    if hrnet_L is not None:
+        H = np.asarray(hrnet_L)
+        if H.ndim == 2 and H.shape[1] == J:
+            m = min(N, H.shape[0]); hrnet_L_arr[:m] = H[:m]
+    if hrnet_R is not None:
+        H = np.asarray(hrnet_R)
+        if H.ndim == 2 and H.shape[1] == J:
+            m = min(N, H.shape[0]); hrnet_R_arr[:m] = H[:m]
+
+    # NaNs in float32 are preserved across the wire and round-trip
+    # cleanly to JS Float32Array.  The client treats NaN as
+    # "no information" (no flag).
+    return {
+        "vel_z":          vel_z.astype(f32),
+        "accel_z":        accel_z.astype(f32),
+        "bone_z":         bone_z.astype(f32),
+        "z_dev":          z_dev.astype(f32),
+        "ydisp_dev":      ydisp_dev.astype(f32),
+        "stereo_dev_L":   stereo_dev_L.astype(f32),
+        "stereo_dev_R":   stereo_dev_R.astype(f32),
+        "step_2d_L":      step_2d_L.astype(f32),
+        "step_2d_R":      step_2d_R.astype(f32),
+        "step_3d":        step_3d.astype(f32),
+        "mpconf_L":       mpconf_L_arr.astype(f32),
+        "mpconf_R":       mpconf_R_arr.astype(f32),
+        "hrnet_L":        hrnet_L_arr.astype(f32),
+        "hrnet_R":        hrnet_R_arr.astype(f32),
+        "bones":          [[int(a), int(b)] for a, b in bones],
+        "N":              int(N),
+        "J":              int(J),
+    }
+
+
+# ──────────────────────────────────────────────────────────────────
+# Composer (server-side, used by Skel Fit v1's internal detector)
 # ──────────────────────────────────────────────────────────────────
 
 def detect_mask(
