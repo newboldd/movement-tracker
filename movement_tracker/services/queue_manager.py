@@ -977,6 +977,9 @@ class QueueManager:
                                     w_smooth=ep.get("w_smooth", 1.0),
                                     snap_bones=ep.get("snap_bones", False),
                                     w_angle=ep.get("w_angle", 0.0),
+                                    accel_k=ep.get("accel_k", 6.0),
+                                    bone_k=ep.get("bone_k", 6.0),
+                                    k_max=ep.get("k_max", 30),
                                 )
                                 # Detect outcome by file presence: if
                                 # skeleton_v1.npz now exists, mark ok.
@@ -1013,6 +1016,9 @@ class QueueManager:
                                 # Joint-angle regularization is no longer
                                 # exposed in the UI; default to 0.
                                 w_angle=ep.get("w_angle", 0.0),
+                                accel_k=ep.get("accel_k", 6.0),
+                                bone_k=ep.get("bone_k", 6.0),
+                                k_max=ep.get("k_max", 30),
                             )
                         elif job_type == "skeleton_v2":
                             # v2 = legacy smoothing fit (writes skeleton_v2.npz)

@@ -1327,6 +1327,9 @@ async function submitJob() {
                 const w_bone   = parseFloat(document.getElementById('skelfitSliderBone')?.value   ?? 5);
                 const w_smooth = parseFloat(document.getElementById('skelfitSliderSmooth')?.value ?? 1);
                 const snap_bones = !!document.getElementById('skelfitSnapBones')?.checked;
+                const accel_k = parseFloat(document.getElementById('skelfitSliderAccelK')?.value ?? 6);
+                const bone_k  = parseFloat(document.getElementById('skelfitSliderBoneK')?.value  ?? 6);
+                const k_max   = parseInt(document.getElementById('skelfitSliderKmax')?.value     ?? 30);
                 await API.post('/api/remote/launch', {
                     job_type: 'skeleton_v1',
                     subject_ids: subjIds,
@@ -1335,6 +1338,7 @@ async function submitJob() {
                     extra_params: {
                         trials: trialEntries,
                         w_reproj, w_bone, w_smooth, snap_bones,
+                        accel_k, bone_k, k_max,
                         // Joint-angle weight no longer exposed — keep
                         // the optimizer from running that term.
                         w_angle: 0,
@@ -2835,4 +2839,22 @@ window.closeTrialsModal = closeTrialsModal;
     await loadSubjects();
     await refreshQueue();
     connectQueueStream();
+    // Live value labels for the Jobs-page Skel Fit v1 sliders.
+    [
+        ['skelfitSliderReproj', 'skelfitWReproj'],
+        ['skelfitSliderBone',   'skelfitWBone'],
+        ['skelfitSliderSmooth', 'skelfitWSmooth'],
+        ['skelfitSliderAccelK', 'skelfitWAccelK'],
+        ['skelfitSliderBoneK',  'skelfitWBoneK'],
+        ['skelfitSliderKmax',   'skelfitWKmax'],
+    ].forEach(([sId, dId]) => {
+        const s = document.getElementById(sId);
+        const d = document.getElementById(dId);
+        if (!s || !d) return;
+        const sync = () => { d.textContent = (sId === 'skelfitSliderKmax')
+            ? String(parseInt(s.value || '0'))
+            : Number(s.value).toFixed(1); };
+        s.addEventListener('input', sync);
+        sync();
+    });
 })();

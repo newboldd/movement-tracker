@@ -87,6 +87,10 @@ def run_skeleton_v1_fit(
     w_smooth: float = 1.0,
     snap_bones: bool = False,
     w_angle: float = 2.0,
+    # Outlier pre-filter thresholds (see _detect_outlier_per_joint).
+    accel_k: float = 6.0,
+    bone_k: float = 6.0,
+    k_max: int = 30,
 ) -> dict[str, Any]:
     """Run Stage 1 skeleton fitting for a single trial.
 
@@ -258,7 +262,7 @@ def run_skeleton_v1_fit(
     #      2.0) for each masked joint.
     joint_outlier_mask, camera_mask = _detect_outlier_per_joint(
         init_3d, mp_L[valid_idx], mp_R[valid_idx], BONES,
-        K_max=30, accel_k=6.0, bone_k=6.0,
+        K_max=int(k_max), accel_k=float(accel_k), bone_k=float(bone_k),
         k_blame_joint=2.0, k_blame_camera=2.0,
     )
     n_joint_outliers = int(joint_outlier_mask.sum())

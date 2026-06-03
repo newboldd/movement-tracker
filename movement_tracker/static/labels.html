@@ -682,7 +682,46 @@
                 </label>
                 <!-- Joint-angle weight removed — the feature is no
                      longer exposed; the fit runs with w_angle = 0. -->
-                <div style="display:flex;gap:4px;">
+
+                <!-- ── MP-combined outlier pre-filter ───────────
+                     These three sliders control _detect_outlier_per_joint:
+                     lower accel/bone = more aggressive masking;
+                     K-max limits the longest run length that can pair. -->
+                <div style="border-top:1px solid var(--border);margin-top:6px;padding-top:6px;">
+                    <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;font-weight:600;">
+                        Outlier pre-filter
+                        <span id="fitOutlierCount" style="float:right;font-weight:400;"></span>
+                    </div>
+                    <div style="font-size:11px;margin-bottom:4px;"
+                         title="Per-joint 3D acceleration z-score threshold for run-boundary detection.  Lower = more aggressive masking.  6 ≈ 99.7% of Gaussian tail.">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <label style="color:var(--text-muted);">Accel sensitivity (MAD)</label>
+                            <span id="fitWAccelK" style="color:var(--text-muted);font-weight:bold;">6.0</span>
+                        </div>
+                        <input type="range" id="fitSliderAccelK" min="2" max="12" step="0.5" value="6"
+                               style="width:100%;cursor:pointer;height:5px;">
+                    </div>
+                    <div style="font-size:11px;margin-bottom:4px;"
+                         title="Per-bone length z-score threshold.  A bone counts as anomalous when its length is this many MAD away from the trial median.  Lower = more aggressive.">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <label style="color:var(--text-muted);">Bone sensitivity (MAD)</label>
+                            <span id="fitWBoneK" style="color:var(--text-muted);font-weight:bold;">6.0</span>
+                        </div>
+                        <input type="range" id="fitSliderBoneK" min="2" max="12" step="0.5" value="6"
+                               style="width:100%;cursor:pointer;height:5px;">
+                    </div>
+                    <div style="font-size:11px;margin-bottom:4px;"
+                         title="Maximum number of frames between paired opposite-direction acceleration spikes.  Caps the run length the detector can match.  At 60 fps, 30 ≈ 0.5 s.">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <label style="color:var(--text-muted);">Max run length (frames)</label>
+                            <span id="fitWKmax" style="color:var(--text-muted);font-weight:bold;">30</span>
+                        </div>
+                        <input type="range" id="fitSliderKmax" min="5" max="60" step="1" value="30"
+                               style="width:100%;cursor:pointer;height:5px;">
+                    </div>
+                </div>
+
+                <div style="display:flex;gap:4px;margin-top:6px;">
                     <button class="btn btn-sm btn-success" id="runStage1Btn" style="flex:1;" onclick="manoViewer.runStage1()">Run</button>
                     <button class="btn btn-sm" style="font-size:10px;padding:2px 6px;" onclick="manoViewer.resetFitDefaults()">Reset</button>
                     <button class="btn btn-sm" id="fitCancelBtn" style="font-size:10px;padding:2px 6px;">Close</button>
@@ -1206,7 +1245,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=389" type="module"></script>
+    <script src="/static/js/labels.js?v=390" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

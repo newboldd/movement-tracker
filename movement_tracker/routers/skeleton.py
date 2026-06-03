@@ -332,6 +332,12 @@ class FitRequest(BaseModel):
     # default to 0 so the optimizer skips the term unless an old
     # caller explicitly passes a value.
     w_angle: float = 0.0
+    # Outlier-detection thresholds (see _detect_outlier_per_joint).
+    # accel_k / bone_k: lower values mask more aggressively.
+    # k_max: longest run length the spike-pair detector accepts.
+    accel_k: float = 6.0
+    bone_k: float = 6.0
+    k_max: int = 30
 
 
 @router.get("/{subject_id}/fit/status")
@@ -385,6 +391,113 @@ def stereo_disparity_by_name(
                 f"Available: {[t.get('trial_name') for t in tmap]}",
             )
     return trial_stereo_disparity(sid, tidx)
+
+
+class OutlierPreviewRequest(BaseModel):
+    trial_idx: int
+    accel_k: float = 6.0
+    bone_k: float = 6.0
+    k_max: int = 30
+
+
+@router.post("/{subject_id}/outlier_preview")
+def outlier_preview(subject_id: int, req: OutlierPreviewRequest) -> dict:
+    """Run the Skel Fit v1 outlier detector on the requested trial
+    and return the per-(frame, joint) and per-(frame, joint, camera)
+    masks.  Used by the Labels page to live-preview which MP-combined
+    frames will be filtered out under the current threshold sliders.
+
+    Cheap: runs the same triangulation + detector the fit'\''s pre-pass
+    uses (~50-200 ms per trial); no optimization."""
+    import numpy as np
+    from ..services.calibration import get_calibration_for_subject, triangulate_points
+    from ..services.skeleton_data import _load_trial_calibration
+    from ..services.skeleton_v1 import _detect_outlier_per_joint, BONES
+    from ..services.mediapipe_prelabel import (
+        load_mediapipe_combined_prelabels, load_mediapipe_prelabels,
+    )
+
+    name = _subject_name(subject_id)
+    tmap = build_trial_map(name)
+    if req.trial_idx < 0 or req.trial_idx >= len(tmap):
+        raise HTTPException(404, f"Trial index {req.trial_idx} out of range")
+    trial = tmap[req.trial_idx]
+    trial_stem = trial["trial_name"]
+    n_frames = trial["frame_count"]
+    start = trial.get("start_frame", 0)
+
+    prelabels = (load_mediapipe_combined_prelabels(name)
+                 or load_mediapipe_prelabels(name))
+    if prelabels is None:
+        raise HTTPException(404, "No MediaPipe prelabels for subject")
+    os_lm = prelabels["OS_landmarks"]
+    od_lm = prelabels["OD_landmarks"]
+    end = min(start + n_frames, os_lm.shape[0])
+    mp_L = os_lm[start:end].copy()
+    mp_R = od_lm[start:end].copy()
+    N_total = mp_L.shape[0]
+
+    calib = _load_trial_calibration(name, trial_stem)
+    if calib is None:
+        calib = get_calibration_for_subject(name)
+    if calib is None:
+        raise HTTPException(404, "No stereo calibration for subject")
+
+    # Triangulate per joint, then build init_3d on valid frames the
+    # same way the fit does (wrist fallback for stray NaNs).
+    mp_3d = np.full((N_total, 21, 3), np.nan)
+    for j in range(21):
+        mp_3d[:, j, :] = triangulate_points(mp_L[:, j, :], mp_R[:, j, :], calib)
+    valid_mask = (
+        ~np.isnan(mp_L[:, 0, 0])
+        & ~np.isnan(mp_R[:, 0, 0])
+        & ~np.isnan(mp_3d[:, 0, 0])
+    )
+    valid_idx = np.where(valid_mask)[0]
+    n_valid = len(valid_idx)
+    if n_valid < 5:
+        return {
+            "n_frames": int(N_total), "n_valid": int(n_valid),
+            "joint_mask": [], "frame_mask": [],
+            "n_cells_masked": 0, "n_frames_masked": 0,
+            "n_cam_L_masked": 0, "n_cam_R_masked": 0,
+        }
+    init_3d = mp_3d[valid_idx].copy()
+    for i in range(n_valid):
+        for j in range(21):
+            if np.isnan(init_3d[i, j, 0]):
+                if not np.isnan(init_3d[i, 0, 0]):
+                    init_3d[i, j] = init_3d[i, 0]
+                else:
+                    init_3d[i, j] = [0.0, 0.0, 500.0]
+
+    joint_mask_v, cam_mask_v = _detect_outlier_per_joint(
+        init_3d, mp_L[valid_idx], mp_R[valid_idx], BONES,
+        K_max=int(req.k_max), accel_k=float(req.accel_k),
+        bone_k=float(req.bone_k),
+        k_blame_joint=2.0, k_blame_camera=2.0,
+    )
+    # Lift to full-trial coordinates (frames dropped from valid_idx
+    # are reported as unmasked here — they have no MP data anyway,
+    # so the Labels page just plots nothing there).
+    joint_mask_full = np.zeros((N_total, 21), dtype=bool)
+    joint_mask_full[valid_idx] = joint_mask_v
+    cam_mask_full = np.zeros((N_total, 21, 2), dtype=bool)
+    cam_mask_full[valid_idx] = cam_mask_v
+    frame_mask_full = joint_mask_full.any(axis=1)
+
+    return {
+        "n_frames": int(N_total),
+        "n_valid": int(n_valid),
+        # Per (frame, joint) bool, transposed to a list of N arrays
+        # of length 21 for JSON compactness.
+        "joint_mask": joint_mask_full.astype(bool).tolist(),
+        "frame_mask": frame_mask_full.astype(bool).tolist(),
+        "n_cells_masked":   int(joint_mask_full.sum()),
+        "n_frames_masked":  int(frame_mask_full.sum()),
+        "n_cam_L_masked":   int(cam_mask_full[:, :, 0].sum()),
+        "n_cam_R_masked":   int(cam_mask_full[:, :, 1].sum()),
+    }
 
 
 @router.get("/{subject_id}/trial/{trial_idx}/stereo_disparity")
@@ -603,6 +716,9 @@ def run_fit(subject_id: int, req: FitRequest) -> dict:
                 w_smooth=req.w_smooth,
                 snap_bones=req.snap_bones,
                 w_angle=req.w_angle,
+                accel_k=req.accel_k,
+                bone_k=req.bone_k,
+                k_max=req.k_max,
             )
 
             if result.get("cancelled"):

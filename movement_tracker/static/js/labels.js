@@ -14,6 +14,15 @@ const manoViewer = (() => {
     let trials = [];
     let currentTrialIdx = -1;
     let trialData = null;
+    // Live-preview state for the v1 outlier pre-filter.  Set by
+    // _refreshV1OutlierPreview() whenever the fit panel is open and
+    // a threshold slider changes; consumed by renderDistanceTrace to
+    // gray out the MP-combined trace on frames where any joint
+    // contributing to the active metric would be masked.  Shape
+    // (n_frames, 21) bool; null when the panel is closed.
+    let _v1OutlierMask = null;
+    let _v1OutlierPreviewT = null;     // debounce timer
+    let _v1OutlierPreviewSeq = 0;      // race-guard against late responses
 
     let currentFrame = 0;
     let currentSide = 'OS';
@@ -860,11 +869,27 @@ const manoViewer = (() => {
                 $('fitV2Panel').style.display = 'none';
                 $('fitSkeletonV2Btn').classList.remove('active');
                 _restoreV1Params();
+                _refreshV1OutlierPreview();
+            } else {
+                _v1OutlierMask = null;
+                const countEl = $('fitOutlierCount');
+                if (countEl) countEl.textContent = '';
+                renderDistanceTrace();
             }
         });
         $('fitCancelBtn').addEventListener('click', () => {
             $('fitOptionsPanel').style.display = 'none';
             $('fitSkeletonBtn').classList.remove('active');
+            _v1OutlierMask = null;
+            const countEl = $('fitOutlierCount');
+            if (countEl) countEl.textContent = '';
+            renderDistanceTrace();
+        });
+        // Live-preview when the user adjusts any of the three
+        // outlier-threshold sliders.
+        ['fitSliderAccelK', 'fitSliderBoneK', 'fitSliderKmax'].forEach(id => {
+            const el = $(id);
+            if (el) el.addEventListener('input', _refreshV1OutlierPreview);
         });
 
         // Fit Skeleton v2 expand/collapse — toggle panel, highlight button
@@ -1299,7 +1324,17 @@ const manoViewer = (() => {
         btns.forEach((b, i) => b.classList.toggle('active', i === idx));
     }
 
+    function _clearV1OutlierPreview() {
+        if (_v1OutlierPreviewT) { clearTimeout(_v1OutlierPreviewT); _v1OutlierPreviewT = null; }
+        _v1OutlierMask = null;
+        const countEl = $('fitOutlierCount');
+        if (countEl) countEl.textContent = '';
+    }
+
     async function loadTrial(idx) {
+        // Trial change → drop any stale outlier preview (the mask
+        // shape is tied to this trial's frame count).
+        _clearV1OutlierPreview();
         if (idx < 0 || idx >= trials.length) return;
         const trial = trials[idx];
         currentTrialIdx = idx;
@@ -1394,6 +1429,9 @@ const manoViewer = (() => {
         // Restore fitting sliders + constraints from last fit
         _restoreV1Params();
         _restoreV2Params();
+        // Re-fetch the outlier preview if the v1 panel happens to
+        // still be open (rare across trial changes, but harmless).
+        _refreshV1OutlierPreview();
 
         // Populate previous fit dropdown
         prevFitData = null;
@@ -5598,7 +5636,25 @@ const manoViewer = (() => {
             const revMask  = _makeInFrameMask(trialData.reverse_tracked_L, trialData.reverse_tracked_R, joints);
             const crpMask  = _makeInFrameMask(trialData.cropped_tracked_L, trialData.cropped_tracked_R, joints);
             const sttMask  = _makeInFrameMask(trialData.static_tracked_L, trialData.static_tracked_R, joints);
-            const cmbMask  = _makeInFrameMask(trialData.combined_tracked_L, trialData.combined_tracked_R, joints);
+            let cmbMask  = _makeInFrameMask(trialData.combined_tracked_L, trialData.combined_tracked_R, joints);
+            // When the v1 fit panel is open and a live-preview mask
+            // is loaded, drop combined-source frames where any
+            // joint contributing to the active metric would be
+            // masked by the outlier pre-filter at the current
+            // slider settings.  cmbMask is per-frame; AND in 0 on
+            // those frames.
+            if (_v1OutlierMask && Array.isArray(_v1OutlierMask) && joints && joints.length) {
+                const nF = Math.min(cmbMask.length, _v1OutlierMask.length);
+                for (let i = 0; i < nF; i++) {
+                    const row = _v1OutlierMask[i];
+                    if (!row) continue;
+                    let masked = false;
+                    for (const j of joints) {
+                        if (row[j]) { masked = true; break; }
+                    }
+                    if (masked) cmbMask[i] = 0;
+                }
+            }
             const manoMask = _makeInFrameMask(trialData.skeleton_proj_L,      trialData.skeleton_proj_R,      joints);
             const visMask  = _makeInFrameMask(trialData.vision_tracked_L, trialData.vision_tracked_R, joints);
 
@@ -8388,6 +8444,43 @@ const manoViewer = (() => {
         if (el && val != null) { el.value = val; el.dispatchEvent(new Event('input')); }
     }
 
+    // Fetch the per-(frame, joint) outlier mask for the current
+    // trial using the current threshold slider values.  Debounced
+    // (80 ms) on slider input; race-guarded so a late response from
+    // an earlier slider position can't overwrite a newer one.  Only
+    // runs when the v1 fit panel is actually open.
+    function _refreshV1OutlierPreview() {
+        if (_v1OutlierPreviewT) clearTimeout(_v1OutlierPreviewT);
+        const panel = $('fitOptionsPanel');
+        if (!panel || panel.style.display !== 'block') return;
+        if (!subjectId || currentTrialIdx < 0 || !trials?.[currentTrialIdx]) return;
+        const trialIdx = trials[currentTrialIdx].trial_idx;
+        const accel_k = parseFloat($('fitSliderAccelK')?.value ?? 6);
+        const bone_k  = parseFloat($('fitSliderBoneK')?.value  ?? 6);
+        const k_max   = parseInt($('fitSliderKmax')?.value     ?? 30);
+        const seq = ++_v1OutlierPreviewSeq;
+        _v1OutlierPreviewT = setTimeout(async () => {
+            try {
+                const data = await api(`/api/skeleton/${subjectId}/outlier_preview`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ trial_idx: trialIdx, accel_k, bone_k, k_max }),
+                });
+                if (seq !== _v1OutlierPreviewSeq) return;   // a newer request already in flight
+                _v1OutlierMask = data?.joint_mask || null;
+                const countEl = $('fitOutlierCount');
+                if (countEl && data) {
+                    countEl.textContent =
+                        `${data.n_frames_masked} frames · ${data.n_cells_masked} cells · `
+                      + `L=${data.n_cam_L_masked} R=${data.n_cam_R_masked}`;
+                }
+                renderDistanceTrace();
+            } catch (e) {
+                console.warn('outlier preview failed:', e);
+            }
+        }, 80);
+    }
+
     // Restore sliders from saved fit params (called when panel opens)
     function _restoreV1Params() {
         const p = trialData?.v1_fit_params;
@@ -8398,6 +8491,9 @@ const manoViewer = (() => {
         // Joint-angle slider was removed; no UI element to set.
         const snap = $('fitSnapBones');
         if (snap && p.snap_bones != null) snap.checked = p.snap_bones;
+        if (p.accel_k != null) _setSlider('fitSliderAccelK', p.accel_k);
+        if (p.bone_k  != null) _setSlider('fitSliderBoneK',  p.bone_k);
+        if (p.k_max   != null) _setSlider('fitSliderKmax',   p.k_max);
     }
 
     function _restoreV2Params() {
@@ -8478,12 +8574,16 @@ const manoViewer = (() => {
     }
 
     function resetFitDefaults() {
-        const defaults = { fitSliderReproj: 1, fitSliderBone: 5, fitSliderSmooth: 1 };
+        const defaults = {
+            fitSliderReproj: 1, fitSliderBone: 5, fitSliderSmooth: 1,
+            fitSliderAccelK: 6, fitSliderBoneK: 6, fitSliderKmax: 30,
+        };
         for (const [id, val] of Object.entries(defaults)) {
             _setSlider(id, val);
         }
         const snap = $('fitSnapBones');
         if (snap) snap.checked = false;
+        _refreshV1OutlierPreview();
     }
 
 
@@ -8495,6 +8595,9 @@ const manoViewer = (() => {
             { id: 'fitSliderReproj',      display: 'fitWReproj' },
             { id: 'fitSliderBone',         display: 'fitWBone' },
             { id: 'fitSliderSmooth',       display: 'fitWSmooth' },
+            { id: 'fitSliderAccelK',       display: 'fitWAccelK' },
+            { id: 'fitSliderBoneK',        display: 'fitWBoneK' },
+            { id: 'fitSliderKmax',         display: 'fitWKmax' },
             // v2
             { id: 'v2SliderMediapipe',     display: 'v2WMediapipe' },
             { id: 'v2SliderVision',        display: 'v2WVision' },
@@ -8536,6 +8639,10 @@ const manoViewer = (() => {
             // Joint-angle regularization is no longer a feature;
             // explicitly request 0 from the backend.
             w_angle: 0,
+            // Outlier pre-filter thresholds.
+            accel_k: parseFloat($('fitSliderAccelK')?.value ?? 6),
+            bone_k:  parseFloat($('fitSliderBoneK')?.value  ?? 6),
+            k_max:   parseInt($('fitSliderKmax')?.value     ?? 30),
         };
 
         try {

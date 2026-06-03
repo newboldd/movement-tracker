@@ -440,6 +440,33 @@
                         <input type="checkbox" id="skelfitSnapBones" style="margin:0;cursor:pointer;">
                         Snap bone lengths
                     </label>
+                    <!-- Outlier pre-filter thresholds.  Same defaults
+                         as the Labels-page panel; passed through
+                         extra_params.{accel_k, bone_k, k_max}. -->
+                    <div style="font-size:11px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <label style="color:var(--text-muted);">Accel sensitivity (MAD)</label>
+                            <span id="skelfitWAccelK" style="color:var(--text-muted);font-weight:bold;">6.0</span>
+                        </div>
+                        <input type="range" id="skelfitSliderAccelK" min="2" max="12" step="0.5" value="6"
+                               style="width:100%;cursor:pointer;height:5px;">
+                    </div>
+                    <div style="font-size:11px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <label style="color:var(--text-muted);">Bone sensitivity (MAD)</label>
+                            <span id="skelfitWBoneK" style="color:var(--text-muted);font-weight:bold;">6.0</span>
+                        </div>
+                        <input type="range" id="skelfitSliderBoneK" min="2" max="12" step="0.5" value="6"
+                               style="width:100%;cursor:pointer;height:5px;">
+                    </div>
+                    <div style="font-size:11px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <label style="color:var(--text-muted);">Max run length (frames)</label>
+                            <span id="skelfitWKmax" style="color:var(--text-muted);font-weight:bold;">30</span>
+                        </div>
+                        <input type="range" id="skelfitSliderKmax" min="5" max="60" step="1" value="30"
+                               style="width:100%;cursor:pointer;height:5px;">
+                    </div>
                 </div>
             </div>
 
@@ -601,7 +628,7 @@
 
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js?v=13"></script>
-    <script src="/static/js/remote.js?v=68"></script>
+    <script src="/static/js/remote.js?v=69"></script>
     <script src="/static/js/cache_results.js?v=2"></script>
 </body>
 </html>
