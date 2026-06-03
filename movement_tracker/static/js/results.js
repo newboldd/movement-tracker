@@ -174,32 +174,49 @@ function _handlePlotClick(divId, ev) {
 
 function _applyHighlightAll() {
     if (!_clickHL) return;
-    // Apply to every distance/velocity plot (all trials) and every
-    // movement plot (subplot per trial).
-    document.querySelectorAll('[id^="distPlot_"], [id^="velPlot_"], [id^="movPlot_"], [id^="distMovPlot_"]')
+    // Highlight is scoped to the clicked trial: only that trial's
+    // dist/vel plot, and only that trial's subplot inside each
+    // movement / dist-movement plot.  Other trials stay clean — the
+    // x-axes there don't share a coordinate system with the click.
+    const { trialIdx } = _clickHL;
+    _applyHighlightTo(`distPlot_${trialIdx}`);
+    _applyHighlightTo(`velPlot_${trialIdx}`);
+    // Clear any stale highlights on OTHER trials' dist/vel plots so
+    // re-clicks on a different trial don't leave a phantom line
+    // behind from the previous click.
+    document.querySelectorAll('[id^="distPlot_"], [id^="velPlot_"]').forEach(d => {
+        if (d.id !== `distPlot_${trialIdx}` && d.id !== `velPlot_${trialIdx}`) {
+            _clearHighlightOn(d.id);
+        }
+    });
+    document.querySelectorAll('[id^="movPlot_"], [id^="distMovPlot_"]')
         .forEach(d => _applyHighlightTo(d.id));
+}
+
+function _clearHighlightOn(divId) {
+    const div = document.getElementById(divId);
+    if (!div || !div.layout) return;
+    const base = _baseShapeCount[divId] || 0;
+    const shapes = (div.layout.shapes || []).slice(0, base);
+    try { Plotly.relayout(divId, { shapes }); } catch (_) {}
 }
 
 function _applyHighlightTo(divId) {
     if (!_clickHL) return;
     const div = document.getElementById(divId);
     if (!div || !div.layout) return;
-    const { time } = _clickHL;
+    const { trialIdx, time } = _clickHL;
     const base = _baseShapeCount[divId] || 0;
     const shapes = (div.layout.shapes || []).slice(0, base);
     const lineStyle = { color: 'rgba(0,0,0,0.45)', width: 1, dash: 'dot' };
     if (divId.startsWith('movPlot_') || divId.startsWith('distMovPlot_')) {
-        // Movement / dist-movement plots have one subplot per trial —
-        // paint the line in EVERY subplot's x-axis.
-        const xaxes = Object.keys(div.layout)
-            .filter(k => /^xaxis(\d+)?$/.test(k))
-            .map(k => k === 'xaxis' ? 'x' : 'x' + k.slice('xaxis'.length));
-        xaxes.forEach(axId => {
-            shapes.push({
-                type: 'line', xref: axId, yref: 'paper',
-                x0: time, x1: time, y0: 0, y1: 1,
-                line: lineStyle, layer: 'above',
-            });
+        // Per-trial subplots — paint only on the clicked trial's
+        // subplot.  Trial 0 uses 'x', trial N uses 'x{N+1}'.
+        const axId = trialIdx === 0 ? 'x' : 'x' + (trialIdx + 1);
+        shapes.push({
+            type: 'line', xref: axId, yref: 'paper',
+            x0: time, x1: time, y0: 0, y1: 1,
+            line: lineStyle, layer: 'above',
         });
     } else {
         // Dist/Vel plots — single xaxis 'x'.
