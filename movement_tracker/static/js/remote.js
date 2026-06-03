@@ -275,11 +275,34 @@ function selectStep(step) {
     document.querySelectorAll('.step-btn').forEach(b => {
         b.classList.toggle('active', b.dataset.step === step);
     });
+    // Cache Results steps swap the per-job pickers (target / subjects
+    // / trials / submit) for a settings panel.  Mounted by
+    // cache_results.js via window.cacheResultsMount(page).
+    const isCacheStep = (step === 'cache_group' || step === 'cache_explore');
+    const cacheBody = document.getElementById('cacheStepBody');
+    // Sections to hide while a cache step is active.  ``[data-cache-hide="1"]``
+    // wraps stuff that's already in the Launch Job card; we also
+    // grab a few well-known ids that aren't tagged.
+    const hideEls = [
+        document.querySelector('#trialSection'),
+        document.querySelector('#subjectGrid')?.parentElement,
+        document.querySelector('.toolbar'),
+        document.querySelector('#jobWarning'),
+    ].filter(Boolean);
+    const submitRow = document.querySelector('button.btn-primary[onclick="submitJob()"]')?.parentElement;
+    if (submitRow) hideEls.push(submitRow);
+    hideEls.forEach(el => { el.dataset._origDisplay ??= el.style.display || ''; el.style.display = isCacheStep ? 'none' : el.dataset._origDisplay; });
+    if (cacheBody) {
+        cacheBody.style.display = isCacheStep ? '' : 'none';
+        if (isCacheStep && typeof window.cacheResultsMount === 'function') {
+            window.cacheResultsMount(step === 'cache_group' ? 'group' : 'explore');
+        }
+    }
     updateStepAvailability();
     updateJobWarning();
     colorSubjectsByStep();
     if (isTrialStep()) updateTrialSection();
-    document.getElementById('trialSection').style.display = isTrialStep() ? '' : 'none';
+    document.getElementById('trialSection').style.display = (isTrialStep() && !isCacheStep) ? '' : 'none';
     // MediaPipe-only "Run in reverse" + "Use bounding box" options.
     // Cleared / reset whenever the user switches away from MediaPipe
     // so a stale state doesn't accidentally tag a different step's launch.

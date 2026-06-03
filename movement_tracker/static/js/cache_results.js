@@ -1,26 +1,22 @@
-/* Cache Results: Jobs-page card with two collapsible jobs
-   (Group Comparisons + Explore) that show + edit + rebuild the
-   per-page static-cache config.  Source of truth lives in
-   <DATA_DIR>/cache_config.json on the backend (via
-   services/cache_config.py); the Results page reads the same file. */
+/* Cache Results: integrates with the existing Jobs-page step-button
+   pattern.  When the user clicks the Group Comparison or Explore
+   step button, selectStep() in remote.js hides the per-subject
+   pickers + Launch button and invokes window.cacheResultsMount(page).
+   This file renders the settings panel (sources / seq modes /
+   hand-trial pairs) into #cacheStepBody, shows current cache size,
+   exposes Revert / Cache, and polls progress while a rebuild is
+   running.  Source of truth: <DATA_DIR>/cache_config.json on the
+   backend (services/cache_config.py) — the same file the Results
+   page consults for cache-hit checks. */
 (function () {
-    const PAGES = [
-        { id: 'group',   title: 'Group Comparisons' },
-        { id: 'explore', title: 'Explore' },
-    ];
-
     // ── State ──────────────────────────────────────────────────
-    // ``serverCfg`` is the last config the backend persisted; we
-    // compare against it to decide whether to show Revert+Cache.
-    let serverCfg = null;
-    let domains   = null;
-    let labels    = null;
-    let cacheInfo = null;
-    let runs      = {};
-    // ``localCfg[page]`` is what the UI currently shows — a mutable
-    // copy of serverCfg[page] until the user clicks Revert/Cache.
+    let serverCfg = null;   // last persisted config (per page)
+    let domains   = null;   // every legal value per axis
+    let labels    = null;   // human-friendly per-value labels
+    let cacheInfo = null;   // { bytes, files }
+    let runs      = {};     // per-page rebuild progress
     const localCfg = { group: null, explore: null };
-    const expanded = new Set();
+    let mountedPage = null; // 'group' / 'explore' / null
 
     // ── Helpers ────────────────────────────────────────────────
     function _fmtSize(n) {
@@ -52,81 +48,75 @@
         labels    = data.labels;
         cacheInfo = data.cache;
         runs      = data.runs || {};
-        for (const p of PAGES) localCfg[p.id] = _cloneCfg(serverCfg[p.id]);
-        render();
+        for (const id of ['group', 'explore']) {
+            if (!localCfg[id]) localCfg[id] = _cloneCfg(serverCfg[id]);
+        }
     }
 
     // ── Render ─────────────────────────────────────────────────
     function render() {
-        const totalLbl = document.getElementById('cacheTotalLabel');
-        if (totalLbl) {
-            totalLbl.textContent = cacheInfo
-                ? `Cache size on disk: ${_fmtSize(cacheInfo.bytes)} · ${cacheInfo.files} files`
-                : '';
+        const body = document.getElementById('cacheStepBody');
+        if (!body || !mountedPage) return;
+        body.innerHTML = '';
+
+        const cfg = localCfg[mountedPage];
+        const dirty = !_cfgEq(cfg, serverCfg[mountedPage]);
+        const run = runs[mountedPage];
+
+        // Header line: size on disk + run badge.
+        const head = document.createElement('div');
+        head.style.cssText = 'display:flex;align-items:center;gap:12px;margin-bottom:10px;';
+        const title = document.createElement('span');
+        title.style.cssText = 'font-weight:600;font-size:13px;';
+        title.textContent = mountedPage === 'group' ? 'Group Comparison cache' : 'Explore cache';
+        head.appendChild(title);
+        const sizeLbl = document.createElement('span');
+        sizeLbl.style.cssText = 'font-size:11px;color:var(--text-muted);flex:1 1 auto;';
+        sizeLbl.textContent = cacheInfo
+            ? `Cache on disk: ${_fmtSize(cacheInfo.bytes)} · ${cacheInfo.files} files (both pages combined)`
+            : '';
+        head.appendChild(sizeLbl);
+        if (run) {
+            const badge = document.createElement('span');
+            badge.style.cssText = 'font-size:11px;';
+            if (run.status === 'running' || run.status === 'starting') {
+                const pct = run.n_total ? Math.round(100 * run.n_done / run.n_total) : 0;
+                badge.style.color = 'var(--blue)';
+                badge.textContent = `running · ${run.n_done}/${run.n_total} (${pct}%)`;
+            } else if (run.status === 'done') {
+                badge.style.color = 'var(--green)';
+                badge.textContent = `last run wrote ${run.n_written}`;
+            } else if (run.status === 'error') {
+                badge.style.color = 'var(--red)';
+                badge.textContent = `error: ${run.error || 'unknown'}`;
+            }
+            head.appendChild(badge);
         }
-        const row = document.getElementById('cacheJobsRow');
-        if (!row) return;
-        row.innerHTML = '';
-        for (const p of PAGES) row.appendChild(_buildJobCard(p));
-    }
+        body.appendChild(head);
 
-    function _buildJobCard(page) {
-        const cfg = localCfg[page.id];
-        const isExpanded = expanded.has(page.id);
-        const dirty = !_cfgEq(cfg, serverCfg[page.id]);
-        const run = runs[page.id];
+        // Settings columns
+        const grid = document.createElement('div');
+        grid.style.cssText = 'display:flex;flex-direction:column;gap:12px;';
 
-        const card = document.createElement('div');
-        card.style.cssText = 'border:1px solid var(--border);border-radius:var(--radius);'
-                            + 'background:var(--bg);overflow:hidden;';
+        grid.appendChild(_buildCheckboxGroup('Sources',
+            domains.sources, labels.sources, cfg.sources,
+            (v, on) => _toggleAxis('sources', v, on)));
+        grid.appendChild(_buildCheckboxGroup('Sequence modes',
+            domains.seq_modes, labels.seq_modes, cfg.seq_modes,
+            (v, on) => _toggleAxis('seq_modes', v, on)));
+        grid.appendChild(_buildHandTrialGrid(cfg));
+        body.appendChild(grid);
 
-        // Header (always visible)
-        const header = document.createElement('div');
-        header.style.cssText = 'display:flex;align-items:center;gap:10px;padding:10px 14px;'
-                              + 'cursor:pointer;user-select:none;background:var(--bg);';
-        header.innerHTML = `
-            <span style="font-weight:600;flex:0 0 auto;">${page.title}</span>
-            <span style="font-size:11px;color:var(--text-muted);flex:1 1 auto;">
-                ${cfg.sources.length} source(s) · ${cfg.seq_modes.length} seq mode(s) · ${cfg.hand_trial.length} (hand, trial) pair(s)
-            </span>
-            ${run ? _renderRunBadge(run) : ''}
-            <span style="font-size:11px;color:var(--text-muted);flex:0 0 auto;">${isExpanded ? '▾' : '▸'}</span>
-        `;
-        header.addEventListener('click', () => {
-            if (isExpanded) expanded.delete(page.id);
-            else expanded.add(page.id);
-            render();
-        });
-        card.appendChild(header);
-
-        if (!isExpanded) return card;
-
-        // Settings body
-        const body = document.createElement('div');
-        body.style.cssText = 'padding:12px 14px;border-top:1px solid var(--border);'
-                            + 'display:flex;flex-direction:column;gap:12px;';
-
-        body.appendChild(_buildCheckboxGroup('Sources', domains.sources, labels.sources,
-            cfg.sources,
-            (v, checked) => _toggleAxis(page.id, 'sources', v, checked)));
-
-        body.appendChild(_buildCheckboxGroup('Sequence modes', domains.seq_modes, labels.seq_modes,
-            cfg.seq_modes,
-            (v, checked) => _toggleAxis(page.id, 'seq_modes', v, checked)));
-
-        body.appendChild(_buildHandTrialGrid(page.id, cfg));
-
-        // Action buttons (Revert + Cache) only when dirty
+        // Actions row
         const actions = document.createElement('div');
-        actions.style.cssText = 'display:flex;gap:8px;align-items:center;'
-                              + 'border-top:1px solid var(--border);padding-top:10px;';
+        actions.style.cssText = 'display:flex;gap:8px;align-items:center;margin-top:12px;';
         if (dirty) {
             const revert = document.createElement('button');
             revert.className = 'btn btn-sm';
             revert.textContent = 'Revert';
             revert.style.cssText = 'background:var(--blue);color:#fff;border-color:var(--blue);';
             revert.addEventListener('click', () => {
-                localCfg[page.id] = _cloneCfg(serverCfg[page.id]);
+                localCfg[mountedPage] = _cloneCfg(serverCfg[mountedPage]);
                 render();
             });
             actions.appendChild(revert);
@@ -135,44 +125,22 @@
             cacheBtn.className = 'btn btn-sm';
             cacheBtn.textContent = 'Cache';
             cacheBtn.style.cssText = 'background:var(--green);color:#fff;border-color:var(--green);';
-            cacheBtn.addEventListener('click', () => _saveAndRebuild(page.id));
+            cacheBtn.addEventListener('click', _saveAndRebuild);
             actions.appendChild(cacheBtn);
 
-            actions.appendChild(_textHint('Settings differ from the persisted config.'));
+            const hint = document.createElement('span');
+            hint.style.cssText = 'font-size:11px;color:var(--text-muted);';
+            hint.textContent = 'Settings differ from the persisted config.';
+            actions.appendChild(hint);
         } else {
             const rebuild = document.createElement('button');
             rebuild.className = 'btn btn-sm';
             rebuild.textContent = 'Rebuild cache';
             rebuild.title = 'Re-export every combo the current config covers';
-            rebuild.addEventListener('click', () => _rebuildOnly(page.id));
+            rebuild.addEventListener('click', _rebuildOnly);
             actions.appendChild(rebuild);
         }
         body.appendChild(actions);
-
-        card.appendChild(body);
-        return card;
-    }
-
-    function _textHint(txt) {
-        const el = document.createElement('span');
-        el.style.cssText = 'font-size:11px;color:var(--text-muted);';
-        el.textContent = txt;
-        return el;
-    }
-
-    function _renderRunBadge(run) {
-        if (!run) return '';
-        if (run.status === 'running' || run.status === 'starting') {
-            const pct = run.n_total ? Math.round(100 * run.n_done / run.n_total) : 0;
-            return `<span style="font-size:11px;color:var(--blue);">running · ${run.n_done}/${run.n_total} (${pct}%)</span>`;
-        }
-        if (run.status === 'done') {
-            return `<span style="font-size:11px;color:var(--green);">last run wrote ${run.n_written}</span>`;
-        }
-        if (run.status === 'error') {
-            return `<span style="font-size:11px;color:var(--red);">error: ${run.error || 'unknown'}</span>`;
-        }
-        return '';
     }
 
     function _buildCheckboxGroup(title, options, labelMap, selected, onToggle) {
@@ -198,7 +166,7 @@
         return wrap;
     }
 
-    function _buildHandTrialGrid(pageId, cfg) {
+    function _buildHandTrialGrid(cfg) {
         const wrap = document.createElement('div');
         const head = document.createElement('div');
         head.style.cssText = 'font-size:12px;font-weight:600;margin-bottom:4px;color:var(--text-muted);';
@@ -207,7 +175,6 @@
 
         const table = document.createElement('table');
         table.style.cssText = 'border-collapse:collapse;font-size:12px;';
-        // Header row: trial labels
         const thead = document.createElement('thead');
         const trH = document.createElement('tr');
         const corner = document.createElement('th'); corner.textContent = '';
@@ -219,7 +186,6 @@
             trH.appendChild(th);
         }
         thead.appendChild(trH); table.appendChild(thead);
-        // Body rows: one per hand
         const tbody = document.createElement('tbody');
         const pairKey = (h, t) => `${h}|${t}`;
         const pairSet = new Set(cfg.hand_trial.map(([h, t]) => pairKey(h, t)));
@@ -235,7 +201,7 @@
                 const cb = document.createElement('input');
                 cb.type = 'checkbox';
                 cb.checked = pairSet.has(pairKey(h, t));
-                cb.addEventListener('change', () => _togglePair(pageId, h, t, cb.checked));
+                cb.addEventListener('change', () => _togglePair(h, t, cb.checked));
                 td.appendChild(cb);
                 tr.appendChild(td);
             }
@@ -246,27 +212,27 @@
         return wrap;
     }
 
-    function _toggleAxis(pageId, axis, value, checked) {
-        const set = new Set(localCfg[pageId][axis]);
+    function _toggleAxis(axis, value, checked) {
+        const set = new Set(localCfg[mountedPage][axis]);
         if (checked) set.add(value);
         else set.delete(value);
-        localCfg[pageId][axis] = [...set];
+        localCfg[mountedPage][axis] = [...set];
         render();
     }
 
-    function _togglePair(pageId, hand, trial, checked) {
-        const cur = localCfg[pageId].hand_trial;
+    function _togglePair(hand, trial, checked) {
+        const cur = localCfg[mountedPage].hand_trial;
         const key = JSON.stringify([hand, trial]);
         const has = cur.some(p => JSON.stringify(p) === key);
         if (checked && !has) cur.push([hand, trial]);
         else if (!checked && has) {
-            localCfg[pageId].hand_trial = cur.filter(p => JSON.stringify(p) !== key);
+            localCfg[mountedPage].hand_trial = cur.filter(p => JSON.stringify(p) !== key);
         }
         render();
     }
 
-    async function _saveAndRebuild(pageId) {
-        const merged = { ...serverCfg, [pageId]: localCfg[pageId] };
+    async function _saveAndRebuild() {
+        const merged = { ...serverCfg, [mountedPage]: localCfg[mountedPage] };
         try {
             const r = await API.post('/api/cache-results/config', merged);
             serverCfg = r.config;
@@ -274,24 +240,23 @@
             alert('Save failed: ' + e.message);
             return;
         }
-        await _rebuildOnly(pageId);
+        await _rebuildOnly();
     }
 
-    async function _rebuildOnly(pageId) {
+    async function _rebuildOnly() {
         try {
-            await API.post(`/api/cache-results/rebuild/${pageId}`, {});
+            await API.post(`/api/cache-results/rebuild/${mountedPage}`, {});
         } catch (e) {
             alert('Rebuild start failed: ' + e.message);
             return;
         }
-        // Poll the config endpoint while the run is active.
         const tick = async () => {
             try {
                 const d = await API.get('/api/cache-results/config');
                 runs = d.runs || {};
                 cacheInfo = d.cache;
                 render();
-                const st = runs[pageId]?.status;
+                const st = runs[mountedPage]?.status;
                 if (st === 'running' || st === 'starting') {
                     setTimeout(tick, 1000);
                 }
@@ -300,17 +265,13 @@
         tick();
     }
 
-    // ── Init ───────────────────────────────────────────────────
-    function init() {
-        if (!document.getElementById('cacheJobsRow')) return;
-        fetchConfig().catch(e => {
-            console.warn('cache-results init failed', e);
-        });
-    }
-
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', init);
-    } else {
-        init();
-    }
+    // ── Public entry point — selectStep() in remote.js calls this. ──
+    window.cacheResultsMount = async function (page) {
+        mountedPage = page;
+        if (!serverCfg) {
+            try { await fetchConfig(); }
+            catch (e) { console.warn('cache-results fetch failed', e); return; }
+        }
+        render();
+    };
 })();

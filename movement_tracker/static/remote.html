@@ -254,20 +254,14 @@
     </div>
 
     <div class="container">
-        <!-- Cache Results: per-page settings + cache size + rebuild -->
-        <div class="card" id="cacheResultsCard">
-            <h2 style="display:flex;align-items:center;gap:10px;">
-                Cache Results
-                <span id="cacheTotalLabel" style="font-size:12px;font-weight:400;color:var(--text-muted);"></span>
-            </h2>
-            <div id="cacheJobsRow" style="display:flex;flex-direction:column;gap:8px;">
-                <!-- Two job rows are populated by remote.js: Group Comparisons, Explore. -->
-            </div>
-        </div>
-
         <!-- Launch Job -->
         <div class="card">
             <h2>Launch Job</h2>
+            <!-- Cache-step settings body (Group Comparisons / Explore).
+                 Rendered by cache_results.js; visible only when one of
+                 the cache_* step buttons is active.  Subject /
+                 trial / target sections are hidden in that case. -->
+            <div id="cacheStepBody" style="display:none;margin-bottom:12px;"></div>
 
             <!-- Step buttons + Target Selection -->
             <div style="margin-bottom:12px;">
@@ -301,6 +295,13 @@
                             <button class="btn btn-sm step-btn" data-step="refine" onclick="selectStep('refine')">Refine</button>
                             <button class="btn btn-sm step-btn" data-step="analyze_v1" onclick="selectStep('analyze_v1')">Analyze v1</button>
                             <button class="btn btn-sm step-btn" data-step="analyze_v2" onclick="selectStep('analyze_v2')">Analyze v2</button>
+                        </div>
+                    </div>
+                    <div style="display:flex;flex-direction:column;gap:3px;">
+                        <span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">Cache Results</span>
+                        <div style="display:flex;gap:3px;">
+                            <button class="btn btn-sm step-btn" data-step="cache_group" onclick="selectStep('cache_group')">Group Comparison</button>
+                            <button class="btn btn-sm step-btn" data-step="cache_explore" onclick="selectStep('cache_explore')">Explore</button>
                         </div>
                     </div>
                 </div>
@@ -545,7 +546,7 @@
 
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js?v=13"></script>
-    <script src="/static/js/remote.js?v=62"></script>
-    <script src="/static/js/cache_results.js?v=1"></script>
+    <script src="/static/js/remote.js?v=63"></script>
+    <script src="/static/js/cache_results.js?v=2"></script>
 </body>
 </html>
