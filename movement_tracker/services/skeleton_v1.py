@@ -226,6 +226,13 @@ def run_skeleton_v1_fit(
 
     tgt_L = torch.tensor(mp_L[valid_idx], device=device, dtype=torch.float32)
     tgt_R = torch.tensor(mp_R[valid_idx], device=device, dtype=torch.float32)
+    # Per-frame weight for the reproj loss: 0 on detected outlier
+    # frames so the data term doesn't anchor them at the bad
+    # position; the smoothness + bone terms still apply, which
+    # naturally pulls them toward an interpolation of neighbors.
+    frame_w_np = np.ones(n_valid, dtype=np.float32)
+    frame_w_np[outlier_mask] = 0.0
+    frame_weight = torch.tensor(frame_w_np, device=device, dtype=torch.float32)
     target_bl = torch.tensor(target_bone_lengths, device=device, dtype=torch.float32)
     bl_w = torch.tensor(bone_weights, device=device, dtype=torch.float32)
     bone_idx = torch.tensor(BONES, device=device, dtype=torch.long)
@@ -241,6 +248,23 @@ def run_skeleton_v1_fit(
                     init_3d[i, j] = init_3d[i, 0]
                 else:
                     init_3d[i, j] = [0, 0, 500]  # arbitrary fallback
+
+    # ── Pre-pass: flag mislabeled-run frames ───────────────────
+    #
+    # A run of K consecutive frames where MP locks onto the wrong
+    # target shows up as TWO opposite-sign acceleration spikes
+    # spaced K frames apart, with normal velocity inside the run
+    # (all bad frames are offset by the same amount, so velocity
+    # within the run looks fine).  Single-frame |a| thresholding
+    # would miss this.  Detect the pair, then confirm with a
+    # robust bone-length anomaly score so we don't mask genuine
+    # fast curving motion.
+    outlier_mask = _detect_outlier_runs(
+        init_3d, BONES, K_max=30, accel_k=6.0, bone_k=6.0,
+    )
+    n_outliers = int(outlier_mask.sum())
+    logger.info(f"  Outlier pre-filter: masked {n_outliers}/{n_valid} frames "
+                f"({100.0 * n_outliers / max(n_valid, 1):.1f}%)")
 
     # Optimizable: 3D joint positions only.
     #
@@ -308,11 +332,17 @@ def run_skeleton_v1_fit(
         pL = _project_torch(joints_3d, K1, d1) + offset_L
         pR = _project_torch(joints_3d, K2, d2, R_stereo, T_stereo) + offset_R
 
-        # Loss 1: 2D reprojection (both cameras)
-        loss_reproj = (
-            ((pL - tgt_L) ** 2).sum(-1).mean()
-            + ((pR - tgt_R) ** 2).sum(-1).mean()
-        )
+        # Loss 1: 2D reprojection (both cameras), with per-frame
+        # outlier mask applied — flagged frames get weight 0 so the
+        # data term doesn't pull them toward MP's bad detection.
+        # `.sum(-1)` is (N, 21); broadcast frame_weight as (N, 1)
+        # to zero out an entire frame across all joints.  We normalize
+        # by the live frame count so the loss magnitude is comparable
+        # across trials with different outlier counts.
+        sq_L = ((pL - tgt_L) ** 2).sum(-1) * frame_weight[:, None]
+        sq_R = ((pR - tgt_R) ** 2).sum(-1) * frame_weight[:, None]
+        live_n = frame_weight.sum().clamp(min=1.0) * 21.0
+        loss_reproj = (sq_L.sum() + sq_R.sum()) / live_n
 
         # Loss 2: Bone length consistency (match robust targets)
         j1_pts = joints_3d[:, bone_idx[:, 0]]
@@ -393,12 +423,17 @@ def run_skeleton_v1_fit(
     all_joints = np.full((N, 21, 3), np.nan)
     all_err_L = np.full(N, np.nan)
     all_err_R = np.full(N, np.nan)
+    # Frame-level outlier flag in the FULL N-frame timeline so the
+    # Labels page can highlight the masked frames on the distance
+    # trace later if we wire that up.
+    all_outlier_mask = np.zeros(N, dtype=bool)
 
     j3d_np = joints_3d.detach().cpu().numpy()
     for i, t in enumerate(valid_idx):
         all_joints[t] = j3d_np[i]
         all_err_L[t] = err_L[i]
         all_err_R[t] = err_R[i]
+        all_outlier_mask[t] = bool(outlier_mask[i])
 
     skeleton_trial_dir = _skeleton_dir(subject_name) / trial_stem
     skeleton_trial_dir.mkdir(parents=True, exist_ok=True)
@@ -425,6 +460,11 @@ def run_skeleton_v1_fit(
         w_smooth=float(w_smooth),
         snap_bones=bool(snap_bones),
         w_angle=float(w_angle),
+        # Per-frame outlier mask in full-trial coordinates.  True =
+        # frame's reproj loss was dropped during the fit because it
+        # paired with another opposite-direction acceleration spike
+        # AND its bone lengths were anomalous.
+        frame_outlier_mask=all_outlier_mask,
     )
 
     # Save fitting parameters alongside the npz
@@ -450,6 +490,7 @@ def run_skeleton_v1_fit(
             "mean_error_L": float(np.nanmean(all_err_L)),
             "mean_error_R": float(np.nanmean(all_err_R)),
             "target_bone_lengths": target_bone_lengths.tolist(),
+            "n_outliers_masked": int(n_outliers),
         },
         "angle_constraints": angle_prior_data,
         "timestamp": datetime.now().isoformat(),
@@ -469,6 +510,106 @@ def run_skeleton_v1_fit(
         "mean_error_L": float(np.nanmean(all_err_L)),
         "mean_error_R": float(np.nanmean(all_err_R)),
     }
+
+
+def _detect_outlier_runs(
+    init_3d: np.ndarray,
+    bones,
+    K_max: int = 30,
+    accel_k: float = 6.0,
+    bone_k: float = 6.0,
+) -> np.ndarray:
+    """Identify a per-frame mask of suspected outlier frames.
+
+    Two independent signals AND'd together:
+
+    1. **Acceleration-spike pairing** — a run of K consecutive
+       mislabeled frames produces opposite-sign acceleration
+       spikes at frames t1 and t2 = t1+K, with matching magnitudes
+       and roughly opposite vector directions.  We scan all
+       frames whose per-frame |a| exceeds median + accel_k·MAD,
+       then pair each positive-direction spike to the next
+       negative-direction spike within K_max frames whose
+       magnitude ratio is in (0.5, 2.0) and whose vector cosine
+       is ≤ -0.3.  Frames between matched spikes go in the
+       candidate set.
+
+    2. **Bone-length anomaly** — for each bone, compute a
+       robust z-score (median / MAD) of its per-frame length
+       across the trial.  Frame-level score is the max |z| over
+       all bones.  Frames with score > bone_k are flagged.
+
+    Both signals are needed for a frame to be masked, so genuine
+    fast motion (high acceleration but normal bone lengths) and
+    gradual MP drift on a single joint (anomalous bone length
+    but smooth velocity) don't mask each other.
+
+    Returns: bool array of shape (N,) where True means MASKED.
+    """
+    N = init_3d.shape[0]
+    if N < 5:
+        return np.zeros(N, dtype=bool)
+
+    # ── Acceleration-spike pairing ────────────────────────────
+    # a[t] = x[t+1] − 2·x[t] + x[t-1] for t in 1..N-2
+    a = init_3d[2:] - 2 * init_3d[1:-1] + init_3d[:-2]   # (N-2, 21, 3)
+    a_norm = np.linalg.norm(a, axis=-1)                  # (N-2, 21)
+    a_frame_mag = a_norm.max(axis=-1)                    # (N-2,)
+    med = float(np.median(a_frame_mag))
+    mad = float(np.median(np.abs(a_frame_mag - med))) * 1.4826
+    threshold = med + accel_k * max(mad, 0.1)
+    spike_local = np.where(a_frame_mag > threshold)[0]   # indices into a[]
+    spike_frames = spike_local + 1                       # convert to full-frame idx
+    # Flatten per-spike vector and magnitude for direction matching.
+    spike_vecs = a[spike_local].reshape(len(spike_local), -1)
+    spike_norms = np.linalg.norm(spike_vecs, axis=-1)
+
+    run_candidate = np.zeros(N, dtype=bool)
+    used = np.zeros(len(spike_local), dtype=bool)
+    for i in range(len(spike_local)):
+        if used[i]:
+            continue
+        t1 = spike_frames[i]
+        v1 = spike_vecs[i]
+        m1 = spike_norms[i]
+        if m1 < 1e-9:
+            continue
+        for j in range(i + 1, len(spike_local)):
+            if used[j]:
+                continue
+            t2 = spike_frames[j]
+            if t2 - t1 > K_max:
+                break
+            v2 = spike_vecs[j]
+            m2 = spike_norms[j]
+            if m2 < 1e-9:
+                continue
+            cos = float(v1 @ v2) / (m1 * m2)
+            if cos > -0.3:
+                continue
+            ratio = m1 / m2
+            if not (0.5 < ratio < 2.0):
+                continue
+            # Mark the interior frames; pair both spikes too.
+            run_candidate[t1:t2 + 1] = True
+            used[i] = True
+            used[j] = True
+            break
+
+    # ── Bone-length anomaly ──────────────────────────────────
+    n_bones = len(bones)
+    bone_lens = np.zeros((N, n_bones), dtype=np.float64)
+    for b, (j1, j2) in enumerate(bones):
+        diff = init_3d[:, j2] - init_3d[:, j1]
+        bone_lens[:, b] = np.linalg.norm(diff, axis=1)
+    med_b = np.median(bone_lens, axis=0)
+    mad_b = np.median(np.abs(bone_lens - med_b[None, :]), axis=0) * 1.4826
+    mad_b = np.maximum(mad_b, 0.5)            # mm; avoid /0 on rigid bones
+    z = np.abs(bone_lens - med_b[None, :]) / mad_b[None, :]
+    bone_score = z.max(axis=1)                # (N,)
+    bone_anomaly = bone_score > bone_k
+
+    return run_candidate & bone_anomaly
 
 
 def _project_torch(pts3d, K, dist, R_ext=None, t_ext=None, min_z=10.0):
