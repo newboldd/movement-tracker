@@ -133,6 +133,13 @@ let _collapsedTrials = new Set();
 // here as a module-level state object so a re-render of a single
 // plot still picks the line back up.
 let _clickHL = null;            // { trialIdx, time }  or  null
+// Drag-to-mark intervals on the distance / velocity / IMI plots.
+// _intervals[trialIdx] is an array of { x0, x1, marched } in seconds
+// (trial-local).  Cleared on subject change; preserved across
+// source / overlay / X-scale changes.
+let _intervals = {};
+let _intervalHover = null;      // { trialIdx, intervalIdx }  or  null
+const _INTERVAL_PLOT_PREFIXES = ['distPlot_', 'imiPlot_', 'velPlot_'];
 // Saved tapping events for the current subject — { open, peak, close,
 // pause } each a list of GLOBAL video-frame indices.  Used by the
 // Pause overlay on per-trial distance plots.
@@ -149,12 +156,14 @@ function _registerClickPlot(divId) {
     // DOM event and convert pixel coords → data coords via the
     // subplot's xaxis directly.
     div.addEventListener('click', e => _handleNativeClick(divId, e));
+    // On dist/imi/vel plots, install the drag-to-mark gesture and
+    // hover detection for the per-interval action button.
+    if (_isIntervalPlot(divId)) _wireIntervalDrag(divId);
     // Lock in how many shapes the plot started with so the highlight
     // append/strip cycle doesn't accumulate.
     _baseShapeCount[divId] = (div.layout?.shapes || []).length;
-    // Re-apply the existing highlight (if any) so a fresh plot
-    // picks it up immediately.
-    if (_clickHL) _applyHighlightTo(divId);
+    // Re-apply existing intervals + click highlight on a fresh plot.
+    _rebuildShapes(divId);
 }
 
 function _handlePlotClick(divId, ev) {
@@ -187,6 +196,10 @@ function _handleNativeClick(divId, e) {
     // plotly_click fires before the native click on a marker hit —
     // skip the trailing native handler so we don't re-process.
     if (div._lastPlotlyClickAt && (performance.now() - div._lastPlotlyClickAt) < 200) return;
+    // A drag-to-mark gesture just committed an interval — the
+    // trailing native click from the same pointer up isn't a
+    // user-intended click.
+    if (div._suppressClickUntil && performance.now() < div._suppressClickUntil) return;
     const rect = div.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
@@ -223,62 +236,337 @@ function _handleNativeClick(divId, e) {
 
 function _applyHighlightAll() {
     if (!_clickHL) return;
-    // Highlight is scoped to the clicked trial: only that trial's
-    // dist/vel plot, and only that trial's subplot inside each
-    // movement / dist-movement plot.  Other trials stay clean — the
-    // x-axes there don't share a coordinate system with the click.
     const { trialIdx } = _clickHL;
-    _applyHighlightTo(`distPlot_${trialIdx}`);
-    _applyHighlightTo(`imiPlot_${trialIdx}`);
-    _applyHighlightTo(`velPlot_${trialIdx}`);
-    // Clear any stale highlights on OTHER trials' dist/imi/vel plots
-    // so re-clicks on a different trial don't leave a phantom line
-    // behind from the previous click.
-    document.querySelectorAll('[id^="distPlot_"], [id^="imiPlot_"], [id^="velPlot_"]').forEach(d => {
-        if (d.id !== `distPlot_${trialIdx}`
-                && d.id !== `imiPlot_${trialIdx}`
-                && d.id !== `velPlot_${trialIdx}`) {
-            _clearHighlightOn(d.id);
-        }
-    });
+    // Repaint dist/imi/vel for the clicked trial AND every other
+    // trial (so stale lines on previously-clicked trials clear).
+    document.querySelectorAll('[id^="distPlot_"], [id^="imiPlot_"], [id^="velPlot_"]')
+        .forEach(d => _rebuildShapes(d.id));
+    // Movement plots: repaint all so the trial's subplot gets the
+    // line and others stay clean.
     document.querySelectorAll('[id^="movPlot_"], [id^="distMovPlot_"]')
-        .forEach(d => _applyHighlightTo(d.id));
+        .forEach(d => _rebuildShapes(d.id));
 }
 
-function _clearHighlightOn(divId) {
+// Back-compat aliases — interval handlers and older call sites
+// route through the single shape composer.
+function _clearHighlightOn(divId) { _rebuildShapes(divId); }
+function _applyHighlightTo(divId) { _rebuildShapes(divId); }
+
+// Single source of truth for a plot div's `layout.shapes`:
+//   base (sliced) + drag-mark intervals (for dist/imi/vel only)
+//   + click-highlight vertical line (if any).
+function _rebuildShapes(divId) {
     const div = document.getElementById(divId);
     if (!div || !div.layout) return;
     const base = _baseShapeCount[divId] || 0;
     const shapes = (div.layout.shapes || []).slice(0, base);
-    try { Plotly.relayout(divId, { shapes }); } catch (_) {}
-}
 
-function _applyHighlightTo(divId) {
-    if (!_clickHL) return;
-    const div = document.getElementById(divId);
-    if (!div || !div.layout) return;
-    const { trialIdx, time } = _clickHL;
-    const base = _baseShapeCount[divId] || 0;
-    const shapes = (div.layout.shapes || []).slice(0, base);
-    const lineStyle = { color: 'rgba(0,0,0,0.45)', width: 1, dash: 'dot' };
-    if (divId.startsWith('movPlot_') || divId.startsWith('distMovPlot_')) {
-        // Per-trial subplots — paint only on the clicked trial's
-        // subplot.  Trial 0 uses 'x', trial N uses 'x{N+1}'.
-        const axId = trialIdx === 0 ? 'x' : 'x' + (trialIdx + 1);
-        shapes.push({
-            type: 'line', xref: axId, yref: 'paper',
-            x0: time, x1: time, y0: 0, y1: 1,
-            line: lineStyle, layer: 'above',
-        });
-    } else {
-        // Dist/Vel plots — single xaxis 'x'.
-        shapes.push({
-            type: 'line', xref: 'x', yref: 'paper',
-            x0: time, x1: time, y0: 0, y1: 1,
-            line: lineStyle, layer: 'above',
+    // Drag-marked intervals (dist / imi / vel plots only; one trial).
+    const trialIdx = _trialIdxOfDiv(divId);
+    if (trialIdx != null && _isIntervalPlot(divId)) {
+        const list = _intervals[trialIdx] || [];
+        list.forEach(iv => {
+            if (iv.marched) {
+                shapes.push(..._marchedShapes(iv, div));
+            } else {
+                shapes.push(_bandShape(iv.x0, iv.x1, 'rgba(33,150,243,0.20)'));
+            }
+            // Thin edge lines so the boundaries stay readable even
+            // when the band fill is light.
+            shapes.push(_edgeLine(iv.x0));
+            shapes.push(_edgeLine(iv.x1));
         });
     }
+
+    // Click-highlight vertical line.
+    if (_clickHL) {
+        const lineStyle = { color: 'rgba(0,0,0,0.45)', width: 1, dash: 'dot' };
+        if (divId.startsWith('movPlot_') || divId.startsWith('distMovPlot_')) {
+            // Only the clicked trial's subplot gets a line.
+            const axId = _clickHL.trialIdx === 0 ? 'x' : 'x' + (_clickHL.trialIdx + 1);
+            shapes.push({
+                type: 'line', xref: axId, yref: 'paper',
+                x0: _clickHL.time, x1: _clickHL.time, y0: 0, y1: 1,
+                line: lineStyle, layer: 'above',
+            });
+        } else if (trialIdx === _clickHL.trialIdx) {
+            shapes.push({
+                type: 'line', xref: 'x', yref: 'paper',
+                x0: _clickHL.time, x1: _clickHL.time, y0: 0, y1: 1,
+                line: lineStyle, layer: 'above',
+            });
+        }
+    }
+
     try { Plotly.relayout(divId, { shapes }); } catch (_) {}
+}
+
+function _isIntervalPlot(divId) {
+    return _INTERVAL_PLOT_PREFIXES.some(p => divId.startsWith(p));
+}
+function _trialIdxOfDiv(divId) {
+    for (const p of _INTERVAL_PLOT_PREFIXES) {
+        if (divId.startsWith(p)) return parseInt(divId.slice(p.length));
+    }
+    return null;
+}
+function _bandShape(x0, x1, fill) {
+    return {
+        type: 'rect', xref: 'x', yref: 'paper',
+        x0, x1, y0: 0, y1: 1,
+        fillcolor: fill, line: { width: 0 }, layer: 'below',
+    };
+}
+function _edgeLine(x) {
+    return {
+        type: 'line', xref: 'x', yref: 'paper',
+        x0: x, x1: x, y0: 0, y1: 1,
+        line: { color: 'rgba(33,150,243,0.55)', width: 1 }, layer: 'below',
+    };
+}
+// Tile the trial forward from iv.x0 with bands of width (iv.x1-iv.x0),
+// alternating two fills so each repetition is visually distinct.
+function _marchedShapes(iv, div) {
+    const dt = iv.x1 - iv.x0;
+    if (!(dt > 0)) return [];
+    const fl = div._fullLayout;
+    const xMax = (fl && fl.xaxis && fl.xaxis.range)
+        ? fl.xaxis.range[1]
+        : (iv.x1 + dt * 50);
+    const out = [];
+    let k = 0;
+    for (let s = iv.x0; s < xMax; s += dt, k++) {
+        const e = Math.min(s + dt, xMax);
+        const col = (k % 2 === 0)
+            ? 'rgba(33,150,243,0.22)'
+            : 'rgba(33,150,243,0.06)';
+        out.push(_bandShape(s, e, col));
+    }
+    return out;
+}
+
+// ── Drag-to-mark intervals on dist/imi/vel plots ──────────────────
+//
+// Native pointer handlers convert pixel coords → trial-local
+// seconds via the plot's xaxis.  A drag of >4 px commits an
+// interval into _intervals[trialIdx].  Without shift/ctrl the new
+// interval REPLACES previous ones on that trial; with shift OR
+// ctrl held the new one is appended.  Sub-threshold drags fall
+// through to the click-cursor handler (suppressed via
+// _suppressNextClickOn so we don't double-fire).
+function _wireIntervalDrag(divId) {
+    const div = document.getElementById(divId);
+    if (!div || div._intervalDragBound) return;
+    div._intervalDragBound = true;
+    const trialIdx = _trialIdxOfDiv(divId);
+
+    // Drag state for this plot.  Captured at pointerdown and read at
+    // pointermove / pointerup.
+    let down = null;
+
+    div.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        const ax = div._fullLayout && div._fullLayout.xaxis;
+        if (!ax || ax._offset == null) return;
+        const rect = div.getBoundingClientRect();
+        const px = e.clientX - rect.left;
+        const py = e.clientY - rect.top;
+        // Only react inside the plot area (avoid axis labels).
+        if (px < ax._offset || px > ax._offset + ax._length) return;
+        const yax = div._fullLayout.yaxis;
+        if (yax && yax._offset != null
+                && (py < yax._offset || py > yax._offset + yax._length)) return;
+        down = {
+            clientX0: e.clientX,
+            startData: ax.p2c(px - ax._offset),
+            ax,
+            additive: !!(e.shiftKey || e.ctrlKey || e.metaKey),
+        };
+        try { div.setPointerCapture(e.pointerId); } catch (_) {}
+        e.preventDefault();
+    });
+
+    div.addEventListener('pointermove', (e) => {
+        if (!down) return;
+        const rect = div.getBoundingClientRect();
+        const cur = down.ax.p2c(e.clientX - rect.left - down.ax._offset);
+        const x0 = Math.min(down.startData, cur);
+        const x1 = Math.max(down.startData, cur);
+        _previewInterval(trialIdx, x0, x1);
+    });
+
+    const finish = (e) => {
+        if (!down) return;
+        const ax = down.ax;
+        const rect = div.getBoundingClientRect();
+        const cur = ax.p2c(e.clientX - rect.left - ax._offset);
+        const movedPx = Math.abs(e.clientX - down.clientX0);
+        const additive = down.additive;
+        const startData = down.startData;
+        down = null;
+        _clearPreview(trialIdx);
+        if (movedPx < 4) return;        // sub-threshold → click handlers
+        const x0 = Math.min(startData, cur);
+        const x1 = Math.max(startData, cur);
+        if (!(x1 - x0 > 0)) return;
+        // Commit.  Replace existing intervals on the trial unless
+        // shift/ctrl/cmd is held.
+        const list = additive ? (_intervals[trialIdx] || []) : [];
+        list.push({ x0, x1, marched: false });
+        _intervals[trialIdx] = list;
+        // Suppress the trailing native-click for this same gesture.
+        div._suppressClickUntil = performance.now() + 250;
+        _rebuildShapesForTrial(trialIdx);
+    };
+    div.addEventListener('pointerup', finish);
+    div.addEventListener('pointercancel', () => {
+        down = null; _clearPreview(trialIdx);
+    });
+
+    // Hover detection for the per-interval action button.
+    div.addEventListener('mousemove', (e) => _onIntervalHover(divId, e));
+    div.addEventListener('mouseleave', () => _scheduleHoverHide(trialIdx));
+}
+
+function _previewInterval(trialIdx, x0, x1) {
+    _INTERVAL_PLOT_PREFIXES.forEach(prefix => {
+        const div = document.getElementById(prefix + trialIdx);
+        if (!div || !div.layout) return;
+        const base = _baseShapeCount[prefix + trialIdx] || 0;
+        const list = _intervals[trialIdx] || [];
+        const shapes = (div.layout.shapes || []).slice(0, base);
+        list.forEach(iv => {
+            if (iv.marched) shapes.push(..._marchedShapes(iv, div));
+            else shapes.push(_bandShape(iv.x0, iv.x1, 'rgba(33,150,243,0.20)'));
+            shapes.push(_edgeLine(iv.x0));
+            shapes.push(_edgeLine(iv.x1));
+        });
+        shapes.push(_bandShape(x0, x1, 'rgba(33,150,243,0.30)'));
+        try { Plotly.relayout(prefix + trialIdx, { shapes }); } catch (_) {}
+    });
+}
+function _clearPreview(trialIdx) {
+    if (trialIdx == null) return;
+    _rebuildShapesForTrial(trialIdx);
+}
+function _rebuildShapesForTrial(trialIdx) {
+    _INTERVAL_PLOT_PREFIXES.forEach(p => _rebuildShapes(p + trialIdx));
+}
+
+// ── Per-interval hover button (✕ delete + March across) ──────────
+function _onIntervalHover(divId, e) {
+    const trialIdx = _trialIdxOfDiv(divId);
+    if (trialIdx == null) return;
+    const list = _intervals[trialIdx] || [];
+    if (!list.length) { _scheduleHoverHide(trialIdx); return; }
+    const div = document.getElementById(divId);
+    const ax = div._fullLayout && div._fullLayout.xaxis;
+    if (!ax || ax._offset == null) return;
+    const rect = div.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const xData = ax.p2c(px - ax._offset);
+    // Find first interval whose [x0,x1] contains the cursor.  When
+    // marched, treat the original [x0,x1] as the anchor (the rest
+    // are derived bands) so the button only shows over the source.
+    const hit = list.findIndex(iv => xData >= iv.x0 && xData <= iv.x1);
+    if (hit < 0) { _scheduleHoverHide(trialIdx); return; }
+    _showHoverButton(trialIdx, hit);
+}
+
+function _ensureHoverButton(trialIdx) {
+    const wrapper = document.getElementById(`trialWrap_${trialIdx}`);
+    if (!wrapper) return null;
+    let btn = wrapper.querySelector(':scope > .interval-actions');
+    if (btn) return btn;
+    btn = document.createElement('div');
+    btn.className = 'interval-actions';
+    btn.style.cssText = [
+        'position:absolute', 'top:2px', 'transform:translateX(-50%)',
+        'display:none', 'gap:4px', 'z-index:10',
+        'background:rgba(255,255,255,0.95)',
+        'border:1px solid rgba(33,150,243,0.55)',
+        'border-radius:4px', 'padding:2px 4px',
+        'box-shadow:0 1px 3px rgba(0,0,0,0.15)',
+        'font-size:11px', 'align-items:center',
+    ].join(';');
+    const march = document.createElement('button');
+    march.type = 'button';
+    march.className = 'iv-march';
+    march.textContent = 'March across';
+    march.title = 'Tile this interval forward across the trial';
+    march.style.cssText = 'border:none;background:transparent;color:#1976D2;font-weight:600;cursor:pointer;padding:0 2px;font-size:11px;';
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'iv-del';
+    del.textContent = '✕';
+    del.title = 'Delete this interval';
+    del.style.cssText = 'border:none;background:transparent;color:#c62828;font-weight:700;cursor:pointer;padding:0 2px;font-size:12px;';
+    btn.appendChild(march);
+    btn.appendChild(del);
+    // Stay open while pointer is over the button itself.
+    btn.addEventListener('mouseenter', () => { if (_hoverHideT) clearTimeout(_hoverHideT); });
+    btn.addEventListener('mouseleave', () => _scheduleHoverHide(trialIdx));
+    march.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const idx = btn._intervalIdx;
+        const list = _intervals[trialIdx] || [];
+        if (idx == null || !list[idx]) return;
+        list[idx].marched = !list[idx].marched;
+        march.textContent = list[idx].marched ? 'Stop march' : 'March across';
+        _rebuildShapesForTrial(trialIdx);
+    });
+    del.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const idx = btn._intervalIdx;
+        const list = _intervals[trialIdx] || [];
+        if (idx == null || !list[idx]) return;
+        list.splice(idx, 1);
+        if (!list.length) delete _intervals[trialIdx];
+        btn.style.display = 'none';
+        _rebuildShapesForTrial(trialIdx);
+    });
+    wrapper.appendChild(btn);
+    return btn;
+}
+
+let _hoverHideT = null;
+function _scheduleHoverHide(trialIdx) {
+    if (_hoverHideT) clearTimeout(_hoverHideT);
+    _hoverHideT = setTimeout(() => {
+        const wrapper = document.getElementById(`trialWrap_${trialIdx}`);
+        const btn = wrapper && wrapper.querySelector(':scope > .interval-actions');
+        if (btn) btn.style.display = 'none';
+    }, 180);
+}
+
+function _showHoverButton(trialIdx, intervalIdx) {
+    if (_hoverHideT) { clearTimeout(_hoverHideT); _hoverHideT = null; }
+    const btn = _ensureHoverButton(trialIdx);
+    if (!btn) return;
+    btn._intervalIdx = intervalIdx;
+    const list = _intervals[trialIdx] || [];
+    const iv = list[intervalIdx];
+    if (!iv) return;
+    // Update march/stop label.
+    const march = btn.querySelector('.iv-march');
+    if (march) march.textContent = iv.marched ? 'Stop march' : 'March across';
+    // Position centered over the interval on the distance plot —
+    // the wrapper is the offset parent and the dist plot is its
+    // first child, so x in wrapper coords == x in dist-plot coords.
+    const dist = document.getElementById(`distPlot_${trialIdx}`);
+    if (!dist || !dist._fullLayout || !dist._fullLayout.xaxis) return;
+    const ax = dist._fullLayout.xaxis;
+    if (ax._offset == null) return;
+    const mid = (iv.x0 + iv.x1) / 2;
+    const pxMid = ax.d2p(mid) + ax._offset;
+    btn.style.left = pxMid + 'px';
+    btn.style.display = 'inline-flex';
+}
+function _updateHoverButtonForTrial(trialIdx) {
+    // Refresh the button's stored idx after list mutation.
+    const wrapper = document.getElementById(`trialWrap_${trialIdx}`);
+    const btn = wrapper && wrapper.querySelector(':scope > .interval-actions');
+    if (btn && btn.style.display !== 'none') btn.style.display = 'none';
 }
 let currentTab = 'distances';
 let currentSubjectId = null;
@@ -2381,6 +2669,9 @@ function renderAllDistancePlots() {
         const wrapper = document.createElement('div');
         wrapper.style.gridArea = 'wrapper';
         wrapper.style.overflowX = 'auto';
+        wrapper.style.position = 'relative';   // anchor for hover button overlay
+        wrapper.dataset.trialIdx = String(idx);
+        wrapper.id = `trialWrap_${idx}`;
         if (isCollapsed) wrapper.style.display = 'none';
         // CSS grid would otherwise let the wrapper grow to fit its
         // content; min-width:0 lets the 1fr track stay 1fr.
@@ -2865,6 +3156,8 @@ function renderDistancePlot(divId, trial, yRange, width, overlayTraces, shapes) 
     // Plotly title here — top margin shrunk to reclaim the space.
     const layout = {
         margin: { t: 10, b: 5, l: 55, r: 20 },
+        // Custom drag-to-mark gesture replaces zoom — see _wireIntervalDrag.
+        dragmode: false,
         // Pin the X range to the trace extent so toggling the peak
         // overlays (which adds marker traces) can't rescale the axis.
         xaxis: {
@@ -2932,6 +3225,7 @@ function renderIMIPlot(divId, trial, trialStart, trialMovs, fps, refKind, width)
         // Zero top/bottom margins so the strip butts up against the
         // distance plot above and the velocity plot below.
         margin: { t: 0, b: 0, l: 55, r: 20 },
+        dragmode: false,
         xaxis: {
             showticklabels: false, color: '#666', gridcolor: '#eee',
             range: [0, tEnd], autorange: false,
@@ -2972,6 +3266,7 @@ function renderVelocityPlot(divId, trial, yRange, width, overlayTraces, shapes) 
 
     const layout = {
         margin: { t: 5, b: 35, l: 55, r: 20 },
+        dragmode: false,
         // Pin the X range to the trace extent so toggling the peak
         // overlays can't rescale the axis.
         xaxis: {
@@ -4434,6 +4729,10 @@ document.getElementById('subjectSelect').addEventListener('change', (e) => {
     if (!currentSubjectId) return;
     // Trial-collapse state is per-subject — drop it on subject change.
     _collapsedTrials = new Set();
+    // Drag-marked intervals are per-subject too.  Clear the click
+    // highlight too so it doesn't reappear on a stale trial idx.
+    _intervals = {};
+    _clickHL = null;
 
     sessionStorage.setItem('dlc_lastSubjectId', String(currentSubjectId));
     if (typeof setLastSubject === 'function') setLastSubject(currentSubjectId);
