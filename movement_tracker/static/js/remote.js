@@ -2178,17 +2178,18 @@ function subjectsAndTrialsHtml(item, rowKey, opts) {
             }
         }
     }
+    // Local jobs never go through upload / remote_only / download
+    // stages — there's nothing to SCP.  Collapse the chip palette to:
+    //   ok          → green   "Completed"
+    //   failed      → red     failed
+    //   current     → pulsing yellow ("Running")
+    //   else        → blue    pending
+    const isLocal = (item.execution_target || 'remote').startsWith('local');
     const trialChip = (n, t) => {
         let short = t.trial_name || '';
         const idx = short.indexOf('_');
         if (idx >= 0) short = short.slice(idx + 1);
         if (!short) return '';
-        // Trial chip state:
-        //   ok          → green   completed + downloaded
-        //   remote_only → yellow  completed remotely, download missing
-        //   failed      → red     inference failed
-        //   uploaded    → blue    upload done, awaiting / running inference
-        //   none        → blue dimmed (waiting to upload)
         let bg = 'var(--accent,#2196f3)';
         let opacity = '1';
         let titleSuffix = '';
@@ -2196,8 +2197,8 @@ function subjectsAndTrialsHtml(item, rowKey, opts) {
         const out = t.outcome;
         if (out === 'ok') {
             bg = 'var(--green,#4caf50)';
-            titleSuffix = ' — completed + downloaded';
-        } else if (out === 'remote_only') {
+            titleSuffix = isLocal ? ' — completed' : ' — completed + downloaded';
+        } else if (out === 'remote_only' && !isLocal) {
             bg = 'var(--yellow,#fbc02d)';
             titleSuffix = ' — completed but not downloaded (re-download to fetch)';
         } else if (out === 'failed') {
@@ -2205,21 +2206,23 @@ function subjectsAndTrialsHtml(item, rowKey, opts) {
             const err = t.outcome_error ? ` (${t.outcome_error})` : '';
             titleSuffix = ` — failed${err}`;
         } else if (t === _currentTrialRef) {
-            // The trial actively running on the GPU.  Pulse-yellow it
-            // (same vibe as the jobs-nav status dot) so the user can see
-            // at a glance which trial is "live".  The CSS class is
-            // styled inside the trial-detail modal — outside that, no
-            // styling exists so this remains a plain chip.
+            // The trial actively in flight — pulse-yellow it.  For
+            // remote jobs this is "running on GPU"; for local jobs
+            // there's no upload step so the marker simply means
+            // "running now".
             extraClass = 'trial-current';
             bg = 'var(--yellow,#fbc02d)';
-            titleSuffix = ' — running on GPU now';
-        } else if (t.uploaded) {
+            titleSuffix = isLocal ? ' — running now' : ' — running on GPU now';
+        } else if (!isLocal && t.uploaded) {
             titleSuffix = ' — uploaded, awaiting inference';
-        } else {
+        } else if (!isLocal) {
             // Pre-upload — dim the chip so the user can see at a glance
             // which trials haven't been pushed to the remote yet.
             opacity = '0.4';
             titleSuffix = ' — pending upload';
+        } else {
+            // Local + no outcome yet — plain pending chip.
+            titleSuffix = ' — pending';
         }
         const style = `display:inline-block;background:${bg};color:#fff;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600;margin-right:4px;text-decoration:none;opacity:${opacity};`;
         if (kind === 'dlc') {
@@ -2710,6 +2713,25 @@ async function _refreshTrialsModal() {
             const resource = (j.remote_host && j.remote_host !== 'localhost')
                 ? 'Remote' : 'Local';
             titleEl.textContent = `${typeStr} · ${resource} · ${j.status} (${pct}%)`;
+        }
+        // Tailor the legend to the job's execution target.  Local
+        // jobs skip the upload + remote-only-completed stages; the
+        // "Downloaded" row is relabeled "Completed".
+        const isLocalJob = !(j.remote_host && j.remote_host !== 'localhost');
+        const _show = (id, vis) => {
+            const el = document.getElementById(id);
+            if (el) el.style.display = vis ? '' : 'none';
+        };
+        _show('legendUploading',  !isLocalJob);
+        _show('legendRemoteOnly', !isLocalJob);
+        const dl = document.getElementById('legendDownloaded');
+        if (dl) {
+            // Rebuild the label text (after the colour square) so we
+            // don't wipe the inline span.
+            const sq = dl.querySelector('.lg-sq');
+            dl.innerHTML = '';
+            if (sq) dl.appendChild(sq);
+            dl.appendChild(document.createTextNode(isLocalJob ? 'Completed' : 'Downloaded'));
         }
         // Local style block ensures the row-line height + flex alignment
         // is in effect even if the History table hasn't rendered its
