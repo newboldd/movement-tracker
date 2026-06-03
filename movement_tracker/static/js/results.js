@@ -159,7 +159,7 @@ function _handlePlotClick(divId, ev) {
     let trialIdx = null;
     if (divId.startsWith('distPlot_') || divId.startsWith('velPlot_')) {
         trialIdx = parseInt(divId.split('_')[1]);
-    } else if (divId.startsWith('movPlot_')) {
+    } else if (divId.startsWith('movPlot_') || divId.startsWith('distMovPlot_')) {
         // The movement-plot div bundles every trial's data on its own
         // xaxis (x / x2 / x3 / …).  Position in trialInfo = trial idx,
         // since data.trials is in sorted trial-idx order.
@@ -176,7 +176,7 @@ function _applyHighlightAll() {
     if (!_clickHL) return;
     // Apply to every distance/velocity plot (all trials) and every
     // movement plot (subplot per trial).
-    document.querySelectorAll('[id^="distPlot_"], [id^="velPlot_"], [id^="movPlot_"]')
+    document.querySelectorAll('[id^="distPlot_"], [id^="velPlot_"], [id^="movPlot_"], [id^="distMovPlot_"]')
         .forEach(d => _applyHighlightTo(d.id));
 }
 
@@ -188,9 +188,9 @@ function _applyHighlightTo(divId) {
     const base = _baseShapeCount[divId] || 0;
     const shapes = (div.layout.shapes || []).slice(0, base);
     const lineStyle = { color: 'rgba(0,0,0,0.45)', width: 1, dash: 'dot' };
-    if (divId.startsWith('movPlot_')) {
-        // Movement plots have one subplot per trial — paint the line
-        // in EVERY subplot's x-axis.
+    if (divId.startsWith('movPlot_') || divId.startsWith('distMovPlot_')) {
+        // Movement / dist-movement plots have one subplot per trial —
+        // paint the line in EVERY subplot's x-axis.
         const xaxes = Object.keys(div.layout)
             .filter(k => /^xaxis(\d+)?$/.test(k))
             .map(k => k === 'xaxis' ? 'x' : 'x' + k.slice('xaxis'.length));
