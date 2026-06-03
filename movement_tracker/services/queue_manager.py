@@ -911,49 +911,137 @@ class QueueManager:
                         with get_db_ctx() as _db:
                             _db.execute("UPDATE jobs SET progress_pct = ? WHERE id = ?", (pct, job_id))
                     ep = extra_params or {}
-                    trial_idx = ep.get("trial_idx", 0)
-                    vtm = build_trial_map(subject_names[0])
-                    if trial_idx >= len(vtm):
-                        raise ValueError(f"Trial index {trial_idx} out of range")
-                    trial_stem = vtm[trial_idx]["trial_name"]
-                    if job_type == "skeleton_v1":
-                        # v1 = original FK skeleton fit (writes skeleton_v1.npz)
+
+                    # Batch mode: when the frontend submits
+                    # ``extra_params.trials = [{subject_name, trial_idx,
+                    # trial_name}, ...]`` we iterate the list under one
+                    # parent job_id so the user sees a single row in the
+                    # queue with per-trial outcome chips (matches the
+                    # hrnet / deidentify batch pattern).  Falls back to
+                    # the legacy single-trial path otherwise.
+                    trials_batch = ep.get("trials") if job_type == "skeleton_v1" else None
+                    if trials_batch:
                         from ..services.skeleton_v1 import run_skeleton_v1_fit
-                        run_skeleton_v1_fit(
-                            subject_names[0], trial_stem,
-                            cancel_event=cancel_event, progress_callback=on_progress,
-                            w_reproj=ep.get("w_reproj", 1.0), w_bone=ep.get("w_bone", 5.0),
-                            w_smooth=ep.get("w_smooth", 1.0), snap_bones=ep.get("snap_bones", False),
-                            w_angle=ep.get("w_angle", 2.0),
-                        )
-                    elif job_type == "skeleton_v2":
-                        # v2 = legacy smoothing fit (writes skeleton_v2.npz)
-                        from ..services.skeleton_v2 import run_skeleton_v2_fit
-                        run_skeleton_v2_fit(
-                            subject_names[0], trial_stem,
-                            cancel_event=cancel_event, progress_callback=on_progress,
-                        )
+                        from ..services.skeleton_data import _skeleton_dir
+                        n_total = max(1, len(trials_batch))
+                        # Per-trial outcome map lives inside extra_params
+                        # so the JS queue renderer can color the chips.
+                        # Initialize and persist before starting.
+                        outcomes = [None] * n_total
+                        ep_state = dict(ep)
+                        ep_state["trials"] = [dict(t) for t in trials_batch]
+                        for i, t in enumerate(ep_state["trials"]):
+                            t.setdefault("subject_name", subject_names[0])
+                            t["outcome"] = None
+                            outcomes[i] = t
+                        with get_db_ctx() as _db:
+                            _db.execute("UPDATE jobs SET params_json = ? WHERE id = ?",
+                                        (json.dumps(ep_state), job_id))
+                        for i, t in enumerate(ep_state["trials"]):
+                            if cancel_event.is_set():
+                                t["outcome"] = "cancelled"
+                                with get_db_ctx() as _db:
+                                    _db.execute("UPDATE jobs SET params_json = ? WHERE id = ?",
+                                                (json.dumps(ep_state), job_id))
+                                break
+                            sub = t.get("subject_name") or subject_names[0]
+                            try:
+                                vtm = build_trial_map(sub)
+                            except Exception as exc:
+                                t["outcome"] = "failed"
+                                t["outcome_error"] = str(exc)
+                                with get_db_ctx() as _db:
+                                    _db.execute("UPDATE jobs SET params_json = ? WHERE id = ?",
+                                                (json.dumps(ep_state), job_id))
+                                continue
+                            ti = int(t.get("trial_idx", -1))
+                            if ti < 0 or ti >= len(vtm):
+                                t["outcome"] = "failed"
+                                t["outcome_error"] = f"trial_idx {ti} out of range"
+                                with get_db_ctx() as _db:
+                                    _db.execute("UPDATE jobs SET params_json = ? WHERE id = ?",
+                                                (json.dumps(ep_state), job_id))
+                                continue
+                            trial_stem = vtm[ti]["trial_name"]
+                            def _per_trial_progress(pct, _i=i, _n=n_total):
+                                # Map per-trial 0..100 → batch 0..100.
+                                batch_pct = ((_i + pct / 100.0) / _n) * 100.0
+                                on_progress(batch_pct)
+                            try:
+                                run_skeleton_v1_fit(
+                                    sub, trial_stem,
+                                    cancel_event=cancel_event,
+                                    progress_callback=_per_trial_progress,
+                                    w_reproj=ep.get("w_reproj", 1.0),
+                                    w_bone=ep.get("w_bone", 5.0),
+                                    w_smooth=ep.get("w_smooth", 1.0),
+                                    snap_bones=ep.get("snap_bones", False),
+                                    w_angle=ep.get("w_angle", 0.0),
+                                )
+                                # Detect outcome by file presence: if
+                                # skeleton_v1.npz now exists, mark ok.
+                                root = _skeleton_dir(sub)
+                                npz = root / trial_stem / "skeleton_v1.npz" if root else None
+                                t["outcome"] = "ok" if (npz and npz.exists()) else "failed"
+                            except Exception as exc:
+                                t["outcome"] = "failed"
+                                t["outcome_error"] = str(exc)
+                            with get_db_ctx() as _db:
+                                _db.execute("UPDATE jobs SET params_json = ? WHERE id = ?",
+                                            (json.dumps(ep_state), job_id))
+                        # End of batch — leave the loop; outer code will
+                        # mark the parent job completed/failed based on
+                        # whether any exception escaped.
+                        continue_after_batch = True
                     else:
-                        # v3 = corrections pipeline (writes skeleton_v3.npz).
-                        # skeleton_v3.py's public entry point now wraps
-                        # mp_error_detection.run_correction_pipeline + save_errors
-                        # so the queue manager only knows one function per version.
-                        from ..services.skeleton_v3 import run_skeleton_v3_fit
-                        det = dict(ep.get("detection") or {})
-                        attr = dict(ep.get("attribution") or {})
-                        run_skeleton_v3_fit(
-                            subject_names[0], trial_stem,
-                            detection=det, attribution=attr,
-                            progress_callback=on_progress,
-                            cancel_event=cancel_event,
-                            hrnet_source=ep.get("hrnet_source", "auto"),
-                            stereo_mode=ep.get("stereo_mode", "image"),
-                            stereo_mask_dilate_px=int(ep.get("mask_dilate_px", 10)),
-                            stereo_gauss_center_weight=float(ep.get("gauss_center_weight", 0.0)),
-                            stereo_conf=float(ep.get("stereo_conf", 0.0)),
-                            stereo_dist_px=float(ep.get("stereo_dist_px", 0.0)),
-                            stereo_occlusion_px=float(ep.get("stereo_occlusion_px", 0.0)),
-                        )
+                        continue_after_batch = False
+                    if not continue_after_batch:
+                        # Legacy single-trial path — works for v1/v2/v3.
+                        trial_idx = ep.get("trial_idx", 0)
+                        vtm = build_trial_map(subject_names[0])
+                        if trial_idx >= len(vtm):
+                            raise ValueError(f"Trial index {trial_idx} out of range")
+                        trial_stem = vtm[trial_idx]["trial_name"]
+                        if job_type == "skeleton_v1":
+                            # v1 = original FK skeleton fit (writes skeleton_v1.npz)
+                            from ..services.skeleton_v1 import run_skeleton_v1_fit
+                            run_skeleton_v1_fit(
+                                subject_names[0], trial_stem,
+                                cancel_event=cancel_event, progress_callback=on_progress,
+                                w_reproj=ep.get("w_reproj", 1.0), w_bone=ep.get("w_bone", 5.0),
+                                w_smooth=ep.get("w_smooth", 1.0), snap_bones=ep.get("snap_bones", False),
+                                # Joint-angle regularization is no longer
+                                # exposed in the UI; default to 0.
+                                w_angle=ep.get("w_angle", 0.0),
+                            )
+                        elif job_type == "skeleton_v2":
+                            # v2 = legacy smoothing fit (writes skeleton_v2.npz)
+                            from ..services.skeleton_v2 import run_skeleton_v2_fit
+                            run_skeleton_v2_fit(
+                                subject_names[0], trial_stem,
+                                cancel_event=cancel_event, progress_callback=on_progress,
+                            )
+                        else:
+                            # v3 = corrections pipeline (writes skeleton_v3.npz).
+                            # skeleton_v3.py's public entry point now wraps
+                            # mp_error_detection.run_correction_pipeline + save_errors
+                            # so the queue manager only knows one function per version.
+                            from ..services.skeleton_v3 import run_skeleton_v3_fit
+                            det = dict(ep.get("detection") or {})
+                            attr = dict(ep.get("attribution") or {})
+                            run_skeleton_v3_fit(
+                                subject_names[0], trial_stem,
+                                detection=det, attribution=attr,
+                                progress_callback=on_progress,
+                                cancel_event=cancel_event,
+                                hrnet_source=ep.get("hrnet_source", "auto"),
+                                stereo_mode=ep.get("stereo_mode", "image"),
+                                stereo_mask_dilate_px=int(ep.get("mask_dilate_px", 10)),
+                                stereo_gauss_center_weight=float(ep.get("gauss_center_weight", 0.0)),
+                                stereo_conf=float(ep.get("stereo_conf", 0.0)),
+                                stereo_dist_px=float(ep.get("stereo_dist_px", 0.0)),
+                                stereo_occlusion_px=float(ep.get("stereo_occlusion_px", 0.0)),
+                            )
                     job_registry._cancel_events.pop(job_id, None)
                     with get_db_ctx() as _db:
                         _db.execute("UPDATE jobs SET status='completed', progress_pct=100, finished_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,))

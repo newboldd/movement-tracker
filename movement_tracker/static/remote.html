@@ -305,6 +305,13 @@
                         </div>
                     </div>
                     <div style="display:flex;flex-direction:column;gap:3px;">
+                        <span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">3D models</span>
+                        <div style="display:flex;gap:3px;">
+                            <button class="btn btn-sm step-btn" data-step="skeleton_v1" onclick="selectStep('skeleton_v1')"
+                                    title="Run Skeleton Fit v1 on each selected trial (writes skeleton_v1.npz).  Trials that already have a skeleton_v1.npz appear in green; submit batches them into a single queue row with per-trial outcome chips.">Skel Fit v1</button>
+                        </div>
+                    </div>
+                    <div style="display:flex;flex-direction:column;gap:3px;">
                         <span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">Cache Results</span>
                         <div style="display:flex;gap:3px;">
                             <button class="btn btn-sm step-btn" data-step="cache_group" onclick="selectStep('cache_group')">Group Comparison</button>
@@ -393,6 +400,44 @@
                     Use bounding boxes (saved or MediaPipe-derived defaults)
                 </label>
                 <div id="hrnetIneligibleBanner" style="display:none;font-size:11px;color:var(--text-muted);margin-top:6px;padding:6px 8px;background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.25);border-radius:var(--radius);"></div>
+            </div>
+
+            <!-- Skeleton Fit v1 settings — shown only when the selected
+                 step is skeleton_v1.  Mirrors the labels-page settings
+                 panel minus the joint-angles slider (the term is no
+                 longer part of the v1 fit). -->
+            <div id="skelfitSettings" data-cache-hide style="display:none;margin-bottom:12px;padding:10px 12px;background:var(--bg);border-radius:var(--radius);">
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;font-weight:600;">Skel Fit v1 settings</div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px 18px;">
+                    <div style="font-size:11px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <label style="color:var(--text-muted);">Reprojection weight</label>
+                            <span id="skelfitWReproj" style="color:var(--text-muted);font-weight:bold;">1.0</span>
+                        </div>
+                        <input type="range" id="skelfitSliderReproj" min="0" max="20" step="0.5" value="1"
+                               style="width:100%;cursor:pointer;height:5px;">
+                    </div>
+                    <div style="font-size:11px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <label style="color:var(--text-muted);">Bone-length weight</label>
+                            <span id="skelfitWBone" style="color:var(--text-muted);font-weight:bold;">5.0</span>
+                        </div>
+                        <input type="range" id="skelfitSliderBone" min="0" max="20" step="0.5" value="5"
+                               style="width:100%;cursor:pointer;height:5px;">
+                    </div>
+                    <div style="font-size:11px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <label style="color:var(--text-muted);">Smoothness weight</label>
+                            <span id="skelfitWSmooth" style="color:var(--text-muted);font-weight:bold;">1.0</span>
+                        </div>
+                        <input type="range" id="skelfitSliderSmooth" min="0" max="5" step="0.1" value="1"
+                               style="width:100%;cursor:pointer;height:5px;">
+                    </div>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);cursor:pointer;">
+                        <input type="checkbox" id="skelfitSnapBones" style="margin:0;cursor:pointer;">
+                        Snap bone lengths
+                    </label>
+                </div>
             </div>
 
             <!-- Submit Button -->
@@ -553,7 +598,7 @@
 
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js?v=13"></script>
-    <script src="/static/js/remote.js?v=64"></script>
+    <script src="/static/js/remote.js?v=65"></script>
     <script src="/static/js/cache_results.js?v=2"></script>
 </body>
 </html>

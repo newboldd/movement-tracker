@@ -8395,7 +8395,7 @@ const manoViewer = (() => {
         _setSlider('fitSliderReproj', p.w_reproj);
         _setSlider('fitSliderBone',   p.w_bone);
         _setSlider('fitSliderSmooth',  p.w_smooth);
-        _setSlider('fitSliderAngle',   p.w_angle);
+        // Joint-angle slider was removed; no UI element to set.
         const snap = $('fitSnapBones');
         if (snap && p.snap_bones != null) snap.checked = p.snap_bones;
     }
@@ -8478,7 +8478,7 @@ const manoViewer = (() => {
     }
 
     function resetFitDefaults() {
-        const defaults = { fitSliderReproj: 1, fitSliderBone: 5, fitSliderSmooth: 1, fitSliderAngle: 2 };
+        const defaults = { fitSliderReproj: 1, fitSliderBone: 5, fitSliderSmooth: 1 };
         for (const [id, val] of Object.entries(defaults)) {
             _setSlider(id, val);
         }
@@ -8495,7 +8495,6 @@ const manoViewer = (() => {
             { id: 'fitSliderReproj',      display: 'fitWReproj' },
             { id: 'fitSliderBone',         display: 'fitWBone' },
             { id: 'fitSliderSmooth',       display: 'fitWSmooth' },
-            { id: 'fitSliderAngle',        display: 'fitWAngle' },
             // v2
             { id: 'v2SliderMediapipe',     display: 'v2WMediapipe' },
             { id: 'v2SliderVision',        display: 'v2WVision' },
@@ -8534,7 +8533,9 @@ const manoViewer = (() => {
             w_bone: parseFloat($('fitSliderBone')?.value ?? 5),
             w_smooth: parseFloat($('fitSliderSmooth')?.value ?? 1),
             snap_bones: $('fitSnapBones')?.checked ?? false,
-            w_angle: parseFloat($('fitSliderAngle')?.value ?? 2),
+            // Joint-angle regularization is no longer a feature;
+            // explicitly request 0 from the backend.
+            w_angle: 0,
         };
 
         try {

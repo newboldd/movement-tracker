@@ -328,7 +328,10 @@ class FitRequest(BaseModel):
     w_bone: float = 5.0
     w_smooth: float = 1.0
     snap_bones: bool = False
-    w_angle: float = 2.0
+    # Joint-angle regularization is no longer exposed in the UI;
+    # default to 0 so the optimizer skips the term unless an old
+    # caller explicitly passes a value.
+    w_angle: float = 0.0
 
 
 @router.get("/{subject_id}/fit/status")
@@ -336,6 +339,33 @@ def get_fit_status(subject_id: int) -> dict:
     """Check if Skeleton fitting dependencies are available."""
     from ..services.skeleton_v1 import check_skeleton_available
     return check_skeleton_available()
+
+
+@router.get("/{subject_id}/trial_skeleton_status")
+def trial_skeleton_status(subject_id: int) -> dict:
+    """Per-trial skeleton_v1.npz existence for the given subject.
+
+    Powers the per-trial color coding on the Jobs page Skel Fit v1
+    selector: green when the npz already exists, neutral when not.
+    """
+    from ..services.skeleton_data import _skeleton_dir
+    name = _subject_name(subject_id)
+    try:
+        tmap = build_trial_map(name)
+    except Exception:
+        return {"trials": []}
+    root = _skeleton_dir(name)
+    out: list[dict] = []
+    for i, t in enumerate(tmap):
+        tn = t.get("trial_name", "")
+        npz = root / tn / "skeleton_v1.npz" if root else None
+        has = bool(npz and npz.exists())
+        out.append({
+            "trial_idx": i,
+            "trial_name": tn,
+            "has_skeleton_v1": has,
+        })
+    return {"trials": out}
 
 
 @router.post("/{subject_id}/fit")

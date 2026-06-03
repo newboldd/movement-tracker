@@ -322,6 +322,9 @@ function selectStep(step) {
             if (cb) cb.checked = false;
         }
     }
+    // Skeleton Fit v1 settings panel — only visible for that step.
+    const skelfitBox = document.getElementById('skelfitSettings');
+    if (skelfitBox) skelfitBox.style.display = (step === 'skeleton_v1') ? '' : 'none';
 }
 
 // ── Load steps ──────────────────────────────────────────
@@ -390,7 +393,31 @@ async function loadSubjects() {
 }
 
 // Steps that support per-trial selection
-const TRIAL_STEPS = new Set(['deidentify', 'hrnet', 'preproc', 'mediapipe']);
+const TRIAL_STEPS = new Set(['deidentify', 'hrnet', 'preproc', 'mediapipe', 'skeleton_v1']);
+// Cache: subjectId → [{trial_idx, trial_name, has_skeleton_v1}, ...]
+// Populated by ensureSkeletonStatusForSubjects() the first time a
+// subject is shown in the Skel Fit v1 trial picker so the trial chips
+// can be coloured green (has npz) or neutral (missing).
+const cachedSkeletonStatus = {};
+let _skelStatusFetchInFlight = false;
+async function ensureSkeletonStatusForSubjects(subjectIds) {
+    const need = (subjectIds || []).filter(id => id != null && !(id in cachedSkeletonStatus));
+    if (!need.length || _skelStatusFetchInFlight) return false;
+    _skelStatusFetchInFlight = true;
+    try {
+        await Promise.all(need.map(async (sid) => {
+            try {
+                const data = await API.get(`/api/skeleton/${sid}/trial_skeleton_status`);
+                cachedSkeletonStatus[sid] = (data && data.trials) || [];
+            } catch {
+                cachedSkeletonStatus[sid] = [];
+            }
+        }));
+        return true;
+    } finally {
+        _skelStatusFetchInFlight = false;
+    }
+}
 // Cache: subjectId (number) -> trial array from /api/deidentify/{id}/trials
 const cachedTrialData = {};
 // Cache: subjectId (number) -> trial array from /api/analyze/hrnet/job-status
@@ -494,11 +521,34 @@ function colorSubjectsByStep() {
         _colorSubjectsFromHrnetCache(flag);
         return;
     }
+    if (step === 'skeleton_v1') {
+        // Per-trial skeleton_v1.npz presence — halo a subject green
+        // when EVERY trial has the npz already.
+        const ids = subjects.map(s => s.id);
+        ensureSkeletonStatusForSubjects(ids).then(() =>
+            _colorSubjectsFromSkeletonCache());
+        _colorSubjectsFromSkeletonCache();
+        return;
+    }
     const prop = STEP_DONE_MAP[step];
     subjects.forEach(s => {
         const label = document.getElementById('subj-' + s.id);
         if (!label) return;
         const done = prop ? !!s[prop] : false;
+        label.style.borderColor = done ? 'var(--green)' : '';
+        label.style.background = done ? 'rgba(76,175,80,0.08)' : '';
+    });
+}
+
+function _colorSubjectsFromSkeletonCache() {
+    subjects.forEach(s => {
+        const label = document.getElementById('subj-' + s.id);
+        if (!label) return;
+        const trials = cachedSkeletonStatus[s.id];
+        let done = false;
+        if (Array.isArray(trials) && trials.length > 0) {
+            done = trials.every(t => !!t.has_skeleton_v1);
+        }
         label.style.borderColor = done ? 'var(--green)' : '';
         label.style.background = done ? 'rgba(76,175,80,0.08)' : '';
     });
@@ -578,7 +628,24 @@ async function updateTrialSection() {
     if (useBboxRow) useBboxRow.style.display = (selectedStep === 'hrnet') ? 'flex' : 'none';
     if (banner && selectedStep !== 'hrnet') banner.style.display = 'none';
 
-    if (selectedStep === 'hrnet' || selectedStep === 'mediapipe') {
+    if (selectedStep === 'skeleton_v1') {
+        // Per-trial skeleton_v1.npz status is fetched separately (one
+        // endpoint per subject).  The deidentify /trials endpoint is
+        // still the source of the trial LIST; the skeleton status is
+        // merged in by trial_idx in renderTrialGrid.
+        const ids = checkedSubjects.map(s => s.id);
+        await ensureSkeletonStatusForSubjects(ids);
+        await Promise.all(checkedSubjects.map(async (s) => {
+            if (!cachedTrialData[s.id]) {
+                try {
+                    const data = await API.get(`/api/deidentify/${s.id}/trials`);
+                    cachedTrialData[s.id] = data.trials || [];
+                } catch (e) {
+                    cachedTrialData[s.id] = [];
+                }
+            }
+        }));
+    } else if (selectedStep === 'hrnet' || selectedStep === 'mediapipe') {
         // Both steps consume the same /hrnet/job-status payload (which
         // includes per-trial ``has_hrnet_output`` *and* ``has_mp_npz`` /
         // ``has_mp_reverse_npz``).  Reuse ``cachedHrnetStatus`` as the
@@ -697,6 +764,18 @@ function renderTrialGrid(checkedSubjects) {
                     title = mpReverse
                         ? 'No mediapipe_reverse.npz yet — will run reverse pass on this trial'
                         : 'No mediapipe.npz yet — will run on this trial';
+                }
+            } else if (selectedStep === 'skeleton_v1') {
+                const skelTrials = cachedSkeletonStatus[s.id] || [];
+                const skelEntry = skelTrials.find(x => x.trial_idx === t.trial_idx);
+                const hasNpz = !!(skelEntry && skelEntry.has_skeleton_v1);
+                if (hasNpz) {
+                    colorClass = 'done';
+                    title = 'skeleton_v1.npz already exists for this trial';
+                    initialChecked = false;  // skip re-running by default
+                } else {
+                    extraStyle = 'border-color:#e53935;background:rgba(229,57,53,0.10);';
+                    title = 'No skeleton_v1.npz yet — Submit will run the fit';
                 }
             } else if (selectedStep === 'preproc') {
                 // No per-trial bake-status flag yet — colour everything
@@ -875,6 +954,15 @@ function renderRedownloadSubjects() {
 //                  Run-in-reverse checkbox is forwarded to every job.
 let _useBatchRunnerForNextSubmit = false;
 async function submitBatch() {
+    // Skel Fit v1 is a local CPU job — submitJob's skeleton_v1 branch
+    // already packs every selected trial into a single queue row with
+    // per-trial outcome chips, which is the same UX the remote MP
+    // batch provides.  Route through it regardless of the current
+    // target so the user doesn't have to think about it.
+    if (selectedStep === 'skeleton_v1') {
+        await submitJob();
+        return;
+    }
     if (getExecutionTarget() !== 'remote') {
         alert('Submit Batch only runs on the remote server.  Switch the execution target to Remote.');
         return;
@@ -1207,6 +1295,62 @@ async function submitJob() {
                 // Bust per-subject HRnet status cache so the refresh
                 // shows in-flight state.
                 for (const id of subjIds) delete cachedHrnetStatus[id];
+            } else if (jobType === 'skeleton_v1') {
+                // Single batched submit: one queue row, one log, one
+                // progress bar, per-trial outcome chips driven by the
+                // queue manager updating jobs.params_json.trials[i].
+                const trialEntries = [];
+                const subjectIdSet = new Set();
+                const subjectIdToName = new Map();
+                for (const cb of trialChecks) {
+                    const subjectId = parseInt(cb.dataset.subjectId);
+                    const trialIdx = parseInt(cb.dataset.trialIdx);
+                    const subjName = cb.closest('.trial-item')?.parentElement
+                        ?.parentElement?.querySelector('.trial-group-label')?.textContent
+                        || (subjectNames.length === 1 ? subjectNames[0] : null);
+                    const fullStem = cb.dataset.trialName || '';
+                    const shortTrial = fullStem.includes('_')
+                        ? fullStem.slice(fullStem.indexOf('_') + 1)
+                        : fullStem;
+                    subjectIdSet.add(subjectId);
+                    if (subjName) subjectIdToName.set(subjectId, subjName);
+                    trialEntries.push({
+                        subject_name: subjName,
+                        trial_idx: trialIdx,
+                        trial_name: shortTrial,
+                    });
+                }
+                if (!trialEntries.length) return;
+                const subjIds = [...subjectIdSet];
+                const subjNames = subjIds.map(id => subjectIdToName.get(id)).filter(Boolean);
+                const w_reproj = parseFloat(document.getElementById('skelfitSliderReproj')?.value ?? 1);
+                const w_bone   = parseFloat(document.getElementById('skelfitSliderBone')?.value   ?? 5);
+                const w_smooth = parseFloat(document.getElementById('skelfitSliderSmooth')?.value ?? 1);
+                const snap_bones = !!document.getElementById('skelfitSnapBones')?.checked;
+                await API.post('/api/remote/launch', {
+                    job_type: 'skeleton_v1',
+                    subject_ids: subjIds,
+                    subjects: subjNames,
+                    execution_target: executionTarget,
+                    extra_params: {
+                        trials: trialEntries,
+                        w_reproj, w_bone, w_smooth, snap_bones,
+                        // Joint-angle weight no longer exposed — keep
+                        // the optimizer from running that term.
+                        w_angle: 0,
+                        trial_name: (() => {
+                            if (trialEntries.length === 1) return trialEntries[0].trial_name;
+                            if (trialEntries.length >= 5) return `${trialEntries.length} trials`;
+                            const multiSubj = subjIds.length > 1;
+                            return trialEntries.map(t =>
+                                multiSubj ? `${t.subject_name} ${t.trial_name}` : t.trial_name
+                            ).join(', ');
+                        })(),
+                    },
+                });
+                // Bust per-subject skeleton-status cache so the refresh
+                // picks up new npz files when the batch finishes.
+                for (const id of subjIds) delete cachedSkeletonStatus[id];
             }
             clearSubjects();
             refreshQueue();
