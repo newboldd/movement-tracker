@@ -341,6 +341,52 @@ def get_fit_status(subject_id: int) -> dict:
     return check_skeleton_available()
 
 
+@router.get("/stereo_disparity")
+def stereo_disparity_by_name(
+    subject: str = Query(..., description="Subject name (e.g. MSA01)"),
+    trial: str = Query(..., description="Trial name (e.g. L1) or numeric trial_idx"),
+) -> dict:
+    """Name-friendly wrapper around the numeric stereo_disparity endpoint.
+
+    Resolves ``subject`` (name) → subject_id and ``trial`` (name or
+    numeric idx) → trial_idx, then delegates.  Use this form when
+    typing into a browser URL by hand:
+
+        /api/skeleton/stereo_disparity?subject=MSA01&trial=L1
+    """
+    from ..db import get_db_ctx
+    from ..services.video import build_trial_map
+
+    with get_db_ctx() as db:
+        row = db.execute(
+            "SELECT id FROM subjects WHERE name = ? COLLATE NOCASE", (subject,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, f"Subject {subject!r} not found")
+    sid = int(row["id"])
+
+    tidx: int | None = None
+    if trial.isdigit() or (trial.startswith("-") and trial[1:].isdigit()):
+        tidx = int(trial)
+    else:
+        # Match by trial_name suffix (e.g. "L1" matches "MSA01_L1")
+        # case-insensitive; fall back to exact match.
+        name = _subject_name(sid)
+        tmap = build_trial_map(name)
+        wanted = trial.lower()
+        for i, t in enumerate(tmap):
+            tn = (t.get("trial_name") or "").lower()
+            if tn == wanted or tn.endswith("_" + wanted) or tn.endswith(wanted):
+                tidx = i; break
+        if tidx is None:
+            raise HTTPException(
+                404,
+                f"Trial {trial!r} not found for {subject!r}. "
+                f"Available: {[t.get('trial_name') for t in tmap]}",
+            )
+    return trial_stereo_disparity(sid, tidx)
+
+
 @router.get("/{subject_id}/trial/{trial_idx}/stereo_disparity")
 def trial_stereo_disparity(subject_id: int, trial_idx: int) -> dict:
     """Diagnostic: per-joint L vs R epipolar residual at MP-combined
