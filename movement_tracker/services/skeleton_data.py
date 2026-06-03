@@ -1137,28 +1137,17 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
     R_eye = np.eye(3, dtype=np.float64)
     T_zero = np.zeros((3, 1), dtype=np.float64)
 
-    # ── Apply learned 2D offsets to 3D joints (before projection) ──
-    if has_skeleton_fit and has_calib:
-        offset_L = v1.get("offset_L")
-        offset_R = v1.get("offset_R")
-        # Convert the average of L/R 2D pixel offsets to a 3D world-space shift
-        # using the left camera intrinsics and the average hand depth.
-        if offset_L is not None or offset_R is not None:
-            off_L = np.array(offset_L, dtype=np.float64).ravel()[:2] if offset_L is not None else np.zeros(2)
-            off_R = np.array(offset_R, dtype=np.float64).ravel()[:2] if offset_R is not None else np.zeros(2)
-            # Average the two camera offsets for a single 3D correction
-            avg_off = (off_L + off_R) / 2.0
-            # Compute average depth (Z in left camera frame) across all valid frames
-            valid_mask = ~np.isnan(joints_3d[:, 0, 2])
-            if valid_mask.any():
-                avg_z = np.nanmean(joints_3d[valid_mask, :, 2])
-                fx, fy = K1[0, 0], K1[1, 1]
-                # 2D pixel offset → 3D world offset: dx_3d = dx_px * Z / fx
-                dx_3d = avg_off[0] * avg_z / fx
-                dy_3d = avg_off[1] * avg_z / fy
-                joints_3d = joints_3d.copy()
-                joints_3d[valid_mask, :, 0] += dx_3d
-                joints_3d[valid_mask, :, 1] += dy_3d
+    # NOTE: an earlier version of the fit also optimized per-camera
+    # 2D pixel offsets and stored them in the npz as offset_L /
+    # offset_R.  The display code used to "fold" those offsets back
+    # into joints_3d via a single averaged 3D shift through the LEFT
+    # camera intrinsics — but a single 3D shift cannot reproduce two
+    # independent per-camera 2D offsets, so the reprojections came
+    # out shifted relative to MP-combined on both cameras.  The fit
+    # no longer optimizes those offsets (new npz files save zeros)
+    # and the display ignores them.  joints_3d here is the
+    # optimizer's final 3D pose, projected straight through the
+    # stereo calibration below.
 
     # ── Project Skeleton 3D→2D (if available) ──────────────────────
     if has_skeleton_fit and has_calib:

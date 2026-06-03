@@ -242,10 +242,25 @@ def run_skeleton_v1_fit(
                 else:
                     init_3d[i, j] = [0, 0, 500]  # arbitrary fallback
 
-    # Optimizable: 3D joint positions + per-camera 2D offsets
+    # Optimizable: 3D joint positions only.
+    #
+    # We used to also optimize per-camera 2D offsets (offset_L /
+    # offset_R) to soak up residual stereo-calibration error, but
+    # that created a perverse outcome: with reproj-only settings
+    # the optimizer would drift the offsets to non-zero and shift
+    # joints_3d to compensate, so the saved 3D pose no longer
+    # triangulates back to the MP-combined 2D points the user fed
+    # in.  The display path then tried to "fold" the saved offsets
+    # back into joints_3d via a single 3D shift (averaging the two
+    # cameras and converting through the LEFT intrinsics), which
+    # can't reproduce two independent per-camera 2D offsets — so
+    # both cameras' reprojections came out shifted relative to
+    # MP-combined.  Dropping the offsets makes the loss minimum
+    # equal to a per-frame triangulation, which is the behaviour
+    # the rest of the app assumes.
     joints_3d = torch.tensor(init_3d, device=device, dtype=torch.float32, requires_grad=True)
-    offset_L = torch.zeros(1, 1, 2, device=device, dtype=torch.float32, requires_grad=True)
-    offset_R = torch.zeros(1, 1, 2, device=device, dtype=torch.float32, requires_grad=True)
+    offset_L = torch.zeros(1, 1, 2, device=device, dtype=torch.float32)
+    offset_R = torch.zeros(1, 1, 2, device=device, dtype=torch.float32)
 
     logger.info(f"  Fitting {n_valid} frames ({n_valid * 21 * 3} position params)")
     report(20)
@@ -264,7 +279,6 @@ def run_skeleton_v1_fit(
 
     optimizer = torch.optim.Adam([
         {"params": [joints_3d], "lr": 0.5},
-        {"params": [offset_L, offset_R], "lr": 0.1},
     ])
 
     # Build kinematic chain traversal order (BFS from wrist) for bone projection
@@ -329,10 +343,9 @@ def run_skeleton_v1_fit(
             continue
 
         loss.backward()
-        for p in [joints_3d, offset_L, offset_R]:
-            if p.grad is not None:
-                torch.nan_to_num_(p.grad, nan=0.0, posinf=0.0, neginf=0.0)
-        torch.nn.utils.clip_grad_norm_([joints_3d, offset_L, offset_R], max_norm=5.0)
+        if joints_3d.grad is not None:
+            torch.nan_to_num_(joints_3d.grad, nan=0.0, posinf=0.0, neginf=0.0)
+        torch.nn.utils.clip_grad_norm_([joints_3d], max_norm=5.0)
         optimizer.step()
 
         # Project bone lengths to target values (hard constraint)
