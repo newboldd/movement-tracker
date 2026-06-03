@@ -77,6 +77,81 @@
 })();
 
 let subjects = [];
+
+// ── Click-anywhere time-cursor across plots ──────────────────────
+// When the user clicks any per-trial plot (distance, velocity, any
+// of the movement-parameter scatters), we draw a faint vertical line
+// at that x value on every plot showing the same trial.  Stored
+// here as a module-level state object so a re-render of a single
+// plot still picks the line back up.
+let _clickHL = null;            // { trialIdx, time }  or  null
+const _baseShapeCount = {};     // divId → shapes.length right after newPlot
+function _registerClickPlot(divId) {
+    const div = document.getElementById(divId);
+    if (!div || div._clickHLBound) return;
+    div._clickHLBound = true;
+    div.on('plotly_click', ev => _handlePlotClick(divId, ev));
+    // Lock in how many shapes the plot started with so the highlight
+    // append/strip cycle doesn't accumulate.
+    _baseShapeCount[divId] = (div.layout?.shapes || []).length;
+    // Re-apply the existing highlight (if any) so a fresh plot
+    // picks it up immediately.
+    if (_clickHL) _applyHighlightTo(divId);
+}
+
+function _handlePlotClick(divId, ev) {
+    if (!ev || !ev.points || !ev.points.length) return;
+    const pt = ev.points[0];
+    const x = (typeof pt.x === 'number') ? pt.x : parseFloat(pt.x);
+    if (!isFinite(x)) return;
+    let trialIdx = null;
+    if (divId.startsWith('distPlot_') || divId.startsWith('velPlot_')) {
+        trialIdx = parseInt(divId.split('_')[1]);
+    } else if (divId.startsWith('movPlot_')) {
+        // The movement-plot div bundles every trial's data on its own
+        // xaxis (x / x2 / x3 / …).  Position in trialInfo = trial idx,
+        // since data.trials is in sorted trial-idx order.
+        const axId = pt.xaxis?._id || 'x';
+        const m = axId.match(/^x(\d*)$/);
+        trialIdx = m ? (m[1] ? parseInt(m[1]) - 1 : 0) : 0;
+    } else return;
+    if (!Number.isFinite(trialIdx) || trialIdx < 0) return;
+    _clickHL = { trialIdx, time: x };
+    _applyHighlightAll();
+}
+
+function _applyHighlightAll() {
+    if (!_clickHL) return;
+    const { trialIdx } = _clickHL;
+    _applyHighlightTo(`distPlot_${trialIdx}`);
+    _applyHighlightTo(`velPlot_${trialIdx}`);
+    document.querySelectorAll('[id^="movPlot_"]').forEach(d => _applyHighlightTo(d.id));
+}
+
+function _applyHighlightTo(divId) {
+    if (!_clickHL) return;
+    const div = document.getElementById(divId);
+    if (!div || !div.layout) return;
+    const { trialIdx, time } = _clickHL;
+    const base = _baseShapeCount[divId] || 0;
+    const shapes = (div.layout.shapes || []).slice(0, base);
+    // Movement plots reference the trial's per-subplot xaxis; dist/vel
+    // plots only have one xaxis ('x').
+    let axId = 'x';
+    if (divId.startsWith('movPlot_')) {
+        axId = trialIdx === 0 ? 'x' : 'x' + (trialIdx + 1);
+    }
+    shapes.push({
+        type: 'line',
+        xref: axId,
+        yref: 'paper',
+        x0: time, x1: time,
+        y0: 0, y1: 1,
+        line: { color: 'rgba(0,0,0,0.45)', width: 1, dash: 'dot' },
+        layer: 'above',
+    });
+    try { Plotly.relayout(divId, { shapes }); } catch (_) {}
+}
 let currentTab = 'distances';
 let currentSubjectId = null;
 
@@ -2613,7 +2688,7 @@ function renderDistancePlot(divId, trial, yRange, width, overlayTraces, shapes) 
     Plotly.newPlot(divId, traces, layout, {
         responsive: false,
         displayModeBar: false,
-    });
+    }).then(() => _registerClickPlot(divId));
 }
 
 function renderVelocityPlot(divId, trial, yRange, width, overlayTraces, shapes) {
@@ -2662,7 +2737,7 @@ function renderVelocityPlot(divId, trial, yRange, width, overlayTraces, shapes) 
     Plotly.newPlot(divId, traces, layout, {
         responsive: false,
         displayModeBar: false,
-    });
+    }).then(() => _registerClickPlot(divId));
 }
 
 // ── Movements Tab ──────────────────────────────────────────────
@@ -3288,7 +3363,8 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
     if (widthPx) { layout.width = widthPx; config.responsive = false; }
     else { config.responsive = true; }
 
-    Plotly.newPlot(divId, traces, layout, config);
+    Plotly.newPlot(divId, traces, layout, config)
+        .then(() => _registerClickPlot(divId));
 }
 
 function linearRegression(x, y) {
