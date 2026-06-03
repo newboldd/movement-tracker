@@ -242,30 +242,46 @@ def run_skeleton_v1_fit(
                 else:
                     init_3d[i, j] = [0, 0, 500]  # arbitrary fallback
 
-    # ── Pre-pass: flag mislabeled-run frames ───────────────────
+    # ── Pre-pass: per-joint per-camera outlier mask ────────────
     #
-    # A run of K consecutive frames where MP locks onto the wrong
-    # target shows up as TWO opposite-sign acceleration spikes
-    # spaced K frames apart, with normal velocity inside the run
-    # (all bad frames are offset by the same amount, so velocity
-    # within the run looks fine).  Single-frame |a| thresholding
-    # would miss this.  Detect the pair, then confirm with a
-    # robust bone-length anomaly score so we don't mask genuine
-    # fast curving motion.
-    outlier_mask = _detect_outlier_runs(
-        init_3d, BONES, K_max=30, accel_k=6.0, bone_k=6.0,
+    # Three signals composed (per joint, per frame; final mask
+    # also per camera):
+    #   1. Per-joint 3D acceleration-spike pairing identifies
+    #      run-boundary frames for each joint.
+    #   2. Per-bone length z-score flags anomalous bones; we
+    #      blame ONE endpoint per anomalous bone by comparing
+    #      the two endpoints' 3D step magnitudes
+    #      (k_blame_joint = 2.0).  AND'ing with signal 1 gives
+    #      the per-joint outlier mask.
+    #   3. Per-joint per-camera 2D-pixel step magnitudes
+    #      attribute blame to L, R, or both (k_blame_camera =
+    #      2.0) for each masked joint.
+    joint_outlier_mask, camera_mask = _detect_outlier_per_joint(
+        init_3d, mp_L[valid_idx], mp_R[valid_idx], BONES,
+        K_max=30, accel_k=6.0, bone_k=6.0,
+        k_blame_joint=2.0, k_blame_camera=2.0,
     )
-    n_outliers = int(outlier_mask.sum())
-    logger.info(f"  Outlier pre-filter: masked {n_outliers}/{n_valid} frames "
-                f"({100.0 * n_outliers / max(n_valid, 1):.1f}%)")
+    n_joint_outliers = int(joint_outlier_mask.sum())
+    n_frames_any = int(joint_outlier_mask.any(axis=1).sum())
+    n_cam_L = int(camera_mask[:, :, 0].sum())
+    n_cam_R = int(camera_mask[:, :, 1].sum())
+    logger.info(
+        f"  Outlier pre-filter: {n_joint_outliers} (joint, frame) cells masked "
+        f"across {n_frames_any}/{n_valid} frames; "
+        f"camera attribution L={n_cam_L} R={n_cam_R}"
+    )
 
-    # Per-frame weight for the reproj loss: 0 on detected outlier
-    # frames so the data term doesn't anchor them at the bad
-    # position; the smoothness + bone terms still apply, which
-    # naturally pulls them toward an interpolation of neighbors.
-    frame_w_np = np.ones(n_valid, dtype=np.float32)
-    frame_w_np[outlier_mask] = 0.0
-    frame_weight = torch.tensor(frame_w_np, device=device, dtype=torch.float32)
+    # Per (frame, joint, camera) weights for the reproj loss.  Zero
+    # on a (frame, joint) for the camera(s) attributed as bad.  The
+    # smoothness + bone terms still apply, so masked joints get
+    # pulled toward neighbor-interpolated positions through the
+    # smoothness gradient.  A joint with one camera masked still
+    # gets a reproj anchor from the OTHER camera, so we don't
+    # throw away the good observation.
+    jw_L_np = (1.0 - camera_mask[:, :, 0].astype(np.float32))
+    jw_R_np = (1.0 - camera_mask[:, :, 1].astype(np.float32))
+    joint_weight_L = torch.tensor(jw_L_np, device=device, dtype=torch.float32)
+    joint_weight_R = torch.tensor(jw_R_np, device=device, dtype=torch.float32)
 
     # Optimizable: 3D joint positions only.
     #
@@ -333,17 +349,18 @@ def run_skeleton_v1_fit(
         pL = _project_torch(joints_3d, K1, d1) + offset_L
         pR = _project_torch(joints_3d, K2, d2, R_stereo, T_stereo) + offset_R
 
-        # Loss 1: 2D reprojection (both cameras), with per-frame
-        # outlier mask applied — flagged frames get weight 0 so the
-        # data term doesn't pull them toward MP's bad detection.
-        # `.sum(-1)` is (N, 21); broadcast frame_weight as (N, 1)
-        # to zero out an entire frame across all joints.  We normalize
-        # by the live frame count so the loss magnitude is comparable
-        # across trials with different outlier counts.
-        sq_L = ((pL - tgt_L) ** 2).sum(-1) * frame_weight[:, None]
-        sq_R = ((pR - tgt_R) ** 2).sum(-1) * frame_weight[:, None]
-        live_n = frame_weight.sum().clamp(min=1.0) * 21.0
-        loss_reproj = (sq_L.sum() + sq_R.sum()) / live_n
+        # Loss 1: 2D reprojection per camera, weighted per
+        # (frame, joint, camera) by the outlier mask.  Zero on
+        # (frame, joint, camera) means MP's detection there was
+        # attributed bad; that contribution drops from the data
+        # term while the other camera's good detection (if any)
+        # still anchors the joint.  Normalize by the sum of live
+        # weights so the magnitude doesn't drift with the
+        # outlier count.
+        sq_L = ((pL - tgt_L) ** 2).sum(-1) * joint_weight_L
+        sq_R = ((pR - tgt_R) ** 2).sum(-1) * joint_weight_R
+        live_w = (joint_weight_L.sum() + joint_weight_R.sum()).clamp(min=1.0)
+        loss_reproj = (sq_L.sum() + sq_R.sum()) / live_w
 
         # Loss 2: Bone length consistency (match robust targets)
         j1_pts = joints_3d[:, bone_idx[:, 0]]
@@ -424,9 +441,14 @@ def run_skeleton_v1_fit(
     all_joints = np.full((N, 21, 3), np.nan)
     all_err_L = np.full(N, np.nan)
     all_err_R = np.full(N, np.nan)
-    # Frame-level outlier flag in the FULL N-frame timeline so the
-    # Labels page can highlight the masked frames on the distance
-    # trace later if we wire that up.
+    # Outlier masks in full-trial coordinates.  Multiple
+    # resolutions saved for downstream convenience:
+    #   joint_outlier_mask[N, 21]      — per (frame, joint)
+    #   camera_outlier_mask[N, 21, 2]  — per (frame, joint, camera)
+    #   frame_outlier_mask[N]          — any-joint reduction
+    #                                    (back-compat with v0 mask)
+    all_joint_mask  = np.zeros((N, 21), dtype=bool)
+    all_camera_mask = np.zeros((N, 21, 2), dtype=bool)
     all_outlier_mask = np.zeros(N, dtype=bool)
 
     j3d_np = joints_3d.detach().cpu().numpy()
@@ -434,7 +456,9 @@ def run_skeleton_v1_fit(
         all_joints[t] = j3d_np[i]
         all_err_L[t] = err_L[i]
         all_err_R[t] = err_R[i]
-        all_outlier_mask[t] = bool(outlier_mask[i])
+        all_joint_mask[t]  = joint_outlier_mask[i]
+        all_camera_mask[t] = camera_mask[i]
+        all_outlier_mask[t] = bool(joint_outlier_mask[i].any())
 
     skeleton_trial_dir = _skeleton_dir(subject_name) / trial_stem
     skeleton_trial_dir.mkdir(parents=True, exist_ok=True)
@@ -461,11 +485,13 @@ def run_skeleton_v1_fit(
         w_smooth=float(w_smooth),
         snap_bones=bool(snap_bones),
         w_angle=float(w_angle),
-        # Per-frame outlier mask in full-trial coordinates.  True =
-        # frame's reproj loss was dropped during the fit because it
-        # paired with another opposite-direction acceleration spike
-        # AND its bone lengths were anomalous.
-        frame_outlier_mask=all_outlier_mask,
+        # Outlier masks in full-trial coordinates.  All three keys
+        # are saved so downstream readers can pick the resolution
+        # they need.  See _detect_outlier_per_joint for the
+        # signal-composition details.
+        frame_outlier_mask=all_outlier_mask,        # (N,) bool
+        joint_outlier_mask=all_joint_mask,          # (N, 21) bool
+        camera_outlier_mask=all_camera_mask,        # (N, 21, 2) bool
     )
 
     # Save fitting parameters alongside the npz
@@ -491,7 +517,10 @@ def run_skeleton_v1_fit(
             "mean_error_L": float(np.nanmean(all_err_L)),
             "mean_error_R": float(np.nanmean(all_err_R)),
             "target_bone_lengths": target_bone_lengths.tolist(),
-            "n_outliers_masked": int(n_outliers),
+            "n_outliers_masked": int(n_joint_outliers),
+            "n_frames_with_any_mask": int(n_frames_any),
+            "n_cam_L_masked": int(n_cam_L),
+            "n_cam_R_masked": int(n_cam_R),
         },
         "angle_constraints": angle_prior_data,
         "timestamp": datetime.now().isoformat(),
@@ -511,6 +540,181 @@ def run_skeleton_v1_fit(
         "mean_error_L": float(np.nanmean(all_err_L)),
         "mean_error_R": float(np.nanmean(all_err_R)),
     }
+
+
+def _detect_outlier_per_joint(
+    init_3d: np.ndarray,
+    mp_L: np.ndarray,
+    mp_R: np.ndarray,
+    bones,
+    K_max: int = 30,
+    accel_k: float = 6.0,
+    bone_k: float = 6.0,
+    k_blame_joint: float = 2.0,
+    k_blame_camera: float = 2.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-joint per-camera outlier detection.
+
+    Returns
+    -------
+    joint_outlier_mask : (N, 21) bool
+        True where the joint at the frame should be treated as
+        misdetected (any camera).
+    camera_mask : (N, 21, 2) bool
+        True for the camera(s) attributed as the source of the bad
+        detection.  camera_mask[t, j, 0] = left, [t, j, 1] = right.
+        Both can be True simultaneously when the 2D step is
+        comparable on both cameras.
+
+    Three composed signals:
+      1. Per-joint 3D acceleration-spike pairing — opposite-sign
+         spikes within K_max frames, magnitude ratio in (0.5, 2)
+         and direction cos ≤ -0.3, on each joint independently.
+         Catches the run window.
+      2. Bone-length anomaly with per-endpoint blame.  A bone is
+         flagged when its length z-score (robust median / MAD)
+         exceeds bone_k.  We blame ONE endpoint per anomalous
+         bone via the ratio of 3D step magnitudes (k_blame_joint).
+         AND'd with signal 1 produces joint_outlier_mask.
+      3. Per-joint per-camera attribution via the ratio of 2D
+         pixel-step magnitudes (k_blame_camera).  Both cameras
+         masked when the steps are comparable.
+
+    NaN-triangulated frames are *not* masked through this path —
+    init_3d's wrist-fallback would create a spurious accel spike;
+    those frames are filtered out before signal 1 instead.
+    """
+    N = init_3d.shape[0]
+    n_joints = init_3d.shape[1]
+    joint_mask = np.zeros((N, n_joints), dtype=bool)
+    cam_mask = np.zeros((N, n_joints, 2), dtype=bool)
+    if N < 5:
+        return joint_mask, cam_mask
+
+    # ── Per-joint 3D acceleration spikes ──────────────────────
+    # a[t, j, :] = x[t+1, j] − 2·x[t, j] + x[t-1, j]   for t in 1..N-2
+    a = init_3d[2:] - 2 * init_3d[1:-1] + init_3d[:-2]    # (N-2, 21, 3)
+    a_norm = np.linalg.norm(a, axis=-1)                    # (N-2, 21)
+    # Per-joint robust threshold using the trial's own statistics.
+    med_j = np.median(a_norm, axis=0)                      # (21,)
+    mad_j = np.median(np.abs(a_norm - med_j[None, :]),
+                      axis=0) * 1.4826                     # (21,)
+    thr_j = med_j + accel_k * np.maximum(mad_j, 0.1)       # (21,)
+
+    # Pair opposite spikes per joint.  joint_candidate[t, j] True
+    # iff frame t lies inside (or at) a matched spike pair on
+    # joint j.
+    joint_candidate = np.zeros((N, n_joints), dtype=bool)
+    for j in range(n_joints):
+        spikes = np.where(a_norm[:, j] > thr_j[j])[0]       # indices into a
+        if spikes.size < 2:
+            continue
+        # Vector at each spike for direction check.
+        vecs = a[spikes, j]                                # (n_sp, 3)
+        norms = np.linalg.norm(vecs, axis=-1)              # (n_sp,)
+        used = np.zeros(spikes.size, dtype=bool)
+        for i in range(spikes.size):
+            if used[i]:
+                continue
+            t1 = spikes[i] + 1                              # frame idx in init_3d
+            v1, m1 = vecs[i], norms[i]
+            if m1 < 1e-9:
+                continue
+            for k in range(i + 1, spikes.size):
+                if used[k]:
+                    continue
+                t2 = spikes[k] + 1
+                if t2 - t1 > K_max:
+                    break
+                v2, m2 = vecs[k], norms[k]
+                if m2 < 1e-9:
+                    continue
+                cos = float(v1 @ v2) / (m1 * m2)
+                if cos > -0.3:
+                    continue
+                ratio = m1 / m2
+                if not (0.5 < ratio < 2.0):
+                    continue
+                joint_candidate[t1:t2 + 1, j] = True
+                used[i] = True
+                used[k] = True
+                break
+
+    # NaN frames in init_3d would have undefined accel — drop any
+    # candidacy on those frames (they were filled with wrist
+    # fallback, not real data).
+    nan_frames = np.isnan(init_3d[:, :, 0])                # (N, 21) bool
+    joint_candidate &= ~nan_frames
+
+    # ── Per-bone length anomaly + per-endpoint blame ─────────
+    n_bones = len(bones)
+    bone_lens = np.zeros((N, n_bones), dtype=np.float64)
+    for b, (j1, j2) in enumerate(bones):
+        diff = init_3d[:, j2] - init_3d[:, j1]
+        bone_lens[:, b] = np.linalg.norm(diff, axis=1)
+    med_b = np.median(bone_lens, axis=0)
+    mad_b = np.median(np.abs(bone_lens - med_b[None, :]),
+                      axis=0) * 1.4826
+    mad_b = np.maximum(mad_b, 0.5)  # mm; avoid /0 on near-rigid bones
+    z = np.abs(bone_lens - med_b[None, :]) / mad_b[None, :]   # (N, n_bones)
+    bone_bad = z > bone_k                                     # (N, n_bones)
+
+    # Per-joint 3D step magnitude  v[t, j] = ‖x[t,j] − x[t-1,j]‖
+    # used for blame disambiguation.  Frame 0 has no previous;
+    # leave it at 0.
+    step_3d = np.zeros((N, n_joints), dtype=np.float64)
+    if N > 1:
+        step_3d[1:] = np.linalg.norm(init_3d[1:] - init_3d[:-1], axis=-1)
+
+    # Accumulate per-joint blame from each anomalous (t, bone).
+    bone_blame = np.zeros((N, n_joints), dtype=np.float32)
+    bad_idx_t, bad_idx_b = np.where(bone_bad)
+    for t, b in zip(bad_idx_t, bad_idx_b):
+        j1, j2 = bones[b]
+        v1 = float(step_3d[t, j1])
+        v2 = float(step_3d[t, j2])
+        if v1 > k_blame_joint * v2:
+            bone_blame[t, j1] += 1.0
+        elif v2 > k_blame_joint * v1:
+            bone_blame[t, j2] += 1.0
+        else:
+            bone_blame[t, j1] += 0.5
+            bone_blame[t, j2] += 0.5
+
+    # ── Combine: joint masked iff BOTH signals fire ──────────
+    joint_mask = joint_candidate & (bone_blame > 0)
+
+    # ── Per-joint per-camera attribution via 2D step ─────────
+    # Compare ‖mp_L[t,j] − mp_L[t-1,j]‖ vs ‖mp_R[t,j] − mp_R[t-1,j]‖
+    # for each masked (t, j).  Both flagged when the magnitudes
+    # are within factor k_blame_camera of each other.
+    step_2d_L = np.zeros((N, n_joints), dtype=np.float64)
+    step_2d_R = np.zeros((N, n_joints), dtype=np.float64)
+    if N > 1:
+        step_2d_L[1:] = np.linalg.norm(mp_L[1:] - mp_L[:-1], axis=-1)
+        step_2d_R[1:] = np.linalg.norm(mp_R[1:] - mp_R[:-1], axis=-1)
+    # nan-safe — np.linalg.norm of a NaN vector is NaN; we treat
+    # NaN as "no information", default to flagging both cameras.
+    tj_idx = np.argwhere(joint_mask)
+    for t, j in tj_idx:
+        dL = step_2d_L[t, j]
+        dR = step_2d_R[t, j]
+        if np.isnan(dL) and np.isnan(dR):
+            cam_mask[t, j, 0] = True
+            cam_mask[t, j, 1] = True
+        elif np.isnan(dL):
+            cam_mask[t, j, 1] = True
+        elif np.isnan(dR):
+            cam_mask[t, j, 0] = True
+        elif dL > k_blame_camera * dR:
+            cam_mask[t, j, 0] = True
+        elif dR > k_blame_camera * dL:
+            cam_mask[t, j, 1] = True
+        else:
+            cam_mask[t, j, 0] = True
+            cam_mask[t, j, 1] = True
+
+    return joint_mask, cam_mask
 
 
 def _detect_outlier_runs(
