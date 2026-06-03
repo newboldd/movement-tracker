@@ -1,18 +1,27 @@
 /* Movement Tracker — Main Styles */
 
 :root {
-    --bg: #1a1a2e;
-    --bg-card: #16213e;
-    --bg-hover: #1a2744;
+    /* Palette shifted from navy-blue to deep purple to match the
+       app icon and the Movement Viewer color scheme.  Hex values
+       echo the viewer's deep-purple bg (#5a1f8e), shadow-ring
+       purple (#2d0f5a), and vivid icon-body purple (#8e30c2),
+       darkened to keep the same dark-UI vibe.
+
+       --blue keeps its name so every existing
+       `color: var(--blue)` reference continues to resolve to the
+       app's primary-accent hue — it's now a bright lavender. */
+    --bg: #1f0f3a;
+    --bg-card: #2e1554;
+    --bg-hover: #3a1d68;
     --text: #e0e0e0;
-    --text-muted: #8892a0;
-    --accent: #0f3460;
-    --blue: #4a9eff;
+    --text-muted: #aa9fbd;
+    --accent: #5a1f8e;
+    --blue: #b07cd4;
     --green: #4caf50;
     --orange: #ff9800;
     --red: #f44336;
     --purple: #9c27b0;
-    --border: #2a3a5c;
+    --border: #4a2a78;
     --radius: 6px;
 }
 
