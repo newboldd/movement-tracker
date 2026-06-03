@@ -279,7 +279,7 @@ def update_subject(subject_id: int, req: SubjectUpdate) -> dict:
             "levodopa", "last_dose", "dbs", "fluctuations",
             "tremor", "dysmetria", "myoclonus",
             "handedness", "other_meds", "video_date",
-            "saa_flag", "skin_biopsy_flag", "sinemet_schedule",
+            "saa_flag", "skin_biopsy_flag", "updated_consent", "sinemet_schedule",
         ]
         for field in clinical_fields:
             val = getattr(req, field, None)

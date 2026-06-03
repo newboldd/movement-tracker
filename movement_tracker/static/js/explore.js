@@ -289,7 +289,12 @@ function _renderSubjectList() {
 
 function _activeSubjects() {
     if (!_data || !_data.subjects) return [];
-    return _data.subjects.filter(s => _subjChecked[s.name]);
+    const consentOn = !!document.getElementById('exUpdatedConsent')?.checked;
+    return _data.subjects.filter(s => {
+        if (!_subjChecked[s.name]) return false;
+        if (consentOn && !s.updated_consent) return false;
+        return true;
+    });
 }
 
 /** Toggle a group's "collapsed" state.  When collapsed we save each
@@ -881,6 +886,8 @@ $('exIncludeAuto').addEventListener('change', () => {
     });
     render();
 });
+
+$('exUpdatedConsent')?.addEventListener('change', () => render());
 
 $('exSelectAllBtn').addEventListener('click', () => {
     const inc = $('exIncludeAuto').checked;

@@ -543,6 +543,12 @@ async function showDetail(subjectId) {
                             <input type="checkbox" ${detail.skin_biopsy_flag ? 'checked' : ''} onchange="updateClinical(${detail.id},'skin_biopsy_flag',this.checked?1:0)"> Skin Biopsy
                         </label>
                     </div>
+                    <div style="margin-top:4px;">
+                        <label style="font-size:11px;display:flex;align-items:center;gap:4px;"
+                               title="Marks the subject as having re-consented to the current data-use terms.  Filters on the Group Comparison and Explore pages can restrict to these subjects.">
+                            <input type="checkbox" ${detail.updated_consent ? 'checked' : ''} onchange="updateClinical(${detail.id},'updated_consent',this.checked?1:0)"> Updated consent
+                        </label>
+                    </div>
                     <div style="margin-top:8px;">
                         <a class="btn btn-sm" href="/onboarding?subject=${detail.id}" style="text-decoration:none;width:100%;display:block;text-align:center;">Edit Subject</a>
                     </div>

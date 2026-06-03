@@ -55,6 +55,7 @@ class SubjectUpdate(BaseModel):
     video_date: Optional[str] = None
     saa_flag: Optional[int] = None
     skin_biopsy_flag: Optional[int] = None
+    updated_consent: Optional[int] = None
     sinemet_schedule: Optional[str] = None
     group_label: Optional[str] = None
 

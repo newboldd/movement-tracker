@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS subjects (
     video_date TEXT,
     saa_flag INTEGER DEFAULT 0,
     skin_biopsy_flag INTEGER DEFAULT 0,
+    updated_consent INTEGER DEFAULT 0,
     sinemet_schedule TEXT,
     group_label TEXT DEFAULT 'Other',
     hand_size_left REAL,
@@ -411,6 +412,7 @@ def _migrate_add_clinical_fields(conn):
         "video_date": "TEXT",
         "saa_flag": "INTEGER DEFAULT 0",
         "skin_biopsy_flag": "INTEGER DEFAULT 0",
+        "updated_consent": "INTEGER DEFAULT 0",
         "sinemet_schedule": "TEXT",
         "group_label": "TEXT DEFAULT 'Other'",
     }

@@ -1624,6 +1624,9 @@ def get_group_comparison(include_auto: bool = Query(False),
             "levodopa_off": _is_levodopa_off(subj.get("levodopa")),
             "laterality_raw": subj.get("laterality") or None,
             "laterality_side": _laterality_more_side(subj.get("laterality")),
+            # Surfaced to the Group Comparison / Explore "Updated
+            # consent" filters; toggled from the subject detail panel.
+            "updated_consent": bool(subj.get("updated_consent")),
         }
 
         # Movement-similarity (nanmean upper-triangle r) averaged
@@ -1894,6 +1897,7 @@ def get_explore_variables(include_auto: bool = Query(False),
             "has_saved_events": s.get("has_saved_events", False),
             "has_complete_events": s.get("has_complete_events", False),
             "laterality_side": s.get("laterality_side"),
+            "updated_consent": bool(s.get("updated_consent")),
             "vars": vars_,
         })
 

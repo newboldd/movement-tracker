@@ -4683,9 +4683,11 @@ async function _ensureDlcSubjectSet() {
 function _activeGroupSubjects() {
     if (!cachedGroup || !cachedGroup.subjects) return [];
     const dlcOn = _dlcFilterActive();
+    const consentOn = !!document.getElementById('updatedConsentFilter')?.checked;
     return cachedGroup.subjects.filter(s => {
         if (!_groupSubjectChecked[s.name]) return false;
         if (dlcOn && _dlcSubjectNames && !_dlcSubjectNames.has(s.name)) return false;
+        if (consentOn && !s.updated_consent) return false;
         return true;
     });
 }
@@ -5438,6 +5440,9 @@ document.getElementById('lockYAxis').addEventListener('change', () => {
 // the union of saved + auto already.  Toggle only changes the
 // default-checked state of auto-only subjects.
 document.getElementById('includeAutoToggle').addEventListener('change', _onIncludeAutoChanged);
+document.getElementById('updatedConsentFilter')?.addEventListener('change', () => {
+    if (cachedGroup) renderGroupPlots();
+});
 
 document.getElementById('groupSelectAllBtn').addEventListener('click',
     () => window._groupSelectAll(true));
