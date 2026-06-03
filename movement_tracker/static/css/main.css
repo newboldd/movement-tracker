@@ -45,19 +45,22 @@ body {
 }
 
 .header h1 {
-    font-size: 18px;
-    font-weight: 600;
+    font-size: 24px;
+    font-weight: 800;
     margin: 0;
+    letter-spacing: -0.01em;
 }
 
 .header h1 a {
     color: var(--text);
     text-decoration: none;
-    transition: color 0.2s;
+    transition: color 0.2s, text-shadow 0.2s;
+    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
 }
 
 .header h1 a:hover {
     color: var(--blue);
+    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.35);
 }
 
 .header nav {
