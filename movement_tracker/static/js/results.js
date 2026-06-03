@@ -901,7 +901,11 @@ function renderIntervalParamPlots() {
     });
     const trialKeys = Object.keys(byTrial).sort((a, b) => +a - +b);
 
-    trialKeys.forEach(ti => {
+    // Two passes: compute per-trial (xs, ys) once, then derive the
+    // SHARED axis ranges across every trial so the scatters can be
+    // compared on the same scale.  Empty trials still get an
+    // empty plot with the shared axes for layout consistency.
+    const perTrial = trialKeys.map(ti => {
         const ms = byTrial[ti];
         const meta = frameMeta[ti] || { fps: 60 };
         const xs = [], ys = [];
@@ -917,7 +921,21 @@ function renderIntervalParamPlots() {
             xs.push(+dt.toFixed(4));
             ys.push(yv);
         });
+        return { ti, xs, ys };
+    });
+    // 5 % pad on each side so points don't sit on the axis lines.
+    const _pad = (lo, hi) => {
+        if (!isFinite(lo) || !isFinite(hi)) return null;
+        if (lo === hi) { const e = Math.abs(lo) * 0.05 || 1; return [lo - e, hi + e]; }
+        const p = (hi - lo) * 0.05;
+        return [lo - p, hi + p];
+    };
+    const allXs = perTrial.flatMap(t => t.xs);
+    const allYs = perTrial.flatMap(t => t.ys);
+    const xRange = allXs.length ? _pad(Math.min(...allXs), Math.max(...allXs)) : null;
+    const yRange = allYs.length ? _pad(Math.min(...allYs), Math.max(...allYs)) : null;
 
+    perTrial.forEach(({ ti, xs, ys }) => {
         const block = document.createElement('div');
         block.style.cssText = 'flex:0 0 auto;display:flex;flex-direction:column;';
         const head = document.createElement('div');
@@ -943,9 +961,13 @@ function renderIntervalParamPlots() {
         }], {
             margin: { t: 8, b: 36, l: 52, r: 12 },
             xaxis: { title: { text: xLabel, font: { size: 10 } },
-                     gridcolor: '#eee', tickfont: { size: 9 } },
+                     gridcolor: '#eee', tickfont: { size: 9 },
+                     range: xRange ? xRange.slice() : undefined,
+                     autorange: xRange ? false : true },
             yaxis: { title: { text: yLabel, font: { size: 10 } },
-                     gridcolor: '#eee', tickfont: { size: 9 } },
+                     gridcolor: '#eee', tickfont: { size: 9 },
+                     range: yRange ? yRange.slice() : undefined,
+                     autorange: yRange ? false : true },
             plot_bgcolor: '#fff', paper_bgcolor: '#fff',
             showlegend: false, hovermode: 'closest', dragmode: false,
             width: 320, height: 260,
