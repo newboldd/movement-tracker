@@ -8870,6 +8870,11 @@ const manoViewer = (() => {
         if (_errorStages.size > 0) _scheduleMPErrorRecompute();
         else { skelErrorMatrices = {}; }
         _saveCheckboxes();
+        // Now that v3 is open, kick off the deferred MP-error
+        // prewarm.  Cheap no-op when v3 was already expanded (the
+        // module-level _prewarmStarted gate makes this idempotent
+        // for the current trial).
+        if (open) _prewarmStages();
         render(); update3D(); renderDistanceTrace();
     }
 
@@ -9159,6 +9164,17 @@ const manoViewer = (() => {
         if (!hasV3 && !hasHR) {
             return;
         }
+        // Defer until the user opens the Skeleton v3 panel.  The
+        // prewarm populates per-stage MP-error caches that ONLY the
+        // v3 error overlays read; when v3 stays collapsed nobody
+        // will ever look at those numbers, so the 5+ parallel
+        // /mp_errors calls + the per-stage MP-snapshot loads from
+        // skeleton_v3.npz are pure load-time tax.  _setV3Expanded
+        // calls _prewarmStages() on transition to expanded so the
+        // cache fill still happens — just lazily.  _prewarmStarted
+        // is intentionally NOT set in the early-return branches so
+        // a later expand can still trigger the prewarm.
+        if (!_v3Expanded) return;
         _prewarmStarted = true;
         // Wait for browser idle so the trial's first paint, video decode, and
         // 3D scene assembly all finish before we start hitting the backend
