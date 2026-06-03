@@ -2839,9 +2839,14 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
     // trial-local time (frame relative to the trial's first frame /
     // fps) — the same time values the distance/velocity plots use, so
     // the markers line up.  No per-trial first-movement offset.
-    const frameField = param === 'peak_open_vel' ? 'peak_open_vel_frame'
+    // IMI honors the inline 'peak / open / close' radio so the user
+    // can switch which event drives the inter-movement interval.
+    const _imiRef = (document.querySelector('input[name="imiRef"]:checked')?.value)
+                    || 'peak';
+    const frameField = param === 'peak_open_vel'  ? 'peak_open_vel_frame'
                      : param === 'peak_close_vel' ? 'peak_close_vel_frame'
-                     : 'peak_frame';
+                     : param === 'imi'            ? `${_imiRef}_frame`
+                                                  : 'peak_frame';
     const frameMeta = _trialFrameMeta();
 
     // Same color for every trial — trial identity is shown by the
@@ -2901,7 +2906,24 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
         // Trial-local time (frame-from-trial-start / fps), same values
         // as the distance/velocity plots.
         const x = rawX;
-        const y = ms.map(m => m[param]);
+        let y;
+        if (param === 'imi') {
+            // IMI = time between consecutive movements measured at
+            // ``frameField`` (peak / open / close, picked by the
+            // inline radio).  First movement gets null since there's
+            // no prior reference frame.
+            const meta = frameMeta[ti] || { fps: 60 };
+            y = ms.map((m, i) => {
+                if (i === 0) return null;
+                const cur = m[frameField];
+                const prev = ms[i - 1][frameField];
+                if (cur == null || prev == null) return null;
+                if (!isFinite(cur) || !isFinite(prev)) return null;
+                return (cur - prev) / meta.fps;
+            });
+        } else {
+            y = ms.map(m => m[param]);
+        }
         const trialLabel = trialNames[ti] || `Trial ${+ti + 1}`;
         // Short label: just the trial suffix (e.g. "R1" from "PD03_R1").
         const trialShort = String(trialLabel).split('_').pop();
@@ -4129,6 +4151,7 @@ document.getElementById('sequenceMode').addEventListener('change', () => {
 // Distance tab movement controls: re-render on checkbox or fit mode change
 document.querySelectorAll('#distMovementControls input[data-dparam]').forEach(cb => {
     cb.addEventListener('change', () => {
+        if (cb.dataset.dparam === 'imi') _syncImiRefVisibility();
         if (cachedMovements) renderDistMovementPlots();
     });
 });
@@ -4136,6 +4159,24 @@ document.getElementById('distSequenceMode').addEventListener('change', () => {
     cachedSequenceAssignments = null;
     if (cachedMovements) renderDistMovementPlots();
 });
+
+// IMI reference (peak / open / close): re-render when changed.
+document.querySelectorAll('input[name="imiRef"]').forEach(r => {
+    r.addEventListener('change', () => {
+        if (cachedMovements) renderDistMovementPlots();
+    });
+});
+
+/** Show the inline imi-reference radios only when the IMI checkbox
+ *  itself is checked.  Called on init and on IMI checkbox toggle. */
+function _syncImiRefVisibility() {
+    const row = document.getElementById('imiRefRow');
+    if (!row) return;
+    const imiCb = document.querySelector('#distMovementControls input[data-dparam="imi"]');
+    const on = !!(imiCb && imiCb.checked);
+    row.style.display = on ? 'inline-flex' : 'none';
+}
+_syncImiRefVisibility();
 
 // Overlay controls: re-render distance/velocity plots
 ['overlayPeakDist', 'overlayOpen', 'overlayClose', 'overlayPeakOpenVel', 'overlayPeakCloseVel'].forEach(id => {

@@ -98,10 +98,25 @@
                 </label>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
                 <label><input type="checkbox" data-dparam="amplitude" checked> Amplitude</label>
-                <label><input type="checkbox" data-dparam="imi" checked> IMI</label>
                 <label><input type="checkbox" data-dparam="peak_open_vel" checked> Peak Opening Vel.</label>
                 <label><input type="checkbox" data-dparam="peak_close_vel" checked> Peak Closing Vel.</label>
                 <label><input type="checkbox" data-dparam="power"> Power</label>
+                <label><input type="checkbox" data-dparam="imi" checked> IMI</label>
+                <!-- Inline IMI-reference radios.  Visible only when the
+                     IMI checkbox is on; switching swaps the per-trial
+                     IMI series between peak-to-peak (default), open-to-
+                     open, and close-to-close. -->
+                <span id="imiRefRow" style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);">
+                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;">
+                        <input type="radio" name="imiRef" value="peak" checked> peak
+                    </label>
+                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;">
+                        <input type="radio" name="imiRef" value="open"> open
+                    </label>
+                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;">
+                        <input type="radio" name="imiRef" value="close"> close
+                    </label>
+                </span>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
                 <label style="display:flex;align-items:center;gap:4px;">
                     Sequence Calculation:
@@ -360,6 +375,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=102"></script>
+    <script src="/static/js/results.js?v=103"></script>
 </body>
 </html>
