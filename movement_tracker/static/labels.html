@@ -227,6 +227,20 @@
                 <input type="checkbox" id="showCombined3D" style="margin:0;justify-self:center;">
                 <span></span>
 
+                <!-- Filtered = Combined with the MP-Filter mask applied
+                     per (frame, joint, camera).  Driven entirely by the
+                     mask returned from /api/skeleton/{id}/outlier_preview;
+                     no stored npz of its own.  When MP Filter panel is
+                     closed the mask is null so this row reads exactly
+                     like Combined. -->
+                <span style="color:var(--text-muted);padding-left:18px;"
+                      title="Combined with outlier-filter mask applied.  Edit the MP Filter panel above v3 to tune thresholds.">
+                    <span class="layer-swatch" style="background:#fff176;"></span> Filtered
+                </span>
+                <input type="checkbox" id="showFiltered2D" style="margin:0;justify-self:center;">
+                <input type="checkbox" id="showFiltered3D" style="margin:0;justify-self:center;">
+                <span></span>
+
                 <!-- 1b. Stereo — partner-camera MP label translated by
                      image-content phase-correlation.  2D only. -->
                 <span style="color:var(--text-muted);padding-left:18px;"><span class="layer-swatch" style="background:#e91e63;"></span> Stereo</span>
@@ -682,45 +696,10 @@
                 </label>
                 <!-- Joint-angle weight removed — the feature is no
                      longer exposed; the fit runs with w_angle = 0. -->
-
-                <!-- ── MP-combined outlier pre-filter ───────────
-                     These three sliders control _detect_outlier_per_joint:
-                     lower accel/bone = more aggressive masking;
-                     K-max limits the longest run length that can pair. -->
-                <div style="border-top:1px solid var(--border);margin-top:6px;padding-top:6px;">
-                    <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;font-weight:600;">
-                        Outlier pre-filter
-                        <span id="fitOutlierCount" style="float:right;font-weight:400;"></span>
-                    </div>
-                    <div style="font-size:11px;margin-bottom:4px;"
-                         title="Per-joint 3D acceleration z-score threshold for run-boundary detection.  Lower = more aggressive masking.  6 ≈ 99.7% of Gaussian tail.">
-                        <div style="display:flex;justify-content:space-between;align-items:center;">
-                            <label style="color:var(--text-muted);">Accel sensitivity (MAD)</label>
-                            <span id="fitWAccelK" style="color:var(--text-muted);font-weight:bold;">6.0</span>
-                        </div>
-                        <input type="range" id="fitSliderAccelK" min="0.5" max="12" step="0.1" value="6"
-                               style="width:100%;cursor:pointer;height:5px;">
-                    </div>
-                    <div style="font-size:11px;margin-bottom:4px;"
-                         title="Per-bone length z-score threshold.  A bone counts as anomalous when its length is this many MAD away from the trial median.  Lower = more aggressive.">
-                        <div style="display:flex;justify-content:space-between;align-items:center;">
-                            <label style="color:var(--text-muted);">Bone sensitivity (MAD)</label>
-                            <span id="fitWBoneK" style="color:var(--text-muted);font-weight:bold;">6.0</span>
-                        </div>
-                        <input type="range" id="fitSliderBoneK" min="0.5" max="12" step="0.1" value="6"
-                               style="width:100%;cursor:pointer;height:5px;">
-                    </div>
-                    <div style="font-size:11px;margin-bottom:4px;"
-                         title="Maximum number of frames between paired opposite-direction acceleration spikes.  Caps the run length the detector can match.  At 60 fps, 30 ≈ 0.5 s.">
-                        <div style="display:flex;justify-content:space-between;align-items:center;">
-                            <label style="color:var(--text-muted);">Max run length (frames)</label>
-                            <span id="fitWKmax" style="color:var(--text-muted);font-weight:bold;">30</span>
-                        </div>
-                        <input type="range" id="fitSliderKmax" min="5" max="60" step="1" value="30"
-                               style="width:100%;cursor:pointer;height:5px;">
-                    </div>
-                </div>
-
+                <!-- Outlier pre-filter sliders moved to their own
+                     MP Filter panel above v3.  v1 still runs an
+                     internal detector at default thresholds; rigging
+                     it to consume the MP Filter output is a follow-up. -->
                 <div style="display:flex;gap:4px;margin-top:6px;">
                     <button class="btn btn-sm btn-success" id="runStage1Btn" style="flex:1;" onclick="manoViewer.runStage1()">Run</button>
                     <button class="btn btn-sm" style="font-size:10px;padding:2px 6px;" onclick="manoViewer.resetFitDefaults()">Reset</button>
@@ -802,6 +781,53 @@
                 </div>
             </div>
             <div id="fitLegacyStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
+
+            <!-- ── MP Filter ─────────────────────────────────────
+                 Outlier pre-filter for MP-combined.  Drives the
+                 new "Filtered" model row in the MediaPipe section
+                 + the live overlay on the MP-combined trace.
+                 Independent of Skel Fit v1; eventually v1 will be
+                 wired to consume the Filtered output instead of
+                 running its own internal detector. -->
+            <button class="btn btn-sm" id="mpFilterBtn" style="width:100%;margin-top:6px;">MP Filter</button>
+            <div id="mpFilterPanel" style="display:none;margin-top:6px;">
+                <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;font-weight:600;">
+                    Outlier pre-filter
+                    <span id="mpFilterCount" style="float:right;font-weight:400;"></span>
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;"
+                     title="Per-joint 3D acceleration z-score threshold for run-boundary detection.  Lower = more aggressive masking.  6 ≈ 99.7% of Gaussian tail.">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Accel sensitivity (MAD)</label>
+                        <span id="mpFilterWAccelK" style="color:var(--text-muted);font-weight:bold;">6.0</span>
+                    </div>
+                    <input type="range" id="mpFilterSliderAccelK" min="0.5" max="12" step="0.1" value="6"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;"
+                     title="Per-bone length z-score threshold.  A bone counts as anomalous when its length is this many MAD away from the trial median.  Lower = more aggressive.">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Bone sensitivity (MAD)</label>
+                        <span id="mpFilterWBoneK" style="color:var(--text-muted);font-weight:bold;">6.0</span>
+                    </div>
+                    <input type="range" id="mpFilterSliderBoneK" min="0.5" max="12" step="0.1" value="6"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="font-size:11px;margin-bottom:4px;"
+                     title="Maximum number of frames between paired opposite-direction acceleration spikes.  Caps the run length the detector can match.  At 60 fps, 30 ≈ 0.5 s.">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <label style="color:var(--text-muted);">Max run length (frames)</label>
+                        <span id="mpFilterWKmax" style="color:var(--text-muted);font-weight:bold;">30</span>
+                    </div>
+                    <input type="range" id="mpFilterSliderKmax" min="5" max="60" step="1" value="30"
+                           style="width:100%;cursor:pointer;height:5px;">
+                </div>
+                <div style="display:flex;gap:4px;margin-top:6px;">
+                    <button class="btn btn-sm" id="mpFilterResetBtn" style="font-size:10px;padding:2px 6px;">Reset</button>
+                    <button class="btn btn-sm" id="mpFilterCloseBtn" style="font-size:10px;padding:2px 6px;flex:1;">Close</button>
+                </div>
+            </div>
+            <div id="mpFilterStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
 
             <!-- Skeleton v3 — FK parameterisation, multi-source -->
             <button class="btn btn-sm" id="fitSkeletonV2Btn" style="width:100%;margin-top:6px;">Fit Skeleton (v3)</button>
@@ -1245,7 +1271,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=391" type="module"></script>
+    <script src="/static/js/labels.js?v=392" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

@@ -14,15 +14,24 @@ const manoViewer = (() => {
     let trials = [];
     let currentTrialIdx = -1;
     let trialData = null;
-    // Live-preview state for the v1 outlier pre-filter.  Set by
-    // _refreshV1OutlierPreview() whenever the fit panel is open and
-    // a threshold slider changes; consumed by renderDistanceTrace to
-    // gray out the MP-combined trace on frames where any joint
-    // contributing to the active metric would be masked.  Shape
-    // (n_frames, 21) bool; null when the panel is closed.
-    let _v1OutlierMask = null;
-    let _v1OutlierPreviewT = null;     // debounce timer
-    let _v1OutlierPreviewSeq = 0;      // race-guard against late responses
+    // ── MP Filter state ───────────────────────────────────────
+    // _mpFilterMask        (n_frames, 21) bool         — joint mask
+    // _mpFilterCamMask     (n_frames, 21, 2) bool      — per-camera attribution
+    // Both null when the mask hasn't been fetched yet (no trial loaded
+    // or MP Filter panel never opened) — Filtered row renders as
+    // Combined in that case.  The MP Filter panel'\''s own visibility
+    // additionally drives the LIVE preview on the Combined trace
+    // (when closed, Combined renders without the gray-out overlay).
+    let _mpFilterMask = null;
+    let _mpFilterCamMask = null;
+    let _mpFilterPanelOpen = false;
+    let _mpFilterPreviewT = null;      // debounce timer
+    let _mpFilterPreviewSeq = 0;       // race-guard against late responses
+    // Filtered MediaPipe overlay toggles — independent of MP Filter
+    // panel visibility.  When on, Filtered keypoints / wireframe /
+    // distance trace are drawn using Combined-data-minus-mask.
+    let showFiltered2D = false;
+    let showFiltered3D = false;
 
     let currentFrame = 0;
     let currentSide = 'OS';
@@ -623,7 +632,7 @@ const manoViewer = (() => {
 
     // Three.js
     let scene, camera3d, renderer;
-    let manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup;
+    let manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, filteredGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup;
     let camera3dInit = false;
 
     // Scene-space orbit: rotate content around hand center while camera stays fixed
@@ -865,31 +874,52 @@ const manoViewer = (() => {
             $('fitOptionsPanel').style.display = open ? 'block' : 'none';
             $('fitSkeletonBtn').classList.toggle('active', open);
             if (open) {
-                // Close v2 panel
                 $('fitV2Panel').style.display = 'none';
                 $('fitSkeletonV2Btn').classList.remove('active');
                 _restoreV1Params();
-                _refreshV1OutlierPreview();
-            } else {
-                _v1OutlierMask = null;
-                const countEl = $('fitOutlierCount');
-                if (countEl) countEl.textContent = '';
-                renderDistanceTrace();
             }
         });
         $('fitCancelBtn').addEventListener('click', () => {
             $('fitOptionsPanel').style.display = 'none';
             $('fitSkeletonBtn').classList.remove('active');
-            _v1OutlierMask = null;
-            const countEl = $('fitOutlierCount');
-            if (countEl) countEl.textContent = '';
+        });
+        // MP Filter panel.
+        $('mpFilterBtn')?.addEventListener('click', () => {
+            const open = $('mpFilterPanel').style.display !== 'block';
+            $('mpFilterPanel').style.display = open ? 'block' : 'none';
+            $('mpFilterBtn').classList.toggle('active', open);
+            _mpFilterPanelOpen = open;
+            if (open) {
+                _refreshMpFilterMask({force: true});
+            } else {
+                // Live-preview on the Combined trace goes away when
+                // the panel closes.  The Filtered model row keeps its
+                // mask if its checkboxes are on.
+                renderDistanceTrace();
+            }
+        });
+        $('mpFilterCloseBtn')?.addEventListener('click', () => {
+            $('mpFilterPanel').style.display = 'none';
+            $('mpFilterBtn').classList.remove('active');
+            _mpFilterPanelOpen = false;
             renderDistanceTrace();
         });
-        // Live-preview when the user adjusts any of the three
-        // outlier-threshold sliders.
-        ['fitSliderAccelK', 'fitSliderBoneK', 'fitSliderKmax'].forEach(id => {
+        $('mpFilterResetBtn')?.addEventListener('click', _resetMpFilterDefaults);
+        ['mpFilterSliderAccelK', 'mpFilterSliderBoneK', 'mpFilterSliderKmax'].forEach(id => {
             const el = $(id);
-            if (el) el.addEventListener('input', _refreshV1OutlierPreview);
+            if (el) el.addEventListener('input', () => _refreshMpFilterMask());
+        });
+        // Filtered model-row toggles.  Turning either on triggers a
+        // mask fetch if we don'\''t already have one cached.
+        $('showFiltered2D')?.addEventListener('change', e => {
+            showFiltered2D = e.target.checked;
+            if (showFiltered2D && !_mpFilterMask) _refreshMpFilterMask({force: true});
+            render();
+        });
+        $('showFiltered3D')?.addEventListener('change', e => {
+            showFiltered3D = e.target.checked;
+            if (showFiltered3D && !_mpFilterMask) _refreshMpFilterMask({force: true});
+            update3D();
         });
 
         // Fit Skeleton v2 expand/collapse — toggle panel, highlight button
@@ -1325,9 +1355,10 @@ const manoViewer = (() => {
     }
 
     function _clearV1OutlierPreview() {
-        if (_v1OutlierPreviewT) { clearTimeout(_v1OutlierPreviewT); _v1OutlierPreviewT = null; }
-        _v1OutlierMask = null;
-        const countEl = $('fitOutlierCount');
+        if (_mpFilterPreviewT) { clearTimeout(_mpFilterPreviewT); _mpFilterPreviewT = null; }
+        _mpFilterMask = null;
+        _mpFilterCamMask = null;
+        const countEl = $('mpFilterCount');
         if (countEl) countEl.textContent = '';
     }
 
@@ -4318,6 +4349,22 @@ const manoViewer = (() => {
             }
         }
 
+        // Filtered = Combined keypoints with the MP-Filter mask
+        // applied per (joint, camera).  Skip joints flagged on the
+        // current camera; the OTHER camera may still draw the same
+        // joint if only L (or only R) was attributed.
+        if (showFiltered2D && combinedKp && combinedKp[fn]) {
+            const camIdx = isLeft ? 0 : 1;
+            const camRow = _mpFilterCamMask ? _mpFilterCamMask[fn] : null;
+            for (let j = 0; j < 21; j++) {
+                if (!isJointVisible(j) || !combinedKp[fn][j]) continue;
+                if (camRow && camRow[j] && camRow[j][camIdx]) continue;
+                const x = combinedKp[fn][j][0] * pixelScale;
+                const y = combinedKp[fn][j][1] * pixelScale;
+                drawCross(x, y, '#fff176', 4);
+            }
+        }
+
         // Stereo: partner-camera MP label translated into this camera
         // by the phase-correlation shift discovered by ``run_stereo``.
         // Pink (#e91e63) crosses; size scaled by per-joint confidence.
@@ -5585,7 +5632,7 @@ const manoViewer = (() => {
         const SOURCE_COLORS = {
             skeleton: 'lime', skel_v2: '#ff9800', skel_legacy: '#e040fb',
             mp: '#00cccc', cropped: '#7cb342', reverse: '#e040fb',
-            static: '#26c6da', combined: '#ffa726',
+            static: '#26c6da', combined: '#ffa726', filtered: '#fff176',
             vision: '#2196f3', dlc: '#ff4444',
             prev: '#b35b00', heatmap: '#ff6600',
             hrnet_centroid:  '#ff9966',
@@ -5637,24 +5684,29 @@ const manoViewer = (() => {
             const crpMask  = _makeInFrameMask(trialData.cropped_tracked_L, trialData.cropped_tracked_R, joints);
             const sttMask  = _makeInFrameMask(trialData.static_tracked_L, trialData.static_tracked_R, joints);
             let cmbMask  = _makeInFrameMask(trialData.combined_tracked_L, trialData.combined_tracked_R, joints);
-            // When the v1 fit panel is open and a live-preview mask
-            // is loaded, drop combined-source frames where any
-            // joint contributing to the active metric would be
-            // masked by the outlier pre-filter at the current
-            // slider settings.  cmbMask is per-frame; AND in 0 on
-            // those frames.
-            if (_v1OutlierMask && Array.isArray(_v1OutlierMask) && joints && joints.length) {
-                const nF = Math.min(cmbMask.length, _v1OutlierMask.length);
-                for (let i = 0; i < nF; i++) {
-                    const row = _v1OutlierMask[i];
-                    if (!row) continue;
-                    let masked = false;
-                    for (const j of joints) {
-                        if (row[j]) { masked = true; break; }
+            // Helper: per-frame keep-mask after applying the MP
+            // Filter joint mask to the joints contributing to the
+            // active metric.  1 = keep, 0 = drop.  Returns a fresh
+            // copy of cmbMask AND-ed with the filter.
+            const _withMpFilter = () => {
+                const out = cmbMask.slice();
+                if (_mpFilterMask && Array.isArray(_mpFilterMask) && joints && joints.length) {
+                    const nF = Math.min(out.length, _mpFilterMask.length);
+                    for (let i = 0; i < nF; i++) {
+                        const row = _mpFilterMask[i];
+                        if (!row) continue;
+                        for (const j of joints) {
+                            if (row[j]) { out[i] = 0; break; }
+                        }
                     }
-                    if (masked) cmbMask[i] = 0;
                 }
-            }
+                return out;
+            };
+            // Live-preview on the Combined trace: only while the MP
+            // Filter panel is open.  Filtered series gets its own
+            // mask below (independent of panel visibility).
+            if (_mpFilterPanelOpen) cmbMask = _withMpFilter();
+            const filMask = (_mpFilterMask) ? _withMpFilter() : cmbMask.slice();
             const manoMask = _makeInFrameMask(trialData.skeleton_proj_L,      trialData.skeleton_proj_R,      joints);
             const visMask  = _makeInFrameMask(trialData.vision_tracked_L, trialData.vision_tracked_R, joints);
 
@@ -5690,6 +5742,11 @@ const manoViewer = (() => {
             if (showReverse2D || showReverse3D)       drawSeries(_applyMask(rawReverse, revMask), useSourceColor ? SOURCE_COLORS.reverse     : metricColor, 'reverse',     toY, abdDash);
             if (showStatic2D || showStatic3D)         drawSeries(_applyMask(rawStatic, sttMask),   useSourceColor ? SOURCE_COLORS.static    : metricColor, 'static',      toY, abdDash);
             if (showCombined2D || showCombined3D)     drawSeries(_applyMask(rawCombined, cmbMask), useSourceColor ? SOURCE_COLORS.combined  : metricColor, 'combined',    toY, abdDash);
+            // Filtered = Combined data with the MP-Filter mask AND'ed
+            // into the per-frame mask.  Draws on top of Combined so
+            // the two can be compared side-by-side when both rows
+            // are on.
+            if (showFiltered2D || showFiltered3D)      drawSeries(_applyMask(rawCombined, filMask), useSourceColor ? SOURCE_COLORS.filtered  : metricColor, 'filtered',    toY, abdDash);
             if (showVision2D || showVision3D)         drawSeries(_applyMask(rawVis,   visMask),  useSourceColor ? SOURCE_COLORS.vision      : metricColor, 'vision',      toY, abdDash);
             if (showDLC || showDLC3D)                 drawSeries(rawDlc,                                                     useSourceColor ? SOURCE_COLORS.dlc         : metricColor, 'dlc',         toY, abdDash);
             if (showHeatmap2D || showHeatmap3D) {
@@ -6271,12 +6328,13 @@ const manoViewer = (() => {
         reverseGroup = new THREE.Group();
         staticGroup = new THREE.Group();
         combinedGroup = new THREE.Group();
+        filteredGroup = new THREE.Group();
         visionGroup = new THREE.Group();
         dlcGroup = new THREE.Group();
         poseGroup = new THREE.Group();
         heatmapGroup = new THREE.Group();
         angleArcGroup = new THREE.Group();
-        scene.add(manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup);
+        scene.add(manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, filteredGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup);
 
         renderer.render(scene, camera3d);
 
@@ -6581,7 +6639,7 @@ const manoViewer = (() => {
         let arcSrcKey = null;
 
         // Clear groups
-        [manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup].forEach(g => {
+        [manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, filteredGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup].forEach(g => {
             while (g.children.length) {
                 const child = g.children[0];
                 g.remove(child);
@@ -7194,6 +7252,39 @@ const manoViewer = (() => {
             }
         }
 
+        // Filtered = Combined 3D with masked joints removed.  A
+        // joint is hidden when the MP-Filter joint mask flags it
+        // at the current frame (any-camera).  Bones that touch a
+        // masked joint also disappear.  Independent of
+        // showCombined3D so the user can compare side-by-side or
+        // see only the filtered view.
+        if (showFiltered3D && combined3d) {
+            const filMat     = new THREE.MeshPhongMaterial({ color: 0xfff176, emissive: 0xc0a04a });
+            const filBoneMat = new THREE.MeshPhongMaterial({ color: 0xfff176, emissive: 0x8a7530 });
+            const jRow = _mpFilterMask ? _mpFilterMask[fn] : null;
+            const masked = (j) => !!(jRow && jRow[j]);
+            for (let j = 0; j < 21; j++) {
+                if (!isJointVisible(j) || !combined3d[j]) continue;
+                if (masked(j)) continue;
+                const sphere = new THREE.Mesh(sphereGeom, filMat);
+                sphere.position.copy(orbitPt(getScenePos(combined3d, j)));
+                filteredGroup.add(sphere);
+            }
+            if (showCombinedSkel && trialData.skeleton) {
+                trialData.skeleton.forEach(([i, j]) => {
+                    if (!isBoneVisible(i, j)) return;
+                    if (!combined3d[i] || !combined3d[j]) return;
+                    if (masked(i) || masked(j)) return;
+                    const bone = makeBone(
+                        orbitPt(getScenePos(combined3d, i)),
+                        orbitPt(getScenePos(combined3d, j)),
+                        1.0, filBoneMat
+                    );
+                    if (bone) filteredGroup.add(bone);
+                });
+            }
+        }
+
         // Vision joints (light blue)
         if (showVision3D && vision3d) {
             const vMat = new THREE.MeshPhongMaterial({ color: 0x2196f3, emissive: 0x0d47a1 });
@@ -7529,6 +7620,7 @@ const manoViewer = (() => {
         reverseGroup.visible = showReverse3D;
         staticGroup.visible = showStatic3D;
         combinedGroup.visible = showCombined3D;
+        filteredGroup.visible = showFiltered3D;
         visionGroup.visible = showVision3D;
         dlcGroup.visible = showDLC3D;
 
@@ -7905,6 +7997,9 @@ const manoViewer = (() => {
             ['showReverse2D',  hasReverse],  ['showReverse3D',  hasReverse],
             ['showStatic2D',   hasStatic],   ['showStatic3D',   hasStatic],
             ['showCombined2D', hasCombined], ['showCombined3D', hasCombined],
+            // Filtered = Combined with the MP-Filter mask applied;
+            // available exactly when Combined is.
+            ['showFiltered2D', hasCombined], ['showFiltered3D', hasCombined],
             ['showPose2D',     hasPose],     ['showPose3D',     hasPose],
         ]) {
             _setLayerAvail(id, ok);
@@ -8444,42 +8539,51 @@ const manoViewer = (() => {
         if (el && val != null) { el.value = val; el.dispatchEvent(new Event('input')); }
     }
 
-    // Fetch the per-(frame, joint) outlier mask for the current
-    // trial using the current threshold slider values.  Debounced
-    // (80 ms) on slider input; race-guarded so a late response from
-    // an earlier slider position can't overwrite a newer one.  Only
-    // runs when the v1 fit panel is actually open.
-    function _refreshV1OutlierPreview() {
-        if (_v1OutlierPreviewT) clearTimeout(_v1OutlierPreviewT);
-        const panel = $('fitOptionsPanel');
-        if (!panel || panel.style.display !== 'block') return;
+    // Fetch the MP-Filter outlier mask for the current trial using
+    // the MP Filter panel'\''s current threshold sliders.  Debounced
+    // (80 ms); race-guarded so a late response from an earlier
+    // slider position can'\''t overwrite a newer one.  Refreshes
+    // regardless of whether the panel is open (the Filtered model
+    // row needs the mask even with the panel closed).
+    function _refreshMpFilterMask({force = false} = {}) {
+        if (_mpFilterPreviewT) clearTimeout(_mpFilterPreviewT);
         if (!subjectId || currentTrialIdx < 0 || !trials?.[currentTrialIdx]) return;
+        // Skip the network call entirely when nothing needs the mask:
+        // the panel is closed AND the Filtered row toggles are all off.
+        const needsMask = force || _mpFilterPanelOpen
+                       || showFiltered2D || showFiltered3D;
+        if (!needsMask) return;
         const trialIdx = trials[currentTrialIdx].trial_idx;
-        const accel_k = parseFloat($('fitSliderAccelK')?.value ?? 6);
-        const bone_k  = parseFloat($('fitSliderBoneK')?.value  ?? 6);
-        const k_max   = parseInt($('fitSliderKmax')?.value     ?? 30);
-        const seq = ++_v1OutlierPreviewSeq;
-        _v1OutlierPreviewT = setTimeout(async () => {
+        const accel_k = parseFloat($('mpFilterSliderAccelK')?.value ?? 6);
+        const bone_k  = parseFloat($('mpFilterSliderBoneK')?.value  ?? 6);
+        const k_max   = parseInt($('mpFilterSliderKmax')?.value     ?? 30);
+        const seq = ++_mpFilterPreviewSeq;
+        _mpFilterPreviewT = setTimeout(async () => {
             try {
                 const data = await api(`/api/skeleton/${subjectId}/outlier_preview`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ trial_idx: trialIdx, accel_k, bone_k, k_max }),
                 });
-                if (seq !== _v1OutlierPreviewSeq) return;   // a newer request already in flight
-                _v1OutlierMask = data?.joint_mask || null;
-                const countEl = $('fitOutlierCount');
+                if (seq !== _mpFilterPreviewSeq) return;
+                _mpFilterMask = data?.joint_mask || null;
+                _mpFilterCamMask = data?.camera_mask || null;
+                const countEl = $('mpFilterCount');
                 if (countEl && data) {
                     countEl.textContent =
                         `${data.n_frames_masked} frames · ${data.n_cells_masked} cells · `
                       + `L=${data.n_cam_L_masked} R=${data.n_cam_R_masked}`;
                 }
                 renderDistanceTrace();
+                render();
+                update3D();
             } catch (e) {
                 console.warn('outlier preview failed:', e);
             }
         }, 80);
     }
+    // Legacy name kept for the loadTrial call site; just delegates.
+    function _refreshV1OutlierPreview() { _refreshMpFilterMask(); }
 
     // Restore sliders from saved fit params (called when panel opens)
     function _restoreV1Params() {
@@ -8491,9 +8595,11 @@ const manoViewer = (() => {
         // Joint-angle slider was removed; no UI element to set.
         const snap = $('fitSnapBones');
         if (snap && p.snap_bones != null) snap.checked = p.snap_bones;
-        if (p.accel_k != null) _setSlider('fitSliderAccelK', p.accel_k);
-        if (p.bone_k  != null) _setSlider('fitSliderBoneK',  p.bone_k);
-        if (p.k_max   != null) _setSlider('fitSliderKmax',   p.k_max);
+        // Outlier sliders moved to the MP Filter panel; v1 fit no
+        // longer drives them.  Leaving the v1 params'\'' accel_k /
+        // bone_k / k_max alone — they continue to apply default
+        // values (6 / 6 / 30) inside run_skeleton_v1_fit until we
+        // wire v1 to consume MP-Filter output directly.
     }
 
     function _restoreV2Params() {
@@ -8576,14 +8682,18 @@ const manoViewer = (() => {
     function resetFitDefaults() {
         const defaults = {
             fitSliderReproj: 1, fitSliderBone: 5, fitSliderSmooth: 1,
-            fitSliderAccelK: 6, fitSliderBoneK: 6, fitSliderKmax: 30,
         };
         for (const [id, val] of Object.entries(defaults)) {
             _setSlider(id, val);
         }
         const snap = $('fitSnapBones');
         if (snap) snap.checked = false;
-        _refreshV1OutlierPreview();
+    }
+    function _resetMpFilterDefaults() {
+        _setSlider('mpFilterSliderAccelK', 6);
+        _setSlider('mpFilterSliderBoneK',  6);
+        _setSlider('mpFilterSliderKmax',  30);
+        _refreshMpFilterMask({force: true});
     }
 
 
@@ -8595,9 +8705,10 @@ const manoViewer = (() => {
             { id: 'fitSliderReproj',      display: 'fitWReproj' },
             { id: 'fitSliderBone',         display: 'fitWBone' },
             { id: 'fitSliderSmooth',       display: 'fitWSmooth' },
-            { id: 'fitSliderAccelK',       display: 'fitWAccelK' },
-            { id: 'fitSliderBoneK',        display: 'fitWBoneK' },
-            { id: 'fitSliderKmax',         display: 'fitWKmax' },
+            // MP Filter sliders (separate panel).
+            { id: 'mpFilterSliderAccelK',  display: 'mpFilterWAccelK' },
+            { id: 'mpFilterSliderBoneK',   display: 'mpFilterWBoneK' },
+            { id: 'mpFilterSliderKmax',    display: 'mpFilterWKmax' },
             // v2
             { id: 'v2SliderMediapipe',     display: 'v2WMediapipe' },
             { id: 'v2SliderVision',        display: 'v2WVision' },
@@ -8639,10 +8750,10 @@ const manoViewer = (() => {
             // Joint-angle regularization is no longer a feature;
             // explicitly request 0 from the backend.
             w_angle: 0,
-            // Outlier pre-filter thresholds.
-            accel_k: parseFloat($('fitSliderAccelK')?.value ?? 6),
-            bone_k:  parseFloat($('fitSliderBoneK')?.value  ?? 6),
-            k_max:   parseInt($('fitSliderKmax')?.value     ?? 30),
+            // Outlier-pre-filter thresholds moved to the MP Filter
+            // panel; the v1 fit'\''s internal detector keeps running
+            // at default thresholds (6 / 6 / 30) until we wire v1
+            // to consume MP-Filter output directly.
         };
 
         try {
