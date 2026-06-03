@@ -226,13 +226,6 @@ def run_skeleton_v1_fit(
 
     tgt_L = torch.tensor(mp_L[valid_idx], device=device, dtype=torch.float32)
     tgt_R = torch.tensor(mp_R[valid_idx], device=device, dtype=torch.float32)
-    # Per-frame weight for the reproj loss: 0 on detected outlier
-    # frames so the data term doesn't anchor them at the bad
-    # position; the smoothness + bone terms still apply, which
-    # naturally pulls them toward an interpolation of neighbors.
-    frame_w_np = np.ones(n_valid, dtype=np.float32)
-    frame_w_np[outlier_mask] = 0.0
-    frame_weight = torch.tensor(frame_w_np, device=device, dtype=torch.float32)
     target_bl = torch.tensor(target_bone_lengths, device=device, dtype=torch.float32)
     bl_w = torch.tensor(bone_weights, device=device, dtype=torch.float32)
     bone_idx = torch.tensor(BONES, device=device, dtype=torch.long)
@@ -265,6 +258,14 @@ def run_skeleton_v1_fit(
     n_outliers = int(outlier_mask.sum())
     logger.info(f"  Outlier pre-filter: masked {n_outliers}/{n_valid} frames "
                 f"({100.0 * n_outliers / max(n_valid, 1):.1f}%)")
+
+    # Per-frame weight for the reproj loss: 0 on detected outlier
+    # frames so the data term doesn't anchor them at the bad
+    # position; the smoothness + bone terms still apply, which
+    # naturally pulls them toward an interpolation of neighbors.
+    frame_w_np = np.ones(n_valid, dtype=np.float32)
+    frame_w_np[outlier_mask] = 0.0
+    frame_weight = torch.tensor(frame_w_np, device=device, dtype=torch.float32)
 
     # Optimizable: 3D joint positions only.
     #
