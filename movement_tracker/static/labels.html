@@ -841,8 +841,8 @@
                     <input type="range" id="mpfSliderMpconf" min="0" max="1" step="0.01" value="0.5">
                 </div>
                 <div class="mp-filter-signal" data-signal="stereo"
-                     title="Per-(frame, joint) stereo reprojection error in pixels.  Triangulate then reproject; flag the camera with the larger residual.">
-                    <label><input type="checkbox" id="mpfEnableStereo"> Stereo reproj (px)</label>
+                     title="Per-(frame, joint, camera) stereo reprojection residual minus the per-joint per-camera trial baseline (the calibration-dependent natural offset, usually 0.3 - 1.5 px).  Pixels.  Flags frames whose residual exceeds the baseline by this much.">
+                    <label><input type="checkbox" id="mpfEnableStereo"> Stereo reproj Δ (px)</label>
                     <span class="mpf-val" id="mpfValStereo">5.0</span>
                     <span class="mpf-count" id="mpfCountStereo"></span>
                     <input type="range" id="mpfSliderStereo" min="0.5" max="30" step="0.5" value="5">
@@ -1311,7 +1311,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=394" type="module"></script>
+    <script src="/static/js/labels.js?v=395" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

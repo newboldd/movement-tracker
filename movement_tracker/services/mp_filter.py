@@ -211,11 +211,19 @@ def _signal_mpconf(confidence_L, confidence_R, N, J, mpconf_min: float):
 
 
 def _signal_stereo_reproj(init_3d, mp_L, mp_R, calib, stereo_px: float):
-    """Per-(frame, joint) stereo reprojection error in pixels.
+    """Per-(frame, joint, camera) stereo reprojection residual,
+    thresholded against the per-joint per-camera trial baseline.
 
-    Reproject init_3d through calibration; per camera, residual against
-    its MP detection.  Flag the camera whose residual exceeds threshold;
-    if both exceed, flag both.  No calib → no-op.
+    A non-rectified stereo pair has a calibration-dependent
+    irreducible reprojection error per joint per camera (the L2-
+    optimal triangulation residual).  Treating "0 = perfect" would
+    punish trials whose calibration happens to have a ~0.3 px
+    natural offset.  Subtracting the per-(joint, camera) trial
+    median (np.nanmedian) leaves only the per-frame DEVIATION
+    above the baseline as the anomaly signal.
+
+    Flag camera L when ``res_L - median_L > stereo_px`` (and
+    similarly for R).  No calib → no-op.
     """
     N, J = init_3d.shape[0], init_3d.shape[1]
     out = np.zeros((N, J, 2), dtype=bool)
@@ -240,8 +248,16 @@ def _signal_stereo_reproj(init_3d, mp_L, mp_R, calib, stereo_px: float):
     proj_R = proj_R.reshape(N, J, 2)
     res_L = np.linalg.norm(proj_L - mp_L, axis=-1)         # (N, J)
     res_R = np.linalg.norm(proj_R - mp_R, axis=-1)
-    out[..., 0] = np.where(np.isfinite(res_L), res_L > stereo_px, False)
-    out[..., 1] = np.where(np.isfinite(res_R), res_R > stereo_px, False)
+    # Per-joint per-camera baseline (irreducible cal/MP residual).
+    base_L = np.nanmedian(res_L, axis=0, keepdims=True)    # (1, J)
+    base_R = np.nanmedian(res_R, axis=0, keepdims=True)
+    # nan-safe fallback when an entire joint column is NaN.
+    base_L = np.where(np.isfinite(base_L), base_L, 0.0)
+    base_R = np.where(np.isfinite(base_R), base_R, 0.0)
+    dev_L = res_L - base_L
+    dev_R = res_R - base_R
+    out[..., 0] = np.where(np.isfinite(dev_L), dev_L > stereo_px, False)
+    out[..., 1] = np.where(np.isfinite(dev_R), dev_R > stereo_px, False)
     return out
 
 
