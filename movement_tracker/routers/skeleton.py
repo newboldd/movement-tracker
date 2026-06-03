@@ -341,6 +341,132 @@ def get_fit_status(subject_id: int) -> dict:
     return check_skeleton_available()
 
 
+@router.get("/{subject_id}/trial/{trial_idx}/stereo_disparity")
+def trial_stereo_disparity(subject_id: int, trial_idx: int) -> dict:
+    """Diagnostic: per-joint L vs R epipolar residual at MP-combined
+    positions for the requested trial.
+
+    For each frame and joint we triangulate the MP-combined (uL, vL)
+    / (uR, vR) pair to a 3D point using the trial's stereo
+    calibration, then reproject through cv2.projectPoints (full
+    distortion model) back to both cameras.  The residual
+    ``proj_L − tgt_L`` and ``proj_R − tgt_R`` is the per-camera
+    component of the stereo-input inconsistency — the same thing the
+    Skel Fit v1 L2 optimizer has to split between cameras.
+
+    The output groups summary stats per joint (and overall) so the
+    user can tell whether the residual is a couple of pixels
+    (genuine MP noise, live with it) or much larger (calibration
+    worth re-doing).
+    """
+    import numpy as np
+    import cv2
+    from ..services.video import build_trial_map
+    from ..services.calibration import (
+        get_calibration_for_subject, triangulate_points,
+    )
+    from ..services.skeleton_data import _load_trial_calibration
+    from ..services.mediapipe_prelabel import (
+        load_mediapipe_combined_prelabels, load_mediapipe_prelabels,
+    )
+
+    name = _subject_name(subject_id)
+    tmap = build_trial_map(name)
+    if trial_idx < 0 or trial_idx >= len(tmap):
+        raise HTTPException(404, f"Trial index {trial_idx} out of range")
+    trial = tmap[trial_idx]
+    trial_stem = trial["trial_name"]
+    n_frames = trial["frame_count"]
+    start = trial.get("start_frame", 0)
+
+    prelabels = (load_mediapipe_combined_prelabels(name)
+                 or load_mediapipe_prelabels(name))
+    if prelabels is None:
+        raise HTTPException(404, "No MediaPipe prelabels for subject")
+    os_lm = prelabels["OS_landmarks"]
+    od_lm = prelabels["OD_landmarks"]
+    end = min(start + n_frames, os_lm.shape[0])
+    mp_L = os_lm[start:end]
+    mp_R = od_lm[start:end]
+
+    calib = _load_trial_calibration(name, trial_stem)
+    if calib is None:
+        calib = get_calibration_for_subject(name)
+    if calib is None:
+        raise HTTPException(404, "No stereo calibration for subject")
+
+    K1 = calib["K1"]; K2 = calib["K2"]
+    d1 = calib["dist1"]; d2 = calib["dist2"]
+    R = calib["R"]; T = calib["T"].reshape(3, 1)
+    rvec_R, _ = cv2.Rodrigues(R)
+    tvec_R = T
+
+    # Triangulate per joint across all frames, then reproject.
+    N = mp_L.shape[0]
+    joints_3d = np.full((N, 21, 3), np.nan)
+    for j in range(21):
+        joints_3d[:, j, :] = triangulate_points(mp_L[:, j, :], mp_R[:, j, :], calib)
+
+    # Reproject (distortion-aware) per camera, per (frame, joint).
+    proj_L = np.full((N, 21, 2), np.nan)
+    proj_R = np.full((N, 21, 2), np.nan)
+    for t in range(N):
+        valid = ~np.isnan(joints_3d[t, :, 0])
+        if not valid.any():
+            continue
+        pts = joints_3d[t, valid].reshape(-1, 1, 3).astype(np.float64)
+        pL_2d, _ = cv2.projectPoints(pts, np.zeros(3), np.zeros(3), K1, d1)
+        pR_2d, _ = cv2.projectPoints(pts, rvec_R, tvec_R, K2, d2)
+        proj_L[t, valid] = pL_2d.reshape(-1, 2)
+        proj_R[t, valid] = pR_2d.reshape(-1, 2)
+
+    res_L = proj_L - mp_L   # (N, 21, 2): projected − target on left
+    res_R = proj_R - mp_R   # same for right
+
+    def _stats(a):
+        # Median + |median| + max-|.|; ignores NaN.
+        flat = a[~np.isnan(a)]
+        if flat.size == 0:
+            return {"median": None, "abs_median": None, "max_abs": None}
+        return {
+            "median": float(np.nanmedian(a)),
+            "abs_median": float(np.nanmedian(np.abs(flat))),
+            "max_abs": float(np.nanmax(np.abs(flat))),
+        }
+
+    per_joint: list[dict] = []
+    for j in range(21):
+        per_joint.append({
+            "joint": j,
+            "n_frames": int((~np.isnan(joints_3d[:, j, 0])).sum()),
+            "L_dx": _stats(res_L[:, j, 0]),
+            "L_dy": _stats(res_L[:, j, 1]),
+            "R_dx": _stats(res_R[:, j, 0]),
+            "R_dy": _stats(res_R[:, j, 1]),
+        })
+    overall = {
+        "L_dx": _stats(res_L[..., 0]),
+        "L_dy": _stats(res_L[..., 1]),
+        "R_dx": _stats(res_R[..., 0]),
+        "R_dy": _stats(res_R[..., 1]),
+    }
+    return {
+        "subject": name,
+        "trial_idx": trial_idx,
+        "trial_name": trial_stem,
+        "n_frames": int(N),
+        "overall": overall,
+        "per_joint": per_joint,
+        "interpretation": (
+            "L_dy / R_dy are the per-camera vertical residuals between "
+            "the triangulated 3D point reprojected back vs the MP-combined "
+            "input.  Signed median ≈ 0 means the residual is symmetric noise. "
+            "|median| / max-|.| of a few px = OK (genuine MP per-camera noise). "
+            "Anything larger (≥ ~5 px median) points at calibration error."
+        ),
+    }
+
+
 @router.get("/{subject_id}/trial_skeleton_status")
 def trial_skeleton_status(subject_id: int) -> dict:
     """Per-trial skeleton_v1.npz existence for the given subject.
