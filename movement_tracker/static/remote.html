@@ -264,26 +264,13 @@
         <!-- Launch Job -->
         <div class="card">
             <h2>Launch Job</h2>
-            <!-- Cache-step settings body (Group Comparisons / Explore).
-                 Rendered by cache_results.js; visible only when one of
-                 the cache_* step buttons is active.  Subject /
-                 trial / target sections are hidden in that case. -->
-            <div id="cacheStepBody" style="display:none;margin-bottom:12px;"></div>
-
-            <!-- Step buttons + Target Selection -->
+            <!-- Step buttons + Target Selection.  Order: Preproc,
+                 Deidentify, Hand Tracking, Deep Lab Cut, 3D models,
+                 Cache Results — same flow as the pipeline. -->
             <div style="margin-bottom:12px;">
                 <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;">
                     <div style="display:flex;flex-direction:column;gap:3px;">
-                        <span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">Detection</span>
-                        <div style="display:flex;gap:3px;">
-                            <button class="btn btn-sm step-btn" data-step="mediapipe" onclick="selectStep('mediapipe')">MediaPipe</button>
-                            <button class="btn btn-sm step-btn" data-step="vision" onclick="selectStep('vision')">Vision</button>
-                            <button class="btn btn-sm step-btn" data-step="pose" onclick="selectStep('pose')">Pose</button>
-                            <button class="btn btn-sm step-btn" data-step="hrnet" onclick="selectStep('hrnet')">HRNet</button>
-                        </div>
-                    </div>
-                    <div style="display:flex;flex-direction:column;gap:3px;">
-                        <span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">Pre-proc</span>
+                        <span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">Preproc</span>
                         <div style="display:flex;gap:3px;">
                             <button class="btn btn-sm step-btn" data-step="preproc" onclick="selectStep('preproc')"
                                     title="Run camera trajectory + background/mask bake for the selected trials.  Remote target reuses already-uploaded videos and the MP npz.">Preproc</button>
@@ -296,7 +283,16 @@
                         </div>
                     </div>
                     <div style="display:flex;flex-direction:column;gap:3px;">
-                        <span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">DLC</span>
+                        <span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">Hand Tracking</span>
+                        <div style="display:flex;gap:3px;">
+                            <button class="btn btn-sm step-btn" data-step="mediapipe" onclick="selectStep('mediapipe')">MediaPipe</button>
+                            <button class="btn btn-sm step-btn" data-step="vision" onclick="selectStep('vision')">Vision</button>
+                            <button class="btn btn-sm step-btn" data-step="pose" onclick="selectStep('pose')">Pose</button>
+                            <button class="btn btn-sm step-btn" data-step="hrnet" onclick="selectStep('hrnet')">HRNet</button>
+                        </div>
+                    </div>
+                    <div style="display:flex;flex-direction:column;gap:3px;">
+                        <span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">Deep Lab Cut</span>
                         <div style="display:flex;gap:3px;">
                             <button class="btn btn-sm step-btn" data-step="train" onclick="selectStep('train')">Train</button>
                             <button class="btn btn-sm step-btn" data-step="refine" onclick="selectStep('refine')">Refine</button>
@@ -320,6 +316,13 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Cache-step settings body (Group Comparisons / Explore).
+                 Rendered by cache_results.js; visible only when one of
+                 the cache_* step buttons is active.  Sits BELOW the
+                 step-button row so the group buttons stay visible
+                 alongside their settings, like every other step. -->
+            <div id="cacheStepBody" style="display:none;margin-bottom:12px;"></div>
             <div class="toolbar" data-cache-hide style="flex-wrap:wrap;">
                 <label style="font-size:13px;color:var(--text-muted);">Target:</label>
                 <div class="target-radios">
@@ -598,7 +601,7 @@
 
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js?v=13"></script>
-    <script src="/static/js/remote.js?v=65"></script>
+    <script src="/static/js/remote.js?v=66"></script>
     <script src="/static/js/cache_results.js?v=2"></script>
 </body>
 </html>
