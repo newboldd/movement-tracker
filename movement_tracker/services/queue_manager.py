@@ -937,6 +937,31 @@ class QueueManager:
                         with get_db_ctx() as _db:
                             _db.execute("UPDATE jobs SET params_json = ? WHERE id = ?",
                                         (json.dumps(ep_state), job_id))
+
+                        # Open the per-job log file and write a settings
+                        # header so the Jobs-page History panel actually
+                        # has something to show.  Append mode so a
+                        # restarted worker doesn't clobber prior runs
+                        # at the same log_path.
+                        def _log_line(msg: str) -> None:
+                            try:
+                                os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                                with open(log_path, "a") as _lf:
+                                    _lf.write(msg.rstrip() + "\n")
+                            except Exception:
+                                pass
+                        _log_line(f"\n=== Skeleton fit v1 batch: {n_total} trial(s) ===")
+                        _log_line(
+                            f"  Settings: w_reproj={ep.get('w_reproj', 1.0)}"
+                            f" w_bone={ep.get('w_bone', 5.0)}"
+                            f" w_smooth={ep.get('w_smooth', 1.0)}"
+                            f" snap_bones={bool(ep.get('snap_bones', False))}"
+                            f" w_angle={ep.get('w_angle', 0.0)}")
+                        _log_line(
+                            f"  Outlier pre-filter:"
+                            f" accel_k={ep.get('accel_k', 6.0)}"
+                            f" bone_k={ep.get('bone_k', 6.0)}"
+                            f" k_max={ep.get('k_max', 30)}")
                         for i, t in enumerate(ep_state["trials"]):
                             if cancel_event.is_set():
                                 t["outcome"] = "cancelled"
@@ -992,6 +1017,37 @@ class QueueManager:
                             with get_db_ctx() as _db:
                                 _db.execute("UPDATE jobs SET params_json = ? WHERE id = ?",
                                             (json.dumps(ep_state), job_id))
+                            # Per-trial log line.  Reads skeleton_v1_params.json
+                            # if the fit produced one — that's where the
+                            # outlier-detector counts live (n_outliers_masked,
+                            # n_frames_with_any_mask, n_cam_L_masked,
+                            # n_cam_R_masked) and the final mean reproj errors.
+                            _sidecar = None
+                            try:
+                                _root = _skeleton_dir(sub)
+                                _sidecar_path = _root / trial_stem / "skeleton_v1_params.json"
+                                if _sidecar_path.exists():
+                                    _sidecar = json.loads(_sidecar_path.read_text())
+                            except Exception:
+                                _sidecar = None
+                            _res = (_sidecar or {}).get("results", {}) if _sidecar else {}
+                            _outline = (
+                                f"  [{i + 1}/{n_total}] {sub} {trial_stem}: "
+                                f"outcome={t.get('outcome')}"
+                            )
+                            if _res:
+                                _outline += (
+                                    f"  reproj_L={_res.get('mean_error_L', float('nan')):.2f}px"
+                                    f" reproj_R={_res.get('mean_error_R', float('nan')):.2f}px"
+                                    f"  masked cells={_res.get('n_outliers_masked', 0)}"
+                                    f" frames={_res.get('n_frames_with_any_mask', 0)}"
+                                    f" L={_res.get('n_cam_L_masked', 0)}"
+                                    f" R={_res.get('n_cam_R_masked', 0)}"
+                                )
+                            if t.get("outcome_error"):
+                                _outline += f"  ERROR: {t['outcome_error']}"
+                            _log_line(_outline)
+                        _log_line(f"=== batch finished ===\n")
                         # End of batch — leave the loop; outer code will
                         # mark the parent job completed/failed based on
                         # whether any exception escaped.
@@ -1008,6 +1064,25 @@ class QueueManager:
                         if job_type == "skeleton_v1":
                             # v1 = original FK skeleton fit (writes skeleton_v1.npz)
                             from ..services.skeleton_v1 import run_skeleton_v1_fit
+                            from ..services.skeleton_data import _skeleton_dir as _sk_dir
+                            # Settings header to the per-job log.
+                            try:
+                                os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                                with open(log_path, "a") as _lf:
+                                    _lf.write(
+                                        f"\n=== Skeleton fit v1 (single trial) ===\n"
+                                        f"  {subject_names[0]} {trial_stem}\n"
+                                        f"  Settings: w_reproj={ep.get('w_reproj', 1.0)}"
+                                        f" w_bone={ep.get('w_bone', 5.0)}"
+                                        f" w_smooth={ep.get('w_smooth', 1.0)}"
+                                        f" snap_bones={bool(ep.get('snap_bones', False))}"
+                                        f" w_angle={ep.get('w_angle', 0.0)}\n"
+                                        f"  Outlier pre-filter: accel_k={ep.get('accel_k', 6.0)}"
+                                        f" bone_k={ep.get('bone_k', 6.0)}"
+                                        f" k_max={ep.get('k_max', 30)}\n"
+                                    )
+                            except Exception:
+                                pass
                             run_skeleton_v1_fit(
                                 subject_names[0], trial_stem,
                                 cancel_event=cancel_event, progress_callback=on_progress,
@@ -1020,6 +1095,23 @@ class QueueManager:
                                 bone_k=ep.get("bone_k", 6.0),
                                 k_max=ep.get("k_max", 30),
                             )
+                            # Outcome line from the JSON sidecar.
+                            try:
+                                _sp = _sk_dir(subject_names[0]) / trial_stem / "skeleton_v1_params.json"
+                                if _sp.exists():
+                                    _res = (json.loads(_sp.read_text()) or {}).get("results", {})
+                                    with open(log_path, "a") as _lf:
+                                        _lf.write(
+                                            f"  Result: reproj_L={_res.get('mean_error_L', float('nan')):.2f}px"
+                                            f" reproj_R={_res.get('mean_error_R', float('nan')):.2f}px"
+                                            f"  masked cells={_res.get('n_outliers_masked', 0)}"
+                                            f" frames={_res.get('n_frames_with_any_mask', 0)}"
+                                            f" L={_res.get('n_cam_L_masked', 0)}"
+                                            f" R={_res.get('n_cam_R_masked', 0)}\n"
+                                            f"=== finished ===\n\n"
+                                        )
+                            except Exception:
+                                pass
                         elif job_type == "skeleton_v2":
                             # v2 = legacy smoothing fit (writes skeleton_v2.npz)
                             from ..services.skeleton_v2 import run_skeleton_v2_fit
