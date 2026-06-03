@@ -163,7 +163,7 @@ function _handlePlotClick(divId, ev) {
     const x = (typeof pt.x === 'number') ? pt.x : parseFloat(pt.x);
     if (!isFinite(x)) return;
     let trialIdx = null;
-    if (divId.startsWith('distPlot_') || divId.startsWith('velPlot_')) {
+    if (divId.startsWith('distPlot_') || divId.startsWith('velPlot_') || divId.startsWith('imiPlot_')) {
         trialIdx = parseInt(divId.split('_')[1]);
     } else if (divId.startsWith('movPlot_') || divId.startsWith('distMovPlot_')) {
         // The movement-plot div bundles every trial's data on its own
@@ -211,7 +211,7 @@ function _handleNativeClick(divId, e) {
     const dataX = chosenAx.p2c(px - chosenAx._offset);
     if (!isFinite(dataX)) return;
     let trialIdx = null;
-    if (divId.startsWith('distPlot_') || divId.startsWith('velPlot_')) {
+    if (divId.startsWith('distPlot_') || divId.startsWith('velPlot_') || divId.startsWith('imiPlot_')) {
         trialIdx = parseInt(divId.split('_')[1]);
     } else if (divId.startsWith('movPlot_') || divId.startsWith('distMovPlot_')) {
         trialIdx = chosenN - 1;
@@ -229,12 +229,15 @@ function _applyHighlightAll() {
     // x-axes there don't share a coordinate system with the click.
     const { trialIdx } = _clickHL;
     _applyHighlightTo(`distPlot_${trialIdx}`);
+    _applyHighlightTo(`imiPlot_${trialIdx}`);
     _applyHighlightTo(`velPlot_${trialIdx}`);
-    // Clear any stale highlights on OTHER trials' dist/vel plots so
-    // re-clicks on a different trial don't leave a phantom line
+    // Clear any stale highlights on OTHER trials' dist/imi/vel plots
+    // so re-clicks on a different trial don't leave a phantom line
     // behind from the previous click.
-    document.querySelectorAll('[id^="distPlot_"], [id^="velPlot_"]').forEach(d => {
-        if (d.id !== `distPlot_${trialIdx}` && d.id !== `velPlot_${trialIdx}`) {
+    document.querySelectorAll('[id^="distPlot_"], [id^="imiPlot_"], [id^="velPlot_"]').forEach(d => {
+        if (d.id !== `distPlot_${trialIdx}`
+                && d.id !== `imiPlot_${trialIdx}`
+                && d.id !== `velPlot_${trialIdx}`) {
             _clearHighlightOn(d.id);
         }
     });
@@ -2301,8 +2304,10 @@ function renderAllDistancePlots() {
     // Reduced top margin (was 30) — the trial title used to sit in
     // Plotly's title space; it's now rendered in an HTML header above
     // the scrolling wrapper instead.
-    const DIST_H = 220, DIST_MT = 10, DIST_MB = 5;
-    const VEL_H = 150, VEL_MT = 5, VEL_MB = 35;
+    const DIST_H = 220, DIST_MT = 10, DIST_MB = 0;
+    // Compressed IMI strip between distance and velocity plots.
+    const IMI_H = 70, IMI_MT = 0, IMI_MB = 0;
+    const VEL_H = 150, VEL_MT = 0, VEL_MB = 35;
 
     // Short trial label (e.g. "R1" from "PD03_R1").
     const _trialPartOf = t => String(t.name || '').split('_').pop();
@@ -2363,6 +2368,12 @@ function renderAllDistancePlots() {
         sliderCol.style.display = isCollapsed ? 'none' : 'flex';
         sliderCol.style.flexDirection = 'column';
         sliderCol.appendChild(_buildYSliderCol('dist', idx, DIST_H, DIST_MT, DIST_MB));
+        // Spacer in the slider column so the velocity slider lines up
+        // with the velocity plot — the IMI strip in the wrapper has
+        // no Y-range slider of its own.
+        const imiSpacer = document.createElement('div');
+        imiSpacer.style.height = IMI_H + 'px';
+        sliderCol.appendChild(imiSpacer);
         sliderCol.appendChild(_buildYSliderCol('vel', idx, VEL_H, VEL_MT, VEL_MB));
         block.appendChild(sliderCol);
 
@@ -2380,6 +2391,12 @@ function renderAllDistancePlots() {
         distDiv.id = `distPlot_${idx}`;
         distDiv.style.height = DIST_H + 'px';
         wrapper.appendChild(distDiv);
+
+        // Compressed IMI strip between distance and velocity.
+        const imiDiv = document.createElement('div');
+        imiDiv.id = `imiPlot_${idx}`;
+        imiDiv.style.height = IMI_H + 'px';
+        wrapper.appendChild(imiDiv);
 
         // Velocity plot
         const velDiv = document.createElement('div');
@@ -2403,6 +2420,7 @@ function renderAllDistancePlots() {
 
         // Set wrapper width to enable scrolling
         distDiv.style.width = plotWidth + 'px';
+        imiDiv.style.width = plotWidth + 'px';
         velDiv.style.width = plotWidth + 'px';
 
         const trialStart = data.trials.slice(0, idx).reduce((acc, t) => acc + (t.distances ? t.distances.length : 0), 0);
@@ -2558,6 +2576,8 @@ function renderAllDistancePlots() {
         }
 
         renderDistancePlot(distDiv.id, trial, _effYRange('dist', idx), plotWidth, distOverlays, distShapes);
+        const _imiRefVal = (document.querySelector('input[name="imiRef"]:checked')?.value) || 'peak';
+        renderIMIPlot(imiDiv.id, trial, trialStart, trialMovs, fps, _imiRefVal, plotWidth);
         renderVelocityPlot(velDiv.id, trial, _effYRange('vel', idx), plotWidth, velOverlays, distShapes);
     });
 }
@@ -2870,6 +2890,65 @@ function renderDistancePlot(divId, trial, yRange, width, overlayTraces, shapes) 
     Plotly.newPlot(divId, traces, layout, {
         responsive: false,
         displayModeBar: false,
+    }).then(() => _registerClickPlot(divId));
+}
+
+// Compressed IMI strip rendered between the distance and velocity
+// plots.  X axis is shared trial-local time; Y is inter-movement
+// interval (seconds), measured between consecutive `refKind`_frame
+// values (peak / open / close).  Each point is plotted at the
+// SECOND frame of the pair so it sits over the spot in time where
+// that interval ends.
+function renderIMIPlot(divId, trial, trialStart, trialMovs, fps, refKind, width) {
+    const fpsT = trial.fps || fps || 60;
+    const refFrameKey = `${refKind}_frame`;
+    const xs = [], ys = [];
+    let prevLocal = null;
+    (trialMovs || []).forEach(m => {
+        const f = m[refFrameKey];
+        if (f == null || !isFinite(f)) return;
+        const local = f - trialStart;
+        if (local < 0) return;
+        if (prevLocal != null) {
+            const dt = (local - prevLocal) / fpsT;
+            if (isFinite(dt) && dt > 0) {
+                xs.push(+(local / fpsT).toFixed(3));
+                ys.push(+dt.toFixed(3));
+            }
+        }
+        prevLocal = local;
+    });
+    const trace = {
+        x: xs, y: ys,
+        type: 'scatter', mode: 'lines+markers',
+        line: { color: '#9C27B0', width: 1 },
+        marker: { color: '#9C27B0', size: 4 },
+        hovertemplate: '%{x:.2f}s<br>IMI %{y:.2f}s<extra></extra>',
+        name: 'IMI',
+    };
+    const n = trial.distances.length;
+    const tEnd = n > 0 ? (n - 1) / fpsT : 1;
+    const layout = {
+        // Zero top/bottom margins so the strip butts up against the
+        // distance plot above and the velocity plot below.
+        margin: { t: 0, b: 0, l: 55, r: 20 },
+        xaxis: {
+            showticklabels: false, color: '#666', gridcolor: '#eee',
+            range: [0, tEnd], autorange: false,
+        },
+        yaxis: {
+            title: { text: 'IMI (s)', font: { size: 10, color: '#9C27B0' }, standoff: 4 },
+            color: '#9C27B0', gridcolor: '#f0f0f0',
+            zeroline: false,
+            tickfont: { size: 9 },
+            nticks: 3,
+        },
+        plot_bgcolor: '#fff', paper_bgcolor: '#fff',
+        showlegend: false, hovermode: 'x unified',
+        width: width,
+    };
+    Plotly.newPlot(divId, [trace], layout, {
+        responsive: false, displayModeBar: false,
     }).then(() => _registerClickPlot(divId));
 }
 
@@ -4424,6 +4503,9 @@ document.getElementById('distSequenceMode').addEventListener('change', () => {
 document.querySelectorAll('input[name="imiRef"]').forEach(r => {
     r.addEventListener('change', () => {
         if (cachedMovements) renderDistMovementPlots();
+        // The compressed IMI strips between dist/vel also depend
+        // on the peak/open/close reference — re-render them.
+        if (cachedTraces) renderAllDistancePlots();
     });
 });
 
