@@ -2157,8 +2157,10 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
             # ── Camera mask (matches what Skel Fit v1 sees) ──
             # detect_mask needs an init_3d and per-cam ancillary
             # signals; build them from MP combined the same way
-            # the v1 pre-pass does.
-            from .calibration import triangulate_points
+            # the v1 pre-pass does.  (triangulate_points is already
+            # module-imported — don't re-import inside the function
+            # or Python rebinds the name as local for the WHOLE
+            # function body, breaking earlier triangulate calls.)
             _mp_L_full = np.where(np.isfinite(combined_tracked_L),
                                     combined_tracked_L, mp_tracked_L)
             _mp_R_full = np.where(np.isfinite(combined_tracked_R),
