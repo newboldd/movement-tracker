@@ -3514,7 +3514,11 @@ async function _copyPlotsAsPng(plotDivs, filename, btn, opts) {
  *  handlers attached to the per-column copy buttons. */
 window._copyGroupColumn = function(paramId, kind, btn) {
     const prefix = kind === 'dose' ? 'grpPlotDose_' : 'grpPlot_';
-    const divs = ['mean', 'cv', 'seq']
+    // Seq-effect div-id suffix tracks the R²/Slope checkboxes —
+    // each metric can be visible alone, both, or neither.
+    const seqSuffixes = ['seq_r2', 'seq_slope']
+        .filter(s => document.getElementById(prefix + paramId + '_' + s));
+    const divs = ['mean', 'cv', ...seqSuffixes]
         .map(f => document.getElementById(prefix + paramId + '_' + f))
         .filter(Boolean);
     const m = (typeof GROUP_METRICS !== 'undefined')
@@ -4918,12 +4922,22 @@ function renderGroupPlots() {
     });
     html += '</div>';
 
-    // Scrollable grid: 3 rows (Mean, Variance, Sequence) × N metric columns
+    // Scrollable grid: Mean + Variance + 0..2 sequence-effect rows
+    // (R² and/or slope) per the checkboxes next to the seq-effect
+    // dropdown.  ``field`` is the lookup key into each metric spec;
+    // ``seqMetric`` is set on seq rows to tell ``_key`` which
+    // per-mode prefix to use (``seq_…`` for R², ``seqslope_…`` for
+    // slope).
+    const _seqShow = (v) =>
+        !!document.querySelector(`#groupSeqMetric input.groupseqm[value="${v}"]:checked`);
+    const _showR2 = _seqShow('r2');
+    const _showSlope = _seqShow('slope');
     const ROW_DEFS = [
         { label: 'Mean', field: 'mean', height: 200 },
         { label: 'Variance', field: 'cv', height: 180 },
-        { label: 'Sequence Effect', field: 'seq', height: 180 },
     ];
+    if (_showR2)    ROW_DEFS.push({ label: 'Sequence Effect (R²)',    field: 'seq', seqMetric: 'r2',    height: 180 });
+    if (_showSlope) ROW_DEFS.push({ label: 'Sequence Effect (slope)', field: 'seq', seqMetric: 'slope', height: 180 });
 
     const colW = Math.max(200, Math.min(280, container.clientWidth / visibleMetrics.length));
 
@@ -4942,10 +4956,13 @@ function renderGroupPlots() {
     html += '<div style="overflow-x:auto;">';
     html += `<div style="display:grid;grid-template-columns:repeat(${visibleMetrics.length}, ${colW}px);gap:0;">`;
 
+    // Per-row div-id suffix — two seq rows both have field=='seq',
+    // so distinguish them by their seqMetric to avoid id collisions.
+    const _rowSuffix = (row) => row.seqMetric ? `${row.field}_${row.seqMetric}` : row.field;
     ROW_DEFS.forEach((row, ri) => {
         visibleMetrics.forEach((m) => {
             const spec = m[row.field];
-            const divId = `grpPlot_${m.id}_${row.field}`;
+            const divId = `grpPlot_${m.id}_${_rowSuffix(row)}`;
             if (spec) {
                 html += `<div style="height:${row.height}px;">
                     ${ri === 0 ? _columnTitle(m, 'bar') : ''}
@@ -4972,7 +4989,7 @@ function renderGroupPlots() {
     ROW_DEFS.forEach((row, ri) => {
         visibleMetrics.forEach(m => {
             const spec = m[row.field];
-            const divId = `grpPlotDose_${m.id}_${row.field}`;
+            const divId = `grpPlotDose_${m.id}_${_rowSuffix(row)}`;
             if (spec) {
                 html += `<div style="height:${row.height}px;">
                     ${ri === 0 ? _columnTitle(m, 'dose') : ''}
@@ -4992,29 +5009,22 @@ function renderGroupPlots() {
     const _reverseY = (m, row) =>
         row.field === 'mean' && (m.id === 'peak_close_vel' || m.id === 'mean_close_vel');
 
-    // Sequence-Effect row uses R² (seq_<mode>_*) or slope
-    // (seqslope_<mode>_*) per the radio next to the Sequence-effect
-    // dropdown.  Each cached subject record carries fields for every
-    // embedded model (linear_full / linear_first10 / linear_multi /
-    // exp_*); the selected seq_mode picks which one to read.
-    const seqMetric = document.querySelector('#groupSeqMetric input:checked')?.value || 'r2';
+    // Sequence-Effect rows read R² (seq_<mode>_*) or slope
+    // (seqslope_<mode>_*) from each subject's cached fields.  ``row``
+    // carries the seqMetric ('r2' or 'slope') so two seq rows can
+    // coexist with independent metrics.
     const seqMode = document.getElementById('groupSeqModeSelect')?.value || 'linear_full';
     const _key = (spec, row) => {
         if (row.field !== 'seq') return spec.key;
         if (seqMode === 'none') return null;   // 'none' has no per-mode data
         const param = spec.key.replace(/^seq_/, '');
-        const prefix = seqMetric === 'slope' ? 'seqslope' : 'seq';
+        const prefix = row.seqMetric === 'slope' ? 'seqslope' : 'seq';
         return `${prefix}_${seqMode}_${param}`;
     };
 
-    // Per-row Y-axis label.  Sequence Effect row picks up "(R²)" or
-    // "(slope)" depending on the radio next to the seq-effect dropdown.
-    const _yLabelFor = (row) => {
-        if (row.field === 'seq') {
-            return 'Sequence Effect (' + (seqMetric === 'slope' ? 'slope' : 'R²') + ')';
-        }
-        return row.label;       // 'Mean' or 'Variance'
-    };
+    // Per-row Y-axis label.  Sequence Effect rows carry their own
+    // "(R²)" / "(slope)" suffix from the row label.
+    const _yLabelFor = (row) => row.label;
 
     // Render each chart.  Column titles live in the HTML header above
     // each column; per-plot Y-axis labels tell which row (Mean / Var /
@@ -5027,7 +5037,7 @@ function renderGroupPlots() {
             // seq_mode === 'none' returns null — the row has nothing
             // to plot, so paint an empty placeholder and move on.
             if (k == null) return;
-            const divId = `grpPlot_${m.id}_${row.field}`;
+            const divId = `grpPlot_${m.id}_${_rowSuffix(row)}`;
             renderGroupBar(divId, data, k, _reverseY(m, row), _yLabelFor(row));
         });
     });
@@ -5040,7 +5050,7 @@ function renderGroupPlots() {
             if (!spec) return;
             const k = _key(spec, row);
             if (k == null) return;
-            const divId = `grpPlotDose_${m.id}_${row.field}`;
+            const divId = `grpPlotDose_${m.id}_${_rowSuffix(row)}`;
             renderDoseScatter(divId, data, k, _reverseY(m, row), _yLabelFor(row));
         });
     });

@@ -384,9 +384,10 @@
                         <option value="exp_multi" selected>Exponential (multi-seq)</option>
                     </select>
                 </label>
-                <span id="groupSeqMetric" style="display:flex;align-items:center;gap:8px;font-size:12px;">
-                    <label style="display:inline-flex;align-items:center;gap:2px;cursor:pointer;margin:0;"><input type="radio" name="groupseqm" value="r2"> R²</label>
-                    <label style="display:inline-flex;align-items:center;gap:2px;cursor:pointer;margin:0;"><input type="radio" name="groupseqm" value="slope" checked> Slope</label>
+                <span id="groupSeqMetric" style="display:flex;align-items:center;gap:8px;font-size:12px;"
+                      title="Which sequence-effect metric(s) to plot.  Neither, either, or both — uncheck both to hide the sequence-effect row entirely.">
+                    <label style="display:inline-flex;align-items:center;gap:2px;cursor:pointer;margin:0;"><input type="checkbox" class="groupseqm" value="r2"> R²</label>
+                    <label style="display:inline-flex;align-items:center;gap:2px;cursor:pointer;margin:0;"><input type="checkbox" class="groupseqm" value="slope" checked> Slope</label>
                 </span>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
                 <label style="display:flex;align-items:center;gap:6px;margin:0;">Hand:
@@ -478,6 +479,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=126"></script>
+    <script src="/static/js/results.js?v=127"></script>
 </body>
 </html>
