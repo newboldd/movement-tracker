@@ -364,22 +364,22 @@ def _signal_stereo_reproj(init_3d, mp_L, mp_R, calib, stereo_px: float):
     return out
 
 
-def _signal_stereo_hybrid(stereo_shift_mag, stereo_response,
+def _signal_stereo_outline(stereo_shift_mag, stereo_response,
                            mp_L, mp_R, N, J,
-                           stereo_hybrid_px: float,
-                           stereo_hybrid_conf_min: float,
+                           stereo_outline_px: float,
+                           stereo_outline_conf_min: float,
                            k_blame_camera: float):
-    """Per-(frame, joint) hybrid-stereo correction distance, gated
+    """Per-(frame, joint) outline-stereo correction distance, gated
     by phase-correlation confidence.
 
     Three-step decision:
 
     1. If the per-joint phase-corr response is below
-       ``stereo_hybrid_conf_min``, skip — the shift baked into
-       stereo_align_hybrid.npz is unreliable, so we have no basis
+       ``stereo_outline_conf_min``, skip — the shift baked into
+       stereo_align_outline.npz is unreliable, so we have no basis
        to call its distance "wrong" either.
     2. If the shift magnitude is at-or-under
-       ``stereo_hybrid_px``, the per-joint stereo distance is in
+       ``stereo_outline_px``, the per-joint stereo distance is in
        the normal range — no flag.
     3. Otherwise (confident shift, large distance) attribute the
        error to one camera via the 2D-jump rule shared with every
@@ -398,14 +398,14 @@ def _signal_stereo_hybrid(stereo_shift_mag, stereo_response,
     m = min(N, S.shape[0])
     big_shift = np.zeros((N, J), dtype=bool)
     big_shift[:m] = np.where(np.isfinite(S[:m]),
-                               S[:m] > stereo_hybrid_px, False)
+                               S[:m] > stereo_outline_px, False)
     conf_ok = np.zeros((N, J), dtype=bool)
     if stereo_response is not None:
         R = np.asarray(stereo_response, dtype=np.float64)
         if R.ndim == 2 and R.shape[1] == J:
             mr = min(N, R.shape[0])
             conf_ok[:mr] = np.where(np.isfinite(R[:mr]),
-                                      R[:mr] >= stereo_hybrid_conf_min,
+                                      R[:mr] >= stereo_outline_conf_min,
                                       False)
     else:
         # No response array → can't gate; trust the distance check.
@@ -525,22 +525,22 @@ def build_signal_data(
 
     # ── Hybrid-stereo correction distance (px) ────────────────
     # Per-(frame, joint) 2D shift magnitude from the trial's
-    # stereo_align_hybrid.npz, NaN-padded when missing.
-    stereo_hybrid_mag = np.full((N, J), np.nan, dtype=np.float64)
+    # stereo_align_outline.npz, NaN-padded when missing.
+    stereo_outline_mag = np.full((N, J), np.nan, dtype=np.float64)
     if stereo_shift_mag is not None:
         S = np.asarray(stereo_shift_mag, dtype=np.float64)
         if S.ndim == 2 and S.shape[1] == J:
             m = min(N, S.shape[0])
-            stereo_hybrid_mag[:m] = S[:m]
+            stereo_outline_mag[:m] = S[:m]
     # ── Hybrid-stereo phase-corr response (≈[0,1]) ────────────
     # Per-(frame, joint) confidence baked alongside the shift in
-    # the hybrid npz.  NaN where missing.
-    stereo_hybrid_resp = np.full((N, J), np.nan, dtype=np.float64)
+    # the outline npz.  NaN where missing.
+    stereo_outline_resp = np.full((N, J), np.nan, dtype=np.float64)
     if stereo_response is not None:
         R = np.asarray(stereo_response, dtype=np.float64)
         if R.ndim == 2 and R.shape[1] == J:
             m = min(N, R.shape[0])
-            stereo_hybrid_resp[:m] = R[:m]
+            stereo_outline_resp[:m] = R[:m]
 
     # ── Camera-attribution helpers (2D residuals + 3D step) ──
     # ``step_2d_L`` / ``step_2d_R`` are NOT raw frame-to-frame
@@ -588,8 +588,8 @@ def build_signal_data(
         "ydisp_dev":      ydisp_dev.astype(f32),
         "stereo_dev_L":   stereo_dev_L.astype(f32),
         "stereo_dev_R":   stereo_dev_R.astype(f32),
-        "stereo_hybrid_mag": stereo_hybrid_mag.astype(f32),
-        "stereo_hybrid_resp": stereo_hybrid_resp.astype(f32),
+        "stereo_outline_mag": stereo_outline_mag.astype(f32),
+        "stereo_outline_resp": stereo_outline_resp.astype(f32),
         "step_2d_L":      step_2d_L.astype(f32),
         "step_2d_R":      step_2d_R.astype(f32),
         "step_3d":        step_3d.astype(f32),
@@ -640,9 +640,9 @@ def detect_mask(
     enable_stereo: bool = False,
     stereo_px: float = 5.0,
     # Stereo error: dist threshold (px) gated by min conf (≥).
-    enable_stereo_hybrid: bool = False,
-    stereo_hybrid_px: float = 10.0,
-    stereo_hybrid_conf_min: float = 0.2,
+    enable_stereo_outline: bool = False,
+    stereo_outline_px: float = 10.0,
+    stereo_outline_conf_min: float = 0.2,
     stereo_shift_mag=None,
     stereo_response=None,
     # HRnet (≥)
@@ -684,12 +684,12 @@ def detect_mask(
         _add("mp_confidence", _signal_mpconf(confidence_L, confidence_R, N, J, mpconf_min))
     if enable_stereo and calib is not None:
         _add("stereo_reproj", _signal_stereo_reproj(init_3d, mp_L, mp_R, calib, stereo_px))
-    if enable_stereo_hybrid and stereo_shift_mag is not None:
-        _add("stereo_hybrid",
-             _signal_stereo_hybrid(stereo_shift_mag, stereo_response,
+    if enable_stereo_outline and stereo_shift_mag is not None:
+        _add("stereo_outline",
+             _signal_stereo_outline(stereo_shift_mag, stereo_response,
                                      mp_L, mp_R, N, J,
-                                     stereo_hybrid_px,
-                                     stereo_hybrid_conf_min,
+                                     stereo_outline_px,
+                                     stereo_outline_conf_min,
                                      k_blame_camera))
     if enable_hrnet and (hrnet_L is not None or hrnet_R is not None):
         _add("hrnet",        _signal_hrnet(hrnet_L, hrnet_R, N, J, hrnet_min))
@@ -763,9 +763,21 @@ def detect_mask_from_params(
         mpconf_min=float(_mpf.get("mpconf_min", 0.5)),
         enable_stereo=bool(_mpf.get("enable_stereo", False)),
         stereo_px=float(_mpf.get("stereo_px", 5.0)),
-        enable_stereo_hybrid=bool(_mpf.get("enable_stereo_hybrid", False)),
-        stereo_hybrid_px=float(_mpf.get("stereo_hybrid_px", 10.0)),
-        stereo_hybrid_conf_min=float(_mpf.get("stereo_hybrid_conf_min", 0.2)),
+        # Back-compat: pre-rename mp_filter_params.json used
+        # ``enable_stereo_outline`` / ``stereo_hybrid_*`` keys.  Accept
+        # both, prefer the new outline-named key.
+        enable_stereo_outline=bool(
+            _mpf.get("enable_stereo_outline",
+                      _mpf.get("enable_stereo_outline", False))
+        ),
+        stereo_outline_px=float(
+            _mpf.get("stereo_outline_px",
+                      _mpf.get("stereo_outline_px", 10.0))
+        ),
+        stereo_outline_conf_min=float(
+            _mpf.get("stereo_outline_conf_min",
+                      _mpf.get("stereo_outline_conf_min", 0.2))
+        ),
         enable_hrnet=bool(_mpf.get("enable_hrnet", False)),
         hrnet_min=float(_mpf.get("hrnet_min", 0.2)),
     )
@@ -787,7 +799,7 @@ def build_stereo_fill(
         MP combined 2D keypoints, NaN where missing.
     stereo_L, stereo_R : (N, J, 2)
         Stereo-corrected 2D keypoints from the chosen stereo
-        variant (hybrid preferred over image).
+        variant (outline preferred over image).
     stereo_response : (N, J)
         Per-(frame, joint) phase-corr confidence baked alongside
         the shifts.  Cells with ``response > conf_min`` may donate.

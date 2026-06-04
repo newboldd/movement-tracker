@@ -329,12 +329,12 @@ def run_stereo_align(subject_name: str, trial_idx: int,
     - ``"image"`` (default): both Pass 1 (hand-wide) and Pass 2
       (per-joint) use raw video frame crops with a BGR -> gray ->
       high-pass pre-filter.  Output: ``stereo_align.npz``.
-    - ``"hybrid"``: Pass 1 uses outline voting (large-scale features,
+    - ``"outline"``: Pass 1 uses outline voting (large-scale features,
       robust to hand pose); Pass 2 uses raw image phase-corr (fine
-      pixel-level features).  Output: ``stereo_align_hybrid.npz``.
+      pixel-level features).  Output: ``stereo_align_outline.npz``.
       Requires both the video and the outline + trajectory data.
 
-    ``mask_dilate_px`` (hybrid only): the outline mask is dilated by
+    ``mask_dilate_px`` (outline only): the outline mask is dilated by
     this many pixels before being applied to the Pass-2 raw-image
     crops -- background pixels outside the dilated mask are weighted
     to zero so phase correlation is driven only by hand-region
@@ -348,18 +348,13 @@ def run_stereo_align(subject_name: str, trial_idx: int,
 
     Returns the saved npz path as a string.
     """
-    # Legacy use_outline boolean removed along with the outline-only
-    # mode it selected.  Reject explicitly so callers don't silently
-    # fall through with no stereo bake.
-    if use_outline:
-        raise ValueError(
-            "use_outline=True is no longer supported; the outline-only "
-            "stereo mode was removed. Use mode='hybrid' for the "
-            "outline-vote Pass-1 + image Pass-2 variant."
-        )
-    if mode not in ("image", "hybrid"):
+    # Legacy use_outline boolean: maps True → mode="outline" so old
+    # callers that pre-date the named mode argument keep working.
+    if use_outline and mode == "image":
+        mode = "outline"
+    if mode not in ("image", "outline"):
         raise ValueError(f"Unknown stereo mode: {mode!r}")
-    needs_outline = mode == "hybrid"
+    needs_outline = mode == "outline"
     needs_video   = True  # both remaining modes read video frames
     import json as _json
     from ..config import get_settings
@@ -414,7 +409,7 @@ def run_stereo_align(subject_name: str, trial_idx: int,
     if start_frame + n_frames > N_total:
         n_frames = max(0, N_total - start_frame)
 
-    # Outline data prerequisites (outline + hybrid modes): load
+    # Outline data prerequisites (outline mode only): load
     # outlines.json + camera trajectory.
     out_frames = None
     H_L_all = H_R_all = None
@@ -481,7 +476,7 @@ def run_stereo_align(subject_name: str, trial_idx: int,
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / {
         "image":   "stereo_align.npz",
-        "hybrid":  "stereo_align_hybrid.npz",
+        "outline": "stereo_align_outline.npz",
     }[mode]
     # Pass 2 align fn: raw-image phase-corr for both remaining modes.
     align_fn = _align_phase
@@ -497,10 +492,9 @@ def run_stereo_align(subject_name: str, trial_idx: int,
             of = out_frames[fi] if fi < len(out_frames) else {}
             os_poly = _warp_poly_ref_to_orig(of.get("OS"), H_L_all[fi])
             od_poly = _warp_poly_ref_to_orig(of.get("OD"), H_R_all[fi])
-        # Pass 2 source image: raw frame (image / hybrid) or outline
-        # mask (pure outline mode).
-        # Hybrid keeps the raw frame halves and the dilated outline
-        # masks; the per-joint loop below crops both and routes through
+        # Pass 2 source image: raw frame for both remaining modes.
+        # Outline mode also keeps a dilated outline mask; the per-joint
+        # loop below crops both image and mask and routes through
         # _align_phase_weighted so background pixels contribute literal
         # zero to the FFT -- cleaner than mean-filling the image.
         os_mask = od_mask = None
@@ -512,7 +506,7 @@ def run_stereo_align(subject_name: str, trial_idx: int,
             half_w = _fw // 2
             img_OS = frame[:, :half_w, :]
             img_OD = frame[:, half_w:, :]
-            if mode == "hybrid":
+            if mode == "outline":
                 os_mask = _dilate_mask(_outline_mask_image(os_poly, h_full, half_w),
                                        mask_dilate_px)
                 od_mask = _dilate_mask(_outline_mask_image(od_poly, h_full, half_w),
@@ -694,7 +688,7 @@ def run_stereo_align(subject_name: str, trial_idx: int,
             # mask, skip the mask for THAT joint (the Gaussian centre-
             # weight is still applied -- it doesn't zero anything out).
             use_mask = False
-            if mode == "hybrid" and os_mask is not None and od_mask is not None:
+            if mode == "outline" and os_mask is not None and od_mask is not None:
                 h_m, w_m = os_mask.shape
                 in_os = (0 <= os_cx < w_m and 0 <= os_cy < h_m
                          and os_mask[os_cy, os_cx] > 0)
@@ -702,8 +696,8 @@ def run_stereo_align(subject_name: str, trial_idx: int,
                          and od_mask[od_cy, od_cx] > 0)
                 use_mask = in_os and in_od
             try:
-                # Image + hybrid both go through the unified weighted
-                # phase corr (mask optional in hybrid, Gaussian always).
+                # Image + outline both go through the unified weighted
+                # phase corr (mask optional in outline, Gaussian always).
                 os_m_crop = od_m_crop = None
                 if use_mask:
                     os_m_crop = _crop(os_mask, os_cx_used, os_cy_used, jh)
@@ -756,7 +750,7 @@ def run_stereo_align(subject_name: str, trial_idx: int,
         refine_clamp_px=np.array(_REFINE_CLAMP_PX, dtype=np.int32),
         start_frame=np.array(start_frame, dtype=np.int32),
         n_frames=np.array(n_frames, dtype=np.int32),
-        mask_dilate_px=np.array(int(mask_dilate_px) if mode == "hybrid" else -1,
+        mask_dilate_px=np.array(int(mask_dilate_px) if mode == "outline" else -1,
                                  dtype=np.int32),
         gauss_center_weight=np.array(float(gauss_center_weight),
                                       dtype=np.float32),
@@ -775,19 +769,12 @@ def load_stereo_align(subject_name: str, trial_idx: int,
     """Load saved stereo-align npz for a trial.  Returns None if not
     present.
 
-    ``mode`` selects between ``"image"`` and ``"hybrid"`` variants
-    (``stereo_align.npz`` / ``stereo_align_hybrid.npz``).  The legacy
-    ``use_outline=True`` flag is no longer supported — the outline-
-    only mode was removed; pass ``mode="hybrid"`` for the outline-
-    vote + image-phase-corr variant."""
-    if use_outline:
-        raise ValueError(
-            "use_outline=True is no longer supported; the outline-only "
-            "stereo mode was removed. Pass mode='hybrid' instead."
-        )
+    ``mode`` selects between ``"image"`` and ``"outline"`` variants
+    (``stereo_align.npz`` / ``stereo_align_outline.npz``).  The legacy
+    ``use_outline=True`` flag maps to ``mode="outline"``."""
     if mode is None:
-        mode = "image"
-    if mode not in ("image", "hybrid"):
+        mode = "outline" if use_outline else "image"
+    if mode not in ("image", "outline"):
         raise ValueError(f"Unknown stereo mode: {mode!r}")
     from .video import build_trial_map
     from .skeleton_data import _skeleton_dir
@@ -797,7 +784,7 @@ def load_stereo_align(subject_name: str, trial_idx: int,
     stem = tmap[trial_idx]["trial_name"]
     fname = {
         "image":   "stereo_align.npz",
-        "hybrid":  "stereo_align_hybrid.npz",
+        "outline": "stereo_align_outline.npz",
     }[mode]
     path = _skeleton_dir(subject_name) / stem / fname
     if not path.exists():

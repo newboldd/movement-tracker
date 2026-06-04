@@ -459,9 +459,9 @@ class OutlierPreviewRequest(BaseModel):
     mpconf_min: float = 0.5
     enable_stereo: bool = False
     stereo_px: float = 5.0
-    enable_stereo_hybrid: bool = False
-    stereo_hybrid_px: float = 10.0
-    stereo_hybrid_conf_min: float = 0.2
+    enable_stereo_outline: bool = False
+    stereo_outline_px: float = 10.0
+    stereo_outline_conf_min: float = 0.2
     enable_hrnet: bool = False
     hrnet_min: float = 0.2
 
@@ -631,21 +631,21 @@ def mp_filter_data(subject_id: int, trial_idx: int) -> dict:
                 else:
                     init_3d[i, j] = [0.0, 0.0, 500.0]
 
-    # Hybrid stereo: per-joint shift magnitude (px) AND per-joint
+    # Outline stereo: per-joint shift magnitude (px) AND per-joint
     # phase-correlation response (~[0,1] confidence).  Both drive
     # the "Stereo error" pair of MP-Filter sliders.  NaN-padded
-    # when the trial doesn't have a hybrid stereo_align npz.
+    # when the trial doesn't have an outline stereo_align npz.
     stereo_shift_mag = None
     stereo_response = None
     try:
         from ..services.stereo_align import load_stereo_align
-        _sa_hyb = load_stereo_align(name, trial_idx, mode='hybrid')
-        if _sa_hyb is not None and "shifts" in _sa_hyb:
-            _sh = np.asarray(_sa_hyb["shifts"], dtype=np.float64)
+        _sa_out = load_stereo_align(name, trial_idx, mode='outline')
+        if _sa_out is not None and "shifts" in _sa_out:
+            _sh = np.asarray(_sa_out["shifts"], dtype=np.float64)
             if _sh.ndim == 3 and _sh.shape[1] == 21 and _sh.shape[2] == 2:
                 stereo_shift_mag = np.linalg.norm(_sh, axis=-1)
-        if _sa_hyb is not None and "response" in _sa_hyb:
-            _rsp = np.asarray(_sa_hyb["response"], dtype=np.float64)
+        if _sa_out is not None and "response" in _sa_out:
+            _rsp = np.asarray(_sa_out["response"], dtype=np.float64)
             if _rsp.ndim == 2 and _rsp.shape[1] == 21:
                 stereo_response = _rsp
     except Exception:
@@ -691,7 +691,7 @@ def mp_filter_data(subject_id: int, trial_idx: int) -> dict:
         "has_calib":   calib is not None,
         "has_mp_conf": (conf_L is not None or conf_R is not None),
         "has_hrnet":   (hrnet_L is not None or hrnet_R is not None),
-        "has_stereo_hybrid": stereo_shift_mag is not None,
+        "has_stereo_outline": stereo_shift_mag is not None,
         "saved_params": saved_params,
     }
 
@@ -815,28 +815,28 @@ def outlier_preview(subject_id: int, req: OutlierPreviewRequest) -> dict:
         if a is None: return None
         return np.asarray(a)[valid_idx]
 
-    # Hybrid stereo: per-joint shift magnitude (px) + per-joint
+    # Outline stereo: per-joint shift magnitude (px) + per-joint
     # phase-corr response (~[0,1]).  Confidence acts as a gate on
     # the distance check, so both arrays are loaded together iff
     # the Stereo error signal is enabled.
     _stereo_shift_mag_v = None
     _stereo_response_v = None
-    if req.enable_stereo_hybrid:
+    if req.enable_stereo_outline:
         try:
             from ..services.stereo_align import load_stereo_align
-            _sa_hyb = load_stereo_align(name, req.trial_idx, mode='hybrid')
-            if _sa_hyb is not None:
+            _sa_out = load_stereo_align(name, req.trial_idx, mode='outline')
+            if _sa_out is not None:
                 def _stitch(arr):
                     full = np.full((N_total, 21), np.nan, dtype=np.float64)
                     m = min(N_total, arr.shape[0])
                     full[:m] = arr[:m]
                     return full[valid_idx]
-                if "shifts" in _sa_hyb:
-                    _sh = np.asarray(_sa_hyb["shifts"], dtype=np.float64)
+                if "shifts" in _sa_out:
+                    _sh = np.asarray(_sa_out["shifts"], dtype=np.float64)
                     if _sh.ndim == 3 and _sh.shape[1] == 21 and _sh.shape[2] == 2:
                         _stereo_shift_mag_v = _stitch(np.linalg.norm(_sh, axis=-1))
-                if "response" in _sa_hyb:
-                    _rsp = np.asarray(_sa_hyb["response"], dtype=np.float64)
+                if "response" in _sa_out:
+                    _rsp = np.asarray(_sa_out["response"], dtype=np.float64)
                     if _rsp.ndim == 2 and _rsp.shape[1] == 21:
                         _stereo_response_v = _stitch(_rsp)
         except Exception:
@@ -857,9 +857,9 @@ def outlier_preview(subject_id: int, req: OutlierPreviewRequest) -> dict:
         enable_z=req.enable_z,            z_k=req.z_k,
         enable_mpconf=req.enable_mpconf,  mpconf_min=req.mpconf_min,
         enable_stereo=req.enable_stereo,  stereo_px=req.stereo_px,
-        enable_stereo_hybrid=req.enable_stereo_hybrid,
-        stereo_hybrid_px=req.stereo_hybrid_px,
-        stereo_hybrid_conf_min=req.stereo_hybrid_conf_min,
+        enable_stereo_outline=req.enable_stereo_outline,
+        stereo_outline_px=req.stereo_outline_px,
+        stereo_outline_conf_min=req.stereo_outline_conf_min,
         stereo_shift_mag=_stereo_shift_mag_v,
         stereo_response=_stereo_response_v,
         enable_hrnet=req.enable_hrnet,    hrnet_min=req.hrnet_min,
@@ -1140,10 +1140,10 @@ def run_fit(subject_id: int, req: FitRequest) -> dict:
 
 class StereoAlignRequest(BaseModel):
     trial_idx: int
-    # "image" | "hybrid".  Default "image" when unset.
+    # "image" | "outline".  Default "image" when unset.
     mode: str | None = None
-    # Hybrid only: dilate the outline mask by N pixels before applying
-    # to the per-joint image crops.  Ignored for image mode.
+    # Outline only: dilate the outline mask by N pixels before
+    # applying to the per-joint image crops.  Ignored for image mode.
     mask_dilate_px: int = 10
     # Strength of a 2D Gaussian centred on each MP label that weights
     # the Pass-2 phase correlation toward pixels near the joint.
@@ -1158,7 +1158,7 @@ def trial_stereo_params(subject_id: int, trial_idx: int) -> dict:
 
     The Labels page opens the Stereo panel pre-filled with whatever
     settings produced the existing npz for the currently-selected
-    radio (image / hybrid).  Modes with no baked npz are omitted
+    radio (image / outline).  Modes with no baked npz are omitted
     from the response — the frontend falls back to defaults.
     """
     from ..services.stereo_align import load_stereo_align
@@ -1167,14 +1167,14 @@ def trial_stereo_params(subject_id: int, trial_idx: int) -> dict:
     if trial_idx < 0 or trial_idx >= len(trials):
         raise HTTPException(400, "trial_idx out of range")
     out: dict[str, dict] = {}
-    for mode in ("image", "hybrid"):
+    for mode in ("image", "outline"):
         sa = load_stereo_align(name, trial_idx, mode=mode)
         if sa is None:
             continue
         entry: dict = {}
         if "mask_dilate_px" in sa:
             # -1 sentinel = "not applicable for this mode" — only
-            # hybrid actually stores a real value.  Map it to None
+            # outline actually stores a real value.  Map it to None
             # so the frontend doesn't display "-1 px".
             v = int(sa["mask_dilate_px"])
             entry["mask_dilate_px"] = None if v < 0 else v
@@ -1554,9 +1554,9 @@ class MPErrorRequest(BaseModel):
     stage: str | None = None
     # Step 0: Stereo-correction config (v3 fit only).  Defaults are a
     # no-op when stereo_dist_px == 0.
-    stereo_mode: str = "image"        # image / hybrid
-    mask_dilate_px: int = 10           # hybrid only
-    gauss_center_weight: float = 0.0   # image + hybrid
+    stereo_mode: str = "image"        # image / outline
+    mask_dilate_px: int = 10           # outline only
+    gauss_center_weight: float = 0.0   # image + outline
     stereo_conf: float = 0.0           # min confidence to consider a stereo label
     stereo_dist_px: float = 0.0        # 0 disables stereo-correction step
     # 2D radius (px) for the occlusion-revert post-pass.  When > 0,

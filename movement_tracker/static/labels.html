@@ -255,24 +255,24 @@
                     <span id="stereoConfVal" style="min-width:24px; text-align:right; color:var(--text);">0.00</span>
                 </span>
 
-                <!-- 1c'. Stereo (hybrid) -- Pass 1 outline-vote +
+                <!-- 1c'. Stereo (outline) -- Pass 1 outline-vote +
                      Pass 2 raw-image phase-corr.  No outlines shown
                      inside the per-joint bbox. -->
-                <span style="color:var(--text-muted);padding-left:18px;"><span class="layer-swatch" style="background:#f48fb1;"></span> Stereo (hybrid)</span>
-                <input type="checkbox" id="showStereoHybrid2D" style="margin:0;justify-self:center;">
+                <span style="color:var(--text-muted);padding-left:18px;"><span class="layer-swatch" style="background:#f48fb1;"></span> Stereo (outline)</span>
+                <input type="checkbox" id="showStereoOutline2D" style="margin:0;justify-self:center;">
                 <span></span><span></span>
-                <span id="stereoHybridConfWrap" style="grid-column: 1 / -1; display:none; align-items:center; gap:6px; padding:0 4px 4px 28px; font-size:10px; color:var(--text-muted); white-space:nowrap;">
+                <span id="stereoOutlineConfWrap" style="grid-column: 1 / -1; display:none; align-items:center; gap:6px; padding:0 4px 4px 28px; font-size:10px; color:var(--text-muted); white-space:nowrap;">
                     <span title="Hide pink X's whose phase-correlation confidence is below this value">conf ≥</span>
-                    <input type="range" id="stereoHybridConfSlider" min="0" max="1" step="0.02" value="0" style="flex:1; height:5px; cursor:pointer; min-width:0;">
-                    <span id="stereoHybridConfVal" style="min-width:24px; text-align:right; color:var(--text);">0.00</span>
+                    <input type="range" id="stereoOutlineConfSlider" min="0" max="1" step="0.02" value="0" style="flex:1; height:5px; cursor:pointer; min-width:0;">
+                    <span id="stereoOutlineConfVal" style="min-width:24px; text-align:right; color:var(--text);">0.00</span>
                 </span>
 
                 <!-- 1c''. Stereo Fill -- filtered MP combined with
                      per-camera donations from the best available
-                     stereo bake (Hybrid > Image).  Only populated
+                     stereo bake (Outline > Image).  Only populated
                      when an mp_filter_params.json sidecar is
                      present for the trial.  Shares its swatch with
-                     Stereo (hybrid) since it's a derived view. -->
+                     Stereo (outline) since it's a derived view. -->
                 <span class="stage-row" data-stage="stereo_fill"
                       style="color:var(--text-muted);padding-left:18px;"
                       title="Filtered MP combined; for joints where one camera was filtered and the stereo confidence is > 0.4, the filtered cell is replaced with the stereo-corrected point.  Requires a saved MP Filter and at least one Stereo Correct bake.">
@@ -480,17 +480,17 @@
                     Phase-correlate cropped patches around each MP label across cameras (no label info used).  Stereo model then draws the partner-camera label translated into the current view so cross-camera disagreement is visible.
                 </div>
                 <div style="display:flex;gap:10px;align-items:center;font-size:11px;color:var(--text-muted);margin-bottom:6px;"
-                     title="Image: raw video crops for both passes.  Hybrid: outline vote for the global pass, raw image phase-corr for the per-joint pass.">
+                     title="Image: raw video crops for both passes.  Outline: hand-outline vote for the global pass, raw image phase-corr for the per-joint pass.">
                     <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
                         <input type="radio" name="stereoMode" value="image" id="stereoModeImage" checked style="margin:0;">
                         Image
                     </label>
                     <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
-                        <input type="radio" name="stereoMode" value="hybrid" id="stereoModeHybrid" style="margin:0;">
-                        Hybrid
+                        <input type="radio" name="stereoMode" value="outline" id="stereoModeOutline" style="margin:0;">
+                        Outline
                     </label>
                 </div>
-                <!-- Hybrid only: outline-mask dilation for the per-joint
+                <!-- Outline only: outline-mask dilation for the per-joint
                      image-phase-corr stage.  Larger values keep more of
                      the skin / hand boundary in the masked crop. -->
                 <div id="stereoDilateWrap" style="display:none;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);margin-bottom:6px;"
@@ -499,7 +499,7 @@
                     <input type="range" id="stereoDilateSlider" min="0" max="50" step="1" value="10" style="flex:1;height:5px;cursor:pointer;min-width:0;">
                     <span id="stereoDilateVal" style="min-width:30px;text-align:right;color:var(--text);">10 px</span>
                 </div>
-                <!-- Image + hybrid: 2D-Gaussian centre weight on the MP
+                <!-- Image + outline: 2D-Gaussian centre weight on the MP
                      label.  0 = uniform across the per-joint bbox, max =
                      heavily skewed toward the joint centre. -->
                 <div id="stereoGaussWrap" style="display:none;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);margin-bottom:6px;"
@@ -818,19 +818,19 @@
                     <span class="mpf-count" id="mpfCountStereo"></span>
                     <input type="range" id="mpfSliderStereo" min="0.5" max="30" step="0.5" value="5">
                 </div>
-                <div class="mp-filter-signal" data-signal="stereoHybrid"
-                     title="Distance (px) from each MP combined label to its hybrid-stereo-corrected point.  Flags joint+frame pairs where Stereo Correct (hybrid) had to translate the label by more than the threshold to make the two cameras agree.  Requires the trial to have a hybrid stereo_align npz.">
-                    <label><input type="checkbox" id="mpfEnableStereoHybrid"> Stereo error — dist (px)</label>
-                    <span class="mpf-val" id="mpfValStereoHybrid">10.0</span>
-                    <span class="mpf-count" id="mpfCountStereoHybrid"></span>
-                    <input type="range" id="mpfSliderStereoHybrid" min="0.5" max="50" step="0.5" value="10">
+                <div class="mp-filter-signal" data-signal="stereoOutline"
+                     title="Distance (px) from each MP combined label to its outline-stereo-corrected point.  Flags joint+frame pairs where Stereo Correct (outline) had to translate the label by more than the threshold to make the two cameras agree.  Requires the trial to have an outline stereo_align npz.">
+                    <label><input type="checkbox" id="mpfEnableStereoOutline"> Stereo error — dist (px)</label>
+                    <span class="mpf-val" id="mpfValStereoOutline">10.0</span>
+                    <span class="mpf-count" id="mpfCountStereoOutline"></span>
+                    <input type="range" id="mpfSliderStereoOutline" min="0.5" max="50" step="0.5" value="10">
                 </div>
-                <div class="mp-filter-signal" data-signal="stereoHybridConf"
-                     title="Gate on the Stereo error distance check above.  Joints whose hybrid-stereo phase-correlation response is BELOW this threshold are skipped entirely — the shift is too noisy to call its distance wrong.  Joints AT-OR-ABOVE proceed to the dist check.  Has no effect unless the Stereo error checkbox is enabled.  Count = # joint-frames excluded by this gate.">
+                <div class="mp-filter-signal" data-signal="stereoOutlineConf"
+                     title="Gate on the Stereo error distance check above.  Joints whose outline-stereo phase-correlation response is BELOW this threshold are skipped entirely — the shift is too noisy to call its distance wrong.  Joints AT-OR-ABOVE proceed to the dist check.  Has no effect unless the Stereo error checkbox is enabled.  Count = # joint-frames excluded by this gate.">
                     <label style="padding-left:18px;">Stereo error — conf gate (≥)</label>
-                    <span class="mpf-val" id="mpfValStereoHybridConf">0.20</span>
-                    <span class="mpf-count" id="mpfCountStereoHybridConf"></span>
-                    <input type="range" id="mpfSliderStereoHybridConf" min="0" max="1" step="0.01" value="0.2">
+                    <span class="mpf-val" id="mpfValStereoOutlineConf">0.20</span>
+                    <span class="mpf-count" id="mpfCountStereoOutlineConf"></span>
+                    <input type="range" id="mpfSliderStereoOutlineConf" min="0" max="1" step="0.01" value="0.2">
                 </div>
                 <div class="mp-filter-signal" data-signal="hrnet"
                      title="Per-joint HRnet peak score; below the threshold means HRnet wasn'\''t confident.  Requires HRnet to have been run on this trial.">
@@ -871,18 +871,18 @@
                         Image
                     </label>
                     <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
-                        <input type="radio" name="v3StereoMode" value="hybrid" id="v3StereoModeHybrid" style="margin:0;">
-                        Hybrid
+                        <input type="radio" name="v3StereoMode" value="outline" id="v3StereoModeOutline" style="margin:0;">
+                        Outline
                     </label>
                 </div>
                 <div id="v3StereoDilateWrap" style="display:none;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);margin-bottom:6px;"
-                     title="Dilate the hand outline mask before applying it to the per-joint image phase corr (hybrid only).">
+                     title="Dilate the hand outline mask before applying it to the per-joint image phase corr (outline mode only).">
                     <span>Dilate</span>
                     <input type="range" id="v3StereoDilateSlider" min="0" max="50" step="1" value="10" style="flex:1;height:5px;cursor:pointer;min-width:0;">
                     <span id="v3StereoDilateVal" style="min-width:30px;text-align:right;color:var(--text);">10 px</span>
                 </div>
                 <div id="v3StereoGaussWrap" style="display:none;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);margin-bottom:6px;"
-                     title="2D Gaussian centred on each MP label that weights the per-joint phase correlation toward pixels near the joint (image + hybrid).">
+                     title="2D Gaussian centred on each MP label that weights the per-joint phase correlation toward pixels near the joint.">
                     <span>Center</span>
                     <input type="range" id="v3StereoGaussSlider" min="0" max="100" step="1" value="0" style="flex:1;height:5px;cursor:pointer;min-width:0;">
                     <span id="v3StereoGaussVal" style="min-width:30px;text-align:right;color:var(--text);">0.00</span>
@@ -1294,7 +1294,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=409" type="module"></script>
+    <script src="/static/js/labels.js?v=410" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

@@ -290,9 +290,9 @@ def run_skeleton_v2_fit(
                      if tt.get("trial_name") == trial_stem),
                     None,
                 )
-                _sa_hyb = (load_stereo_align(subject_name, _trial_idx, mode="hybrid")
+                _sa_out = (load_stereo_align(subject_name, _trial_idx, mode="outline")
                            if _trial_idx is not None else None)
-                _sa = _sa_hyb or (load_stereo_align(subject_name, _trial_idx, mode="image")
+                _sa = _sa_out or (load_stereo_align(subject_name, _trial_idx, mode="image")
                                   if _trial_idx is not None else None)
                 if _sa is not None and "shifts" in _sa and "response" in _sa:
                     _shifts = np.asarray(_sa["shifts"], dtype=np.float64)

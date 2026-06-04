@@ -3790,7 +3790,7 @@ def compute_errors_for_trial(subject_name: str, trial_stem: str,
                     if t["trial_name"] == trial_stem), None)
                 sa = None
                 if t_idx is not None:
-                    for _m in ("hybrid", "image"):
+                    for _m in ("outline", "image"):
                         sa = load_stereo_align(subject_name, t_idx, mode=_m)
                         if sa is not None:
                             break

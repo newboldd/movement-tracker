@@ -98,8 +98,8 @@ const manoViewer = (() => {
     let showStereo2D = false;
     let stereoSelectedJoint = null;   // joint whose per-joint bbox to draw
     let stereoConfThreshold = 0;      // hide markers with response < this
-    let showStereoHybrid2D = false;   // outline-vote Pass 1 + image Pass 2
-    let stereoHybridConfThreshold = 0;
+    let showStereoOutline2D = false;   // outline-vote Pass 1 + image Pass 2
+    let stereoOutlineConfThreshold = 0;
     let showOutline2D = false;        // per-frame hand boundary polygon
     let showVision2D = false;
     let showVision3D = false;
@@ -566,7 +566,7 @@ const manoViewer = (() => {
     // Visual approximation of cv2.dilate on a closed outline polygon:
     // push each vertex along its bisector by ``dilatePx`` so the result
     // is roughly the offset polygon.  Used to mirror the backend's
-    // hybrid-mode mask dilation in the canvas overlay.  Winding-order
+    // outline-mode mask dilation in the canvas overlay.  Winding-order
     // independent (sign-adjusted via the signed area).
     function _dilatePolygon(poly, dilatePx) {
         if (!poly || poly.length < 3 || dilatePx <= 0) return poly;
@@ -1747,7 +1747,7 @@ const manoViewer = (() => {
         // Helper: clear the selected-joint marker if none of the three
         // Stereo variants is visible anymore.
         const _maybeClearStereoSelected = () => {
-            if (!showStereo2D && !showStereoHybrid2D) {
+            if (!showStereo2D && !showStereoOutline2D) {
                 stereoSelectedJoint = null;
             }
         };
@@ -1764,17 +1764,17 @@ const manoViewer = (() => {
             if (lbl) lbl.textContent = stereoConfThreshold.toFixed(2);
             render();
         });
-        $('showStereoHybrid2D')?.addEventListener('change', e => {
-            showStereoHybrid2D = e.target.checked;
+        $('showStereoOutline2D')?.addEventListener('change', e => {
+            showStereoOutline2D = e.target.checked;
             _maybeClearStereoSelected();
-            const wrap = $('stereoHybridConfWrap');
-            if (wrap) wrap.style.display = showStereoHybrid2D ? 'flex' : 'none';
+            const wrap = $('stereoOutlineConfWrap');
+            if (wrap) wrap.style.display = showStereoOutline2D ? 'flex' : 'none';
             updateLayerFlags();
         });
-        $('stereoHybridConfSlider')?.addEventListener('input', e => {
-            stereoHybridConfThreshold = parseFloat(e.target.value);
-            const lbl = $('stereoHybridConfVal');
-            if (lbl) lbl.textContent = stereoHybridConfThreshold.toFixed(2);
+        $('stereoOutlineConfSlider')?.addEventListener('input', e => {
+            stereoOutlineConfThreshold = parseFloat(e.target.value);
+            const lbl = $('stereoOutlineConfVal');
+            if (lbl) lbl.textContent = stereoOutlineConfThreshold.toFixed(2);
             render();
         });
         $('showOutline2D')?.addEventListener('change', e => {
@@ -1782,24 +1782,24 @@ const manoViewer = (() => {
             updateLayerFlags();
         });
         // Helper: outline is shown on the canvas when the Stereo panel
-        // is OPEN and the Hybrid radio is selected (the user is staging
-        // a hybrid bake and wants to see what's being masked).  Also
+        // is OPEN and the Outline radio is selected (the user is staging
+        // an outline bake and wants to see what's being masked).  Also
         // gates the Dilate slider visibility.
-        const _stereoIsHybridStaging = () => {
+        const _stereoIsOutlineStaging = () => {
             if ($('stereoPanel')?.style.display !== 'block') return false;
             const m = document.querySelector('input[name="stereoMode"]:checked');
-            return !!(m && m.value === 'hybrid');
+            return !!(m && m.value === 'outline');
         };
         // The Gauss (centre-weight) slider applies to BOTH image and
-        // hybrid modes -- it shows whenever the Stereo panel is open
+        // outline modes -- it shows whenever the Stereo panel is open
         // and the selected mode is one of those two.
         const _stereoSupportsGauss = () => {
             if ($('stereoPanel')?.style.display !== 'block') return false;
             const m = document.querySelector('input[name="stereoMode"]:checked');
-            return !!(m && (m.value === 'image' || m.value === 'hybrid'));
+            return !!(m && (m.value === 'image' || m.value === 'outline'));
         };
-        const _refreshStereoHybridUI = () => {
-            const dilateOn = _stereoIsHybridStaging();
+        const _refreshStereoOutlineUI = () => {
+            const dilateOn = _stereoIsOutlineStaging();
             const dWrap = $('stereoDilateWrap');
             if (dWrap) dWrap.style.display = dilateOn ? 'flex' : 'none';
             const gWrap = $('stereoGaussWrap');
@@ -1850,7 +1850,7 @@ const manoViewer = (() => {
             const m = document.querySelector('input[name="stereoMode"]:checked');
             const mode = m ? m.value : 'image';
             const saved = _stereoSavedParams[mode] || {};
-            // mask_dilate_px is only stored for hybrid; image/outline
+            // mask_dilate_px is only stored for outline; image mode
             // get null in the saved entry, so they fall back to default.
             _setStereoDilate(saved.mask_dilate_px ?? null);
             _setStereoGauss(saved.gauss_center_weight ?? null);
@@ -1860,7 +1860,7 @@ const manoViewer = (() => {
             const open = $('stereoPanel').style.display !== 'block';
             $('stereoPanel').style.display = open ? 'block' : 'none';
             $('runStereoBtn').classList.toggle('active', open);
-            _refreshStereoHybridUI();
+            _refreshStereoOutlineUI();
             if (open) {
                 // Lazy-fetch saved params on first open per trial.
                 await _fetchStereoSavedParams();
@@ -1870,7 +1870,7 @@ const manoViewer = (() => {
         $('stereoCloseBtn')?.addEventListener('click', () => {
             $('stereoPanel').style.display = 'none';
             $('runStereoBtn').classList.remove('active');
-            _refreshStereoHybridUI();
+            _refreshStereoOutlineUI();
         });
         // Reset slider values to factory defaults for the selected
         // mode.  Does NOT touch the on-disk npz — it's a UI-only
@@ -1887,7 +1887,7 @@ const manoViewer = (() => {
         document.querySelectorAll('input[name="stereoMode"]').forEach(el => {
             el.addEventListener('change', () => {
                 _applyStereoSavedForCurrentMode();
-                _refreshStereoHybridUI();
+                _refreshStereoOutlineUI();
             });
         });
         $('stereoDilateSlider')?.addEventListener('input', e => {
@@ -1914,7 +1914,7 @@ const manoViewer = (() => {
             } else if (st) {
                 st.textContent = 'Submitting…';
             }
-            // Read selected mode from the Image/Outline/Hybrid radios.
+            // Read selected mode from the Image/Outline radios.
             const _modeEl = document.querySelector('input[name="stereoMode"]:checked');
             const stereoMode = _modeEl ? _modeEl.value : 'image';
             const maskDilatePx = parseInt(($('stereoDilateSlider')?.value ?? '10'), 10) || 0;
@@ -1960,14 +1960,14 @@ const manoViewer = (() => {
                             if (cb && !cb.checked) {
                                 cb.checked = true;
                                 if (varName === 'showStereo2D') showStereo2D = true;
-                                else if (varName === 'showStereoHybrid2D') showStereoHybrid2D = true;
+                                else if (varName === 'showStereoOutline2D') showStereoOutline2D = true;
                                 const wrap = $(wrapId);
                                 if (wrap) wrap.style.display = 'flex';
                                 updateLayerFlags();
                             }
                         };
-                        if (stereoMode === 'hybrid') {
-                            _autoOn('showStereoHybrid2D', 'showStereoHybrid2D', 'stereoHybridConfWrap');
+                        if (stereoMode === 'outline') {
+                            _autoOn('showStereoOutline2D', 'showStereoOutline2D', 'stereoOutlineConfWrap');
                         } else {
                             _autoOn('showStereo2D', 'showStereo2D', 'stereoConfWrap');
                         }
@@ -2103,8 +2103,8 @@ const manoViewer = (() => {
         // user drags.
         $('edSliderStereoOcc')?.addEventListener('input', () => render());
         // Stereo mode radios + dilate/center sliders -- visibility wired
-        // to the radio choice (dilate only for Hybrid; center for image+
-        // hybrid).
+        // to the radio choice (dilate only for Outline; center for image+
+        // outline).
         const _v3StereoMode = () => {
             const m = document.querySelector('input[name="v3StereoMode"]:checked');
             return m ? m.value : 'image';
@@ -2113,9 +2113,9 @@ const manoViewer = (() => {
             const mode = _v3StereoMode();
             _mpErrorWeights.stereo.mode = mode;
             const dWrap = $('v3StereoDilateWrap');
-            if (dWrap) dWrap.style.display = (mode === 'hybrid') ? 'flex' : 'none';
+            if (dWrap) dWrap.style.display = (mode === 'outline') ? 'flex' : 'none';
             const gWrap = $('v3StereoGaussWrap');
-            if (gWrap) gWrap.style.display = (mode === 'image' || mode === 'hybrid') ? 'flex' : 'none';
+            if (gWrap) gWrap.style.display = (mode === 'image' || mode === 'outline') ? 'flex' : 'none';
         };
         document.querySelectorAll('input[name="v3StereoMode"]').forEach(el => {
             el.addEventListener('change', () => { _refreshV3StereoUI(); _scheduleMPErrorRecompute(); });
@@ -2891,7 +2891,7 @@ const manoViewer = (() => {
 
         // If a Stereo-model joint is selected, align the NEW camera's
         // MP label of that joint with the OLD camera's stereo label
-        // (priority: Hybrid > Outline > Image).  This lets the user
+        // (priority: Outline > Image).  This lets the user
         // visually compare partner-camera MP vs. stereo prediction at
         // the same screen position.
         const stereoTarget = _stereoTargetForSwitch(fn, oldIsLeft);
@@ -2957,7 +2957,7 @@ const manoViewer = (() => {
     /** When a Stereo-model joint is selected and at least one of the
      *  three Stereo variants is visible, return the OLD-camera stereo
      *  label position for that joint and the joint index.  Priority:
-     *  Hybrid > Image.  Returns null if no selection / no
+     *  Outline > Image.  Returns null if no selection / no
      *  visible variant / no data this frame. */
     function _stereoTargetForSwitch(fn, oldIsLeft) {
         if (stereoSelectedJoint == null || !trialData) return null;
@@ -2969,8 +2969,8 @@ const manoViewer = (() => {
             return pt ? { joint: j, pt } : null;
         };
         return (
-            trySrc(showStereoHybrid2D,  'has_stereo_hybrid',
-                   'stereo_hybrid_tracked_L',  'stereo_hybrid_tracked_R')
+            trySrc(showStereoOutline2D,  'has_stereo_outline',
+                   'stereo_outline_tracked_L',  'stereo_outline_tracked_R')
             || trySrc(showStereo2D,        'has_stereo',
                       'stereo_tracked_L',         'stereo_tracked_R')
         );
@@ -4154,7 +4154,7 @@ const manoViewer = (() => {
             ? trialData.combined_tracked_L
             : trialData.combined_tracked_R;
         // Stereo Fill — filtered MP combined with per-camera donations
-        // from the best available stereo bake (Hybrid > Image).
+        // from the best available stereo bake (Outline > Image).
         const stereoFillKp = isLeft
             ? trialData.stereo_fill_tracked_L
             : trialData.stereo_fill_tracked_R;
@@ -4564,13 +4564,13 @@ const manoViewer = (() => {
             }
         }
 
-        // Stereo (hybrid) -- outline-vote Pass 1 + image-phase-corr
+        // Stereo (outline) -- outline-vote Pass 1 + image-phase-corr
         // Pass 2.  Light-pink crosses + dashed per-joint bbox (no
         // outlines drawn inside, since the per-joint alignment uses
         // the raw image, not the outline).
-        if (showStereoHybrid2D && trialData?.has_stereo_hybrid) {
-            const stereoKp = isLeft ? trialData.stereo_hybrid_tracked_L
-                                    : trialData.stereo_hybrid_tracked_R;
+        if (showStereoOutline2D && trialData?.has_stereo_outline) {
+            const stereoKp = isLeft ? trialData.stereo_outline_tracked_L
+                                    : trialData.stereo_outline_tracked_R;
             const mpHere = isLeft ? trialData.mp_tracked_L
                                   : trialData.mp_tracked_R;
             if (stereoSelectedJoint != null && mpHere && mpHere[fn]) {
@@ -4593,11 +4593,11 @@ const manoViewer = (() => {
                 }
             }
             if (stereoKp && stereoKp[fn]) {
-                const respFrame = trialData.stereo_hybrid_response?.[fn];
+                const respFrame = trialData.stereo_outline_response?.[fn];
                 for (let j = 0; j < 21; j++) {
                     if (!isJointVisible(j) || !stereoKp[fn][j]) continue;
                     const rawConf = (respFrame && respFrame[j] != null) ? respFrame[j] : 0;
-                    if (rawConf < stereoHybridConfThreshold) continue;
+                    if (rawConf < stereoOutlineConfThreshold) continue;
                     const x = stereoKp[fn][j][0] * pixelScale;
                     const y = stereoKp[fn][j][1] * pixelScale;
                     let conf = rawConf;
@@ -4613,19 +4613,19 @@ const manoViewer = (() => {
         // current frame, from the preproc bake (inverse-warped server-
         // side into this camera's original-frame coords).  Drawn when
         // the Outline model is on OR when the Stereo panel is open
-        // with Hybrid selected (so the user can see what's being
+        // with Outline selected (so the user can see what's being
         // masked).
-        const _showOutlineForHybridStaging = (() => {
+        const _showOutlineForStereoStaging = (() => {
             if ($('stereoPanel')?.style.display !== 'block') return false;
             const m = document.querySelector('input[name="stereoMode"]:checked');
-            return !!(m && m.value === 'hybrid');
+            return !!(m && m.value === 'outline');
         })();
-        if ((showOutline2D || _showOutlineForHybridStaging) && trialData?.has_outlines) {
+        if ((showOutline2D || _showOutlineForStereoStaging) && trialData?.has_outlines) {
             let poly = isLeft ? trialData.outlines_L?.[fn]
                               : trialData.outlines_R?.[fn];
-            // Hybrid staging: draw the DILATED outline (mirrors the
+            // Outline staging: draw the DILATED outline (mirrors the
             // backend mask the bake will use).
-            if (_showOutlineForHybridStaging && poly && poly.length >= 3) {
+            if (_showOutlineForStereoStaging && poly && poly.length >= 3) {
                 const dPx = parseInt($('stereoDilateSlider')?.value ?? '0', 10) || 0;
                 if (dPx > 0) poly = _dilatePolygon(poly, dPx);
             }
@@ -6460,7 +6460,7 @@ const manoViewer = (() => {
             // so we have to do the hit-test HERE rather than on the
             // videoCanvas (whose click handler the overlay blocks).
             if ((showStereo2D && trialData?.has_stereo)
-                || (showStereoHybrid2D && trialData?.has_stereo_hybrid)) {
+                || (showStereoOutline2D && trialData?.has_stereo_outline)) {
                 const cRect = canvas.getBoundingClientRect();
                 const cmx = (e.clientX - cRect.left - offsetX) / scale;
                 const cmy = (e.clientY - cRect.top  - offsetY) / scale;
@@ -6478,9 +6478,9 @@ const manoViewer = (() => {
                     candidates.push(_isLeft ? trialData.stereo_tracked_L
                                             : trialData.stereo_tracked_R);
                 }
-                if (showStereoHybrid2D && trialData?.has_stereo_hybrid) {
-                    candidates.push(_isLeft ? trialData.stereo_hybrid_tracked_L
-                                            : trialData.stereo_hybrid_tracked_R);
+                if (showStereoOutline2D && trialData?.has_stereo_outline) {
+                    candidates.push(_isLeft ? trialData.stereo_outline_tracked_L
+                                            : trialData.stereo_outline_tracked_R);
                 }
                 let sBest = null;
                 for (const sArr of candidates) {
@@ -7924,14 +7924,14 @@ const manoViewer = (() => {
         stereoSelectedJoint = null;
         const _scw = $('stereoConfWrap');
         if (_scw) _scw.style.display = (showStereo2D && hasStereo) ? 'flex' : 'none';
-        const hasStereoHybrid = !!(trialData && trialData.has_stereo_hybrid);
-        _setLayerAvail('showStereoHybrid2D', hasStereoHybrid);
-        if (!hasStereoHybrid && $('showStereoHybrid2D')) {
-            $('showStereoHybrid2D').checked = false;
-            showStereoHybrid2D = false;
+        const hasStereoOutline = !!(trialData && trialData.has_stereo_outline);
+        _setLayerAvail('showStereoOutline2D', hasStereoOutline);
+        if (!hasStereoOutline && $('showStereoOutline2D')) {
+            $('showStereoOutline2D').checked = false;
+            showStereoOutline2D = false;
         }
-        const _shcw = $('stereoHybridConfWrap');
-        if (_shcw) _shcw.style.display = (showStereoHybrid2D && hasStereoHybrid) ? 'flex' : 'none';
+        const _shcw = $('stereoOutlineConfWrap');
+        if (_shcw) _shcw.style.display = (showStereoOutline2D && hasStereoOutline) ? 'flex' : 'none';
         const hasOutlines = !!(trialData && trialData.has_outlines);
         _setLayerAvail('showOutline2D', hasOutlines);
         if (!hasOutlines && $('showOutline2D')) {
@@ -8608,8 +8608,8 @@ const manoViewer = (() => {
         { id: 'z',      fmt: v => v.toFixed(1), keys: ['enable_z',      'z_k'] },
         { id: 'mpconf', fmt: v => v.toFixed(2), keys: ['enable_mpconf', 'mpconf_min'] },
         { id: 'stereo', fmt: v => v.toFixed(1), keys: ['enable_stereo', 'stereo_px'] },
-        { id: 'stereoHybrid', fmt: v => v.toFixed(1), keys: ['enable_stereo_hybrid', 'stereo_hybrid_px'] },
-        { id: 'stereoHybridConf', fmt: v => v.toFixed(2), keys: ['enable_stereo_hybrid_conf', 'stereo_hybrid_conf_min'] },
+        { id: 'stereoOutline', fmt: v => v.toFixed(1), keys: ['enable_stereo_outline', 'stereo_outline_px'] },
+        { id: 'stereoOutlineConf', fmt: v => v.toFixed(2), keys: ['enable_stereo_outline_conf', 'stereo_outline_conf_min'] },
         { id: 'hrnet',  fmt: v => v.toFixed(2), keys: ['enable_hrnet',  'hrnet_min'] },
     ];
     const _MPF_CAP = id => id.charAt(0).toUpperCase() + id.slice(1);
@@ -8813,7 +8813,7 @@ const manoViewer = (() => {
             _addPerSignal('ydisp', count);
         }
 
-        if (p.enable_stereo_hybrid) {
+        if (p.enable_stereo_outline) {
             // Two-stage: conf gates dist.  For each (t, j):
             //   1. conf < conf_min  → skip (treated as too noisy
             //                          to call its distance wrong)
@@ -8824,29 +8824,29 @@ const manoViewer = (() => {
             // (informational — not flagged anywhere).
             let count = 0;
             let gated = 0;
-            const sh = A.stereo_hybrid_mag;
-            const sr = A.stereo_hybrid_resp;
+            const sh = A.stereo_outline_mag;
+            const sr = A.stereo_outline_resp;
             if (sh) {
                 for (let t = 0; t < N; t++) {
                     for (let j = 0; j < J; j++) {
                         const d = sh[idx2(t, j)];
                         if (!isFin(d)) continue;
                         const r = sr ? sr[idx2(t, j)] : NaN;
-                        if (isFin(r) && r < p.stereo_hybrid_conf_min) {
+                        if (isFin(r) && r < p.stereo_outline_conf_min) {
                             gated += 1;     // conf gate dropped it
                             continue;
                         }
                         // Cell with no conf data passes through —
                         // we have no basis to gate.  Same fallback
                         // as the server-side signal.
-                        if (d > p.stereo_hybrid_px) {
+                        if (d > p.stereo_outline_px) {
                             count += attrib3D(t, j);
                         }
                     }
                 }
             }
-            _addPerSignal('stereo_hybrid', count);
-            _addPerSignal('stereo_hybrid_gated', gated);
+            _addPerSignal('stereo_outline', count);
+            _addPerSignal('stereo_outline_gated', gated);
         }
 
         if (p.enable_stereo) {
@@ -8940,10 +8940,10 @@ const manoViewer = (() => {
             vel: 'velocity', accel: 'acceleration', bone: 'bone',
             ydisp: 'ydisp', z: 'z_outlier', mpconf: 'mp_confidence',
             stereo: 'stereo_reproj', hrnet: 'hrnet',
-            stereoHybrid: 'stereo_hybrid',
+            stereoOutline: 'stereo_outline',
             // Conf row is a gate, not a flag — count shows joint-
             // frames excluded by the gate.
-            stereoHybridConf: 'stereo_hybrid_gated',
+            stereoOutlineConf: 'stereo_outline_gated',
         };
         for (const sig of _MPF_SIGNALS) {
             const cnt = out.perSignal[lookup[sig.id]];

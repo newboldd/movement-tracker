@@ -1862,11 +1862,11 @@ def load_skeleton_trial_data(
         "stereo_tracked_R": None,
         "stereo_response": None,
         "has_stereo": False,
-        # Stereo (hybrid) -- Pass 1 outline-vote, Pass 2 image phase-corr.
-        "stereo_hybrid_tracked_L": None,
-        "stereo_hybrid_tracked_R": None,
-        "stereo_hybrid_response": None,
-        "has_stereo_hybrid": False,
+        # Stereo (outline) -- Pass 1 outline-vote, Pass 2 image phase-corr.
+        "stereo_outline_tracked_L": None,
+        "stereo_outline_tracked_R": None,
+        "stereo_outline_response": None,
+        "has_stereo_outline": False,
         # Stereo Fill — filtered MP combined with per-camera stereo
         # donations.  Computed below iff mp_filter_params.json
         # sidecar exists AND at least one stereo variant exists.
@@ -2084,19 +2084,19 @@ def load_skeleton_trial_data(
 
         sa = (load_stereo_align(subject_name, _stereo_trial_idx, mode="image")
               if _stereo_trial_idx is not None else None)
-        sa_hyb = (load_stereo_align(subject_name, _stereo_trial_idx, mode="hybrid")
+        sa_out = (load_stereo_align(subject_name, _stereo_trial_idx, mode="outline")
                   if _stereo_trial_idx is not None else None)
         if sa is not None:
             _emit_stereo(sa, "stereo_tracked_L", "stereo_tracked_R",
                          "stereo_response", "has_stereo")
-        if sa_hyb is not None:
-            _emit_stereo(sa_hyb, "stereo_hybrid_tracked_L",
-                         "stereo_hybrid_tracked_R",
-                         "stereo_hybrid_response", "has_stereo_hybrid")
+        if sa_out is not None:
+            _emit_stereo(sa_out, "stereo_outline_tracked_L",
+                         "stereo_outline_tracked_R",
+                         "stereo_outline_response", "has_stereo_outline")
         # Per-joint + hand crop sizes (used by the frontend to draw
-        # the local-registration bbox).  All three variants share the
-        # same constants, so emit them if ANY bake produced an npz.
-        _sa_meta = sa if sa is not None else (sa_out if sa_out is not None else sa_hyb)
+        # the local-registration bbox).  Both variants share the
+        # same constants, so emit them if either bake produced an npz.
+        _sa_meta = sa if sa is not None else sa_out
         if _sa_meta is not None:
             result["stereo_crop_half"] = int(_sa_meta.get("crop_half", _DEFAULT_CROP_HALF))
             result["stereo_hand_crop_half"] = int(_sa_meta.get("hand_crop_half", _HAND_CROP_HALF))
@@ -2116,7 +2116,7 @@ def load_skeleton_trial_data(
         _sf_inputs_ok = (
             (_skeleton_dir(subject_name) / trial_stem / "mp_filter_params.json").exists()
             and (
-                (_skeleton_dir(subject_name) / trial_stem / "stereo_align_hybrid.npz").exists()
+                (_skeleton_dir(subject_name) / trial_stem / "stereo_align_outline.npz").exists()
                 or (_skeleton_dir(subject_name) / trial_stem / "stereo_align.npz").exists()
             )
         )
@@ -2126,7 +2126,7 @@ def load_skeleton_trial_data(
 
     # ── Stereo Fill ─────────────────────────────────────────────────
     # Filtered MP combined with per-camera donations from the best
-    # available stereo bake (Hybrid > Image).  When ONE camera is
+    # available stereo bake (Outline > Image).  When ONE camera is
     # filtered for a joint AND the stereo confidence at that joint
     # is above ``conf_min``, the filtered cell is replaced with the
     # stereo-corrected point.  Both-filtered or low-confidence
@@ -2155,12 +2155,12 @@ def load_skeleton_trial_data(
         )
         _sf_sidecar = _skeleton_dir(subject_name) / trial_stem / "mp_filter_params.json"
         _sf_params = load_saved_filter_params(_sf_sidecar)
-        # Prefer Hybrid over Image — both compute the same shape
-        # of shifts/response, hybrid just runs a smarter Pass-1
+        # Prefer Outline over Image — both compute the same shape
+        # of shifts/response, outline just runs a smarter Pass-1
         # vote and a masked phase corr per joint.
         _sf_choice = None
         if _sf_params is not None:
-            for _mode in ("hybrid", "image"):
+            for _mode in ("outline", "image"):
                 _sa = load_stereo_align(subject_name, _stereo_trial_idx, mode=_mode) \
                       if _stereo_trial_idx is not None else None
                 if _sa is not None and "shifts" in _sa and "response" in _sa:
