@@ -775,6 +775,7 @@ def list_skeleton_trials(subject_name: str) -> list[dict]:
         # Include every trial the subject's videos produce — even when no
         # MediaPipe/Skeleton data exists yet — so the viewer can show an empty
         # trial and the user can launch detection jobs from there.
+        start_frame = int(vt.get("start_frame", 0))
         results.append({
             "trial_idx": i,
             "trial_stem": trial_stem,
@@ -783,6 +784,14 @@ def list_skeleton_trials(subject_name: str) -> list[dict]:
             "has_skeleton_v1": has_skeleton_v1,
             "has_mp": bool(has_mp),
             "fps": fps,
+            # ``events.csv`` stores frame numbers in the SUBJECT-global
+            # frame index, but the Labels page distance plot is local
+            # to the trial.  ``start_frame`` / ``end_frame`` let the
+            # event-marker overlay translate the global frames into
+            # the local x-axis.  Without these the overlay drew at
+            # x=NaN and silently painted nothing.
+            "start_frame": start_frame,
+            "end_frame":   start_frame + int(n_frames) - 1,
         })
 
     return results
