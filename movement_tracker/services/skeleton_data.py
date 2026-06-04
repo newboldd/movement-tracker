@@ -2193,7 +2193,7 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
                 stereo_response=_resp_arr,
             )
             # ── Apply the fill ──
-            _fL, _fR = build_stereo_fill(
+            _fL, _fR, _donated = build_stereo_fill(
                 _mp_L_full, _mp_R_full,
                 _stereo_L, _stereo_R, _resp, _cam_mask,
                 conf_min=0.4,
@@ -2222,10 +2222,27 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
                 # fall back to the pre-fill _init_3d so the per-row
                 # length matches and the signal arrays don't shrink.
                 _val_3d = np.where(np.isfinite(_f3d), _f3d, _init_3d)
+                # By definition, the distance from "MP combined" to
+                # "stereo" at a donated cell is zero — we just put
+                # the stereo point THERE.  But _shift_mag is loaded
+                # from the static npz and would still report the
+                # original (large) shift, so the Stereo error
+                # signal would re-flag every donation and the
+                # validation pass would throw them all away.
+                # Neutralise the signal for donated cells by zeroing
+                # their shift magnitude; cells we DIDN'T donate to
+                # keep their original shift so the signal still
+                # catches uncorrected joints.
+                _shift_mag_val = _shift_mag
+                if _shift_mag is not None:
+                    _shift_mag_val = _shift_mag.copy()
+                    # _donated is (N, 21); _shift_mag is (N_sa, 21).
+                    _m = min(_shift_mag_val.shape[0], _donated.shape[0])
+                    _shift_mag_val[:_m][_donated[:_m]] = 0.0
                 _, _new_mask, _ = detect_mask_from_params(
                     _sf_params, _val_3d, _fL, _fR, HAND_SKELETON,
                     calib=calib,
-                    stereo_shift_mag=_shift_mag,
+                    stereo_shift_mag=_shift_mag_val,
                     stereo_response=_resp_arr,
                 )
                 # Per (frame, joint): if the cell was originally

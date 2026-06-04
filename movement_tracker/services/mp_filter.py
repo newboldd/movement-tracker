@@ -737,10 +737,12 @@ def build_stereo_fill(
           * exactly one filtered, response > conf_min → stereo on that
             camera, combined on the partner
           * exactly one filtered, response ≤ conf_min → NaN on BOTH
-            (the joint stays filtered — we don't fall back to MP
-            combined on the unfiltered camera because the joint is
-            untrustworthy in 3D either way)
           * both filtered                             → NaN on both
+    donated : (N, J) bool
+        True where a stereo donation was actually placed into one
+        of the cameras (i.e. one-side-filtered + conf OK).  False
+        elsewhere — both the "no donation needed" and "dropped"
+        paths report False here.
     """
     N, J = combined_L.shape[0], combined_L.shape[1]
     fill_L = combined_L.copy()
@@ -790,4 +792,10 @@ def build_stereo_fill(
     fill_L[both_filtered] = np.nan
     fill_R[both_filtered] = np.nan
 
-    return fill_L, fill_R
+    # Per-(frame, joint) bool: was a stereo donation actually
+    # placed into either camera?  Caller uses this to neutralise
+    # signals that are computed against the unfilled MP combined
+    # (notably the Stereo error signal: by definition the distance
+    # from "MP combined" to "stereo" is zero at a donated cell).
+    donated = donate_L | donate_R
+    return fill_L, fill_R, donated
