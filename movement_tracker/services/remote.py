@@ -5276,15 +5276,16 @@ def dispatch_remote_preproc_batch(
                                   f"os.makedirs(r'{remote_work}/videos', exist_ok=True)\""),
                     capture_output=True, timeout=15,
                 )
-                # Resolve & upload video per trial.
+                # Resolve & upload video per trial.  build_trial_map
+                # returns a list indexed by trial_idx — the dicts
+                # don't carry a "trial_idx" key, the index IS the id.
                 from .video import build_trial_map
                 all_trials = build_trial_map(sn)
-                tmap = {tt["trial_idx"]: tt for tt in all_trials}
                 for t in sub_trials:
                     ti = int(t["trial_idx"])
-                    tr = tmap.get(ti)
-                    if not tr:
+                    if ti < 0 or ti >= len(all_trials):
                         continue
+                    tr = all_trials[ti]
                     vname = Path(tr["video_path"]).name
                     remote_v = f"{remote_work}/videos/{vname}"
                     local_v  = str(settings.video_path / vname)
