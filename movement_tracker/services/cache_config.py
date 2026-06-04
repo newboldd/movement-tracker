@@ -32,7 +32,7 @@ _CACHE_PATH = DATA_DIR / "cache_config.json"
 # Universe of values each axis can take — used by the UI to render
 # checkbox grids and by validation when the user submits new settings.
 OPTION_DOMAINS = {
-    "sources":   ["auto", "corrections", "mp_combined", "mp_forward", "skeleton_v1"],
+    "sources":   ["auto", "corrections", "mp_combined", "mp_forward", "skeleton_v1", "skeleton_v2"],
     "seq_modes": ["none",
                   "linear_full", "linear_first10", "linear_multi",
                   "exp_full",    "exp_first10",    "exp_multi"],
@@ -49,6 +49,7 @@ OPTION_LABELS = {
         "mp_combined":  "MP combined",
         "mp_forward":   "MP forward",
         "skeleton_v1":  "Skel fit v1",
+        "skeleton_v2":  "Skel fit v2",
     },
     "seq_modes": {
         "none":            "None",

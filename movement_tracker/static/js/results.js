@@ -100,8 +100,8 @@
     // stays trimmed in static mode.
     drop('groupSourceSelect',      ['mp_forward']);
     drop('resultsSourceSelect',    ['mp_forward']);
-    rename('groupSourceSelect',    { corrections: 'DLC', mp_combined: 'MediaPipe', skeleton_v1: 'Skel fit v1' });
-    rename('resultsSourceSelect',  { corrections: 'DLC', mp_combined: 'MediaPipe', skeleton_v1: 'Skel fit v1' });
+    rename('groupSourceSelect',    { corrections: 'DLC', mp_combined: 'MediaPipe', skeleton_v1: 'Skel fit v1', skeleton_v2: 'Skel fit v2' });
+    rename('resultsSourceSelect',  { corrections: 'DLC', mp_combined: 'MediaPipe', skeleton_v1: 'Skel fit v1', skeleton_v2: 'Skel fit v2' });
     // Pair the Group hand+trial selects so they only allow the
     // exported (more,last) / (less,last) / (average,average) combos.
     const allowed = {
@@ -4645,7 +4645,8 @@ let _dlcSubjectNames = null;
 let _dlcSubjectKey   = null;   // signature of the combo it was fetched for
 
 function _isNonDlcSource(src) {
-    return src === 'mp_combined' || src === 'mp_forward' || src === 'skeleton_v1';
+    return src === 'mp_combined' || src === 'mp_forward'
+        || src === 'skeleton_v1' || src === 'skeleton_v2';
 }
 
 function _dlcFilterActive() {

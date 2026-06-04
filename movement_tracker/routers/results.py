@@ -1421,10 +1421,12 @@ def get_traces(subject_id: int, source: str = Query("auto")) -> dict:
             "vel_max": round(max(all_vels), 2) if all_vels else 0,
         }
 
-    # Check which sources are available (only the three the
-    # dropdown exposes — corrections, mp_combined, mp_forward).
+    # Check which sources are available — exactly the set the
+    # results-page dropdown exposes (corrections, mp_combined,
+    # mp_forward, skeleton_v1, skeleton_v2).
     available_sources = []
-    for src in ("corrections", "mp_combined", "mp_forward"):
+    for src in ("corrections", "mp_combined", "mp_forward",
+                 "skeleton_v1", "skeleton_v2"):
         if _try_source_quick(subject_name, src):
             available_sources.append(src)
 
