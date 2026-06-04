@@ -5232,6 +5232,36 @@ def dispatch_remote_preproc_batch(
         uploads_already_done = (sentinel_check.returncode == 0
                                 and "yes" in (sentinel_check.stdout or ""))
 
+        # ── Trial-dict hydration (always — cheap, local-only) ──
+        # The worker stub at ``_install_stubs`` reads ``trial_name``,
+        # ``video_remote_path``, ``frame_count``, ``start_frame``,
+        # ``fps`` off each trial dict; the bundle.json sent to the
+        # remote must carry all of them.  Computed from the local
+        # ``build_trial_map`` results — must happen on EVERY dispatch
+        # (including resume / sentinel-skip paths) because the trial
+        # dicts that come off params_json from the JS submit are
+        # missing most of these.
+        from .video import build_trial_map
+        modules_dir = f"{cfg.work_dir}/preproc_modules"
+        for sn, sub_trials in by_subj.items():
+            remote_work = f"{cfg.work_dir}/preproc_{sn}"
+            all_trials = build_trial_map(sn)
+            for t in sub_trials:
+                try:
+                    ti = int(t["trial_idx"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if ti < 0 or ti >= len(all_trials):
+                    continue
+                tr = all_trials[ti]
+                vname = Path(tr["video_path"]).name
+                t["video_remote_path"] = f"{remote_work}/videos/{vname}"
+                t["video_name"]        = vname
+                t["trial_name"]        = tr.get("trial_name", t.get("trial_name", ""))
+                t["frame_count"]       = int(tr.get("frame_count", 0))
+                t["start_frame"]       = int(tr.get("start_frame", 0))
+                t["fps"]               = float(tr.get("fps", 30.0))
+
         if uploads_already_done:
             logfile.write("  uploads_complete sentinel present — skipping upload phase\n")
             logfile.flush()
@@ -5240,7 +5270,6 @@ def dispatch_remote_preproc_batch(
             logfile.flush()
             # ── Shared modules + scripts (upload once, idempotent) ──
             service_dir = Path(__file__).parent
-            modules_dir = f"{cfg.work_dir}/preproc_modules"
             for mod_file in ("camera_motion.py", "background.py", "ffmpeg.py"):
                 mp = service_dir / mod_file
                 if not mp.exists():
@@ -5265,7 +5294,9 @@ def dispatch_remote_preproc_batch(
             runner_remote = f"{state_dir}/batch_runner.py"
             _scp_if_changed(cfg, runner_local, runner_remote,
                              timeout=30, logfile=logfile, label="runner: ")
-            # ── Per-subject: dir + video + npz ──
+            # ── Per-subject: dir + video + npz uploads ──
+            # Trial dicts were hydrated above; here we just push the
+            # actual files (skip-if-present).
             for i, (sn, sub_trials) in enumerate(by_subj.items()):
                 _check_cancel()
                 remote_work = f"{cfg.work_dir}/preproc_{sn}"
@@ -5276,24 +5307,15 @@ def dispatch_remote_preproc_batch(
                                   f"os.makedirs(r'{remote_work}/videos', exist_ok=True)\""),
                     capture_output=True, timeout=15,
                 )
-                # Resolve & upload video per trial.  build_trial_map
-                # returns a list indexed by trial_idx — the dicts
-                # don't carry a "trial_idx" key, the index IS the id.
-                from .video import build_trial_map
-                all_trials = build_trial_map(sn)
                 for t in sub_trials:
-                    ti = int(t["trial_idx"])
-                    if ti < 0 or ti >= len(all_trials):
+                    vname = t.get("video_name")
+                    if not vname:
                         continue
-                    tr = all_trials[ti]
-                    vname = Path(tr["video_path"]).name
-                    remote_v = f"{remote_work}/videos/{vname}"
-                    local_v  = str(settings.video_path / vname)
+                    local_v = str(settings.video_path / vname)
                     if os.path.exists(local_v):
-                        _scp_if_changed(cfg, local_v, remote_v, timeout=600,
-                                         logfile=logfile, label=f"{sn}/{vname}: ")
-                    t["video_remote_path"] = remote_v
-                    t["video_name"] = vname
+                        _scp_if_changed(cfg, local_v, t["video_remote_path"],
+                                         timeout=600, logfile=logfile,
+                                         label=f"{sn}/{vname}: ")
                 # MP prelabels for this subject.
                 mp_npz_local = settings.dlc_path / sn / "mediapipe_prelabels.npz"
                 if mp_npz_local.exists():
@@ -5325,10 +5347,8 @@ def dispatch_remote_preproc_batch(
         for i, (sn, sub_trials) in enumerate(by_subj.items()):
             remote_work = f"{cfg.work_dir}/preproc_{sn}"
             run_dir = f"{remote_work}/run_{job_id}"
-            # Ensure video_remote_path is in the bundle.
-            for t in sub_trials:
-                if "video_remote_path" not in t:
-                    t["video_remote_path"] = f"{remote_work}/videos/{t.get('video_name','')}"
+            # video_remote_path is set by the always-run hydration
+            # block above; nothing else to do here.
             bundle = {
                 "subject_name": sn,
                 "modules_dir":  f"{cfg.work_dir}/preproc_modules",
