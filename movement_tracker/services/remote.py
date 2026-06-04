@@ -4856,6 +4856,7 @@ def remote_preproc(
     trials: list[dict],
     finalize: bool = True,
     on_trial_outcome=None,
+    upload_only: bool = False,
 ) -> dict:
     """Remote preproc: per-trial camera-trajectory + background/mask bake.
 
@@ -5157,6 +5158,22 @@ def remote_preproc(
             logfile.write("  uploaded worker script\n"); logfile.flush()
             _check_cancel()
             _set_progress(35)
+
+            # Pre-upload pass for multi-subject batching: caller is going
+            # to come back later (after every subject's files are on the
+            # remote) and re-invoke remote_preproc with upload_only=False
+            # to actually launch + monitor.  The idempotent skip-if-
+            # present probes in phases 2–4 mean nothing gets uploaded
+            # twice.  This lets the user start a big batch, watch every
+            # video land on the remote, and then close their laptop
+            # before any workers run — when the laptop wakes (or never,
+            # if they let the queue manager process the work pass while
+            # they're at lunch), the remote videos are already there.
+            if upload_only:
+                logfile.write("  upload_only=True → stopping before worker launch\n")
+                logfile.flush()
+                return {"n_ok": 0, "n_total": len(bundle_trials),
+                        "uploaded": True}
 
             # ── Phase 6: launch the worker as a detached process ─────
             launch = (

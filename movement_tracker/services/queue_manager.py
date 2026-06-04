@@ -1548,7 +1548,65 @@ class QueueManager:
                     _had_failure = False
                     _was_cancelled = False
                     try:
+                        # ── Pre-upload pass: ship every subject's videos
+                        # + npz + modules to the remote BEFORE any worker
+                        # launches.  User wants to be able to start the
+                        # batch and close their laptop; with every input
+                        # already on the remote, the detached workers
+                        # don't need the local SSH connection to start.
+                        # Idempotent skip-if-present probes inside
+                        # remote_preproc mean the work-pass loop below
+                        # re-uses these uploads instead of re-shipping.
+                        try:
+                            with open(log_path, "a") as _lf:
+                                _lf.write(
+                                    f"\n=== Pre-upload pass: {n_subj} subject(s) ===\n"
+                                )
+                        except OSError:
+                            pass
+                        for sn, sub_trials in by_subj.items():
+                            try:
+                                remote_preproc(
+                                    job_id=job_id, cfg=remote_cfg,
+                                    subject_name=sn, log_path=log_path,
+                                    registry=registry,
+                                    trials=sub_trials,
+                                    finalize=False,
+                                    upload_only=True,
+                                )
+                            except InterruptedError:
+                                _was_cancelled = True
+                                break
+                            except Exception as _ue:
+                                _had_failure = True
+                                logger.exception(
+                                    f"preproc pre-upload {sn} failed: {_ue}"
+                                )
+                                # Subject's trials can't run if its
+                                # videos didn't upload; mark them failed
+                                # now and skip in the work pass below.
+                                for _t in sub_trials:
+                                    if _t.get("outcome") == "pending":
+                                        _t["outcome"] = "failed"
+                        try:
+                            with open(log_path, "a") as _lf:
+                                _lf.write(
+                                    "\n=== Uploads complete — safe to close laptop "
+                                    "(detached workers will continue) ===\n"
+                                )
+                        except OSError:
+                            pass
+                        # ── Work pass: per-subject worker launch + poll +
+                        # download.  Uploads in remote_preproc skip
+                        # because the pre-upload pass already ran.
                         for _i, (sn, sub_trials) in enumerate(by_subj.items()):
+                            if _was_cancelled:
+                                break
+                            # Skip subjects whose pre-upload failed —
+                            # their trials are already marked failed.
+                            if all(_t.get("outcome") == "failed"
+                                    for _t in sub_trials):
+                                continue
                             try:
                                 remote_preproc(
                                     job_id=job_id,
