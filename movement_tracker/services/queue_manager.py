@@ -1545,8 +1545,14 @@ class QueueManager:
                     # Uploads complete: flip phase to "running" so the
                     # UI swaps "Uploading..." for the % progress bar,
                     # and mark every trial uploaded=True so chips turn
-                    # accent blue.
+                    # accent blue.  Carry forward _batch_id (written
+                    # by the dispatcher into the DB) so the resume
+                    # function can find it after a restart.
                     _job_params["phase"] = "running"
+                    if result.get("batch_id"):
+                        _job_params["_batch_id"] = result["batch_id"]
+                    if result.get("remote_pid"):
+                        _job_params["_remote_pid"] = result["remote_pid"]
                     for _t in trials_batch:
                         _t["uploaded"] = True
                     with get_db_ctx() as _db:

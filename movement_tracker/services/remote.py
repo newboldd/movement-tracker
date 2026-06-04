@@ -4873,7 +4873,7 @@ def resume_remote_preproc_batch(
     try:
         with get_db_ctx() as db:
             row = db.execute(
-                "SELECT params_json, extra_params_json FROM jobs WHERE id=?",
+                "SELECT params_json FROM jobs WHERE id=?",
                 (job_id,),
             ).fetchone()
         if not row:
@@ -4881,7 +4881,7 @@ def resume_remote_preproc_batch(
             return
         try:
             params = _json.loads(row["params_json"]
-                                  or row["extra_params_json"] or "{}")
+                                  or "{}")
         except Exception:
             params = {}
         batch_id = params.get("_batch_id")
@@ -4996,13 +4996,13 @@ def resume_remote_preproc(
     try:
         with get_db_ctx() as db:
             row = db.execute(
-                "SELECT params_json, extra_params_json FROM jobs WHERE id=?",
+                "SELECT params_json FROM jobs WHERE id=?",
                 (job_id,),
             ).fetchone()
         if not row:
             logger.warning(f"resume_remote_preproc: job {job_id} not in DB")
             return
-        params_raw = row["params_json"] or row["extra_params_json"] or "{}"
+        params_raw = row["params_json"] or "{}"
         try:
             params = _json.loads(params_raw)
         except Exception:
@@ -5166,15 +5166,13 @@ def dispatch_remote_preproc_batch(
     # Reuse batch_id from params_json when present (resume path).
     with get_db_ctx() as db:
         row = db.execute(
-            "SELECT params_json, extra_params_json FROM jobs WHERE id=?",
+            "SELECT params_json FROM jobs WHERE id=?",
             (job_id,),
         ).fetchone()
     parent_params = {}
     if row:
         try:
-            parent_params = _json.loads(row["params_json"]
-                                          or row["extra_params_json"]
-                                          or "{}")
+            parent_params = _json.loads(row["params_json"] or "{}")
         except Exception:
             parent_params = {}
     batch_id = parent_params.get("_batch_id") or f"p{int(_time.time())}_{_uuid.uuid4().hex[:6]}"
