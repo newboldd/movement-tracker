@@ -531,6 +531,21 @@ def run_stereo_align(subject_name: str, trial_idx: int,
         gf = start_frame + fi
         os_frame = OS_lm[gf]
         od_frame = OD_lm[gf]
+        # MP centroid per camera (always the mean of valid MP joints).
+        # Used by Pass 1 to anchor the hand-wide alignment AND by
+        # Pass 2 to estimate the *expected* per-joint disparity.
+        # ``base_dx/dy`` from Pass 1 is the residual phase-corr shift
+        # AFTER MP-centroid alignment — NOT the full inter-camera
+        # image disparity.  To predict where a joint should land in
+        # the partner camera we need
+        #     expected_disp = (od_centroid - os_centroid) + base.
+        _os_valid_pre = ~np.isnan(os_frame[:, 0])
+        _od_valid_pre = ~np.isnan(od_frame[:, 0])
+        if _os_valid_pre.any() and _od_valid_pre.any():
+            _os_mp_cent_xy = os_frame[_os_valid_pre].mean(axis=0)
+            _od_mp_cent_xy = od_frame[_od_valid_pre].mean(axis=0)
+        else:
+            _os_mp_cent_xy = _od_mp_cent_xy = None
 
         # ── Pass 1: hand-wide alignment ────────────────────────────
         # Image mode: phase-correlate two big crops around the hand
@@ -619,9 +634,22 @@ def run_stereo_align(subject_name: str, trial_idx: int,
             od_cx_used, od_cy_used = od_cx, od_cy
             os_cx_used, os_cy_used = os_cx, os_cy
             ox = oy = 0
-            if base_dx is not None and base_dy is not None:
-                pred_od_cx = os_cx + float(base_dx)
-                pred_od_cy = os_cy + float(base_dy)
+            if (base_dx is not None and base_dy is not None
+                    and _os_mp_cent_xy is not None
+                    and _od_mp_cent_xy is not None):
+                # Expected per-joint disparity = inter-camera centroid
+                # offset + residual from the hand-wide pass.  Earlier
+                # versions of this code used base_dx directly as the
+                # disparity, which over-triggered the re-anchor for
+                # any camera pair with non-rectified geometry.
+                _exp_disp_x = (float(_od_mp_cent_xy[0])
+                                - float(_os_mp_cent_xy[0])
+                                + float(base_dx))
+                _exp_disp_y = (float(_od_mp_cent_xy[1])
+                                - float(_os_mp_cent_xy[1])
+                                + float(base_dy))
+                pred_od_cx = os_cx + _exp_disp_x
+                pred_od_cy = os_cy + _exp_disp_y
                 gap = (((od_cx - pred_od_cx) ** 2
                         + (od_cy - pred_od_cy) ** 2) ** 0.5)
                 if gap > jh:
@@ -648,18 +676,23 @@ def run_stereo_align(subject_name: str, trial_idx: int,
                         od_cx_used = int(round(pred_od_cx))
                         od_cy_used = int(round(pred_od_cy))
                     elif blamed == 'OS':
-                        os_cx_used = int(round(od_cx - float(base_dx)))
-                        os_cy_used = int(round(od_cy - float(base_dy)))
+                        # Mirror image of the OD-blame anchor: OS
+                        # predicted from OD by subtracting the same
+                        # full expected disparity.
+                        os_cx_used = int(round(od_cx - _exp_disp_x))
+                        os_cy_used = int(round(od_cy - _exp_disp_y))
                     # else: ambiguous (or no prev frame) → no
                     # re-anchor.  Phase corr runs on whatever
                     # patches sit at the literal labels and the
                     # refine_clamp_px bound below limits the per-
                     # joint shift to ±6 px of the hand-wide prior.
                     if blamed is not None:
-                        # predicted disparity − observed disparity,
+                        # (expected disparity) − (observed disparity),
                         # rounded to match the integer crop centers.
-                        ox = int(round(float(base_dx))) - (od_cx - os_cx)
-                        oy = int(round(float(base_dy))) - (od_cy - os_cy)
+                        # NB: expected_disp here includes the centroid
+                        # offset between cameras, NOT just base_dx.
+                        ox = int(round(_exp_disp_x)) - (od_cx - os_cx)
+                        oy = int(round(_exp_disp_y)) - (od_cy - os_cy)
             os_crop = _crop(img_OS, os_cx_used, os_cy_used, jh)
             od_crop = _crop(img_OD, od_cx_used, od_cy_used, jh)
             # Hybrid: weight the per-joint phase corr by the dilated
