@@ -1488,34 +1488,31 @@ class QueueManager:
                         )
 
                 elif job_type == "preproc":
-                    # Remote preproc: per-trial trajectory + background +
-                    # outlines bake.  Reuses videos already uploaded to
-                    # the remote in the subject-scoped work dir.
-                    #
-                    # Multi-subject submissions are grouped by subject and
-                    # remote_preproc is called once per subject (each
-                    # subject's videos upload upfront before its trials
-                    # run, just like the HRnet / MP Submit Batch flow).
-                    # Per-trial outcomes get written back into the parent
-                    # job's params_json so the detail panel paints
-                    # coloured chips as trials finish.
-                    from .remote import remote_preproc
+                    # Remote preproc batch: dispatcher uploads all
+                    # subjects' videos + modules + per-subject bundle
+                    # specs, then launches a single long-lived
+                    # ``remote_preproc_batch_runner.py`` on the remote
+                    # that loops subjects sequentially.  Local side
+                    # spawns a poller thread, then frees this worker
+                    # slot so the queue can dispatch the next item.
+                    # Survives server restart via resume_remote_preproc_batch.
+                    from .remote import (
+                        dispatch_remote_preproc_batch,
+                        poll_remote_preproc_batch,
+                    )
                     import json as _json
-                    from collections import defaultdict
+                    import threading as _th
                     ep = extra_params or {}
                     trials_batch = ep.get("trials") or [{
                         "subject_name": subject_names[0],
                         "trial_idx": ep.get("trial_idx"),
                         "trial_name": ep.get("trial_name"),
                     }]
-                    # Per-trial chip-state convention (mirrors what the
-                    # detail-panel chip renderer in static/js/remote.js
-                    # already expects):
-                    #   uploaded missing + outcome missing   → dim blue (uploading)
-                    #   uploaded=true   + outcome missing    → accent blue (queued)
-                    #   uploaded=true   + outcome="ok"       → green
-                    #   outcome="failed"                      → red
-                    # No initial outcome — leave blank so chips start dim.
+                    # Per-trial chip state init.  Trials start with no
+                    # outcome and no `uploaded` flag → chips render as
+                    # dim blue ("uploading").  Once dispatch_remote_
+                    # preproc_batch's upload phase finishes, we mark
+                    # them uploaded=True so chips flip to accent blue.
                     _job_params = dict(ep); _job_params["trials"] = trials_batch
                     _job_params["phase"] = "uploading"
                     with get_db_ctx() as _db:
@@ -1524,179 +1521,59 @@ class QueueManager:
                             (_json.dumps(_job_params), job_id),
                         )
 
-                    def _record_outcome(_sub_name, _stem, _outcome, _bt):
-                        # Match against (subject_name, trial_name) since
-                        # trial_idx alone collides across subjects.
-                        for _t in trials_batch:
-                            if (_t.get("subject_name") == _sub_name
-                                    and _t.get("trial_name") == _stem):
-                                _t["outcome"] = _outcome
-                                break
-                        try:
-                            with get_db_ctx() as _db:
-                                _db.execute(
-                                    "UPDATE jobs SET params_json=? WHERE id=?",
-                                    (_json.dumps(_job_params), job_id),
-                                )
-                        except Exception:
-                            pass
-
-                    # Group trials by subject so each subject's videos
-                    # upload once.
-                    by_subj = defaultdict(list)
-                    for t in trials_batch:
-                        sn = t.get("subject_name") or subject_names[0]
-                        by_subj[sn].append(t)
-
-                    n_subj = len(by_subj)
-                    _had_failure = False
-                    _was_cancelled = False
+                    # Dispatch: uploads (idempotent skip-if-present) +
+                    # writes batch.json + launches remote runner as a
+                    # detached process.  Returns immediately.
                     try:
-                        # ── Pre-upload pass: ship every subject's videos
-                        # + npz + modules to the remote BEFORE any worker
-                        # launches.  User wants to be able to start the
-                        # batch and close their laptop; with every input
-                        # already on the remote, the detached workers
-                        # don't need the local SSH connection to start.
-                        # Idempotent skip-if-present probes inside
-                        # remote_preproc mean the work-pass loop below
-                        # re-uses these uploads instead of re-shipping.
-                        try:
-                            with open(log_path, "a") as _lf:
-                                _lf.write(
-                                    f"\n=== Pre-upload pass: {n_subj} subject(s) ===\n"
-                                )
-                        except OSError:
-                            pass
-                        # Track whether the SHARED uploads (modules +
-                        # worker script in preproc_modules/) have been
-                        # done yet — only the first subject in the batch
-                        # needs to do them.
-                        _shared_uploaded = False
-                        for sn, sub_trials in by_subj.items():
-                            try:
-                                remote_preproc(
-                                    job_id=job_id, cfg=remote_cfg,
-                                    subject_name=sn, log_path=log_path,
-                                    registry=registry,
-                                    trials=sub_trials,
-                                    finalize=False,
-                                    upload_only=True,
-                                    skip_shared_uploads=_shared_uploaded,
-                                )
-                                # First successful call seeded the
-                                # shared dir; later calls can skip.
-                                _shared_uploaded = True
-                                # Mark this subject's trials as uploaded
-                                # so chips flip dim blue → accent blue
-                                # the moment the detail-panel poller
-                                # next refreshes (every ~3 s).
-                                for _t in sub_trials:
-                                    _t["uploaded"] = True
-                                with get_db_ctx() as _db:
-                                    _db.execute(
-                                        "UPDATE jobs SET params_json=? WHERE id=?",
-                                        (_json.dumps(_job_params), job_id),
-                                    )
-                            except InterruptedError:
-                                _was_cancelled = True
-                                break
-                            except Exception as _ue:
-                                _had_failure = True
-                                logger.exception(
-                                    f"preproc pre-upload {sn} failed: {_ue}"
-                                )
-                                # Subject's trials can't run if its
-                                # videos didn't upload; mark them failed
-                                # now and skip in the work pass below.
-                                for _t in sub_trials:
-                                    if not _t.get("uploaded"):
-                                        _t["outcome"] = "failed"
-                        try:
-                            with open(log_path, "a") as _lf:
-                                _lf.write(
-                                    "\n=== Uploads complete — safe to close laptop "
-                                    "(detached workers will continue) ===\n"
-                                )
-                        except OSError:
-                            pass
-                        # Pre-upload finished — flip phase from
-                        # "uploading" to "running" so the detail-panel
-                        # progress bar swaps "Uploading..." for "%".
-                        _job_params["phase"] = "running"
+                        result = dispatch_remote_preproc_batch(
+                            job_id=job_id, cfg=remote_cfg,
+                            trials_batch=trials_batch,
+                            log_path=log_path, registry=registry,
+                        )
+                    except Exception as _de:
+                        logger.exception(f"preproc dispatch {job_id} failed: {_de}")
                         with get_db_ctx() as _db:
                             _db.execute(
-                                "UPDATE jobs SET params_json=? WHERE id=?",
-                                (_json.dumps(_job_params), job_id),
-                            )
-                        # ── Work pass: per-subject worker launch + poll +
-                        # download.  Uploads in remote_preproc skip
-                        # because the pre-upload pass already ran.
-                        # Track subject index so we can scale the
-                        # parent job's progress across the batch
-                        # (each subject contributes 1 / n_subj).
-                        for _i, (sn, sub_trials) in enumerate(by_subj.items()):
-                            if _was_cancelled:
-                                break
-                            # Skip subjects whose pre-upload failed —
-                            # their trials are already marked failed.
-                            if all(_t.get("outcome") == "failed"
-                                    for _t in sub_trials):
-                                continue
-                            try:
-                                remote_preproc(
-                                    job_id=job_id,
-                                    cfg=remote_cfg,
-                                    subject_name=sn,
-                                    log_path=log_path,
-                                    registry=registry,
-                                    trials=sub_trials,
-                                    finalize=(_i == n_subj - 1),
-                                    skip_shared_uploads=True,
-                                    on_trial_outcome=_record_outcome,
-                                )
-                            except InterruptedError:
-                                _was_cancelled = True
-                                # Any trials for this subject still
-                                # pending get marked cancelled.
-                                for _t in sub_trials:
-                                    if _t.get("outcome") == "pending":
-                                        _t["outcome"] = "cancelled"
-                                break
-                            except Exception as _se:
-                                _had_failure = True
-                                logger.exception(
-                                    f"preproc subject {sn} failed: {_se}"
-                                )
-                                for _t in sub_trials:
-                                    if _t.get("outcome") == "pending":
-                                        _t["outcome"] = "failed"
-                                continue
-                        # Final params_json flush + status update if
-                        # remote_preproc didn't finalize on the last
-                        # iteration (e.g. cancelled / errored mid-loop).
-                        with get_db_ctx() as _db:
-                            _db.execute(
-                                "UPDATE jobs SET params_json=? WHERE id=?",
-                                (_json.dumps(_job_params), job_id),
-                            )
-                            _n_ok = sum(1 for _t in trials_batch
-                                         if _t.get("outcome") == "ok")
-                            _n_total = len(trials_batch)
-                            _final_status = (
-                                "cancelled" if _was_cancelled
-                                else ("completed" if not _had_failure
-                                       else "completed"))
-                            _final_err = (None if _n_ok == _n_total
-                                           else f"{_n_ok}/{_n_total} succeeded")
-                            _db.execute(
-                                "UPDATE jobs SET status=?, "
-                                "error_msg=?, progress_pct=100, "
+                                "UPDATE jobs SET status='failed', error_msg=?, "
                                 "finished_at=CURRENT_TIMESTAMP WHERE id=?",
-                                (_final_status, _final_err, job_id),
+                                (f"dispatch: {str(_de)[:400]}", job_id),
                             )
-                    except Exception as _e:
-                        logger.exception(f"preproc multi-subject loop failed: {_e}")
+                        return
+                    if result.get("error"):
+                        # dispatch already wrote failed status
+                        return
+                    # Uploads complete: flip phase to "running" so the
+                    # UI swaps "Uploading..." for the % progress bar,
+                    # and mark every trial uploaded=True so chips turn
+                    # accent blue.
+                    _job_params["phase"] = "running"
+                    for _t in trials_batch:
+                        _t["uploaded"] = True
+                    with get_db_ctx() as _db:
+                        _db.execute(
+                            "UPDATE jobs SET params_json=? WHERE id=?",
+                            (_json.dumps(_job_params), job_id),
+                        )
+
+                    # Spawn the poller in a daemon thread so THIS
+                    # worker thread returns and frees the dispatch
+                    # slot.  Poller's lifecycle is now decoupled from
+                    # the queue manager — it owns the job until the
+                    # remote batch runner finishes (or the server
+                    # restarts and resume_remote_preproc_batch takes
+                    # over).
+                    poller = _th.Thread(
+                        target=poll_remote_preproc_batch,
+                        kwargs=dict(
+                            job_id=job_id, cfg=remote_cfg,
+                            batch_id=result["batch_id"],
+                            log_path=log_path, registry=registry,
+                            parent_extra=_job_params,
+                        ),
+                        daemon=True,
+                    )
+                    poller.start()
+                    registry._threads[job_id] = poller
 
                 elif job_type in ("vision", "pose", "skeleton_v1", "skeleton_v2"):
                     # These don't have remote handlers yet — run locally

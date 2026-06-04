@@ -141,13 +141,19 @@ def _recover_stale_jobs(s):
         # and run the remaining subjects.  resume_remote_preproc reads
         # params_json.trials, groups by subject, and walks them.
         if job_type == PREPROC_BATCH_JOB_TYPE and remote_host and remote_cfg:
-            from .services.remote import resume_remote_preproc
+            # New restart-safe path: ``resume_remote_preproc_batch``
+            # probes for the batch_status.json sentinel.  If the
+            # detached runner is still alive on the remote, just
+            # reattach the poller.  If the runner died, it
+            # re-dispatches (which is idempotent — uploads skip-if-
+            # present, sentinel makes the upload phase a no-op).
+            from .services.remote import resume_remote_preproc_batch
             from .services.jobs import registry as _registry
             log_path = job["log_path"] or str(
                 s.dlc_path / ".logs" / f"job_{job['id']}.log"
             )
             thread = threading.Thread(
-                target=resume_remote_preproc,
+                target=resume_remote_preproc_batch,
                 kwargs=dict(
                     job_id=job["id"], cfg=remote_cfg,
                     log_path=log_path, registry=_registry,

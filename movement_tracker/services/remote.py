@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -4844,6 +4845,120 @@ if __name__ == "__main__":
 '''
 
 
+def resume_remote_preproc_batch(
+    job_id: int,
+    cfg: RemoteConfig,
+    log_path: str,
+    registry,
+) -> None:
+    """Resume monitoring a multi-subject preproc batch after restart.
+
+    Reads ``_batch_id`` from the job's params_json.  Probes the
+    remote for ``batch_status.json``:
+      * if present and runner alive (recent heartbeat)         → just
+        attach the poller and continue
+      * if present but heartbeat stale                          → the
+        runner died; re-launch it via dispatch
+      * if absent (or no _batch_id at all)                      → run
+        full dispatch (uploads are idempotent so this just re-creates
+        the spec and launches)
+    """
+    import json as _json
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    try:
+        with open(log_path, "a") as _lf:
+            _lf.write(f"\n=== Resuming preproc batch job {job_id} after server restart ===\n")
+    except OSError:
+        pass
+    try:
+        with get_db_ctx() as db:
+            row = db.execute(
+                "SELECT params_json, extra_params_json FROM jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+        if not row:
+            logger.warning(f"resume_remote_preproc_batch: job {job_id} not in DB")
+            return
+        try:
+            params = _json.loads(row["params_json"]
+                                  or row["extra_params_json"] or "{}")
+        except Exception:
+            params = {}
+        batch_id = params.get("_batch_id")
+        trials_batch = params.get("trials") or []
+        state_dir = _preproc_batch_state_dir(cfg, batch_id) if batch_id else None
+        status_remote = f"{state_dir}/batch_status.json" if state_dir else None
+
+        runner_alive = False
+        if status_remote:
+            # Probe status.json + check heartbeat freshness.
+            probe = subprocess.run(
+                _py_cmd(cfg,
+                    f"\"import os, json, time; p=r'{status_remote}'; "
+                    f"d=json.load(open(p)) if os.path.exists(p) else None; "
+                    f"print(json.dumps({{'has':d is not None,"
+                    f"'hb':(d or {{}}).get('heartbeat'),"
+                    f"'now':time.time()}}))\""),
+                capture_output=True, text=True, timeout=20,
+            )
+            try:
+                info = _json.loads((probe.stdout or "").strip().splitlines()[-1])
+                if info.get("has"):
+                    hb = info.get("hb") or 0
+                    now = info.get("now") or 0
+                    runner_alive = (now - hb) < 60   # generous: 60 s
+            except Exception:
+                runner_alive = False
+
+        if runner_alive and batch_id:
+            try:
+                with open(log_path, "a") as _lf:
+                    _lf.write(f"  runner alive (batch {batch_id}) — reattaching poller\n")
+            except OSError:
+                pass
+            poll_remote_preproc_batch(
+                job_id=job_id, cfg=cfg, batch_id=batch_id,
+                log_path=log_path, registry=registry,
+                parent_extra=params,
+            )
+            return
+
+        # Runner not alive: redispatch.  dispatch_remote_preproc_batch
+        # will see the uploads_complete sentinel (if present) and
+        # skip the upload phase entirely.
+        try:
+            with open(log_path, "a") as _lf:
+                _lf.write("  runner not alive — re-dispatching\n")
+        except OSError:
+            pass
+        if not trials_batch:
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status='failed', error_msg='resume: no trials', "
+                    "finished_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,),
+                )
+            return
+        result = dispatch_remote_preproc_batch(
+            job_id=job_id, cfg=cfg, trials_batch=trials_batch,
+            log_path=log_path, registry=registry,
+        )
+        if result.get("error"):
+            return  # dispatch already marked failed
+        poll_remote_preproc_batch(
+            job_id=job_id, cfg=cfg, batch_id=result["batch_id"],
+            log_path=log_path, registry=registry,
+            parent_extra=params,
+        )
+    except Exception as e:
+        logger.exception(f"resume_remote_preproc_batch {job_id} failed: {e}")
+        with get_db_ctx() as db:
+            db.execute(
+                "UPDATE jobs SET status='failed', error_msg=?, "
+                "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                (f"resume: {str(e)[:400]}", job_id),
+            )
+
+
 def resume_remote_preproc(
     job_id: int,
     cfg: RemoteConfig,
@@ -5001,6 +5116,533 @@ def resume_remote_preproc(
                 "UPDATE jobs SET status='failed', error_msg=?, "
                 "finished_at=CURRENT_TIMESTAMP WHERE id=?",
                 (f"resume: {str(e)[:400]}", job_id),
+            )
+
+
+# ─── Remote preproc batch runner (multi-subject, detached) ────────────
+# Files written by ``dispatch_remote_preproc_batch`` on the remote:
+#   <work_dir>/preproc_batches/<batch_id>/
+#     batch.json                 — list of subjects + paths
+#     batch_status.json          — live state, written by the runner
+#     batch_runner.py            — copy of _REMOTE_PREPROC_BATCH_RUNNER
+#     runner.log                 — runner's stdout/stderr
+#     uploads_complete.json      — sentinel; presence = uploads done
+# Per-subject artefacts (existing layout, untouched):
+#   <work_dir>/preproc_<subject>/
+#     run_<job_id>/bundle.json   — per-subject worker spec
+#     run_<job_id>/status.json   — per-subject worker progress
+#     videos/, mediapipe_prelabels.npz, ...
+
+
+def _preproc_batch_state_dir(cfg, batch_id: str) -> str:
+    return f"{cfg.work_dir}/preproc_batches/{batch_id}"
+
+
+def dispatch_remote_preproc_batch(
+    job_id: int,
+    cfg: RemoteConfig,
+    trials_batch: list[dict],
+    log_path: str,
+    registry,
+    upload_only: bool = False,
+) -> dict:
+    """Upload everything, write the batch spec, launch the detached
+    runner.  Returns {"batch_id", "remote_pid"} on success or
+    {"error": ...} on failure.
+
+    Idempotent: re-running the same call with the same job_id picks
+    up the existing batch_id (read from params_json), re-probes the
+    upload sentinel, and only re-uploads missing pieces.
+    """
+    import json as _json
+    import tempfile as _tf
+    import time as _time
+    import uuid as _uuid
+    from collections import defaultdict
+    from .video import build_trial_map
+    settings = get_settings()
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+    # Reuse batch_id from params_json when present (resume path).
+    with get_db_ctx() as db:
+        row = db.execute(
+            "SELECT params_json, extra_params_json FROM jobs WHERE id=?",
+            (job_id,),
+        ).fetchone()
+    parent_params = {}
+    if row:
+        try:
+            parent_params = _json.loads(row["params_json"]
+                                          or row["extra_params_json"]
+                                          or "{}")
+        except Exception:
+            parent_params = {}
+    batch_id = parent_params.get("_batch_id") or f"p{int(_time.time())}_{_uuid.uuid4().hex[:6]}"
+    state_dir = _preproc_batch_state_dir(cfg, batch_id)
+
+    logfile = open(log_path, "a", buffering=1)
+    logfile.write(f"\n=== Remote preproc batch {batch_id} ({len(trials_batch)} trials) ===\n")
+    logfile.flush()
+
+    cancel_event = registry.register_cancel_event(job_id)
+
+    def _check_cancel():
+        if cancel_event.is_set():
+            raise InterruptedError("cancelled")
+
+    def _fail(msg: str) -> dict:
+        logfile.write(f"ERROR: {msg}\n"); logfile.flush()
+        with get_db_ctx() as db:
+            db.execute(
+                "UPDATE jobs SET status='failed', error_msg=?, "
+                "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                (msg[:500], job_id),
+            )
+        return {"error": msg}
+
+    try:
+        # Reachability probe.
+        probe = subprocess.run(
+            _ssh_base_args(cfg) + [cfg.host, "echo", "ok"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if probe.returncode != 0 or "ok" not in probe.stdout:
+            return _fail(f"remote unreachable: {probe.stderr[:200]}")
+
+        # Mint state dir + per-subject work dirs.
+        subprocess.run(
+            _py_cmd(cfg, f"\"import os; os.makedirs(r'{state_dir}', exist_ok=True); "
+                          f"os.makedirs(r'{cfg.work_dir}/preproc_modules', exist_ok=True)\""),
+            capture_output=True, timeout=20,
+        )
+
+        # Group trials by subject.
+        by_subj = defaultdict(list)
+        for t in trials_batch:
+            sn = t.get("subject_name")
+            if sn:
+                by_subj[sn].append(t)
+        n_subj = len(by_subj)
+
+        # ── Upload sentinel check ────────────────────────────────
+        uploads_complete_remote = f"{state_dir}/uploads_complete.json"
+        sentinel_check = subprocess.run(
+            _py_cmd(cfg, f"\"import os; print('yes' if os.path.exists(r'{uploads_complete_remote}') else 'no')\""),
+            capture_output=True, text=True, timeout=15,
+        )
+        uploads_already_done = (sentinel_check.returncode == 0
+                                and "yes" in (sentinel_check.stdout or ""))
+
+        if uploads_already_done:
+            logfile.write("  uploads_complete sentinel present — skipping upload phase\n")
+            logfile.flush()
+        else:
+            logfile.write(f"  uploading inputs for {n_subj} subject(s)...\n")
+            logfile.flush()
+            # ── Shared modules + scripts (upload once, idempotent) ──
+            service_dir = Path(__file__).parent
+            modules_dir = f"{cfg.work_dir}/preproc_modules"
+            for mod_file in ("camera_motion.py", "background.py", "ffmpeg.py"):
+                mp = service_dir / mod_file
+                if not mp.exists():
+                    continue
+                _scp_if_changed(
+                    cfg, str(mp), f"{modules_dir}/{mod_file}",
+                    timeout=60, logfile=logfile, label=f"module {mod_file}: ",
+                )
+            # Worker script (per-subject).
+            worker_local = os.path.join(_tf.gettempdir(),
+                                          f"remote_preproc_worker_{job_id}.py")
+            with open(worker_local, "w") as f:
+                f.write(_REMOTE_PREPROC_WORKER)
+            worker_remote = f"{modules_dir}/remote_preproc_worker.py"
+            _scp_if_changed(cfg, worker_local, worker_remote,
+                             timeout=30, logfile=logfile, label="worker: ")
+            # Batch runner script (loops subjects).
+            runner_local = os.path.join(_tf.gettempdir(),
+                                          f"remote_preproc_batch_runner_{job_id}.py")
+            with open(runner_local, "w") as f:
+                f.write(_REMOTE_PREPROC_BATCH_RUNNER)
+            runner_remote = f"{state_dir}/batch_runner.py"
+            _scp_if_changed(cfg, runner_local, runner_remote,
+                             timeout=30, logfile=logfile, label="runner: ")
+            # ── Per-subject: dir + video + npz ──
+            for i, (sn, sub_trials) in enumerate(by_subj.items()):
+                _check_cancel()
+                remote_work = f"{cfg.work_dir}/preproc_{sn}"
+                run_dir = f"{remote_work}/run_{job_id}"
+                subprocess.run(
+                    _py_cmd(cfg, f"\"import os; os.makedirs(r'{run_dir}', exist_ok=True); "
+                                  f"os.makedirs(r'{remote_work}/{sn}', exist_ok=True); "
+                                  f"os.makedirs(r'{remote_work}/videos', exist_ok=True)\""),
+                    capture_output=True, timeout=15,
+                )
+                # Resolve & upload video per trial.
+                from .video import build_trial_map
+                all_trials = build_trial_map(sn)
+                tmap = {tt["trial_idx"]: tt for tt in all_trials}
+                for t in sub_trials:
+                    ti = int(t["trial_idx"])
+                    tr = tmap.get(ti)
+                    if not tr:
+                        continue
+                    vname = Path(tr["video_path"]).name
+                    remote_v = f"{remote_work}/videos/{vname}"
+                    local_v  = str(settings.video_path / vname)
+                    if os.path.exists(local_v):
+                        _scp_if_changed(cfg, local_v, remote_v, timeout=600,
+                                         logfile=logfile, label=f"{sn}/{vname}: ")
+                    t["video_remote_path"] = remote_v
+                    t["video_name"] = vname
+                # MP prelabels for this subject.
+                mp_npz_local = settings.dlc_path / sn / "mediapipe_prelabels.npz"
+                if mp_npz_local.exists():
+                    _scp_if_changed(cfg, str(mp_npz_local),
+                                     f"{remote_work}/{sn}/mediapipe_prelabels.npz",
+                                     timeout=300, logfile=logfile,
+                                     label=f"{sn}/mp_prelabels: ")
+                pose_npz_local = settings.dlc_path / sn / "pose_prelabels.npz"
+                if pose_npz_local.exists():
+                    _scp_if_changed(cfg, str(pose_npz_local),
+                                     f"{remote_work}/{sn}/pose_prelabels.npz",
+                                     timeout=300, logfile=logfile,
+                                     label=f"{sn}/pose_prelabels: ")
+
+            # Mark uploads complete.
+            subprocess.run(
+                _py_cmd(cfg,
+                    f"\"import json,time; "
+                    f"open(r'{uploads_complete_remote}','w').write(json.dumps({{'at':time.time()}}))\""),
+                capture_output=True, timeout=15,
+            )
+            logfile.write("  uploads_complete sentinel written\n"); logfile.flush()
+
+        if upload_only:
+            return {"batch_id": batch_id}
+
+        # ── Per-subject bundle.json (always re-write; cheap) ──
+        bundle_specs = []   # list of {name, bundle_path, status_path}
+        for i, (sn, sub_trials) in enumerate(by_subj.items()):
+            remote_work = f"{cfg.work_dir}/preproc_{sn}"
+            run_dir = f"{remote_work}/run_{job_id}"
+            # Ensure video_remote_path is in the bundle.
+            for t in sub_trials:
+                if "video_remote_path" not in t:
+                    t["video_remote_path"] = f"{remote_work}/videos/{t.get('video_name','')}"
+            bundle = {
+                "subject_name": sn,
+                "modules_dir":  f"{cfg.work_dir}/preproc_modules",
+                "data_dir":     remote_work,
+                "trials":       sub_trials,
+            }
+            bundle_local = os.path.join(_tf.gettempdir(),
+                                          f"preproc_bundle_{job_id}_{sn}.json")
+            with open(bundle_local, "w") as bf:
+                _json.dump(bundle, bf)
+            bundle_remote = f"{run_dir}/bundle.json"
+            subprocess.run(
+                _scp_base_args(cfg) + [bundle_local, f"{cfg.host}:{bundle_remote}"],
+                capture_output=True, text=True, timeout=30,
+            )
+            bundle_specs.append({
+                "name":          sn,
+                "bundle_path":   bundle_remote,
+                "status_path":   f"{run_dir}/status.json",
+            })
+
+        # ── Write batch.json ──
+        batch_spec = {
+            "job_id":      job_id,
+            "batch_id":    batch_id,
+            "worker_path": f"{cfg.work_dir}/preproc_modules/remote_preproc_worker.py",
+            "python":      cfg.python_executable,
+            "subjects":    bundle_specs,
+        }
+        batch_local = os.path.join(_tf.gettempdir(), f"preproc_batch_{job_id}.json")
+        with open(batch_local, "w") as bf:
+            _json.dump(batch_spec, bf)
+        batch_remote = f"{state_dir}/batch.json"
+        up = subprocess.run(
+            _scp_base_args(cfg) + [batch_local, f"{cfg.host}:{batch_remote}"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if up.returncode != 0:
+            return _fail(f"batch.json upload failed: {up.stderr[:200]}")
+
+        # ── Launch detached batch runner ──
+        runner_remote = f"{state_dir}/batch_runner.py"
+        status_remote = f"{state_dir}/batch_status.json"
+        runner_log    = f"{state_dir}/runner.log"
+        launch = (
+            f"\"import subprocess, os, time; "
+            f"log_fh = open(r'{runner_log}', 'w'); "
+            f"args = [r'{cfg.python_executable}', '-u', "
+            f"r'{runner_remote}', r'{batch_remote}', r'{status_remote}']; "
+            f"flags = 0x01000200 if os.name == 'nt' else 0; "
+            f"p = subprocess.Popen(args, creationflags=flags, "
+            f"stdin=subprocess.DEVNULL, stdout=log_fh, stderr=log_fh); "
+            f"print(p.pid); time.sleep(2)\""
+        )
+        launch_res = subprocess.run(_py_cmd(cfg, launch),
+                                     capture_output=True, text=True, timeout=30)
+        if launch_res.returncode != 0:
+            return _fail(f"batch runner launch failed: {launch_res.stderr[:200]}")
+        try:
+            remote_pid = int(launch_res.stdout.strip().splitlines()[-1])
+        except Exception:
+            remote_pid = None
+        logfile.write(f"  batch runner started (pid {remote_pid})\n"); logfile.flush()
+
+        # Persist batch_id + pid on the job row so resume can find them.
+        parent_params["_batch_id"] = batch_id
+        if remote_pid is not None:
+            parent_params["_remote_pid"] = remote_pid
+        with get_db_ctx() as db:
+            db.execute(
+                "UPDATE jobs SET params_json=?, tmux_session=? WHERE id=?",
+                (_json.dumps(parent_params),
+                 f"pid:{remote_pid}" if remote_pid else None,
+                 job_id),
+            )
+        return {"batch_id": batch_id, "remote_pid": remote_pid}
+    except InterruptedError:
+        logfile.write("  dispatch cancelled\n"); logfile.flush()
+        return {"error": "cancelled"}
+    except Exception as e:
+        logger.exception(f"dispatch_remote_preproc_batch {job_id} failed: {e}")
+        return _fail(str(e)[:500])
+    finally:
+        try: logfile.close()
+        except Exception: pass
+
+
+def poll_remote_preproc_batch(
+    job_id: int,
+    cfg: RemoteConfig,
+    batch_id: str,
+    log_path: str,
+    registry,
+    parent_extra: dict | None = None,
+) -> None:
+    """Poll the remote batch_status.json + per-subject status.json
+    files.  As each subject's status flips to ``completed`` (or
+    ``failed``), download the allow-listed outputs for that subject
+    and update the parent job's params_json so chip rendering keeps
+    pace.  Exits when the runner reports ``completed`` (or after a
+    heartbeat-timeout if the runner died).
+    """
+    import json as _json
+    settings = get_settings()
+    state_dir = _preproc_batch_state_dir(cfg, batch_id)
+    status_remote = f"{state_dir}/batch_status.json"
+    runner_log    = f"{state_dir}/runner.log"
+
+    cancel_event = registry.register_cancel_event(job_id)
+
+    def _check_cancel():
+        if cancel_event.is_set():
+            raise InterruptedError("cancelled")
+
+    DOWNLOAD_FILES = (
+        "camera_trajectory.npz",
+        "outlines.json",
+        "background_OS.png",
+        "background_OD.png",
+        "background_refined_OS.png",
+        "background_refined_OD.png",
+    )
+
+    def _download_subject(sub_name):
+        remote_dir = f"{cfg.work_dir}/preproc_{sub_name}/{sub_name}/preproc"
+        local_root = settings.dlc_path / sub_name / "preproc"
+        local_root.mkdir(parents=True, exist_ok=True)
+        # First find which trial stems exist on the remote.
+        listing = subprocess.run(
+            _py_cmd(cfg,
+                f"\"import os; d=r'{remote_dir}'; print(','.join(sorted(os.listdir(d))) "
+                f"if os.path.isdir(d) else '')\""),
+            capture_output=True, text=True, timeout=30,
+        )
+        stems = [s for s in (listing.stdout or "").strip().split(",") if s]
+        any_ok = False
+        for stem in stems:
+            local_dir = local_root / stem
+            local_dir.mkdir(parents=True, exist_ok=True)
+            for fname in DOWNLOAD_FILES:
+                remote_p = f"{remote_dir}/{stem}/{fname}"
+                local_p  = local_dir / fname
+                subprocess.run(
+                    _scp_base_args(cfg) + [f"{cfg.host}:{remote_p}", str(local_p)],
+                    capture_output=True, text=True, timeout=300,
+                )
+                if local_p.exists():
+                    any_ok = True
+        return any_ok
+
+    logfile = open(log_path, "a", buffering=1)
+    logfile.write(f"\n=== Poller attached to batch {batch_id} ===\n")
+    logfile.flush()
+
+    downloaded_subs: set[str] = set()
+    last_heartbeat = None
+    last_log_size = 0
+    try:
+        while True:
+            _check_cancel()
+            time.sleep(3.0)
+            # Pull batch_status.json.
+            local_status = os.path.join(tempfile.gettempdir(),
+                                          f"preproc_batch_status_{job_id}.json")
+            _dl = subprocess.run(
+                _scp_base_args(cfg) + [f"{cfg.host}:{status_remote}", local_status],
+                capture_output=True, text=True, timeout=30,
+            )
+            if _dl.returncode != 0:
+                # Either the runner hasn't written yet or network blipped.
+                continue
+            try:
+                with open(local_status) as f:
+                    st = _json.load(f)
+            except Exception:
+                continue
+            sub_state = st.get("subjects", {})
+            phase = st.get("status", "")
+            current = st.get("current_subject")
+            hb = st.get("heartbeat")
+            if hb:
+                last_heartbeat = hb
+
+            # Update job progress (count of completed subjects / total).
+            n_total = max(1, len(sub_state))
+            n_done = sum(1 for v in sub_state.values()
+                         if v.get("status") in ("completed", "failed"))
+            pct = round(100.0 * n_done / n_total, 1)
+            with get_db_ctx() as _db:
+                _db.execute(
+                    "UPDATE jobs SET progress_pct=? WHERE id=?",
+                    (pct, job_id),
+                )
+
+            # Pull per-subject outputs for any newly-completed subject.
+            for sn, info in sub_state.items():
+                if sn in downloaded_subs:
+                    continue
+                if info.get("status") not in ("completed", "failed"):
+                    continue
+                if info.get("status") == "completed":
+                    logfile.write(f"  downloading outputs for {sn}\n"); logfile.flush()
+                    ok = _download_subject(sn)
+                    outcome = "ok" if ok else "failed"
+                else:
+                    outcome = "failed"
+                downloaded_subs.add(sn)
+                _update_trial_outcomes(job_id, sn, outcome)
+
+            # Stream new runner-log lines into the parent log.
+            try:
+                tail = subprocess.run(
+                    _py_cmd(cfg,
+                        f"\"import os; p=r'{runner_log}'; "
+                        f"sz=os.path.getsize(p) if os.path.exists(p) else 0; print(sz)\""),
+                    capture_output=True, text=True, timeout=15,
+                )
+                cur_sz = int((tail.stdout or "0").strip())
+                if cur_sz > last_log_size:
+                    pull = subprocess.run(
+                        _scp_base_args(cfg) + [f"{cfg.host}:{runner_log}",
+                                                local_status + ".log"],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    if pull.returncode == 0:
+                        try:
+                            with open(local_status + ".log") as f:
+                                f.seek(last_log_size)
+                                new = f.read()
+                            if new.strip():
+                                logfile.write(new); logfile.flush()
+                        except OSError:
+                            pass
+                    last_log_size = cur_sz
+            except Exception:
+                pass
+
+            if phase == "completed":
+                logfile.write("=== Batch complete ===\n"); logfile.flush()
+                break
+            if phase == "failed":
+                logfile.write(f"=== Batch failed: {st.get('error', '?')} ===\n")
+                logfile.flush()
+                break
+            # Heartbeat timeout: 5 min without an update → runner likely dead.
+            if last_heartbeat and (time.time() - last_heartbeat > 300):
+                logfile.write("  WARN: runner heartbeat stale > 5 min\n")
+                logfile.flush()
+                # Don't bail — just keep checking; user can cancel.
+
+        # Final job-status flush.
+        with get_db_ctx() as _db:
+            row = _db.execute(
+                "SELECT params_json FROM jobs WHERE id=?", (job_id,),
+            ).fetchone()
+        try:
+            params = _json.loads(row["params_json"] or "{}") if row else {}
+        except Exception:
+            params = {}
+        trials_list = params.get("trials") or []
+        n_ok = sum(1 for t in trials_list if t.get("outcome") == "ok")
+        n_total = len(trials_list)
+        err = None if n_ok == n_total else f"{n_ok}/{n_total} succeeded"
+        with get_db_ctx() as _db:
+            _db.execute(
+                "UPDATE jobs SET status=?, error_msg=?, progress_pct=100, "
+                "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                ("completed", err, job_id),
+            )
+    except InterruptedError:
+        logfile.write("  poller cancelled by user\n"); logfile.flush()
+        with get_db_ctx() as _db:
+            _db.execute(
+                "UPDATE jobs SET status='cancelled', "
+                "finished_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,),
+            )
+    except Exception as e:
+        logger.exception(f"poll_remote_preproc_batch {job_id}: {e}")
+        with get_db_ctx() as _db:
+            _db.execute(
+                "UPDATE jobs SET status='failed', error_msg=?, "
+                "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                (f"poller: {str(e)[:400]}", job_id),
+            )
+    finally:
+        try: logfile.close()
+        except Exception: pass
+
+
+def _update_trial_outcomes(job_id: int, subject_name: str, outcome: str):
+    """Stamp params_json.trials[i].outcome for every trial belonging
+    to the given subject — so the chip grid colors update."""
+    import json as _json
+    with get_db_ctx() as db:
+        row = db.execute(
+            "SELECT params_json FROM jobs WHERE id=?", (job_id,),
+        ).fetchone()
+        if not row:
+            return
+        try:
+            params = _json.loads(row["params_json"] or "{}")
+        except Exception:
+            return
+        trials = params.get("trials") or []
+        changed = False
+        for t in trials:
+            if t.get("subject_name") == subject_name and t.get("outcome") != outcome:
+                t["outcome"] = outcome
+                t["uploaded"] = True
+                changed = True
+        if changed:
+            db.execute(
+                "UPDATE jobs SET params_json=? WHERE id=?",
+                (_json.dumps(params), job_id),
             )
 
 
@@ -5806,4 +6448,133 @@ def main():
 
 if __name__ == "__main__":
     main()
+'''
+
+
+# ── Remote BATCH runner ───────────────────────────────────────────────
+# Long-lived process that loops through every subject in the batch,
+# spawning the per-subject worker as a subprocess.  Detached at launch;
+# survives local server restarts and laptop sleep.
+_REMOTE_PREPROC_BATCH_RUNNER = r'''#!/usr/bin/env python3
+"""Multi-subject preproc batch runner.
+
+Spawned detached by ``dispatch_remote_preproc_batch``.  Reads
+``batch.json`` (list of subjects + per-subject bundle.json paths),
+runs each subject sequentially via ``remote_preproc_worker.py``,
+updates ``batch_status.json`` after each subject so the local poller
+knows what's been finished and can pull outputs back.
+
+Per-subject heartbeats (status.json file the per-subject worker
+already writes) tell the poller intra-subject progress.  The
+batch status reports which subject is currently active and the
+running set of (subject → outcome) pairs.
+"""
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+
+
+def _write_status_atomic(path, payload):
+    path = os.path.normpath(path)
+    d = os.path.dirname(path)
+    with tempfile.NamedTemporaryFile(mode="w", dir=d, suffix=".tmp", delete=False) as f:
+        json.dump(payload, f)
+        tmp = f.name
+    for _attempt in range(10):
+        try:
+            os.replace(tmp, path); return
+        except OSError:
+            time.sleep(min(0.05 * (1 + _attempt), 0.5))
+
+
+def main():
+    if len(sys.argv) != 3:
+        print(f"Usage: {sys.argv[0]} batch.json batch_status.json", flush=True)
+        sys.exit(1)
+    batch_spec_path, status_path = sys.argv[1], sys.argv[2]
+    with open(batch_spec_path) as f:
+        spec = json.load(f)
+    subjects   = spec["subjects"]   # list of {name, bundle_path, status_path}
+    worker_py  = spec["worker_path"]
+    python_exe = spec["python"]
+
+    # Initial state: every subject pending.
+    sub_state = {s["name"]: {"status": "pending"} for s in subjects}
+    started = time.time()
+
+    def _flush(extra=None):
+        payload = {
+            "status": "running",
+            "subjects": sub_state,
+            "started_at": started,
+            "heartbeat": time.time(),
+            "pid": os.getpid(),
+        }
+        if extra:
+            payload.update(extra)
+        _write_status_atomic(status_path, payload)
+
+    _flush({"current_subject": None})
+
+    for s in subjects:
+        sub_name = s["name"]
+        bundle_path = s["bundle_path"]
+        sub_status_path = s["status_path"]
+        # Resume guard: if a previous run of this batch already
+        # completed this subject (the per-subject status.json says
+        # so), skip rather than re-bake.
+        try:
+            if os.path.exists(sub_status_path):
+                with open(sub_status_path) as f:
+                    prev = json.load(f)
+                if prev.get("status") == "completed":
+                    sub_state[sub_name] = {"status": "completed", "skipped": True}
+                    _flush({"current_subject": None,
+                             "log": f"  {sub_name}: already completed, skipping"})
+                    continue
+        except Exception:
+            pass
+
+        sub_state[sub_name] = {"status": "running"}
+        _flush({"current_subject": sub_name,
+                 "log": f"  starting {sub_name}"})
+        try:
+            rc = subprocess.run(
+                [python_exe, "-u", worker_py, bundle_path, sub_status_path],
+                cwd=os.path.dirname(worker_py),
+            ).returncode
+            if rc == 0:
+                sub_state[sub_name] = {"status": "completed"}
+            else:
+                sub_state[sub_name] = {"status": "failed", "rc": rc}
+        except Exception as e:
+            sub_state[sub_name] = {"status": "failed", "error": str(e)}
+        _flush({"current_subject": None,
+                 "log": f"  finished {sub_name}: {sub_state[sub_name]['status']}"})
+
+    # Final flush — batch complete.
+    final_status = ("completed" if all(v.get("status") == "completed"
+                                         for v in sub_state.values())
+                    else "completed")   # partial-but-not-fatal still 'completed';
+                                        # per-subject 'failed' visible in sub_state
+    _write_status_atomic(status_path, {
+        "status": final_status,
+        "subjects": sub_state,
+        "started_at": started,
+        "finished_at": time.time(),
+        "heartbeat": time.time(),
+        "pid": os.getpid(),
+    })
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        traceback.print_exc()
+        sys.exit(1)
 '''
