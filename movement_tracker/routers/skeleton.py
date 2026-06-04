@@ -1439,17 +1439,17 @@ def run_hrnet_fit(subject_id: int, req: HRnetFitRequest) -> dict:
 
 
 class FitV2LegacyRequest(BaseModel):
-    """Request for the frozen 'Skeleton v2' legacy fit (MP + DLC only)."""
+    """Request for the frozen 'Skeleton v2' legacy fit.
+
+    MP combined is the sole 2D input — the old MP / DLC weights and
+    angle-constraint controls were removed when v2 was simplified.
+    """
     trial_idx: int
-    w_mediapipe: float = 10.0
-    w_dlc: float = 1.0
     w_bone: float = 0.0
-    w_smooth_wrist: float = 1.0
+    w_smooth_wrist: float = 5.0
     w_smooth_xy: float = 10.0
     w_smooth_z: float = 10.0
     w_smooth_angles: float = 10.0
-    use_angle_constraints: bool = True
-    w_constraints: float = 10.0
 
 
 @router.post("/{subject_id}/fit_v2_legacy")
@@ -1505,15 +1505,11 @@ def run_fit_v2_legacy(subject_id: int, req: FitV2LegacyRequest) -> dict:
                 name, trial_stem,
                 cancel_event=cancel_event,
                 progress_callback=on_progress,
-                w_mediapipe=req.w_mediapipe,
-                w_dlc=req.w_dlc,
                 w_bone=req.w_bone,
                 w_smooth_wrist=req.w_smooth_wrist,
                 w_smooth_xy=req.w_smooth_xy,
                 w_smooth_z=req.w_smooth_z,
                 w_smooth_angles=req.w_smooth_angles,
-                use_angle_constraints=req.use_angle_constraints,
-                w_constraints=req.w_constraints,
             )
 
             if result.get("cancelled"):

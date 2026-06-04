@@ -38,7 +38,6 @@ from .skeleton_v3 import (
     _compute_wrist_frame,
     _inverse_fk_init,
     _load_vision_lm,
-    _load_dlc_tips,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,17 +50,20 @@ def run_skeleton_v2_fit(
     trial_stem: str,
     cancel_event: threading.Event | None = None,
     progress_callback: Callable[[float], None] | None = None,
-    w_mediapipe: float = 1.0,
-    w_dlc: float = 1.0,
     w_bone: float = 0.0,
-    w_smooth_wrist: float = 1.0,
+    w_smooth_wrist: float = 5.0,
     w_smooth_xy: float = 10.0,
     w_smooth_z: float = 10.0,
     w_smooth_angles: float = 10.0,
-    use_angle_constraints: bool = True,
-    w_constraints: float = 10.0,
 ) -> dict[str, Any]:
-    """Frozen Skeleton v2 fit: MP + DLC only, absolute-position smoothing + z-constancy."""
+    """Frozen Skeleton v2 fit: MP combined only, absolute-position smoothing + z-constancy.
+
+    Previously took MP weight, DLC weight, angle-constraint flag, and
+    constraint weight; all four were dropped — MP combined is now
+    the sole 2D input (weight implicitly 1.0) and the constraint
+    term has been removed.  Wrist smoothing multiplier default
+    bumped from 1.0 to 5.0 so the wrist tracks more rigidly.
+    """
     import torch
     import torch.nn.functional as F  # noqa: F401
 
@@ -110,10 +112,7 @@ def run_skeleton_v2_fit(
     if cancelled():
         return {"cancelled": True}
 
-    th_L, th_R, ix_L, ix_R = _load_dlc_tips(subject_name, start_frame, N)
-    has_dlc = (not np.isnan(th_L).all()) or (not np.isnan(ix_L).all())
-
-    logger.info(f"  Sources: MP ✓  DLC {'✓' if has_dlc else '✗'}")
+    logger.info("  Sources: MP combined ✓")
 
     logger.info(f"  Triangulating {N} frames...")
     mp_3d = np.full((N, 21, 3), np.nan, dtype=np.float32)
@@ -259,22 +258,9 @@ def run_skeleton_v2_fit(
                 smooth_scale[i+1] = min(smooth_scale[i+1], scale)
     smooth_w = _t(smooth_scale)
 
-    if has_dlc:
-        dlc_tgt_L = _t(np.stack([th_L[valid_idx], ix_L[valid_idx]], axis=1))
-        dlc_tgt_R = _t(np.stack([th_R[valid_idx], ix_R[valid_idx]], axis=1))
-        dlc_mask_L = ~torch.isnan(dlc_tgt_L[:, :, 0])
-        dlc_mask_R = ~torch.isnan(dlc_tgt_R[:, :, 0])
-        dlc_tgt_L  = torch.nan_to_num(dlc_tgt_L, nan=0.0)
-        dlc_tgt_R  = torch.nan_to_num(dlc_tgt_R, nan=0.0)
-    else:
-        dlc_tgt_L = dlc_tgt_R = dlc_mask_L = dlc_mask_R = None
-
-    angle_prior_data = None
-    _angle_priors_list = []
-    if use_angle_constraints:
-        from .skeleton_data import load_angle_priors
-        angle_prior_data = load_angle_priors()
-        _angle_priors_list = angle_prior_data.get("joints", [])
+    # DLC and angle constraints removed from v2 — MP combined is the
+    # only 2D input; the smoothness + bone-length terms below handle
+    # everything else.
 
     n_iters   = 400
     optimizer = torch.optim.Adam([
@@ -293,13 +279,6 @@ def run_skeleton_v2_fit(
 
     logger.info(f"  Running legacy fitting ({n_iters} iters, {n_valid} frames)...")
     report(20)
-
-    # HRNet offset table (for DLC distal correction, same as active fit)
-    HM_OFFSETS = {
-        4: (3, 0.43),  8: (7, 0.32),  12: (11, 0.40), 16: (15, 0.40), 20: (19, 0.55),
-        3: (2, 0.28),  7: (6, 0.19),  11: (10, 0.12), 15: (14, 0.17), 19: (18, 0.02),
-        2: (1, 0.12),  6: (5, 0.10),  10: (9, 0.13),  14: (13, 0.04), 18: (17, 0.05),
-    }
 
     for it in range(n_iters):
         if cancelled():
@@ -324,28 +303,11 @@ def run_skeleton_v2_fit(
             w = jw if mask is None else jw * mask.float()
             return (err * w).sum() / w.sum().clamp(min=1)
 
-        if w_mediapipe > 0:
-            loss = loss + w_mediapipe * (
-                cam_w_L * _weighted_reproj(pL, tgt_mp_L)
-                + cam_w_R * _weighted_reproj(pR, tgt_mp_R)
-            )
-
-        if w_dlc > 0 and has_dlc:
-            # Apply distal offset for DLC (labels are at tip, skeleton joint is at knuckle)
-            joints_ext = joints_3d.clone()
-            for j, (p, ext) in HM_OFFSETS.items():
-                if ext > 0.01:
-                    bone_dir = joints_3d[:, j] - joints_3d[:, p]
-                    joints_ext[:, j] = joints_3d[:, j] + ext * bone_dir
-            pL_ext = _project_torch(joints_ext, K1, d1)
-            pR_ext = _project_torch(joints_ext, K2, d2, R_stereo, T_stereo)
-            pL_tips = torch.stack([pL_ext[:, 4], pL_ext[:, 8]], dim=1)
-            pR_tips = torch.stack([pR_ext[:, 4], pR_ext[:, 8]], dim=1)
-            jw_dlc = torch.stack([jw[:, 4], jw[:, 8]], dim=1)
-            err_L = ((pL_tips - dlc_tgt_L) ** 2).sum(-1) * dlc_mask_L.float() * jw_dlc
-            err_R = ((pR_tips - dlc_tgt_R) ** 2).sum(-1) * dlc_mask_R.float() * jw_dlc
-            denom = (dlc_mask_L.float() * jw_dlc + dlc_mask_R.float() * jw_dlc).sum().clamp(min=1)
-            loss = loss + w_dlc * (cam_w_L * err_L.sum() + cam_w_R * err_R.sum()) / denom
+        # MP combined is the sole 2D input — fixed unit weight.
+        loss = loss + (
+            cam_w_L * _weighted_reproj(pL, tgt_mp_L)
+            + cam_w_R * _weighted_reproj(pR, tgt_mp_R)
+        )
 
         if w_bone > 0:
             loss = loss + w_bone * ((bl_clamped - target_bl) ** 2).mean()
@@ -400,11 +362,6 @@ def run_skeleton_v2_fit(
                 ja = aa[1:] - aa[:-1]
                 t_ang = t_ang + 0.02 * (sw_jrk.unsqueeze(1) * (jf ** 2 + ja ** 2)).mean()
             loss = loss + w_smooth_angles * t_ang
-
-        if use_angle_constraints and _angle_priors_list and w_constraints > 0:
-            from .angle_constraint_loss import compute_angle_constraint_loss
-            _constraint_groups = angle_prior_data.get("constraint_groups") if angle_prior_data else None
-            loss = loss + w_constraints * compute_angle_constraint_loss(joints_3d, _angle_priors_list, _constraint_groups)
 
         if torch.isnan(loss) or torch.isinf(loss):
             continue
@@ -502,24 +459,19 @@ def run_skeleton_v2_fit(
         "n_frames": int(N),
         "n_fitted": int(n_valid),
         "n_iters": n_iters,
-        "sources": {"mediapipe": True, "dlc": has_dlc},
+        "sources": {"mediapipe_combined": True},
         "params": {
-            "w_mediapipe": w_mediapipe,
-            "w_dlc": w_dlc,
             "w_bone": w_bone,
             "w_smooth_wrist": w_smooth_wrist,
             "w_smooth_xy": w_smooth_xy,
             "w_smooth_z": w_smooth_z,
             "w_smooth_angles": w_smooth_angles,
-            "use_angle_constraints": use_angle_constraints,
-            "w_constraints": w_constraints,
         },
         "results": {
             "mean_error_L": float(np.nanmean(all_err_L)),
             "mean_error_R": float(np.nanmean(all_err_R)),
             "bone_lengths": final_bone_lengths.tolist(),
         },
-        "angle_constraints": angle_prior_data,
         "timestamp": datetime.now().isoformat(),
     }, indent=2))
 

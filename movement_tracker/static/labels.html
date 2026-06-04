@@ -729,32 +729,14 @@
                 <div style="font-size:10px;color:var(--text-muted);margin-bottom:6px;line-height:1.4;">
                     Legacy smoothing: per-joint absolute position + z-constancy. May bias bones shorter.
                 </div>
-                <!-- Input weights -->
-                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;">Input weights</div>
-                <div style="font-size:11px;margin-bottom:4px;">
-                    <div style="display:flex;justify-content:space-between;align-items:center;">
-                        <label style="color:var(--text-muted);">Mediapipe</label>
-                        <span id="lgWMediapipe" style="color:var(--text-muted);font-weight:bold;">10.0</span>
-                    </div>
-                    <input type="range" id="lgSliderMediapipe" min="0" max="20" step="0.1" value="10"
-                           style="width:100%;cursor:pointer;height:5px;">
-                </div>
-                <div style="font-size:11px;margin-bottom:4px;">
-                    <div style="display:flex;justify-content:space-between;align-items:center;">
-                        <label style="color:var(--text-muted);">DLC</label>
-                        <span id="lgWDLC" style="color:var(--text-muted);font-weight:bold;">1.0</span>
-                    </div>
-                    <input type="range" id="lgSliderDLC" min="0" max="5" step="0.1" value="1"
-                           style="width:100%;cursor:pointer;height:5px;">
-                </div>
-                <!-- Regularisation -->
-                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;margin-top:6px;">Regularisation</div>
+                <!-- Regularisation (MP combined is the sole 2D input — no input-weight sliders) -->
+                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;">Regularisation</div>
                 <div style="font-size:11px;margin-bottom:4px;">
                     <div style="display:flex;justify-content:space-between;align-items:center;">
                         <label style="color:var(--text-muted);">Wrist smooth ×</label>
-                        <span id="lgWSmoothWrist" style="color:var(--text-muted);font-weight:bold;">1.0</span>
+                        <span id="lgWSmoothWrist" style="color:var(--text-muted);font-weight:bold;">5.0</span>
                     </div>
-                    <input type="range" id="lgSliderSmoothWrist" min="0.1" max="10" step="0.1" value="1"
+                    <input type="range" id="lgSliderSmoothWrist" min="0.1" max="10" step="0.1" value="5"
                            style="width:100%;cursor:pointer;height:5px;">
                 </div>
                 <div style="font-size:11px;margin-bottom:4px;">
@@ -779,14 +761,6 @@
                         <span id="lgWSmoothAngles" style="color:var(--text-muted);font-weight:bold;">10.0</span>
                     </div>
                     <input type="range" id="lgSliderSmoothAngles" min="0" max="20" step="0.1" value="10"
-                           style="width:100%;cursor:pointer;height:5px;">
-                </div>
-                <div style="font-size:11px;margin-bottom:4px;">
-                    <div style="display:flex;justify-content:space-between;align-items:center;">
-                        <label style="color:var(--text-muted);">Constraints <button class="btn btn-sm" onclick="manoViewer.openConstraintsEditor()" style="font-size:10px;padding:1px 8px;margin-left:4px;">Edit</button></label>
-                        <span id="lgWConstraints" style="color:var(--text-muted);font-weight:bold;">10.0</span>
-                    </div>
-                    <input type="range" id="lgSliderConstraints" min="0" max="20" step="0.5" value="10"
                            style="width:100%;cursor:pointer;height:5px;">
                 </div>
                 <div style="display:flex;gap:4px;">
@@ -1341,7 +1315,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=407" type="module"></script>
+    <script src="/static/js/labels.js?v=408" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

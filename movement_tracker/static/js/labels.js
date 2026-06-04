@@ -1241,13 +1241,10 @@ const manoViewer = (() => {
 
         // Live value updates for legacy sliders
         const _lgSliders = [
-            ['lgSliderMediapipe',    'lgWMediapipe',    1],
-            ['lgSliderDLC',          'lgWDLC',          1],
             ['lgSliderSmoothWrist',  'lgWSmoothWrist',  1],
             ['lgSliderSmoothXY',     'lgWSmoothXY',     1],
             ['lgSliderSmoothZ',      'lgWSmoothZ',      1],
             ['lgSliderSmoothAngles', 'lgWSmoothAngles', 1],
-            ['lgSliderConstraints',  'lgWConstraints',  1],
         ];
         for (const [sid, lid, dec] of _lgSliders) {
             const s = $(sid), l = $(lid);
@@ -9521,15 +9518,11 @@ const manoViewer = (() => {
 
         const params = {
             trial_idx:            trials[currentTrialIdx].trial_idx,
-            w_mediapipe:          parseFloat($('lgSliderMediapipe')?.value  ?? 10),
-            w_dlc:                parseFloat($('lgSliderDLC')?.value        ?? 1),
             w_bone:               0,
-            w_smooth_wrist:       parseFloat($('lgSliderSmoothWrist')?.value  ?? 1),
+            w_smooth_wrist:       parseFloat($('lgSliderSmoothWrist')?.value  ?? 5),
             w_smooth_xy:          parseFloat($('lgSliderSmoothXY')?.value     ?? 10),
             w_smooth_z:           parseFloat($('lgSliderSmoothZ')?.value      ?? 10),
             w_smooth_angles:      parseFloat($('lgSliderSmoothAngles')?.value ?? 10),
-            use_angle_constraints: parseFloat($('lgSliderConstraints')?.value ?? 10) > 0,
-            w_constraints:        parseFloat($('lgSliderConstraints')?.value  ?? 10),
         };
 
         try {
@@ -9574,19 +9567,15 @@ const manoViewer = (() => {
 
     function resetFitLegacyDefaults() {
         const defaults = {
-            lgSliderMediapipe:    10,
-            lgSliderDLC:          1,
-            lgSliderSmoothWrist:  1,
+            lgSliderSmoothWrist:  5,
             lgSliderSmoothXY:     10,
             lgSliderSmoothZ:      10,
             lgSliderSmoothAngles: 10,
-            lgSliderConstraints:  10,
         };
         for (const [id, val] of Object.entries(defaults)) {
             const el = $(id);
             if (el) { el.value = val; el.dispatchEvent(new Event('input')); }
         }
-        _refreshConstraints();
     }
 
     // ── MediaPipe error detection: live recompute + save ─────────────────────
