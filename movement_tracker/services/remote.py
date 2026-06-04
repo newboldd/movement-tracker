@@ -5159,6 +5159,7 @@ def dispatch_remote_preproc_batch(
     import time as _time
     import uuid as _uuid
     from collections import defaultdict
+    from ..config import get_settings
     from .video import build_trial_map
     settings = get_settings()
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -5430,6 +5431,7 @@ def poll_remote_preproc_batch(
     heartbeat-timeout if the runner died).
     """
     import json as _json
+    from ..config import get_settings
     settings = get_settings()
     state_dir = _preproc_batch_state_dir(cfg, batch_id)
     status_remote = f"{state_dir}/batch_status.json"
