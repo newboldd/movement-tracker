@@ -4951,6 +4951,12 @@ def resume_remote_preproc_batch(
         )
     except Exception as e:
         logger.exception(f"resume_remote_preproc_batch {job_id} failed: {e}")
+        # Resume crashed — the remote runner may or may not still be
+        # alive.  Best-effort kill so we don't end up with an orphan
+        # batch we can't observe.
+        _kill_remote_preproc_runner(
+            cfg, _fetch_runner_pid(job_id), None, log_path,
+        )
         with get_db_ctx() as db:
             db.execute(
                 "UPDATE jobs SET status='failed', error_msg=?, "
@@ -5138,6 +5144,96 @@ def _preproc_batch_state_dir(cfg, batch_id: str) -> str:
     return f"{cfg.work_dir}/preproc_batches/{batch_id}"
 
 
+def _kill_remote_preproc_runner(
+    cfg, runner_pid, batch_id: str | None = None, log_path: str | None = None,
+):
+    """Best-effort kill of the detached batch-runner process on the
+    remote (and any currently-active per-subject worker subprocess
+    it spawned).
+
+    Called from every dispatch / poller / resume / cancel failure
+    path so a dead local job doesn't leave orphan compute on the
+    remote.  Cross-platform via Python's os.kill on the remote;
+    falls back to taskkill /T /F on Windows so child processes
+    (the active per-subject worker) get walked too.
+    """
+    if not runner_pid:
+        return
+    try:
+        runner_pid = int(runner_pid)
+    except (TypeError, ValueError):
+        return
+    # Kill runner (and its process tree on Windows).  Best-effort —
+    # we don't check returncode because if the runner already exited
+    # the kill is a no-op-with-error, which is the desired state.
+    script = (
+        f"import os, subprocess, sys; "
+        f"pid={runner_pid}; "
+        f"_={{}}; "
+        f"_={{}} if os.name != 'nt' else subprocess.run("
+        f"['taskkill','/F','/T','/PID',str(pid)], capture_output=True); "
+        f"_=None if os.name == 'nt' else "
+        f"(__import__('os').kill(pid, 15) if pid > 0 else None)"
+    )
+    # Also write a cancel sentinel into the batch state dir; the
+    # runner script can be hardened later to check for this between
+    # subjects.  Cheap regardless.
+    if batch_id:
+        sentinel = f"{cfg.work_dir}/preproc_batches/{batch_id}/cancel.flag"
+        script += (
+            f"; open(r'{sentinel}', 'w').write('1')"
+        )
+    try:
+        subprocess.run(
+            _py_cmd(cfg, f"\"{script}\""),
+            capture_output=True, timeout=15,
+        )
+        if log_path:
+            try:
+                with open(log_path, "a") as f:
+                    f.write(f"  killed remote runner pid {runner_pid}\n")
+            except OSError:
+                pass
+    except Exception as e:
+        if log_path:
+            try:
+                with open(log_path, "a") as f:
+                    f.write(f"  WARN: kill_remote_runner failed: {e}\n")
+            except OSError:
+                pass
+
+
+def _fetch_runner_pid(job_id: int) -> int | None:
+    """Read the stored runner PID from the job row.  We persist it
+    in two places (tmux_session 'pid:<n>' and params_json._remote_pid)
+    when the dispatcher launches; either works for resume / kill."""
+    import json as _json
+    try:
+        with get_db_ctx() as db:
+            row = db.execute(
+                "SELECT params_json, tmux_session FROM jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+        if not row:
+            return None
+        ts = (row["tmux_session"] or "").strip()
+        if ts.startswith("pid:"):
+            try:
+                return int(ts.split(":", 1)[1])
+            except (ValueError, IndexError):
+                pass
+        try:
+            p = _json.loads(row["params_json"] or "{}")
+            v = p.get("_remote_pid")
+            if v is not None:
+                return int(v)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return None
+
+
 def dispatch_remote_preproc_batch(
     job_id: int,
     cfg: RemoteConfig,
@@ -5191,6 +5287,13 @@ def dispatch_remote_preproc_batch(
 
     def _fail(msg: str) -> dict:
         logfile.write(f"ERROR: {msg}\n"); logfile.flush()
+        # Kill the detached runner if it was already launched.
+        # _fetch_runner_pid returns None for early-dispatch failures
+        # where the runner never started — kill is a no-op in that
+        # case so the call is safe to make unconditionally.
+        _kill_remote_preproc_runner(
+            cfg, _fetch_runner_pid(job_id), batch_id, log_path,
+        )
         with get_db_ctx() as db:
             db.execute(
                 "UPDATE jobs SET status='failed', error_msg=?, "
@@ -5426,7 +5529,16 @@ def dispatch_remote_preproc_batch(
             )
         return {"batch_id": batch_id, "remote_pid": remote_pid}
     except InterruptedError:
-        logfile.write("  dispatch cancelled\n"); logfile.flush()
+        logfile.write("  dispatch cancelled — killing any launched runner\n")
+        logfile.flush()
+        _kill_remote_preproc_runner(
+            cfg, _fetch_runner_pid(job_id), batch_id, log_path,
+        )
+        with get_db_ctx() as db:
+            db.execute(
+                "UPDATE jobs SET status='cancelled', "
+                "finished_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,),
+            )
         return {"error": "cancelled"}
     except Exception as e:
         logger.exception(f"dispatch_remote_preproc_batch {job_id} failed: {e}")
@@ -5620,7 +5732,11 @@ def poll_remote_preproc_batch(
                 ("completed", err, job_id),
             )
     except InterruptedError:
-        logfile.write("  poller cancelled by user\n"); logfile.flush()
+        logfile.write("  poller cancelled by user — killing remote runner\n")
+        logfile.flush()
+        _kill_remote_preproc_runner(
+            cfg, _fetch_runner_pid(job_id), batch_id, log_path,
+        )
         with get_db_ctx() as _db:
             _db.execute(
                 "UPDATE jobs SET status='cancelled', "
@@ -5628,6 +5744,12 @@ def poll_remote_preproc_batch(
             )
     except Exception as e:
         logger.exception(f"poll_remote_preproc_batch {job_id}: {e}")
+        # Poller-side crash → the runner on the remote is still going.
+        # Kill it so we don't leave orphan compute when the local job
+        # is marked failed.
+        _kill_remote_preproc_runner(
+            cfg, _fetch_runner_pid(job_id), batch_id, log_path,
+        )
         with get_db_ctx() as _db:
             _db.execute(
                 "UPDATE jobs SET status='failed', error_msg=?, "
