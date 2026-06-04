@@ -8809,10 +8809,13 @@ const manoViewer = (() => {
         const isFin = (v) => Number.isFinite(v);
 
         const attrib3D = (t, j) => {
-            // step_2d_L/R already carry a 1-frame lookback fallback
-            // baked in server-side, so NaN here genuinely means
-            // "no usable previous label within 2 frames" → can't
-            // blame this side, route the flag to the partner.
+            // step_2d_L/R are per-camera *polynomial-fit residuals*
+            // at frame t (centred 11-frame window, quadratic) —
+            // not raw frame-to-frame step magnitudes.  Smooth fast
+            // motion has a small residual; a sudden label glitch
+            // has a large one.  NaN here means "couldn't find
+            // enough finite neighbours to fit" → can't blame this
+            // side, route the flag to the partner.
             const dL = A.step_2d_L ? A.step_2d_L[idx2(t, j)] : NaN;
             const dR = A.step_2d_R ? A.step_2d_R[idx2(t, j)] : NaN;
             const okL = isFin(dL), okR = isFin(dR);

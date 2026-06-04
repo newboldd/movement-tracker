@@ -40,27 +40,63 @@ def _robust_z(values: np.ndarray, axis: int = 0):
     return np.abs(values - med) / mad, med, mad
 
 
-def _step_with_lookback(arr: np.ndarray) -> np.ndarray:
-    """Per-(t, j) 2D step magnitude from ``arr[t]`` to the closest
-    finite previous frame within a 2-frame lookback window.
+def _residual_vs_polyfit(
+    arr: np.ndarray, window: int = 5, degree: int = 2,
+) -> np.ndarray:
+    """Per-(t, j) residual of ``arr[t, j]`` against a polynomial fit
+    through its neighbours.
 
-    Per-camera: when ``arr[t-1, j]`` has any NaN, fall back to the
-    1-frame-prior reference (``arr[t-2, j]``).  When BOTH are NaN
-    the entry stays NaN — meaning "this camera's velocity at t is
-    undefined" — so blame attribution can route around it instead
-    of returning a noisy zero.
+    For each (t, j) we fit a quadratic to the points
+    ``arr[t-window:t+window+1, j]`` EXCLUDING t itself (NaN-filtered)
+    and report the distance from ``arr[t, j]`` to the polynomial's
+    prediction at frame t.
+
+    Rationale: raw frame-to-frame step magnitude treats fast natural
+    motion the same as a sudden label glitch — both have big
+    step.  A polynomial residual separates them: smooth real motion
+    matches the local fit so the residual stays small, while an
+    outlier label deviates sharply from the neighbouring trajectory.
+
+    Returns ``(N, J)`` float64; entries are NaN where ``arr[t, j]``
+    itself is NaN or where we couldn't find ``degree+1`` finite
+    neighbours in the window.
     """
-    N = arr.shape[0]
-    s1 = np.full((N, arr.shape[1]), np.nan, dtype=np.float64)
-    if N >= 2:
-        s1[1:] = np.linalg.norm(arr[1:] - arr[:-1], axis=-1)
-    s2 = np.full((N, arr.shape[1]), np.nan, dtype=np.float64)
-    if N >= 3:
-        s2[2:] = np.linalg.norm(arr[2:] - arr[:-2], axis=-1)
-    # np.linalg.norm propagates NaN, so s1 is NaN whenever EITHER
-    # arr[t] or arr[t-1] had a NaN coord — exactly when we want
-    # the lookback fallback.
-    return np.where(np.isfinite(s1), s1, s2)
+    N, J = arr.shape[0], arr.shape[1]
+    out = np.full((N, J), np.nan, dtype=np.float64)
+    if N < degree + 2:
+        return out
+    for j in range(J):
+        col_x = arr[:, j, 0]
+        col_y = arr[:, j, 1]
+        for t in range(N):
+            cx = col_x[t]
+            cy = col_y[t]
+            if not (np.isfinite(cx) and np.isfinite(cy)):
+                continue
+            lo = max(0, t - window)
+            hi = min(N, t + window + 1)
+            ts = np.arange(lo, hi, dtype=np.float64)
+            mask = ts != t
+            ts_n = ts[mask]
+            xs_n = col_x[lo:hi][mask]
+            ys_n = col_y[lo:hi][mask]
+            ok = np.isfinite(xs_n) & np.isfinite(ys_n)
+            if int(ok.sum()) < degree + 1:
+                continue
+            ts_v = ts_n[ok]
+            xs_v = xs_n[ok]
+            ys_v = ys_n[ok]
+            try:
+                px = np.polyfit(ts_v, xs_v, degree)
+                py = np.polyfit(ts_v, ys_v, degree)
+            except (np.linalg.LinAlgError, ValueError):
+                continue
+            xp = np.polyval(px, t)
+            yp = np.polyval(py, t)
+            dx = cx - xp
+            dy = cy - yp
+            out[t, j] = float(np.sqrt(dx * dx + dy * dy))
+    return out
 
 
 def _camera_blame_from_2d_step(
@@ -69,24 +105,30 @@ def _camera_blame_from_2d_step(
     k_blame: float = 2.0,
 ) -> np.ndarray:
     """Distribute a per-(frame, joint) flag onto the L/R cameras
-    based on 2D step magnitude vs. the most recent finite previous
-    frame (up to 2 frames back, per camera independently).
+    based on the polynomial-fit residual at frame t per camera.
+
+    The residual is computed by :func:`_residual_vs_polyfit` over
+    a centred 11-frame window (5 before + 5 after, excluding t).
+    A camera whose label at t deviates sharply from its own local
+    smooth trajectory gets the larger residual and the blame —
+    real fast motion that's continuous on both sides of t has a
+    small residual since the polynomial captures the trajectory.
 
     Decision ladder:
-      * one side's step is NaN  → blame the other side.
-      * both NaN                → blame both.
-      * dL > k_blame × dR       → blame L only.
-      * dR > k_blame × dL       → blame R only.
-      * otherwise (comparable)  → blame the LARGER step.  Exact
-                                  ties (often dL == dR == 0)     →
-                                  blame both.
+      * one side's residual is NaN  → blame the other side.
+      * both NaN                    → blame both.
+      * dL > k_blame × dR           → blame L only.
+      * dR > k_blame × dL           → blame R only.
+      * otherwise (comparable)      → blame the LARGER residual.
+        Exact ties (rare with float residuals; typically dL ==
+        dR == 0)                    → blame both.
     """
     N, J = mp_L.shape[0], mp_L.shape[1]
     out = np.zeros((N, J, 2), dtype=bool)
     if N < 2:
         return out
-    step_L = _step_with_lookback(mp_L)
-    step_R = _step_with_lookback(mp_R)
+    step_L = _residual_vs_polyfit(mp_L)
+    step_R = _residual_vs_polyfit(mp_R)
     tj = np.argwhere(joint_mask)
     for t, j in tj:
         dL = step_L[t, j]
@@ -476,15 +518,17 @@ def build_signal_data(
             m = min(N, R.shape[0])
             stereo_hybrid_resp[:m] = R[:m]
 
-    # ── Camera-attribution helpers (2D + 3D step magnitudes) ──
-    # 2D steps now do a 1-frame lookback fallback so blame
-    # attribution still works when the previous frame's label was
-    # NaN.  See ``_step_with_lookback`` for the convention.  NaN
-    # entries mean "no usable reference within 2 frames" — the
-    # consumer (attrib3D in labels.js, _camera_blame_from_2d_step
-    # here) should treat those as "can't blame this side".
-    step_2d_L = _step_with_lookback(mp_L)
-    step_2d_R = _step_with_lookback(mp_R)
+    # ── Camera-attribution helpers (2D residuals + 3D step) ──
+    # ``step_2d_L`` / ``step_2d_R`` are NOT raw frame-to-frame
+    # step magnitudes anymore — they're per-camera polynomial-fit
+    # residuals over a centred 11-frame window (see
+    # ``_residual_vs_polyfit``).  Real fast motion that's smooth
+    # on both sides of t now has a small residual; a sudden label
+    # jump has a large one, so blame attribution doesn't trip on
+    # high-velocity but legitimate motion.  Keeping the legacy
+    # name avoids churning the JS composer's attrib3D helper.
+    step_2d_L = _residual_vs_polyfit(mp_L)
+    step_2d_R = _residual_vs_polyfit(mp_R)
     step_3d = np.zeros((N, J), dtype=np.float64)
     if N > 1:
         step_3d[1:] = np.linalg.norm(init_3d[1:] - init_3d[:-1], axis=-1)
