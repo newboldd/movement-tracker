@@ -10157,6 +10157,22 @@ const manoViewer = (() => {
         closeConstraintsEditor();
     }
 
+    // Dev shim: a read-only window into the IIFE's hot state so the
+    // DevTools console can hand-inspect what render() / update3D()
+    // see without setting a breakpoint.  Getters resolve at access
+    // time so they always reflect the current values.  Safe to keep
+    // shipped — it never mutates anything.
+    window.__viewer = {
+        get trialData()       { return trialData; },
+        get currentFrame()    { return currentFrame; },
+        get currentTrialIdx() { return currentTrialIdx; },
+        get currentSide()     { return currentSide; },
+        get trials()          { return trials; },
+        get subjectId()       { return subjectId; },
+        get mpFilterData()    { return _mpFilterData; },
+        get mpFilterMask()    { return _mpFilterMask; },
+        get mpFilterCamMask() { return _mpFilterCamMask; },
+    };
     return { goToFrame, togglePlay, toggleSide, resetZoom, toggleTrackingZoom, prevSubject, nextSubject, getExportContext, runStage1, renderDistanceTrace, resetFitDefaults, resetPlotSelection, togglePlotMode, toggleSeriesMode, runFitV2, resetFitV2Defaults, runFitLegacy, resetFitLegacyDefaults, saveErrors, openConstraintsEditor, saveConstraints, resetConstraints, closeConstraintsEditor, cancelConstraintsEditor };
 })();
 
