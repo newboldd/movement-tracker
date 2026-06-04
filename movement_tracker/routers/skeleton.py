@@ -115,6 +115,54 @@ def get_trial_data(subject_id: int, trial_idx: int) -> Response:
     return Response(content=body, media_type="application/json")
 
 
+@router.get("/{subject_id}/trial/{trial_idx}/stereo_fill_data")
+def get_trial_stereo_fill_data(subject_id: int, trial_idx: int) -> Response:
+    """Lazy-fetched Stereo Fill payload for one trial.
+
+    Skel Fit v1 and the Labels page Stereo Fill model both want the
+    filtered+stereo-donated MP combined arrays for a trial.  The
+    computation is heavy (calls detect_mask twice through
+    build_and_validate_stereo_fill, ~150 ms at trial scale) so the
+    main /trial/{idx}/data response defers it — the client fetches
+    this endpoint only when the user toggles the Stereo Fill row on.
+    """
+    name = _subject_name(subject_id)
+    trials = list_skeleton_trials(name)
+    trial = None
+    for t in trials:
+        if t["trial_idx"] == trial_idx:
+            trial = t
+            break
+    if trial is None:
+        raise HTTPException(404, f"No Skeleton data for trial index {trial_idx}")
+    try:
+        data = load_skeleton_trial_data(
+            name, trial["trial_stem"], compute_stereo_fill=True)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    # Return only the Stereo Fill keys to keep the payload small.
+    out = {
+        "stereo_fill_tracked_L": data.get("stereo_fill_tracked_L"),
+        "stereo_fill_tracked_R": data.get("stereo_fill_tracked_R"),
+        "stereo_fill_joints_3d": data.get("stereo_fill_joints_3d"),
+        "stereo_fill_source":    data.get("stereo_fill_source"),
+        "distances_stereo_fill": data.get("distances_stereo_fill"),
+        "has_stereo_fill":       data.get("has_stereo_fill", False),
+    }
+    import math, numpy as np
+    def _default(o):
+        if isinstance(o, (np.integer,)): return int(o)
+        if isinstance(o, (np.floating, float)):
+            v = float(o)
+            if math.isnan(v) or math.isinf(v): return None
+            return v
+        if isinstance(o, np.ndarray): return o.tolist()
+        raise TypeError(f"Object of type {type(o)} is not JSON serializable")
+    body = json.dumps(out, separators=(",", ":"), default=_default)
+    body = body.replace("NaN", "null").replace("Infinity", "null")
+    return Response(content=body, media_type="application/json")
+
+
 @router.get("/{subject_id}/trial/{trial_idx}/heatmap")
 def get_trial_heatmap(
     subject_id: int,

@@ -927,7 +927,10 @@ def _load_trial_calibration(subject_name: str, trial_stem: str) -> dict | None:
     return calib
 
 
-def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, Any]:
+def load_skeleton_trial_data(
+    subject_name: str, trial_stem: str,
+    *, compute_stereo_fill: bool = False,
+) -> dict[str, Any]:
     """Load all Skeleton viewer data for a single trial.
 
     Works in two modes:
@@ -2107,15 +2110,48 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
     except Exception as _e:
         logger.debug(f"stereo_align load skipped: {_e}")
 
+    # ── Stereo Fill availability check (cheap, file-existence only) ──
+    # Used by the Labels page to show the row as available without
+    # actually triggering the (polyfit-heavy) computation on every
+    # trial load.  Lives behind the same flag as the full bake so
+    # the gating signal stays accurate.
+    try:
+        _sf_inputs_ok = (
+            (_skeleton_dir(subject_name) / trial_stem / "mp_filter_params.json").exists()
+            and (
+                (_skeleton_dir(subject_name) / trial_stem / "stereo_align_hybrid.npz").exists()
+                or (_skeleton_dir(subject_name) / trial_stem / "stereo_align.npz").exists()
+            )
+        )
+    except Exception:
+        _sf_inputs_ok = False
+    result["has_stereo_fill_inputs"] = bool(_sf_inputs_ok)
+
     # ── Stereo Fill ─────────────────────────────────────────────────
     # Filtered MP combined with per-camera donations from the best
     # available stereo bake (Hybrid > Image).  When ONE camera is
     # filtered for a joint AND the stereo confidence at that joint
     # is above ``conf_min``, the filtered cell is replaced with the
     # stereo-corrected point.  Both-filtered or low-confidence
-    # cells are left blank.  No mp_filter sidecar or no stereo →
-    # the whole block is skipped and the keys stay None.
+    # cells are left blank.
+    #
+    # Deferred: the full computation is heavy (calls detect_mask
+    # twice through build_and_validate_stereo_fill, which runs the
+    # polyfit-based blame attribution per enabled signal — ~150 ms
+    # at trial scale).  The Labels page fetches it lazily via a
+    # dedicated endpoint when the user toggles the Stereo Fill row
+    # on.  Pass ``compute_stereo_fill=True`` from that endpoint;
+    # the default trial-data response stays fast.
+    # The full Stereo Fill bake is gated on ``compute_stereo_fill``.
+    # When False (default), skip and let the Labels page lazy-fetch
+    # it via /trial/{idx}/stereo_fill_data only when the user
+    # toggles the model row on.  When True, run the full build +
+    # validate pipeline below.  Empty-string sentinel keeps the
+    # existing try/except shape so all post-Stereo-Fill code still
+    # falls through.
     try:
+        if not compute_stereo_fill:
+            raise RuntimeError("stereo_fill skipped (compute_stereo_fill=False)")
         from .mp_filter import (
             load_saved_filter_params, detect_mask_from_params,
             build_and_validate_stereo_fill,

@@ -30,6 +30,12 @@ const manoViewer = (() => {
     // has_calib, has_mp_conf, has_hrnet }.
     let _mpFilterData = null;
     let _mpFilterDataFetch = null;     // in-flight Promise to dedupe
+    // Lazy-loaded Stereo Fill payload — keyed on trialIdx.  The
+    // main trial-data response excludes it (the bake is heavy);
+    // we fetch from /trial/{idx}/stereo_fill_data the first time
+    // the user toggles a Stereo Fill row on for the current trial.
+    let _stereoFillData = null;
+    let _stereoFillFetch = null;
     // Saved Stereo-panel per-mode knobs from the trial's npz files;
     // loaded lazily on first panel-open, cleared on trial switch.
     // Declared at module scope (not inside the event-setup block)
@@ -1401,6 +1407,12 @@ const manoViewer = (() => {
         // previous trial — they'll be refetched the next time the
         // panel opens (or right now if it's already open).
         _stereoSavedParams = {};
+        // Drop the cached Stereo Fill payload — it's per-trial.
+        // If the user already has a Stereo Fill row enabled, kick
+        // off a refetch immediately so the model row populates
+        // for the new trial without a manual toggle.
+        _stereoFillData = null;
+        if (showStereoFill2D || showStereoFill3D) _ensureStereoFillData();
         if ($('stereoPanel')?.style.display === 'block') {
             // Panel is still open across the trial switch: refresh
             // sliders in-place so the user sees the new trial's
@@ -1732,7 +1744,11 @@ const manoViewer = (() => {
         $('showCropped2D')?.addEventListener('change', e => { showCropped2D = e.target.checked; updateLayerFlags(); });
         $('showStatic2D')?.addEventListener('change', e => { showStatic2D = e.target.checked; updateLayerFlags(); });
         $('showCombined2D')?.addEventListener('change', e => { showCombined2D = e.target.checked; updateLayerFlags(); });
-        $('showStereoFill2D')?.addEventListener('change', e => { showStereoFill2D = e.target.checked; updateLayerFlags(); });
+        $('showStereoFill2D')?.addEventListener('change', e => {
+            showStereoFill2D = e.target.checked;
+            updateLayerFlags();
+            if (showStereoFill2D) _ensureStereoFillData();
+        });
         // Helper: clear the selected-joint marker if none of the three
         // Stereo variants is visible anymore.
         const _maybeClearStereoSelected = () => {
@@ -1994,7 +2010,11 @@ const manoViewer = (() => {
         $('showCropped3D')?.addEventListener('change', e => { showCropped3D = e.target.checked; updateLayerFlags(); });
         $('showStatic3D')?.addEventListener('change', e => { showStatic3D = e.target.checked; updateLayerFlags(); });
         $('showCombined3D')?.addEventListener('change', e => { showCombined3D = e.target.checked; updateLayerFlags(); });
-        $('showStereoFill3D')?.addEventListener('change', e => { showStereoFill3D = e.target.checked; updateLayerFlags(); });
+        $('showStereoFill3D')?.addEventListener('change', e => {
+            showStereoFill3D = e.target.checked;
+            updateLayerFlags();
+            if (showStereoFill3D) _ensureStereoFillData();
+        });
         $('showMano2D').addEventListener('change', e => { showMano2D = e.target.checked; updateLayerFlags(); _updateHandDiagramColor(); });
         $('showMano3D').addEventListener('change', e => { showMano3D = e.target.checked; updateLayerFlags(); _updateHandDiagramColor(); });
         $('showSkelV2_2D').addEventListener('change', e => {
@@ -8157,7 +8177,13 @@ const manoViewer = (() => {
         const hasReverse  = _hasTracked('reverse_tracked_L')  || _hasTracked('reverse_tracked_R');
         const hasStatic   = _hasTracked('static_tracked_L')   || _hasTracked('static_tracked_R');
         const hasCombined = _hasTracked('combined_tracked_L') || _hasTracked('combined_tracked_R');
-        const hasStereoFill = _hasTracked('stereo_fill_tracked_L') || _hasTracked('stereo_fill_tracked_R');
+        // Stereo Fill availability now uses the cheap file-existence
+        // flag emitted by the trial-data response — the actual
+        // payload is fetched lazily when the user enables a row,
+        // so _hasTracked() would always be false here on page load.
+        const hasStereoFill = !!trialData?.has_stereo_fill_inputs
+                              || _hasTracked('stereo_fill_tracked_L')
+                              || _hasTracked('stereo_fill_tracked_R');
         const hasPose     = _hasTracked('pose_tracked_L')     || _hasTracked('pose_tracked_R');
         for (const [id, ok] of [
             ['showCropped2D',  hasCropped],  ['showCropped3D',  hasCropped],
@@ -8753,6 +8779,47 @@ const manoViewer = (() => {
         const bytes = new Uint8Array(len);
         for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
         return new Float32Array(bytes.buffer);
+    }
+
+    // Lazy-fetch Stereo Fill for the current trial.  Splices the
+    // returned keys back into trialData so the existing render
+    // code (which reads trialData.stereo_fill_*) keeps working
+    // without conditional checks.  Refetches on trial switch
+    // (loadTrial nulls _stereoFillData) and dedupes in-flight
+    // requests via _stereoFillFetch.
+    async function _ensureStereoFillData() {
+        if (!subjectId || currentTrialIdx < 0 || !trials?.[currentTrialIdx]) return null;
+        const trialIdx = trials[currentTrialIdx].trial_idx;
+        if (_stereoFillData && _stereoFillData.trialIdx === trialIdx) return _stereoFillData;
+        if (_stereoFillFetch && _stereoFillFetch.trialIdx === trialIdx) {
+            return _stereoFillFetch.promise;
+        }
+        const p = (async () => {
+            try {
+                const res = await api(`/api/skeleton/${subjectId}/trial/${trialIdx}/stereo_fill_data`);
+                _stereoFillData = { trialIdx, ...res };
+                // Splice into trialData so the per-frame renderers
+                // pick the new arrays up on the next draw cycle.
+                if (trialData) {
+                    trialData.stereo_fill_tracked_L = res.stereo_fill_tracked_L;
+                    trialData.stereo_fill_tracked_R = res.stereo_fill_tracked_R;
+                    trialData.stereo_fill_joints_3d = res.stereo_fill_joints_3d;
+                    trialData.stereo_fill_source    = res.stereo_fill_source;
+                    trialData.distances_stereo_fill = res.distances_stereo_fill;
+                    trialData.has_stereo_fill       = res.has_stereo_fill;
+                }
+                render();
+                update3D();
+                renderDistanceTrace();
+                return _stereoFillData;
+            } catch (e) {
+                console.warn('stereo_fill fetch failed:', e);
+                return null;
+            }
+        })();
+        _stereoFillFetch = { trialIdx, promise: p };
+        try { return await p; }
+        finally { _stereoFillFetch = null; }
     }
 
     async function _ensureMpFilterData() {
