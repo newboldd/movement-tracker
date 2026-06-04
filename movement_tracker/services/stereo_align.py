@@ -597,8 +597,28 @@ def run_stereo_align(subject_name: str, trial_idx: int,
             os_cx, os_cy = int(round(float(os_x))), int(round(float(os_y)))
             od_cx, od_cy = int(round(float(od_x))), int(round(float(od_y)))
             jh = per_joint_halves[j]
+            # If MP labels disagree by more than the crop half-size,
+            # the OS and OD crops at the literal label positions sit
+            # on entirely non-overlapping scene patches and phase
+            # correlation can only return noise (the user-visible
+            # symptom: stereo correction "gets tripped up when MP
+            # labels are too far apart").  Re-anchor the OD crop on
+            # the hand-wide prior (os_label + base_shift) so both
+            # crops see the same world patch; track the offset so we
+            # can compensate the returned shift below.
+            od_cx_used, od_cy_used = od_cx, od_cy
+            if base_dx is not None and base_dy is not None:
+                pred_od_cx = os_cx + float(base_dx)
+                pred_od_cy = os_cy + float(base_dy)
+                gap = (((od_cx - pred_od_cx) ** 2
+                        + (od_cy - pred_od_cy) ** 2) ** 0.5)
+                if gap > jh:
+                    od_cx_used = int(round(pred_od_cx))
+                    od_cy_used = int(round(pred_od_cy))
+            ox = od_cx_used - od_cx     # OD crop displacement vs.
+            oy = od_cy_used - od_cy     # od_label, applied to shift below
             os_crop = _crop(img_OS, os_cx, os_cy, jh)
-            od_crop = _crop(img_OD, od_cx, od_cy, jh)
+            od_crop = _crop(img_OD, od_cx_used, od_cy_used, jh)
             # Hybrid: weight the per-joint phase corr by the dilated
             # outline mask so BG pixels contribute literal zero to the
             # FFT.  Failsafe: if either MP label falls OUTSIDE the
@@ -623,7 +643,7 @@ def run_stereo_align(subject_name: str, trial_idx: int,
                     os_m_crop = od_m_crop = None
                     if use_mask:
                         os_m_crop = _crop(os_mask, os_cx, os_cy, jh)
-                        od_m_crop = _crop(od_mask, od_cx, od_cy, jh)
+                        od_m_crop = _crop(od_mask, od_cx_used, od_cy_used, jh)
                     raw_dx, raw_dy, r = _align_phase_weighted(
                         os_crop, od_crop, _win_for_half(jh),
                         os_m_crop, od_m_crop,
@@ -638,6 +658,15 @@ def run_stereo_align(subject_name: str, trial_idx: int,
                                     min(_REFINE_CLAMP_PX, raw_dy - base_dy))
             else:
                 dx, dy = raw_dx, raw_dy
+            # Compensate for the OD crop being re-anchored to the
+            # base-shift prediction above (non-zero only when MP
+            # labels disagreed by more than the crop half-size).
+            # ox / oy are intentionally NOT inside the refine clamp:
+            # the clamp limits per-joint *refinement noise* on top
+            # of the global prior, but the re-anchor offset IS the
+            # signal we want when MP genuinely failed.
+            dx += ox
+            dy += oy
             shifts[fi, j, 0] = dx
             shifts[fi, j, 1] = dy
             response[fi, j] = r
