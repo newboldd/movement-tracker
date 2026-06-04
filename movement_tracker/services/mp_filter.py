@@ -261,6 +261,30 @@ def _signal_stereo_reproj(init_3d, mp_L, mp_R, calib, stereo_px: float):
     return out
 
 
+def _signal_stereo_hybrid(stereo_shift_mag, N, J, stereo_hybrid_px: float):
+    """Per-(frame, joint) hybrid-stereo correction distance.
+
+    ``stereo_shift_mag`` is the 2D Euclidean magnitude of the
+    per-joint shift baked by Stereo Correct (hybrid mode) — the
+    distance from each MP combined label to its stereo-corrected
+    point.  Flags both cameras together when the shift exceeds the
+    threshold (the shift is applied antisymmetrically to L and R
+    by the same magnitude, so there is no per-camera attribution
+    naturally available at this signal).  No hybrid npz → no-op.
+    """
+    out = np.zeros((N, J, 2), dtype=bool)
+    if stereo_shift_mag is None:
+        return out
+    S = np.asarray(stereo_shift_mag, dtype=np.float64)
+    if S.ndim != 2 or S.shape[1] != J:
+        return out
+    m = min(N, S.shape[0])
+    bad = np.where(np.isfinite(S[:m]), S[:m] > stereo_hybrid_px, False)
+    out[:m, :, 0] = bad
+    out[:m, :, 1] = bad
+    return out
+
+
 def _signal_hrnet(hrnet_L, hrnet_R, N, J, hrnet_min: float):
     """Per-(frame, joint, camera) HRnet score below threshold."""
     out = np.zeros((N, J, 2), dtype=bool)
@@ -291,6 +315,7 @@ def build_signal_data(
     confidence_R=None,
     hrnet_L=None,
     hrnet_R=None,
+    stereo_shift_mag=None,
 ) -> dict:
     """Compute every signal's RAW per-(frame, joint[, camera]) array
     once for a trial.  Returns float32 numpy arrays the caller can
@@ -368,6 +393,16 @@ def build_signal_data(
             stereo_dev_L = res_L - base_L
             stereo_dev_R = res_R - base_R
 
+    # ── Hybrid-stereo correction distance (px) ────────────────
+    # Per-(frame, joint) 2D shift magnitude from the trial's
+    # stereo_align_hybrid.npz, NaN-padded when missing.
+    stereo_hybrid_mag = np.full((N, J), np.nan, dtype=np.float64)
+    if stereo_shift_mag is not None:
+        S = np.asarray(stereo_shift_mag, dtype=np.float64)
+        if S.ndim == 2 and S.shape[1] == J:
+            m = min(N, S.shape[0])
+            stereo_hybrid_mag[:m] = S[:m]
+
     # ── Camera-attribution helpers (2D + 3D step magnitudes) ──
     step_2d_L = np.zeros((N, J), dtype=np.float64)
     step_2d_R = np.zeros((N, J), dtype=np.float64)
@@ -408,6 +443,7 @@ def build_signal_data(
         "ydisp_dev":      ydisp_dev.astype(f32),
         "stereo_dev_L":   stereo_dev_L.astype(f32),
         "stereo_dev_R":   stereo_dev_R.astype(f32),
+        "stereo_hybrid_mag": stereo_hybrid_mag.astype(f32),
         "step_2d_L":      step_2d_L.astype(f32),
         "step_2d_R":      step_2d_R.astype(f32),
         "step_3d":        step_3d.astype(f32),
@@ -457,6 +493,10 @@ def detect_mask(
     # Stereo reproj (px)
     enable_stereo: bool = False,
     stereo_px: float = 5.0,
+    # Stereo error (hybrid shift magnitude, px)
+    enable_stereo_hybrid: bool = False,
+    stereo_hybrid_px: float = 10.0,
+    stereo_shift_mag=None,
     # HRnet (≥)
     enable_hrnet: bool = False,
     hrnet_min: float = 0.2,
@@ -496,6 +536,9 @@ def detect_mask(
         _add("mp_confidence", _signal_mpconf(confidence_L, confidence_R, N, J, mpconf_min))
     if enable_stereo and calib is not None:
         _add("stereo_reproj", _signal_stereo_reproj(init_3d, mp_L, mp_R, calib, stereo_px))
+    if enable_stereo_hybrid and stereo_shift_mag is not None:
+        _add("stereo_hybrid",
+             _signal_stereo_hybrid(stereo_shift_mag, N, J, stereo_hybrid_px))
     if enable_hrnet and (hrnet_L is not None or hrnet_R is not None):
         _add("hrnet",        _signal_hrnet(hrnet_L, hrnet_R, N, J, hrnet_min))
 

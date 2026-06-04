@@ -8661,6 +8661,7 @@ const manoViewer = (() => {
         { id: 'z',      fmt: v => v.toFixed(1), keys: ['enable_z',      'z_k'] },
         { id: 'mpconf', fmt: v => v.toFixed(2), keys: ['enable_mpconf', 'mpconf_min'] },
         { id: 'stereo', fmt: v => v.toFixed(1), keys: ['enable_stereo', 'stereo_px'] },
+        { id: 'stereoHybrid', fmt: v => v.toFixed(1), keys: ['enable_stereo_hybrid', 'stereo_hybrid_px'] },
         { id: 'hrnet',  fmt: v => v.toFixed(2), keys: ['enable_hrnet',  'hrnet_min'] },
     ];
     const _MPF_CAP = id => id.charAt(0).toUpperCase() + id.slice(1);
@@ -8809,6 +8810,26 @@ const manoViewer = (() => {
                 }
             }
             _addPerSignal('ydisp', count);
+        }
+
+        if (p.enable_stereo_hybrid) {
+            // Per-(frame, joint) hybrid stereo correction distance.
+            // Same magnitude on both cameras (the shift is applied
+            // antisymmetrically by ±|shift|), so flag both together
+            // when over threshold.
+            let count = 0;
+            const sh = A.stereo_hybrid_mag;
+            if (sh) {
+                for (let t = 0; t < N; t++) {
+                    for (let j = 0; j < J; j++) {
+                        const v = sh[idx2(t, j)];
+                        if (isFin(v) && v > p.stereo_hybrid_px) {
+                            cam[idxC(t,j,0)] = 1; cam[idxC(t,j,1)] = 1; count += 2;
+                        }
+                    }
+                }
+            }
+            _addPerSignal('stereo_hybrid', count);
         }
 
         if (p.enable_stereo) {
