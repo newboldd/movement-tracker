@@ -4854,7 +4854,9 @@ def remote_preproc(
     log_path: str,
     registry,
     trials: list[dict],
-) -> None:
+    finalize: bool = True,
+    on_trial_outcome=None,
+) -> dict:
     """Remote preproc: per-trial camera-trajectory + background/mask bake.
 
     Layout under ``cfg.work_dir/preproc_<subject>/``:
@@ -4866,17 +4868,25 @@ def remote_preproc(
 
     Outputs the worker writes per trial:
       <subject>/preproc/<trial_stem>/
-        camera_trajectory.npz   ← downloaded
-        background.npz          ← downloaded
-        background_refined.npz  ← downloaded (when refine ran)
-        outlines.json           ← downloaded (when outlines ran)
-        stable.mp4              ← NOT downloaded (13 MB / 1100 frames,
-                                  unbounded; remote keeps a copy if
-                                  later phases need it for re-runs)
-        background_*.png        ← NOT downloaded (visualisations only)
-        mad_*.png               ← NOT downloaded (visualisations only)
-        fg.mp4 / outline.mp4    ← NOT downloaded (legacy intermediate;
-                                  workers no longer emit these)
+        camera_trajectory.npz       ← downloaded
+        outlines.json               ← downloaded (when outlines ran)
+        background_OS.png           ← downloaded (for visual review)
+        background_OD.png           ← downloaded (for visual review)
+        background_refined_OS.png   ← downloaded (for visual review)
+        background_refined_OD.png   ← downloaded (for visual review)
+        background.npz              ← NOT downloaded (~2 MB; the bg
+                                      is encoded in the PNGs for
+                                      review and in the refined npz
+                                      output that downstream uses)
+        background_refined.npz      ← NOT downloaded (~1.5 MB; only
+                                      the de-id pipeline needs the
+                                      raw arrays — for batch-on-
+                                      everyone the PNGs are enough
+                                      to verify)
+        stable.mp4                  ← NOT downloaded (13 MB / 1100
+                                      frames, unbounded)
+        mad_*.png                   ← NOT downloaded (vis only)
+        fg.mp4 / outline.mp4        ← NOT downloaded (legacy)
 
     Per-file scp pull rather than ``scp -r`` of the whole dir so
     the heavy intermediate artefacts stay on the remote.  Missing
@@ -4909,20 +4919,24 @@ def remote_preproc(
 
     def _fail(msg):
         logger.error(f"Job {job_id} remote preproc failed: {msg}")
-        with get_db_ctx() as db:
-            db.execute(
-                "UPDATE jobs SET status='failed', error_msg=?, "
-                "finished_at=CURRENT_TIMESTAMP WHERE id=?",
-                (msg, job_id),
-            )
-        finalize_job_record(job_id)
+        # Only mark the parent job as failed when this call owns it
+        # (single-subject path).  Multi-subject callers (finalize=False)
+        # aggregate per-subject failures into their own status update.
+        if finalize:
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status='failed', error_msg=?, "
+                    "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (msg, job_id),
+                )
+            finalize_job_record(job_id)
 
     try:
         local_dlc_dir = settings.dlc_path / subject_name
         all_trials = build_trial_map(subject_name)
         if not all_trials:
             _fail("No trials found locally")
-            return
+            return {"n_ok": 0, "n_total": 0, "error": "No trials found locally"}
 
         # Filter to the trial indices the caller wants.  Each entry in
         # ``trials`` is ``{trial_idx, trial_name?, subject_name?}``.
@@ -4936,7 +4950,8 @@ def remote_preproc(
                 wanted_idxs.append(ti)
         if not wanted_idxs:
             _fail("No valid trial indices in request")
-            return
+            return {"n_ok": 0, "n_total": 0,
+                    "error": "No valid trial indices in request"}
 
         # Build the trial entries the remote worker needs.  We bake the
         # video filename (not the local absolute path) because the file
@@ -5256,9 +5271,11 @@ def remote_preproc(
             # phases produced.
             DOWNLOAD_FILES = (
                 "camera_trajectory.npz",
-                "background.npz",
-                "background_refined.npz",
                 "outlines.json",
+                "background_OS.png",
+                "background_OD.png",
+                "background_refined_OS.png",
+                "background_refined_OD.png",
             )
             _dl_t0 = time.perf_counter()
             local_preproc_root = settings.dlc_path / subject_name / "preproc"
@@ -5299,6 +5316,7 @@ def remote_preproc(
                     add_stage(job_id, "download_trial",
                                time.perf_counter() - _trial_dl_t0,
                                outcome="failed", trial=stem)
+                    _trial_outcome = "failed"
                 else:
                     n_ok += 1
                     logfile.write(f"    {_n_got}/{len(DOWNLOAD_FILES)} files, "
@@ -5307,6 +5325,16 @@ def remote_preproc(
                                time.perf_counter() - _trial_dl_t0,
                                outcome="ok", trial=stem,
                                bytes=int(_dl_bytes))
+                    _trial_outcome = "ok"
+                # Surface this trial's outcome to the caller so it can
+                # paint colored chips in the detail panel as soon as
+                # each trial finishes — same UX as the HRnet / MP batch.
+                if on_trial_outcome is not None:
+                    try:
+                        on_trial_outcome(subject_name, stem, _trial_outcome,
+                                          dict(bt))
+                    except Exception:
+                        pass
                 _check_cancel()
             add_stage(job_id, "download_outputs",
                        time.perf_counter() - _dl_t0,
@@ -5314,26 +5342,32 @@ def remote_preproc(
             logfile.write(f"  downloaded {n_ok}/{len(bundle_trials)} trial dirs\n")
             logfile.flush()
 
+            if finalize:
+                with get_db_ctx() as db:
+                    db.execute(
+                        "UPDATE jobs SET status='completed', progress_pct=100, "
+                        "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (job_id,),
+                    )
+                finalize_job_record(job_id)
+        return {"n_ok": n_ok, "n_total": len(bundle_trials)}
+
+    except InterruptedError:
+        logger.info(f"Job {job_id} remote preproc cancelled")
+        if finalize:
             with get_db_ctx() as db:
                 db.execute(
-                    "UPDATE jobs SET status='completed', progress_pct=100, "
+                    "UPDATE jobs SET status='cancelled', "
                     "finished_at=CURRENT_TIMESTAMP WHERE id=?",
                     (job_id,),
                 )
             finalize_job_record(job_id)
-
-    except InterruptedError:
-        logger.info(f"Job {job_id} remote preproc cancelled")
-        with get_db_ctx() as db:
-            db.execute(
-                "UPDATE jobs SET status='cancelled', "
-                "finished_at=CURRENT_TIMESTAMP WHERE id=?",
-                (job_id,),
-            )
-        finalize_job_record(job_id)
+        raise
     except Exception as e:
         logger.exception(f"Job {job_id} remote preproc exception: {e}")
-        _fail(str(e)[:500])
+        if finalize:
+            _fail(str(e)[:500])
+        raise
 
 
 # Worker script — uploaded to the remote and executed there.

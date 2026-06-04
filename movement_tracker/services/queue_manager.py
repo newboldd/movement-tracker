@@ -1488,35 +1488,120 @@ class QueueManager:
                         )
 
                 elif job_type == "preproc":
-                    # Remote preproc: per-trial trajectory + background bake.
-                    # Reuses videos and mediapipe_prelabels.npz already on
-                    # the remote in the subject-scoped work dir (uploaded
-                    # by prior MP / deidentify runs).  Outputs are
-                    # downloaded back into <dlc>/<subject>/preproc/<stem>/.
+                    # Remote preproc: per-trial trajectory + background +
+                    # outlines bake.  Reuses videos already uploaded to
+                    # the remote in the subject-scoped work dir.
+                    #
+                    # Multi-subject submissions are grouped by subject and
+                    # remote_preproc is called once per subject (each
+                    # subject's videos upload upfront before its trials
+                    # run, just like the HRnet / MP Submit Batch flow).
+                    # Per-trial outcomes get written back into the parent
+                    # job's params_json so the detail panel paints
+                    # coloured chips as trials finish.
                     from .remote import remote_preproc
+                    import json as _json
+                    from collections import defaultdict
                     ep = extra_params or {}
                     trials_batch = ep.get("trials") or [{
                         "subject_name": subject_names[0],
                         "trial_idx": ep.get("trial_idx"),
                         "trial_name": ep.get("trial_name"),
                     }]
-                    try:
-                        remote_preproc(
-                            job_id=job_id,
-                            cfg=remote_cfg,
-                            subject_name=subject_names[0],
-                            log_path=log_path,
-                            registry=registry,
-                            trials=trials_batch,
+                    # Initialise per-trial chips so the detail panel
+                    # renders a pending dot for every selected trial
+                    # before any work starts.
+                    for t in trials_batch:
+                        t.setdefault("outcome", "pending")
+                    _job_params = dict(ep); _job_params["trials"] = trials_batch
+                    with get_db_ctx() as _db:
+                        _db.execute(
+                            "UPDATE jobs SET params_json=? WHERE id=?",
+                            (_json.dumps(_job_params), job_id),
                         )
-                    except Exception as _e:
-                        logger.exception(f"remote preproc job {job_id} failed: {_e}")
+
+                    def _record_outcome(_sub_name, _stem, _outcome, _bt):
+                        # Match against (subject_name, trial_name) since
+                        # trial_idx alone collides across subjects.
+                        for _t in trials_batch:
+                            if (_t.get("subject_name") == _sub_name
+                                    and _t.get("trial_name") == _stem):
+                                _t["outcome"] = _outcome
+                                break
+                        try:
+                            with get_db_ctx() as _db:
+                                _db.execute(
+                                    "UPDATE jobs SET params_json=? WHERE id=?",
+                                    (_json.dumps(_job_params), job_id),
+                                )
+                        except Exception:
+                            pass
+
+                    # Group trials by subject so each subject's videos
+                    # upload once.
+                    by_subj = defaultdict(list)
+                    for t in trials_batch:
+                        sn = t.get("subject_name") or subject_names[0]
+                        by_subj[sn].append(t)
+
+                    n_subj = len(by_subj)
+                    _had_failure = False
+                    _was_cancelled = False
+                    try:
+                        for _i, (sn, sub_trials) in enumerate(by_subj.items()):
+                            try:
+                                remote_preproc(
+                                    job_id=job_id,
+                                    cfg=remote_cfg,
+                                    subject_name=sn,
+                                    log_path=log_path,
+                                    registry=registry,
+                                    trials=sub_trials,
+                                    finalize=(_i == n_subj - 1),
+                                    on_trial_outcome=_record_outcome,
+                                )
+                            except InterruptedError:
+                                _was_cancelled = True
+                                # Any trials for this subject still
+                                # pending get marked cancelled.
+                                for _t in sub_trials:
+                                    if _t.get("outcome") == "pending":
+                                        _t["outcome"] = "cancelled"
+                                break
+                            except Exception as _se:
+                                _had_failure = True
+                                logger.exception(
+                                    f"preproc subject {sn} failed: {_se}"
+                                )
+                                for _t in sub_trials:
+                                    if _t.get("outcome") == "pending":
+                                        _t["outcome"] = "failed"
+                                continue
+                        # Final params_json flush + status update if
+                        # remote_preproc didn't finalize on the last
+                        # iteration (e.g. cancelled / errored mid-loop).
                         with get_db_ctx() as _db:
                             _db.execute(
-                                "UPDATE jobs SET status='failed', error_msg=?, "
-                                "finished_at=CURRENT_TIMESTAMP WHERE id=?",
-                                (str(_e)[:500], job_id),
+                                "UPDATE jobs SET params_json=? WHERE id=?",
+                                (_json.dumps(_job_params), job_id),
                             )
+                            _n_ok = sum(1 for _t in trials_batch
+                                         if _t.get("outcome") == "ok")
+                            _n_total = len(trials_batch)
+                            _final_status = (
+                                "cancelled" if _was_cancelled
+                                else ("completed" if not _had_failure
+                                       else "completed"))
+                            _final_err = (None if _n_ok == _n_total
+                                           else f"{_n_ok}/{_n_total} succeeded")
+                            _db.execute(
+                                "UPDATE jobs SET status=?, "
+                                "error_msg=?, progress_pct=100, "
+                                "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                                (_final_status, _final_err, job_id),
+                            )
+                    except Exception as _e:
+                        logger.exception(f"preproc multi-subject loop failed: {_e}")
 
                 elif job_type in ("vision", "pose", "skeleton_v1", "skeleton_v2"):
                     # These don't have remote handlers yet — run locally
