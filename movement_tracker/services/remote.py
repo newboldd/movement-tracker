@@ -4864,12 +4864,25 @@ def remote_preproc(
                                  background.py, ffmpeg.py, plus stubs)
       run_<job_id>/bundle.json, status.json, render.log
 
-    Outputs the worker writes (each trial):
-      <subject>/preproc/<trial_stem>/{camera_trajectory.npz, background.npz,
-        stable.mp4, fg.mp4, outline.mp4, background_*.png, mad_*.png}
+    Outputs the worker writes per trial:
+      <subject>/preproc/<trial_stem>/
+        camera_trajectory.npz   ← downloaded
+        background.npz          ← downloaded
+        background_refined.npz  ← downloaded (when refine ran)
+        outlines.json           ← downloaded (when outlines ran)
+        stable.mp4              ← NOT downloaded (13 MB / 1100 frames,
+                                  unbounded; remote keeps a copy if
+                                  later phases need it for re-runs)
+        background_*.png        ← NOT downloaded (visualisations only)
+        mad_*.png               ← NOT downloaded (visualisations only)
+        fg.mp4 / outline.mp4    ← NOT downloaded (legacy intermediate;
+                                  workers no longer emit these)
 
-    Each output dir is downloaded back to the local
-    ``<dlc>/<subject>/preproc/<trial_stem>/``.
+    Per-file scp pull rather than ``scp -r`` of the whole dir so
+    the heavy intermediate artefacts stay on the remote.  Missing
+    files are tolerated — e.g. a trial where refine_background or
+    compute_outlines_all bailed mid-run still ships back whatever
+    earlier phases produced.
     """
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     from ..config import get_settings
@@ -5236,37 +5249,60 @@ def remote_preproc(
             _set_progress(95)
 
             # ── Phase 8: download outputs back ───────────────────────
+            # Per-file allow-list rather than ``scp -r``: keeps stable.mp4
+            # (~10–50 MB per trial) and the *.png visualisations on the
+            # remote.  Missing files are silently skipped — a trial whose
+            # later phases failed still ships back whatever earlier
+            # phases produced.
+            DOWNLOAD_FILES = (
+                "camera_trajectory.npz",
+                "background.npz",
+                "background_refined.npz",
+                "outlines.json",
+            )
             _dl_t0 = time.perf_counter()
             local_preproc_root = settings.dlc_path / subject_name / "preproc"
             local_preproc_root.mkdir(parents=True, exist_ok=True)
             n_ok = 0
             for bt in bundle_trials:
                 stem = bt["trial_name"]
-                remote_stem_dir = f"{remote_work}/{subject_name}/preproc/{stem}/"
+                remote_stem_dir = f"{remote_work}/{subject_name}/preproc/{stem}"
                 local_stem_dir  = local_preproc_root / stem
                 local_stem_dir.mkdir(parents=True, exist_ok=True)
                 _trial_dl_t0 = time.perf_counter()
-                logfile.write(f"  downloading {stem}/\n"); logfile.flush()
-                _dl = subprocess.run(
-                    _scp_base_args(cfg) + ["-r", f"{cfg.host}:{remote_stem_dir}",
-                                            str(local_stem_dir.parent) + os.sep],
-                    capture_output=True, text=True, timeout=900,
-                )
-                if _dl.returncode != 0:
-                    logfile.write(f"    WARN: download failed: {_dl.stderr[:200]}\n")
+                logfile.write(f"  downloading {stem}/ (allow-list)\n"); logfile.flush()
+                _n_got = 0
+                _dl_bytes = 0
+                for fname in DOWNLOAD_FILES:
+                    remote_path = f"{remote_stem_dir}/{fname}"
+                    local_path  = local_stem_dir / fname
+                    _dl = subprocess.run(
+                        _scp_base_args(cfg) + [f"{cfg.host}:{remote_path}",
+                                                str(local_path)],
+                        capture_output=True, text=True, timeout=300,
+                    )
+                    if _dl.returncode == 0 and local_path.exists():
+                        _n_got += 1
+                        try:
+                            _dl_bytes += local_path.stat().st_size
+                        except OSError:
+                            pass
+                    else:
+                        # Don't log every missing-file scp error — common when
+                        # refine_background or compute_outlines_all didn't run.
+                        # Just note unexpected stderr at top level.
+                        if _dl.returncode != 0 and "No such file" not in (_dl.stderr or ""):
+                            logfile.write(f"    {fname}: scp rc={_dl.returncode}: "
+                                          f"{_dl.stderr[:120]}\n")
+                if _n_got == 0:
+                    logfile.write("    WARN: no files downloaded for this trial\n")
                     add_stage(job_id, "download_trial",
                                time.perf_counter() - _trial_dl_t0,
                                outcome="failed", trial=stem)
                 else:
                     n_ok += 1
-                    # Sum downloaded bytes for the trial dir (best-effort).
-                    _dl_bytes = 0
-                    try:
-                        for f in local_stem_dir.iterdir():
-                            if f.is_file():
-                                _dl_bytes += f.stat().st_size
-                    except OSError:
-                        pass
+                    logfile.write(f"    {_n_got}/{len(DOWNLOAD_FILES)} files, "
+                                  f"{_dl_bytes / 1024:.0f} KB\n")
                     add_stage(job_id, "download_trial",
                                time.perf_counter() - _trial_dl_t0,
                                outcome="ok", trial=stem,
