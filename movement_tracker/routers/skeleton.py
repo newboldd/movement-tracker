@@ -1046,6 +1046,42 @@ class StereoAlignRequest(BaseModel):
     gauss_center_weight: float = 0.0
 
 
+@router.get("/{subject_id}/trial/{trial_idx}/stereo_params")
+def trial_stereo_params(subject_id: int, trial_idx: int) -> dict:
+    """Return the saved Stereo-panel knobs for each baked variant
+    of this trial.
+
+    The Labels page opens the Stereo panel pre-filled with whatever
+    settings produced the existing npz for the currently-selected
+    radio (image / outline / hybrid).  Modes with no baked npz are
+    omitted from the response — the frontend falls back to defaults
+    for those.
+    """
+    from ..services.stereo_align import load_stereo_align
+    name = _subject_name(subject_id)
+    trials = build_trial_map(name)
+    if trial_idx < 0 or trial_idx >= len(trials):
+        raise HTTPException(400, "trial_idx out of range")
+    out: dict[str, dict] = {}
+    for mode in ("image", "outline", "hybrid"):
+        sa = load_stereo_align(name, trial_idx, mode=mode)
+        if sa is None:
+            continue
+        entry: dict = {}
+        if "mask_dilate_px" in sa:
+            # -1 sentinel = "not applicable for this mode" — only
+            # hybrid actually stores a real value.  Map it to None
+            # so the frontend doesn't display "-1 px".
+            v = int(sa["mask_dilate_px"])
+            entry["mask_dilate_px"] = None if v < 0 else v
+        if "gauss_center_weight" in sa:
+            # -1.0 sentinel = "not applicable" (outline mode).
+            g = float(sa["gauss_center_weight"])
+            entry["gauss_center_weight"] = None if g < 0 else g
+        out[mode] = entry
+    return {"per_mode": out}
+
+
 @router.post("/{subject_id}/run_stereo")
 def run_stereo(subject_id: int, req: StereoAlignRequest) -> dict:
     """Submit a cross-camera image-alignment job for one trial.

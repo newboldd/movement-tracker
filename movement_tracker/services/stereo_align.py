@@ -749,6 +749,13 @@ def load_stereo_align(subject_name: str, trial_idx: int,
             result["crop_half"] = int(d["crop_half"])
         if "hand_crop_half" in d.files:
             result["hand_crop_half"] = int(d["hand_crop_half"])
+        # Per-run knobs from the Stereo panel — the Labels UI reads
+        # these back so opening the panel restores the exact settings
+        # used to bake the current npz for the selected mode.
+        if "mask_dilate_px" in d.files:
+            result["mask_dilate_px"] = int(d["mask_dilate_px"])
+        if "gauss_center_weight" in d.files:
+            result["gauss_center_weight"] = float(d["gauss_center_weight"])
         return result
     except Exception as e:
         logger.warning(f"Failed to load {path}: {e}")

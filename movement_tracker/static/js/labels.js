@@ -1381,6 +1381,19 @@ const manoViewer = (() => {
         currentTrialIdx = idx;
         _prewarmStarted = false;  // allow prewarm for the new trial
         _userZoom = false; // allow auto-crop for new trial
+        // Drop the cached per-mode Stereo-panel knobs from the
+        // previous trial — they'll be refetched the next time the
+        // panel opens (or right now if it's already open).
+        _stereoSavedParams = {};
+        if ($('stereoPanel')?.style.display === 'block') {
+            // Panel is still open across the trial switch: refresh
+            // sliders in-place so the user sees the new trial's
+            // saved settings without having to close+reopen.
+            (async () => {
+                await _fetchStereoSavedParams();
+                _applyStereoSavedForCurrentMode();
+            })();
+        }
         highlightTrialButton(idx);
         if (typeof setNavState === 'function') setNavState({ trialIdx: idx, frame: currentFrame });
         // If the user was actively editing a bbox when they switched
@@ -1778,21 +1791,85 @@ const manoViewer = (() => {
             if (gWrap) gWrap.style.display = _stereoSupportsGauss() ? 'flex' : 'none';
             render();
         };
+        // Stereo panel knobs ────────────────────────────────────────
+        // Factory defaults (also the values in the inline HTML).  The
+        // panel opens pre-filled with whatever produced the existing
+        // npz for the selected mode, or falls back to these when no
+        // npz exists yet.
+        const _STEREO_DEFAULTS = { mask_dilate_px: 10, gauss_center_weight: 0.0 };
+        let _stereoSavedParams = {};   // per-mode: { mask_dilate_px, gauss_center_weight }
+        const _setStereoDilate = (pxOrNull) => {
+            const px = (pxOrNull == null) ? _STEREO_DEFAULTS.mask_dilate_px : pxOrNull;
+            const s = $('stereoDilateSlider');
+            const l = $('stereoDilateVal');
+            if (s) s.value = String(px);
+            if (l) l.textContent = `${px} px`;
+        };
+        const _setStereoGauss = (gOrNull) => {
+            const g = (gOrNull == null) ? _STEREO_DEFAULTS.gauss_center_weight : gOrNull;
+            const s = $('stereoGaussSlider');
+            const l = $('stereoGaussVal');
+            if (s) s.value = String(Math.round(g * 100));
+            if (l) l.textContent = g.toFixed(2);
+        };
+        // Pull saved params from the server for all three modes.  Cached
+        // until the trial changes (loadTrial() resets _stereoSavedParams).
+        const _fetchStereoSavedParams = async () => {
+            if (!subjectId || currentTrialIdx < 0 || !trials?.[currentTrialIdx]) return;
+            try {
+                const t = trials[currentTrialIdx].trial_idx;
+                const r = await api(`/api/skeleton/${subjectId}/trial/${t}/stereo_params`);
+                _stereoSavedParams = (r && r.per_mode) || {};
+            } catch (e) {
+                _stereoSavedParams = {};
+            }
+        };
+        // Apply saved params for the currently-selected radio.  Falls
+        // back to factory defaults for any field the saved npz didn't
+        // store (or when no npz exists for that mode yet).
+        const _applyStereoSavedForCurrentMode = () => {
+            const m = document.querySelector('input[name="stereoMode"]:checked');
+            const mode = m ? m.value : 'image';
+            const saved = _stereoSavedParams[mode] || {};
+            // mask_dilate_px is only stored for hybrid; image/outline
+            // get null in the saved entry, so they fall back to default.
+            _setStereoDilate(saved.mask_dilate_px ?? null);
+            _setStereoGauss(saved.gauss_center_weight ?? null);
+        };
         // Stereo button: toggle panel (Run + Close).  Mirrors HRnet Correct.
-        $('runStereoBtn')?.addEventListener('click', () => {
+        $('runStereoBtn')?.addEventListener('click', async () => {
             const open = $('stereoPanel').style.display !== 'block';
             $('stereoPanel').style.display = open ? 'block' : 'none';
             $('runStereoBtn').classList.toggle('active', open);
             _refreshStereoHybridUI();
+            if (open) {
+                // Lazy-fetch saved params on first open per trial.
+                await _fetchStereoSavedParams();
+                _applyStereoSavedForCurrentMode();
+            }
         });
         $('stereoCloseBtn')?.addEventListener('click', () => {
             $('stereoPanel').style.display = 'none';
             $('runStereoBtn').classList.remove('active');
             _refreshStereoHybridUI();
         });
-        // Radio + dilate slider events.
+        // Reset slider values to factory defaults for the selected
+        // mode.  Does NOT touch the on-disk npz — it's a UI-only
+        // reset; user has to hit Run to bake new shifts.
+        $('stereoResetBtn')?.addEventListener('click', () => {
+            _setStereoDilate(null);
+            _setStereoGauss(null);
+            render();
+            const st = $('stereoStatus');
+            if (st) st.textContent = 'Sliders reset to defaults.';
+        });
+        // Radio change: re-apply whatever saved settings exist for
+        // the newly-selected mode, then refresh which sliders show.
         document.querySelectorAll('input[name="stereoMode"]').forEach(el => {
-            el.addEventListener('change', _refreshStereoHybridUI);
+            el.addEventListener('change', () => {
+                _applyStereoSavedForCurrentMode();
+                _refreshStereoHybridUI();
+            });
         });
         $('stereoDilateSlider')?.addEventListener('input', e => {
             const v = parseInt(e.target.value, 10) || 0;
@@ -1851,6 +1928,10 @@ const manoViewer = (() => {
                         evt.close(); _activeEventSources.delete(evt);
                         if (st) st.textContent = 'Complete. Reloading…';
                         await loadTrial(currentTrialIdx);
+                        // Just baked a new npz — refresh the cached
+                        // per-mode params so subsequent radio flips
+                        // pick up the freshly-saved settings.
+                        await _fetchStereoSavedParams();
                         // Auto-enable the model row that matches the
                         // variant we just baked.
                         // Auto-enable the model row that matches the

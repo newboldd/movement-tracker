@@ -514,6 +514,7 @@
                 </div>
                 <div style="display:flex;gap:4px;">
                     <button class="btn btn-sm btn-success" id="runStereoGoBtn" style="flex:1;">Run</button>
+                    <button class="btn btn-sm" id="stereoResetBtn" title="Reset Dilate / Center to factory defaults for the selected mode.">Defaults</button>
                     <button class="btn btn-sm" id="stereoCloseBtn" style="flex:0 0 30px;">×</button>
                 </div>
                 <div id="stereoStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
@@ -1312,7 +1313,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=398" type="module"></script>
+    <script src="/static/js/labels.js?v=399" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {
