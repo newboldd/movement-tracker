@@ -303,6 +303,8 @@
                     <div style="display:flex;flex-direction:column;gap:3px;">
                         <span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">3D models</span>
                         <div style="display:flex;gap:3px;">
+                            <button class="btn btn-sm step-btn" data-step="stereo_correct" onclick="selectStep('stereo_correct')"
+                                    title="Run Stereo Correct on each selected trial (writes stereo_align.npz for image mode or stereo_align_outline.npz for outline mode).  Trials that already have the chosen-mode npz appear in green.">Stereo Correct</button>
                             <button class="btn btn-sm step-btn" data-step="skeleton_v1" onclick="selectStep('skeleton_v1')"
                                     title="Run Skeleton Fit v1 on each selected trial (writes skeleton_v1.npz).  Trials that already have a skeleton_v1.npz appear in green; submit batches them into a single queue row with per-trial outcome chips.">Skel Fit v1</button>
                         </div>
@@ -470,6 +472,53 @@
                 </div>
             </div>
 
+            <!-- Stereo Correct settings — shown only when the selected
+                 step is stereo_correct.  Mirrors the labels-page Stereo
+                 panel: mode (Image/Outline), dilate (Outline only),
+                 center weight (always).  Submitted via the per-trial
+                 run_stereo endpoint, batched into a single job_queue
+                 row with per-trial outcome chips. -->
+            <div id="stereoCorrectSettings" data-cache-hide style="display:none;margin-bottom:12px;padding:10px 12px;background:var(--bg);border-radius:var(--radius);">
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;font-weight:600;">Stereo Correct settings</div>
+                <div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;">
+                    <!-- Mode radio (image / outline) -->
+                    <div style="display:flex;flex-direction:column;gap:4px;">
+                        <span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;">Mode</span>
+                        <div style="display:flex;gap:10px;align-items:center;font-size:11px;color:var(--text-muted);"
+                             title="Image: raw video crops for both passes.  Outline: hand-outline vote for the global pass, raw image phase-corr for the per-joint pass (requires preproc outlines + camera trajectory).">
+                            <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
+                                <input type="radio" name="stereoCorrectMode" value="image" id="stereoCorrectModeImage" checked style="margin:0;">
+                                Image
+                            </label>
+                            <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
+                                <input type="radio" name="stereoCorrectMode" value="outline" id="stereoCorrectModeOutline" style="margin:0;">
+                                Outline
+                            </label>
+                        </div>
+                    </div>
+                    <!-- Dilate (Outline only) -->
+                    <div id="stereoCorrectDilateWrap" style="display:none;font-size:11px;min-width:220px;"
+                         title="Outline mode: dilate the hand outline by this many pixels before masking background out of the per-joint image crops.  0 = strict (outline only), larger = include more pixels just outside the outline.">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <label style="color:var(--text-muted);">Dilate (px)</label>
+                            <span id="stereoCorrectDilateVal" style="color:var(--text-muted);font-weight:bold;">10</span>
+                        </div>
+                        <input type="range" id="stereoCorrectDilateSlider" min="0" max="50" step="1" value="10"
+                               style="width:100%;cursor:pointer;height:5px;">
+                    </div>
+                    <!-- Center (image + outline) -->
+                    <div style="font-size:11px;min-width:220px;"
+                         title="Apply a 2D Gaussian centred on each MP label that weights the per-joint phase correlation toward pixels NEAR the joint.  0 = uniform (no extra weighting); higher = sharper falloff.">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <label style="color:var(--text-muted);">Center weight</label>
+                            <span id="stereoCorrectGaussVal" style="color:var(--text-muted);font-weight:bold;">0.00</span>
+                        </div>
+                        <input type="range" id="stereoCorrectGaussSlider" min="0" max="100" step="1" value="0"
+                               style="width:100%;cursor:pointer;height:5px;">
+                    </div>
+                </div>
+            </div>
+
             <!-- Submit Button -->
             <div data-cache-hide style="display:flex;justify-content:flex-end;gap:8px;">
                 <button class="btn" onclick="submitBatch()"
@@ -628,7 +677,7 @@
 
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js?v=13"></script>
-    <script src="/static/js/remote.js?v=72"></script>
+    <script src="/static/js/remote.js?v=73"></script>
     <script src="/static/js/cache_results.js?v=2"></script>
 </body>
 </html>

@@ -325,6 +325,9 @@ function selectStep(step) {
     // Skeleton Fit v1 settings panel — only visible for that step.
     const skelfitBox = document.getElementById('skelfitSettings');
     if (skelfitBox) skelfitBox.style.display = (step === 'skeleton_v1') ? '' : 'none';
+    // Stereo Correct settings panel — only visible for stereo_correct.
+    const stereoBox = document.getElementById('stereoCorrectSettings');
+    if (stereoBox) stereoBox.style.display = (step === 'stereo_correct') ? '' : 'none';
 }
 
 // ── Load steps ──────────────────────────────────────────
@@ -393,7 +396,7 @@ async function loadSubjects() {
 }
 
 // Steps that support per-trial selection
-const TRIAL_STEPS = new Set(['deidentify', 'hrnet', 'preproc', 'mediapipe', 'skeleton_v1']);
+const TRIAL_STEPS = new Set(['deidentify', 'hrnet', 'preproc', 'mediapipe', 'skeleton_v1', 'stereo_correct']);
 // Cache: subjectId → [{trial_idx, trial_name, has_skeleton_v1}, ...]
 // Populated by ensureSkeletonStatusForSubjects() the first time a
 // subject is shown in the Skel Fit v1 trial picker so the trial chips
@@ -959,7 +962,7 @@ async function submitBatch() {
     // per-trial outcome chips, which is the same UX the remote MP
     // batch provides.  Route through it regardless of the current
     // target so the user doesn't have to think about it.
-    if (selectedStep === 'skeleton_v1') {
+    if (selectedStep === 'skeleton_v1' || selectedStep === 'stereo_correct') {
         await submitJob();
         return;
     }
@@ -1355,6 +1358,63 @@ async function submitJob() {
                 // Bust per-subject skeleton-status cache so the refresh
                 // picks up new npz files when the batch finishes.
                 for (const id of subjIds) delete cachedSkeletonStatus[id];
+            } else if (jobType === 'stereo_correct') {
+                // Stereo Correct: one queue row, per-trial outcome chips.
+                // Same wiring shape as skeleton_v1 — read the per-trial
+                // checkbox grid + the global mode/dilate/gauss settings,
+                // POST one launch request batched across trials.  The
+                // queue manager loops them, calling run_stereo_align
+                // per trial.
+                const trialEntries = [];
+                const subjectIdSet = new Set();
+                const subjectIdToName = new Map();
+                for (const cb of trialChecks) {
+                    const subjectId = parseInt(cb.dataset.subjectId);
+                    const trialIdx = parseInt(cb.dataset.trialIdx);
+                    const subjName = cb.closest('.trial-item')?.parentElement
+                        ?.parentElement?.querySelector('.trial-group-label')?.textContent
+                        || (subjectNames.length === 1 ? subjectNames[0] : null);
+                    const fullStem = cb.dataset.trialName || '';
+                    const shortTrial = fullStem.includes('_')
+                        ? fullStem.slice(fullStem.indexOf('_') + 1)
+                        : fullStem;
+                    subjectIdSet.add(subjectId);
+                    if (subjName) subjectIdToName.set(subjectId, subjName);
+                    trialEntries.push({
+                        subject_name: subjName,
+                        trial_idx: trialIdx,
+                        trial_name: shortTrial,
+                    });
+                }
+                if (!trialEntries.length) return;
+                const subjIds = [...subjectIdSet];
+                const subjNames = subjIds.map(id => subjectIdToName.get(id)).filter(Boolean);
+                const _modeEl = document.querySelector('input[name="stereoCorrectMode"]:checked');
+                const mode = _modeEl ? _modeEl.value : 'image';
+                const mask_dilate_px = parseInt(
+                    document.getElementById('stereoCorrectDilateSlider')?.value ?? 10
+                );
+                const gauss_center_weight = parseFloat(
+                    document.getElementById('stereoCorrectGaussSlider')?.value ?? 0
+                ) / 100;
+                await API.post('/api/remote/launch', {
+                    job_type: 'stereo_correct',
+                    subject_ids: subjIds,
+                    subjects: subjNames,
+                    execution_target: executionTarget,
+                    extra_params: {
+                        trials: trialEntries,
+                        mode, mask_dilate_px, gauss_center_weight,
+                        trial_name: (() => {
+                            if (trialEntries.length === 1) return trialEntries[0].trial_name;
+                            if (trialEntries.length >= 5) return `${trialEntries.length} trials`;
+                            const multiSubj = subjIds.length > 1;
+                            return trialEntries.map(t =>
+                                multiSubj ? `${t.subject_name} ${t.trial_name}` : t.trial_name
+                            ).join(', ');
+                        })(),
+                    },
+                });
             }
             clearSubjects();
             refreshQueue();
@@ -2898,4 +2958,36 @@ window.closeTrialsModal = closeTrialsModal;
         s.addEventListener('input', sync);
         sync();
     });
+
+    // Stereo Correct settings — mirror the Labels-page Stereo panel.
+    // Mode radio shows/hides the dilate slider; sliders update their
+    // live value labels.  All read by submitJob's stereo_correct
+    // branch and forwarded as extra_params.
+    const _stereoSyncMode = () => {
+        const m = document.querySelector('input[name="stereoCorrectMode"]:checked');
+        const mode = m ? m.value : 'image';
+        const dWrap = document.getElementById('stereoCorrectDilateWrap');
+        if (dWrap) dWrap.style.display = (mode === 'outline') ? '' : 'none';
+    };
+    document.querySelectorAll('input[name="stereoCorrectMode"]').forEach(el => {
+        el.addEventListener('change', _stereoSyncMode);
+    });
+    _stereoSyncMode();
+    const _stereoDilSlider = document.getElementById('stereoCorrectDilateSlider');
+    const _stereoDilVal    = document.getElementById('stereoCorrectDilateVal');
+    if (_stereoDilSlider && _stereoDilVal) {
+        const sync = () => { _stereoDilVal.textContent = String(parseInt(_stereoDilSlider.value || '0')); };
+        _stereoDilSlider.addEventListener('input', sync);
+        sync();
+    }
+    const _stereoGSlider = document.getElementById('stereoCorrectGaussSlider');
+    const _stereoGVal    = document.getElementById('stereoCorrectGaussVal');
+    if (_stereoGSlider && _stereoGVal) {
+        const sync = () => {
+            const v = parseFloat(_stereoGSlider.value || '0') / 100;
+            _stereoGVal.textContent = v.toFixed(2);
+        };
+        _stereoGSlider.addEventListener('input', sync);
+        sync();
+    }
 })();

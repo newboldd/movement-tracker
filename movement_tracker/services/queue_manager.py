@@ -41,6 +41,7 @@ RESOURCE_MAP = {
     "skeleton_v1": "cpu",
     "skeleton_v2": "cpu",
     "skeleton_v3": "cpu",
+    "stereo_correct": "cpu",
     # Per-trial pre-processing: camera trajectory + background/mask bake.
     # Pure CPU (OpenCV + numpy + ffmpeg).  No GPU needed.
     "preproc": "cpu",
@@ -1162,6 +1163,144 @@ class QueueManager:
                     job_registry._cancel_events.pop(job_id, None)
                     with get_db_ctx() as _db:
                         _db.execute("UPDATE jobs SET status='completed', progress_pct=100, finished_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,))
+
+                elif job_type == "stereo_correct":
+                    # Stereo Correct — batched: one parent job row, one
+                    # log file, per-trial outcome chips.  Same shape as
+                    # skeleton_v1's batched mode but calls run_stereo_align
+                    # per trial instead of the FK fit.  Local CPU only;
+                    # remote execution isn't wired (the bake is video +
+                    # numpy, fits the local pattern).
+                    from ..services.jobs import registry as job_registry
+                    from ..services.video import build_trial_map
+                    from ..services.stereo_align import run_stereo_align
+                    from ..services.skeleton_data import _skeleton_dir
+                    cancel_event = threading.Event()
+                    job_registry._cancel_events[job_id] = cancel_event
+                    def on_progress(pct):
+                        with get_db_ctx() as _db:
+                            _db.execute(
+                                "UPDATE jobs SET progress_pct = ? WHERE id = ?",
+                                (pct, job_id),
+                            )
+                    ep = extra_params or {}
+                    trials_batch = ep.get("trials") or [{
+                        "subject_name": subject_names[0],
+                        "trial_idx": ep.get("trial_idx"),
+                        "trial_name": ep.get("trial_name"),
+                    }]
+                    _mode = (ep.get("mode") or "image").lower()
+                    if _mode not in ("image", "outline"):
+                        _mode = "image"
+                    _dilate = int(ep.get("mask_dilate_px", 10))
+                    _gauss  = float(ep.get("gauss_center_weight", 0.0))
+                    _expected_fname = (
+                        "stereo_align.npz" if _mode == "image"
+                        else "stereo_align_outline.npz"
+                    )
+
+                    n_total = max(1, len(trials_batch))
+                    ep_state = dict(ep)
+                    ep_state["trials"] = [dict(t) for t in trials_batch]
+                    for t in ep_state["trials"]:
+                        t.setdefault("subject_name", subject_names[0])
+                        t["outcome"] = None
+                    with get_db_ctx() as _db:
+                        _db.execute("UPDATE jobs SET params_json = ? WHERE id = ?",
+                                    (json.dumps(ep_state), job_id))
+
+                    def _log_line(msg: str) -> None:
+                        try:
+                            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                            with open(log_path, "a") as _lf:
+                                _lf.write(msg.rstrip() + "\n")
+                        except Exception:
+                            pass
+                    _log_line(f"\n=== Stereo Correct batch: {n_total} trial(s) ===")
+                    _log_line(
+                        f"  Settings: mode={_mode}"
+                        f" mask_dilate_px={_dilate}"
+                        f" gauss_center_weight={_gauss:.2f}"
+                    )
+                    for i, t in enumerate(ep_state["trials"]):
+                        if cancel_event.is_set():
+                            t["outcome"] = "cancelled"
+                            with get_db_ctx() as _db:
+                                _db.execute("UPDATE jobs SET params_json = ? WHERE id = ?",
+                                            (json.dumps(ep_state), job_id))
+                            break
+                        sub = t.get("subject_name") or subject_names[0]
+                        try:
+                            vtm = build_trial_map(sub)
+                        except Exception as exc:
+                            t["outcome"] = "failed"
+                            t["outcome_error"] = str(exc)
+                            with get_db_ctx() as _db:
+                                _db.execute("UPDATE jobs SET params_json = ? WHERE id = ?",
+                                            (json.dumps(ep_state), job_id))
+                            continue
+                        ti = int(t.get("trial_idx", -1))
+                        if ti < 0 or ti >= len(vtm):
+                            t["outcome"] = "failed"
+                            t["outcome_error"] = f"trial_idx {ti} out of range"
+                            with get_db_ctx() as _db:
+                                _db.execute("UPDATE jobs SET params_json = ? WHERE id = ?",
+                                            (json.dumps(ep_state), job_id))
+                            continue
+                        trial_stem = vtm[ti]["trial_name"]
+                        def _per_trial_progress(pct, _i=i, _n=n_total):
+                            batch_pct = ((_i + pct / 100.0) / _n) * 100.0
+                            on_progress(batch_pct)
+                        try:
+                            run_stereo_align(
+                                sub, ti,
+                                progress_callback=_per_trial_progress,
+                                cancel_event=cancel_event,
+                                mode=_mode,
+                                mask_dilate_px=_dilate,
+                                gauss_center_weight=_gauss,
+                            )
+                            root = _skeleton_dir(sub)
+                            npz = (root / trial_stem / _expected_fname) if root else None
+                            t["outcome"] = "ok" if (npz and npz.exists()) else "failed"
+                        except Exception as exc:
+                            t["outcome"] = "failed"
+                            t["outcome_error"] = str(exc)
+                        with get_db_ctx() as _db:
+                            _db.execute("UPDATE jobs SET params_json = ? WHERE id = ?",
+                                        (json.dumps(ep_state), job_id))
+                        _outline = (
+                            f"  [{i + 1}/{n_total}] {sub} {trial_stem}: "
+                            f"outcome={t.get('outcome')}"
+                        )
+                        if t.get("outcome_error"):
+                            _outline += f"  ERROR: {t['outcome_error']}"
+                        _log_line(_outline)
+                    _log_line(f"=== batch finished ===\n")
+                    job_registry._cancel_events.pop(job_id, None)
+                    # Mark job done.  If any trial failed, set status=failed
+                    # but keep all the per-trial outcome chips intact.
+                    _any_ok = any(t.get("outcome") == "ok"
+                                  for t in ep_state["trials"])
+                    _all_ok = all(t.get("outcome") == "ok"
+                                  for t in ep_state["trials"])
+                    if _all_ok:
+                        _final_status, _err = "completed", None
+                    elif _any_ok:
+                        _n_ok = sum(1 for t in ep_state["trials"]
+                                    if t.get("outcome") == "ok")
+                        _final_status = "completed"
+                        _err = f"{_n_ok}/{n_total} succeeded"
+                    else:
+                        _final_status = "failed"
+                        _err = f"0/{n_total} succeeded"
+                    with get_db_ctx() as _db:
+                        _db.execute(
+                            "UPDATE jobs SET status=?, error_msg=?, "
+                            "progress_pct=100, finished_at=CURRENT_TIMESTAMP "
+                            "WHERE id=?",
+                            (_final_status, _err, job_id),
+                        )
 
                 # Wait for the subprocess to finish (registry._monitor thread)
                 # All local jobs now run as subprocesses tracked by the registry
