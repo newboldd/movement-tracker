@@ -2118,7 +2118,7 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
     try:
         from .mp_filter import (
             load_saved_filter_params, detect_mask_from_params,
-            build_stereo_fill,
+            build_and_validate_stereo_fill,
         )
         _sf_sidecar = _skeleton_dir(subject_name) / trial_stem / "mp_filter_params.json"
         _sf_params = load_saved_filter_params(_sf_sidecar)
@@ -2192,73 +2192,14 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
                 stereo_shift_mag=_shift_mag,
                 stereo_response=_resp_arr,
             )
-            # ── Apply the fill ──
-            _fL, _fR, _donated = build_stereo_fill(
+            # ── Apply the fill + validate against the same filter ──
+            _fL, _fR, _f3d, _donated, _validated = build_and_validate_stereo_fill(
                 _mp_L_full, _mp_R_full,
-                _stereo_L, _stereo_R, _resp, _cam_mask,
+                _stereo_L, _stereo_R, _resp, _shift_mag,
+                _cam_mask, _sf_params,
+                _init_3d, calib, HAND_SKELETON,
                 conf_min=0.4,
             )
-            # ── 3D triangulation ──
-            def _tri(_pL, _pR):
-                _out = np.full((N, 21, 3), np.nan)
-                if calib is not None:
-                    for _jj in range(21):
-                        _out[:, _jj, :] = triangulate_points(
-                            _pL[:, _jj, :], _pR[:, _jj, :], calib)
-                return _out
-            _f3d = _tri(_fL, _fR)
-            # ── Validate: re-run the same filter on the filled
-            # labels.  Any (frame, joint) that was originally
-            # filtered AND is still flagged after the donation
-            # didn't actually fix the problem the filter caught —
-            # drop the whole joint (NaN on both cameras) so we
-            # only keep donations that demonstrably move the
-            # joint into the "passes the filter" region.
-            try:
-                # detect_mask needs an init_3d wrist-filled the same
-                # way we built the first one — for cells where _f3d
-                # is finite, use it; for cells that became NaN after
-                # the fill (both filtered, or low-conf one-side),
-                # fall back to the pre-fill _init_3d so the per-row
-                # length matches and the signal arrays don't shrink.
-                _val_3d = np.where(np.isfinite(_f3d), _f3d, _init_3d)
-                # By definition, the distance from "MP combined" to
-                # "stereo" at a donated cell is zero — we just put
-                # the stereo point THERE.  But _shift_mag is loaded
-                # from the static npz and would still report the
-                # original (large) shift, so the Stereo error
-                # signal would re-flag every donation and the
-                # validation pass would throw them all away.
-                # Neutralise the signal for donated cells by zeroing
-                # their shift magnitude; cells we DIDN'T donate to
-                # keep their original shift so the signal still
-                # catches uncorrected joints.
-                _shift_mag_val = _shift_mag
-                if _shift_mag is not None:
-                    _shift_mag_val = _shift_mag.copy()
-                    # _donated is (N, 21); _shift_mag is (N_sa, 21).
-                    _m = min(_shift_mag_val.shape[0], _donated.shape[0])
-                    _shift_mag_val[:_m][_donated[:_m]] = 0.0
-                _, _new_mask, _ = detect_mask_from_params(
-                    _sf_params, _val_3d, _fL, _fR, HAND_SKELETON,
-                    calib=calib,
-                    stereo_shift_mag=_shift_mag_val,
-                    stereo_response=_resp_arr,
-                )
-                # Per (frame, joint): if the cell was originally
-                # filtered on ANY camera AND the post-fill mask
-                # still flags it on ANY camera, the donation
-                # didn't help — drop it.
-                _orig_either = _cam_mask[..., 0] | _cam_mask[..., 1]
-                _new_either  = _new_mask[..., 0] | _new_mask[..., 1]
-                _fail = _orig_either & _new_either
-                _fL[_fail] = np.nan
-                _fR[_fail] = np.nan
-                # Retriangulate after dropping the failed donations
-                # so the 3D + distance traces match the displayed 2D.
-                _f3d = _tri(_fL, _fR)
-            except Exception as _ve:
-                logger.debug(f"stereo_fill validate skipped: {_ve}")
             # ── Distances ──
             if calib is not None:
                 _dist_sf = _compute_distances(_f3d)

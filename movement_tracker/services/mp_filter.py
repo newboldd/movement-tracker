@@ -799,3 +799,88 @@ def build_stereo_fill(
     # from "MP combined" to "stereo" is zero at a donated cell).
     donated = donate_L | donate_R
     return fill_L, fill_R, donated
+
+
+def build_and_validate_stereo_fill(
+    combined_L: np.ndarray, combined_R: np.ndarray,
+    stereo_L: np.ndarray, stereo_R: np.ndarray,
+    stereo_response: np.ndarray,
+    stereo_shift_mag,
+    camera_mask: np.ndarray,
+    saved_params: dict,
+    init_3d: np.ndarray,
+    calib: dict | None,
+    bones,
+    *,
+    n_joints: int = 21,
+    conf_min: float = 0.4,
+    confidence_L=None, confidence_R=None,
+    hrnet_L=None, hrnet_R=None,
+):
+    """Build stereo-filled labels and prune donations that don't
+    actually fix the problem the filter caught.
+
+    Two-pass:
+
+    1. :func:`build_stereo_fill` substitutes the stereo point
+       into the filtered camera for cells where confidence is
+       above ``conf_min``; drops the rest.
+    2. Triangulate the filled labels, re-run
+       :func:`detect_mask_from_params` on them, and NaN out any
+       (frame, joint) that was originally flagged AND still
+       flagged after the donation.  Donated cells have their
+       ``stereo_shift_mag`` zeroed before the second pass so the
+       Stereo error signal doesn't keep re-flagging the very
+       donations it inspired (the post-fill MP-to-stereo distance
+       is, by definition, zero at a donated cell).
+
+    Returns
+    -------
+    fill_L, fill_R : (N, J, 2)   filled 2D labels (NaN where dropped)
+    fill_3d        : (N, J, 3)   triangulated post-validation
+    donated        : (N, J) bool donations placed in pass 1
+    validated      : (N, J) bool donations that survived pass 2
+    """
+    from .calibration import triangulate_points
+    fill_L, fill_R, donated = build_stereo_fill(
+        combined_L, combined_R, stereo_L, stereo_R,
+        stereo_response, camera_mask, conf_min=conf_min,
+    )
+    N = fill_L.shape[0]
+
+    def _tri(pL, pR):
+        out = np.full((N, n_joints, 3), np.nan)
+        if calib is not None:
+            for j in range(n_joints):
+                out[:, j, :] = triangulate_points(pL[:, j, :], pR[:, j, :], calib)
+        return out
+
+    fill_3d = _tri(fill_L, fill_R)
+    # Wrist-fallback the 3D so detect_mask's velocity/accel arrays
+    # don't NaN-spike across frames where the fill dropped a joint.
+    val_3d = np.where(np.isfinite(fill_3d), fill_3d, init_3d)
+
+    # Zero shift_mag at donated cells — see docstring.
+    shift_mag_val = None
+    if stereo_shift_mag is not None:
+        shift_mag_val = np.asarray(stereo_shift_mag, dtype=np.float64).copy()
+        m = min(shift_mag_val.shape[0], donated.shape[0])
+        shift_mag_val[:m][donated[:m]] = 0.0
+
+    _, new_mask, _ = detect_mask_from_params(
+        saved_params, val_3d, fill_L, fill_R, bones,
+        calib=calib,
+        confidence_L=confidence_L, confidence_R=confidence_R,
+        hrnet_L=hrnet_L, hrnet_R=hrnet_R,
+        stereo_shift_mag=shift_mag_val,
+        stereo_response=stereo_response,
+    )
+
+    orig_either = camera_mask[..., 0] | camera_mask[..., 1]
+    new_either  = new_mask[..., 0] | new_mask[..., 1]
+    fail = orig_either & new_either
+    fill_L[fail] = np.nan
+    fill_R[fail] = np.nan
+    fill_3d = _tri(fill_L, fill_R)
+    validated = donated & ~fail
+    return fill_L, fill_R, fill_3d, donated, validated

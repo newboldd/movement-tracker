@@ -220,7 +220,7 @@ def run_skeleton_v1_fit(
     if cancelled():
         return {"cancelled": True}
 
-    # ── Prepare tensors ────────────────────────────────────────
+    # ── Prepare scalar/static tensors ──────────────────────────
     K1 = torch.tensor(calib["K1"], dtype=torch.float32, device=device)
     K2 = torch.tensor(calib["K2"], dtype=torch.float32, device=device)
     d1 = torch.tensor(calib["dist1"].ravel(), dtype=torch.float32, device=device)
@@ -228,8 +228,6 @@ def run_skeleton_v1_fit(
     R_stereo = torch.tensor(calib["R"], dtype=torch.float32, device=device)
     T_stereo = torch.tensor(calib["T"].ravel(), dtype=torch.float32, device=device)
 
-    tgt_L = torch.tensor(mp_L[valid_idx], device=device, dtype=torch.float32)
-    tgt_R = torch.tensor(mp_R[valid_idx], device=device, dtype=torch.float32)
     target_bl = torch.tensor(target_bone_lengths, device=device, dtype=torch.float32)
     bl_w = torch.tensor(bone_weights, device=device, dtype=torch.float32)
     bone_idx = torch.tensor(BONES, device=device, dtype=torch.long)
@@ -266,14 +264,18 @@ def run_skeleton_v1_fit(
     # when no sidecar exists.
     skeleton_trial_dir = _skeleton_dir(subject_name) / trial_stem
     mp_filter_sidecar = skeleton_trial_dir / "mp_filter_params.json"
+    # Default: 2D reproj targets are MP combined (or forward
+    # fallback) — overridden below to Stereo Fill when a saved
+    # filter AND a stereo bake both exist.
+    target_L_np = mp_L
+    target_R_np = mp_R
+    _saved_params = None
     if mp_filter_sidecar.exists():
-        import json as _json
-        try:
-            _mpf = _json.loads(mp_filter_sidecar.read_text())
-        except Exception:
-            _mpf = {}
-        # Build the multi-signal mask from the saved thresholds.
-        from .mp_filter import detect_mask
+        from .mp_filter import (
+            load_saved_filter_params, detect_mask_from_params,
+            build_and_validate_stereo_fill,
+        )
+        _saved_params = load_saved_filter_params(mp_filter_sidecar)
         # MP confidence and HRnet data — best-effort, optional.
         _conf_L = prelabels.get("confidence_OS") if hasattr(prelabels, "get") else None
         _conf_R = prelabels.get("confidence_OD") if hasattr(prelabels, "get") else None
@@ -291,28 +293,99 @@ def run_skeleton_v1_fit(
                         _hr_R = _hm["heatmaps_R"].max(axis=(2, 3))[valid_idx].astype(np.float32)
         except Exception:
             _hr_L = None; _hr_R = None
-        joint_outlier_mask, camera_mask, _per_sig = detect_mask(
-            init_3d, mp_L[valid_idx], mp_R[valid_idx], BONES,
+        # Hybrid stereo (preferred) + image fallback — same as the
+        # Stereo Fill emission in skeleton_data.  Loads shifts +
+        # response and rebuilds the per-cell stereo points in OS/OD
+        # space so build_and_validate_stereo_fill can compose with
+        # MP combined.
+        _shift_mag_v = None
+        _resp_v = None
+        _stereo_L_v = None
+        _stereo_R_v = None
+        try:
+            from .stereo_align import load_stereo_align
+            from .video import build_trial_map
+            _trial_idx = next(
+                (i for i, t in enumerate(build_trial_map(subject_name))
+                 if t.get("trial_name") == trial_stem),
+                None,
+            )
+            _sa_hyb = (load_stereo_align(subject_name, _trial_idx, mode="hybrid")
+                       if _trial_idx is not None else None)
+            _sa = _sa_hyb or (load_stereo_align(subject_name, _trial_idx, mode="image")
+                              if _trial_idx is not None else None)
+            if _sa is not None and "shifts" in _sa and "response" in _sa:
+                _shifts = np.asarray(_sa["shifts"], dtype=np.float64)
+                _resp_arr = np.asarray(_sa["response"], dtype=np.float64)
+                _N_sa = min(N, _shifts.shape[0])
+                # Anchor stereo to MP combined where finite, forward
+                # fallback elsewhere — matches the display code.
+                _stereo_L_v = np.full((N, 21, 2), np.nan)
+                _stereo_R_v = np.full((N, 21, 2), np.nan)
+                _stereo_L_v[:_N_sa, :, 0] = mp_L[:_N_sa, :, 0] - _shifts[:_N_sa, :, 0]
+                _stereo_L_v[:_N_sa, :, 1] = mp_L[:_N_sa, :, 1] - _shifts[:_N_sa, :, 1]
+                _stereo_R_v[:_N_sa, :, 0] = mp_R[:_N_sa, :, 0] + _shifts[:_N_sa, :, 0]
+                _stereo_R_v[:_N_sa, :, 1] = mp_R[:_N_sa, :, 1] + _shifts[:_N_sa, :, 1]
+                _resp_v = np.full((N, 21), np.nan)
+                _resp_v[:_N_sa] = _resp_arr[:_N_sa]
+                _shift_mag_v = np.linalg.norm(_shifts, axis=-1)
+        except Exception as _e:
+            logger.debug(f"  Stereo Fill source load skipped: {_e}")
+
+        # First pass: camera mask straight from the saved params on
+        # the MP combined frames the optimiser would see.
+        _, camera_mask, _per_sig = detect_mask_from_params(
+            _saved_params, init_3d, mp_L[valid_idx], mp_R[valid_idx], BONES,
             calib=calib,
             confidence_L=_conf_L, confidence_R=_conf_R,
             hrnet_L=_hr_L,        hrnet_R=_hr_R,
-            enable_vel=bool(_mpf.get("enable_vel", False)),
-            vel_k=float(_mpf.get("vel_k", 6.0)),
-            enable_accel=bool(_mpf.get("enable_accel", True)),
-            accel_k=float(_mpf.get("accel_k", 6.0)),
-            enable_bone=bool(_mpf.get("enable_bone", True)),
-            bone_k=float(_mpf.get("bone_k", 6.0)),
-            enable_ydisp=bool(_mpf.get("enable_ydisp", False)),
-            ydisp_px=float(_mpf.get("ydisp_px", 5.0)),
-            enable_z=bool(_mpf.get("enable_z", False)),
-            z_k=float(_mpf.get("z_k", 6.0)),
-            enable_mpconf=bool(_mpf.get("enable_mpconf", False)),
-            mpconf_min=float(_mpf.get("mpconf_min", 0.5)),
-            enable_stereo=bool(_mpf.get("enable_stereo", False)),
-            stereo_px=float(_mpf.get("stereo_px", 5.0)),
-            enable_hrnet=bool(_mpf.get("enable_hrnet", False)),
-            hrnet_min=float(_mpf.get("hrnet_min", 0.2)),
+            stereo_shift_mag=(_shift_mag_v[valid_idx]
+                               if _shift_mag_v is not None else None),
+            stereo_response=(_resp_v[valid_idx]
+                              if _resp_v is not None else None),
         )
+        joint_outlier_mask = camera_mask.any(axis=-1)
+        # Second pass: build + validate stereo fill, then use it as
+        # the optimiser's 2D target.  Requires a stereo bake; without
+        # one we just keep MP combined as the target and downweight
+        # filtered cells.
+        if _stereo_L_v is not None:
+            _shift_mag_valid = _shift_mag_v[valid_idx] if _shift_mag_v is not None else None
+            _resp_valid = _resp_v[valid_idx] if _resp_v is not None else None
+            _stereo_L_valid = _stereo_L_v[valid_idx]
+            _stereo_R_valid = _stereo_R_v[valid_idx]
+            _fL_valid, _fR_valid, _f3d_valid, _donated_v, _validated_v = (
+                build_and_validate_stereo_fill(
+                    mp_L[valid_idx], mp_R[valid_idx],
+                    _stereo_L_valid, _stereo_R_valid,
+                    _resp_valid, _shift_mag_valid,
+                    camera_mask, _saved_params,
+                    init_3d, calib, BONES,
+                    confidence_L=_conf_L, confidence_R=_conf_R,
+                    hrnet_L=_hr_L,        hrnet_R=_hr_R,
+                    conf_min=0.4,
+                ))
+            n_donated_v = int(_donated_v.sum())
+            n_validated_v = int(_validated_v.sum())
+            logger.info(
+                f"  Stereo Fill: {n_donated_v} donations placed, "
+                f"{n_validated_v} survived validation"
+            )
+            # Splice fill back into trial-length target arrays so
+            # downstream code (which still indexes by valid_idx) sees
+            # the right values.  Non-valid frames stay at their MP
+            # combined values — they're not part of the fit anyway.
+            target_L_np = mp_L.copy()
+            target_R_np = mp_R.copy()
+            target_L_np[valid_idx] = _fL_valid
+            target_R_np[valid_idx] = _fR_valid
+            # The camera mask used for joint_weight switches to
+            # "where is the fill target NaN?" — that's the truthful
+            # picture of "this camera has no usable 2D for this
+            # joint at this frame" after the fill+validate pass.
+            _nan_L = ~np.isfinite(_fL_valid[:, :, 0])
+            _nan_R = ~np.isfinite(_fR_valid[:, :, 0])
+            camera_mask = np.stack([_nan_L, _nan_R], axis=-1)
         logger.info(f"  Outlier pre-filter: USING SAVED MP FILTER ({mp_filter_sidecar.name})")
     else:
         joint_outlier_mask, camera_mask = _detect_outlier_per_joint(
@@ -332,16 +405,27 @@ def run_skeleton_v1_fit(
     )
 
     # Per (frame, joint, camera) weights for the reproj loss.  Zero
-    # on a (frame, joint) for the camera(s) attributed as bad.  The
+    # on cells the filter (or fill+validate) marked as bad — the
     # smoothness + bone terms still apply, so masked joints get
     # pulled toward neighbor-interpolated positions through the
     # smoothness gradient.  A joint with one camera masked still
-    # gets a reproj anchor from the OTHER camera, so we don't
-    # throw away the good observation.
+    # gets a reproj anchor from the OTHER camera.
     jw_L_np = (1.0 - camera_mask[:, :, 0].astype(np.float32))
     jw_R_np = (1.0 - camera_mask[:, :, 1].astype(np.float32))
     joint_weight_L = torch.tensor(jw_L_np, device=device, dtype=torch.float32)
     joint_weight_R = torch.tensor(jw_R_np, device=device, dtype=torch.float32)
+
+    # 2D reproj targets: Stereo Fill when available, MP combined
+    # otherwise.  Donated cells carry the stereo-corrected point as
+    # the target; dropped cells carry NaN — replace with 0 here so
+    # torch doesn't NaN-poison the loss (weight is zero there
+    # regardless, so the literal value doesn't matter).
+    _tgt_L_np = np.where(np.isfinite(target_L_np[valid_idx]),
+                          target_L_np[valid_idx], 0.0).astype(np.float32)
+    _tgt_R_np = np.where(np.isfinite(target_R_np[valid_idx]),
+                          target_R_np[valid_idx], 0.0).astype(np.float32)
+    tgt_L = torch.tensor(_tgt_L_np, device=device, dtype=torch.float32)
+    tgt_R = torch.tensor(_tgt_R_np, device=device, dtype=torch.float32)
 
     # Optimizable: 3D joint positions only.
     #
