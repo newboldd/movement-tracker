@@ -5415,8 +5415,41 @@ def dispatch_remote_preproc_batch(
                     if not vname:
                         continue
                     local_v = str(settings.video_path / vname)
-                    if os.path.exists(local_v):
-                        _scp_if_changed(cfg, local_v, t["video_remote_path"],
+                    if not os.path.exists(local_v):
+                        continue
+                    # Two candidate locations on the remote:
+                    #   preproc_<sub>/videos/<v>  — where future
+                    #     preproc jobs upload by default
+                    #   deidentify_<sub>/<v>      — where prior
+                    #     Render / Deidentify jobs uploaded
+                    # If either has a matching file we reuse it
+                    # (legacy ``remote_preproc`` had this fallback;
+                    # the new dispatcher lost it in the rewrite,
+                    # causing every video to re-upload).
+                    preproc_v = t["video_remote_path"]
+                    deidentify_v = f"{cfg.work_dir}/deidentify_{sn}/{vname}"
+                    probe = subprocess.run(
+                        _py_cmd(cfg,
+                            f"\"import os; "
+                            f"print('P' if os.path.exists(r'{preproc_v}') "
+                            f"else ('D' if os.path.exists(r'{deidentify_v}') "
+                            f"else 'N'))\""),
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    where = (probe.stdout or "").strip()
+                    if where == "D":
+                        # Point the bundle at the deidentify path —
+                        # the worker's _install_stubs reads
+                        # t["video_remote_path"] verbatim, so this
+                        # just works without copy/symlink.
+                        t["video_remote_path"] = deidentify_v
+                        logfile.write(f"  {sn}/{vname}: reusing deidentify upload\n")
+                        logfile.flush()
+                    else:
+                        # Either already at the preproc path (skip
+                        # via _scp_if_changed) or missing entirely
+                        # (upload).
+                        _scp_if_changed(cfg, local_v, preproc_v,
                                          timeout=600, logfile=logfile,
                                          label=f"{sn}/{vname}: ")
                 # MP prelabels for this subject.
