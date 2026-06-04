@@ -239,8 +239,131 @@ def run_skeleton_v2_fit(
     meta_flex = _t(np.nanmedian(flex_init[:, META_BONES], axis=0), req_grad=True)
     meta_abd  = _t(np.nanmedian(abd_init[:, META_BONES],  axis=0), req_grad=True)
 
-    tgt_mp_L = _t(mp_L[valid_idx])
-    tgt_mp_R = _t(mp_R[valid_idx])
+    # ── 2D reproj targets: Stereo Fill when available, MP combined otherwise ──
+    # Mirrors the same path skeleton_v1 uses.  When a saved MP
+    # Filter sidecar AND a stereo bake (Hybrid > Image) both exist
+    # for the trial, the filtered + stereo-donated labels become
+    # the optimiser's targets; donated cells contribute the
+    # stereo-corrected 2D point with full weight, dropped cells
+    # (validation failed, or both cameras filtered) contribute
+    # zero per camera so the bone-length + smoothness terms have
+    # to take over.  Joint-weight tensor is the per-camera finite
+    # mask × the trial-level joint_weights confidence from above.
+    target_L_np = mp_L[valid_idx].copy()
+    target_R_np = mp_R[valid_idx].copy()
+    mask_L_np = np.ones((n_valid, 21), dtype=np.float32)
+    mask_R_np = np.ones((n_valid, 21), dtype=np.float32)
+
+    _sf_sidecar = _skeleton_dir(subject_name) / trial_stem / "mp_filter_params.json"
+    if _sf_sidecar.exists():
+        try:
+            from .mp_filter import (
+                load_saved_filter_params, detect_mask_from_params,
+                build_and_validate_stereo_fill,
+            )
+            _saved_params = load_saved_filter_params(_sf_sidecar)
+            # MP confidence + HRnet for the camera-mask filter — same
+            # subset slicing pattern as skeleton_v1.
+            _conf_L = prelabels.get("confidence_OS") if hasattr(prelabels, "get") else None
+            _conf_R = prelabels.get("confidence_OD") if hasattr(prelabels, "get") else None
+            if _conf_L is not None: _conf_L = _conf_L[start_frame:end][valid_idx]
+            if _conf_R is not None: _conf_R = _conf_R[start_frame:end][valid_idx]
+            _hr_L = None; _hr_R = None
+            try:
+                _hm_path = _skeleton_dir(subject_name) / trial_stem / "hrnet_w18_heatmaps.npz"
+                if _hm_path.exists():
+                    with np.load(str(_hm_path), allow_pickle=False) as _hm:
+                        if "heatmaps_L" in _hm.files:
+                            _hr_L = _hm["heatmaps_L"].max(axis=(2, 3))[valid_idx].astype(np.float32)
+                        if "heatmaps_R" in _hm.files:
+                            _hr_R = _hm["heatmaps_R"].max(axis=(2, 3))[valid_idx].astype(np.float32)
+            except Exception:
+                _hr_L = None; _hr_R = None
+            # Hybrid > image stereo source.  Reconstruct per-cell
+            # stereo points the same way the display + v1 pipelines do.
+            _shift_mag_v = None; _resp_v = None
+            _stereo_L_v = None; _stereo_R_v = None
+            try:
+                from .stereo_align import load_stereo_align
+                _trial_idx = next(
+                    (i for i, tt in enumerate(build_trial_map(subject_name))
+                     if tt.get("trial_name") == trial_stem),
+                    None,
+                )
+                _sa_hyb = (load_stereo_align(subject_name, _trial_idx, mode="hybrid")
+                           if _trial_idx is not None else None)
+                _sa = _sa_hyb or (load_stereo_align(subject_name, _trial_idx, mode="image")
+                                  if _trial_idx is not None else None)
+                if _sa is not None and "shifts" in _sa and "response" in _sa:
+                    _shifts = np.asarray(_sa["shifts"], dtype=np.float64)
+                    _resp_arr = np.asarray(_sa["response"], dtype=np.float64)
+                    _N_sa = min(N, _shifts.shape[0])
+                    _stereo_L_v = np.full((N, 21, 2), np.nan)
+                    _stereo_R_v = np.full((N, 21, 2), np.nan)
+                    _stereo_L_v[:_N_sa, :, 0] = mp_L[:_N_sa, :, 0] - _shifts[:_N_sa, :, 0]
+                    _stereo_L_v[:_N_sa, :, 1] = mp_L[:_N_sa, :, 1] - _shifts[:_N_sa, :, 1]
+                    _stereo_R_v[:_N_sa, :, 0] = mp_R[:_N_sa, :, 0] + _shifts[:_N_sa, :, 0]
+                    _stereo_R_v[:_N_sa, :, 1] = mp_R[:_N_sa, :, 1] + _shifts[:_N_sa, :, 1]
+                    _resp_v = np.full((N, 21), np.nan)
+                    _resp_v[:_N_sa] = _resp_arr[:_N_sa]
+                    _shift_mag_v = np.linalg.norm(_shifts, axis=-1)
+            except Exception as _e:
+                logger.debug(f"  Stereo Fill source load skipped: {_e}")
+
+            if _stereo_L_v is not None:
+                # First pass: camera mask from saved filter applied to
+                # MP combined.  init_3d (wrist-filled) is what v2 will
+                # optimise from; pass it as the 3D-aware input.
+                _, camera_mask_v, _ = detect_mask_from_params(
+                    _saved_params, init_3d,
+                    mp_L[valid_idx], mp_R[valid_idx], BONES,
+                    calib=calib,
+                    confidence_L=_conf_L, confidence_R=_conf_R,
+                    hrnet_L=_hr_L,        hrnet_R=_hr_R,
+                    stereo_shift_mag=(_shift_mag_v[valid_idx]
+                                       if _shift_mag_v is not None else None),
+                    stereo_response=(_resp_v[valid_idx]
+                                      if _resp_v is not None else None),
+                )
+                # Second pass: build + validate stereo fill.
+                _shift_mag_valid = (_shift_mag_v[valid_idx]
+                                     if _shift_mag_v is not None else None)
+                _resp_valid = (_resp_v[valid_idx]
+                                if _resp_v is not None else None)
+                _fL_valid, _fR_valid, _f3d_valid, _donated_v, _validated_v = (
+                    build_and_validate_stereo_fill(
+                        mp_L[valid_idx], mp_R[valid_idx],
+                        _stereo_L_v[valid_idx], _stereo_R_v[valid_idx],
+                        _resp_valid, _shift_mag_valid,
+                        camera_mask_v, _saved_params,
+                        init_3d, calib, BONES,
+                        confidence_L=_conf_L, confidence_R=_conf_R,
+                        hrnet_L=_hr_L,        hrnet_R=_hr_R,
+                        conf_min=0.4,
+                    ))
+                logger.info(
+                    f"  Stereo Fill: {int(_donated_v.sum())} donations placed, "
+                    f"{int(_validated_v.sum())} survived validation"
+                )
+                target_L_np = _fL_valid.astype(np.float32)
+                target_R_np = _fR_valid.astype(np.float32)
+                # Per-camera finite mask: 1 where the fill has a usable
+                # value, 0 where dropped.  Multiplied with jw below.
+                mask_L_np = np.isfinite(target_L_np[:, :, 0]).astype(np.float32)
+                mask_R_np = np.isfinite(target_R_np[:, :, 0]).astype(np.float32)
+                logger.info("  Optimising against Stereo Fill targets.")
+        except Exception as _e:
+            logger.warning(f"  Stereo Fill prep failed; falling back to MP combined: {_e}")
+
+    # NaN → 0 so torch doesn't NaN-poison the reproj loss (the
+    # corresponding mask entries are 0, so the literal value is
+    # multiplied out — but NaN times zero is still NaN in float).
+    target_L_np = np.where(np.isfinite(target_L_np), target_L_np, 0.0).astype(np.float32)
+    target_R_np = np.where(np.isfinite(target_R_np), target_R_np, 0.0).astype(np.float32)
+    tgt_mp_L = _t(target_L_np)
+    tgt_mp_R = _t(target_R_np)
+    tgt_mask_L = _t(mask_L_np)
+    tgt_mask_R = _t(mask_R_np)
     jw = _t(joint_weights)
 
     # Adaptive smoothing
@@ -303,10 +426,13 @@ def run_skeleton_v2_fit(
             w = jw if mask is None else jw * mask.float()
             return (err * w).sum() / w.sum().clamp(min=1)
 
-        # MP combined is the sole 2D input — fixed unit weight.
+        # 2D reproj: targets are Stereo Fill when available, MP
+        # combined otherwise.  Per-camera masks zero out cells the
+        # Stereo Fill validation dropped (NaN→0 on the target side,
+        # mask side carries 0 there too).
         loss = loss + (
-            cam_w_L * _weighted_reproj(pL, tgt_mp_L)
-            + cam_w_R * _weighted_reproj(pR, tgt_mp_R)
+            cam_w_L * _weighted_reproj(pL, tgt_mp_L, mask=tgt_mask_L)
+            + cam_w_R * _weighted_reproj(pR, tgt_mp_R, mask=tgt_mask_R)
         )
 
         if w_bone > 0:
@@ -388,8 +514,12 @@ def run_skeleton_v2_fit(
 
         if it % 100 == 0 or it == n_iters - 1:
             with torch.no_grad():
-                eL = torch.sqrt(((pL - tgt_mp_L) ** 2).sum(-1)).mean().item()
-                eR = torch.sqrt(((pR - tgt_mp_R) ** 2).sum(-1)).mean().item()
+                # Mean reproj error over masked-in cells only (dropped
+                # joints shouldn't drag the mean toward zero).
+                _eL_pj = torch.sqrt(((pL - tgt_mp_L) ** 2).sum(-1))
+                _eR_pj = torch.sqrt(((pR - tgt_mp_R) ** 2).sum(-1))
+                eL = ((_eL_pj * tgt_mask_L).sum() / tgt_mask_L.sum().clamp(min=1)).item()
+                eR = ((_eR_pj * tgt_mask_R).sum() / tgt_mask_R.sum().clamp(min=1)).item()
                 be = (bl_clamped - target_bl).abs().mean().item()
             logger.info(f"    iter {it}: L={eL:.1f}px R={eR:.1f}px bone_err={be:.1f}mm")
 
@@ -405,14 +535,33 @@ def run_skeleton_v2_fit(
                                            bl_final, flex_final, abd_final)
         pL_f = _project_torch(joints_final, K1, d1)
         pR_f = _project_torch(joints_final, K2, d2, R_stereo, T_stereo)
-        err_L = torch.sqrt(((pL_f - tgt_mp_L) ** 2).sum(-1)).mean(1).cpu().numpy()
-        err_R = torch.sqrt(((pR_f - tgt_mp_R) ** 2).sum(-1)).mean(1).cpu().numpy()
+        # Per-frame mean reproj error — weighted by the per-camera
+        # mask so dropped cells (zero target) don't drag the average
+        # toward zero or inflate it with the fitted joint's distance
+        # from origin.
+        _err_L_pj = torch.sqrt(((pL_f - tgt_mp_L) ** 2).sum(-1))   # (n_valid, 21)
+        _err_R_pj = torch.sqrt(((pR_f - tgt_mp_R) ** 2).sum(-1))
+        _denom_L = tgt_mask_L.sum(1).clamp(min=1)
+        _denom_R = tgt_mask_R.sum(1).clamp(min=1)
+        err_L = ((_err_L_pj * tgt_mask_L).sum(1) / _denom_L).cpu().numpy()
+        err_R = ((_err_R_pj * tgt_mask_R).sum(1) / _denom_R).cpu().numpy()
 
     with torch.no_grad():
-        off_L = (tgt_mp_L - pL_f).detach().cpu().numpy()
-        off_R = (tgt_mp_R - pR_f).detach().cpu().numpy()
+        # Mask the offset reduction too — dropped cells where
+        # tgt is 0 would otherwise contribute (0 - projected) to
+        # the global-offset median, biasing it.
+        _off_L_t = (tgt_mp_L - pL_f) * tgt_mask_L.unsqueeze(-1)
+        _off_R_t = (tgt_mp_R - pR_f) * tgt_mask_R.unsqueeze(-1)
+        # Replace masked-out cells with NaN so nanmedian skips them.
+        _off_L_t = _off_L_t.masked_fill(tgt_mask_L.unsqueeze(-1) == 0, float('nan'))
+        _off_R_t = _off_R_t.masked_fill(tgt_mask_R.unsqueeze(-1) == 0, float('nan'))
+        off_L = _off_L_t.detach().cpu().numpy()
+        off_R = _off_R_t.detach().cpu().numpy()
     corr_L = np.nanmedian(off_L.reshape(-1, 2), axis=0).astype(np.float32)
     corr_R = np.nanmedian(off_R.reshape(-1, 2), axis=0).astype(np.float32)
+    # nanmedian → NaN when all masked.  Treat as no offset.
+    corr_L = np.where(np.isnan(corr_L), 0.0, corr_L).astype(np.float32)
+    corr_R = np.where(np.isnan(corr_R), 0.0, corr_R).astype(np.float32)
     if np.linalg.norm(corr_L) < 5: corr_L = np.zeros(2, dtype=np.float32)
     if np.linalg.norm(corr_R) < 5: corr_R = np.zeros(2, dtype=np.float32)
 
