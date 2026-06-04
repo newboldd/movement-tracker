@@ -184,14 +184,17 @@ class RemoteBatchJobSpec:
 _GENERIC_RUNNER_SOURCE = r'''#!/usr/bin/env python3
 """Generic remote batch runner.  Spawned detached by the local
 dispatcher; outlives the SSH session.  Reads batch.json, loops
-items, spawns the per-job-type worker for each, writes a heartbeat'd
-batch_status.json.
+items, spawns the per-job-type worker for each, writes a
+batch_status.json with a heartbeat refreshed every 15 s by a
+background thread (so long-running ``subprocess.run`` calls
+don't leave the heartbeat stale).
 """
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 
@@ -225,21 +228,46 @@ def main():
 
     state = {it["id"]: {"status": "pending"} for it in items}
     started = time.time()
+    state_lock = threading.Lock()
+    current_id_ref = [None]
+    last_log_ref   = [None]
+
+    def _build_payload():
+        with state_lock:
+            return {
+                "batch_id": batch_id,
+                "status": "running",
+                "items": dict(state),
+                "started_at": started,
+                "heartbeat": time.time(),
+                "pid": os.getpid(),
+                "current_item": current_id_ref[0],
+                "last_log": last_log_ref[0],
+            }
 
     def _flush(current_id=None, extra_log=None):
-        payload = {
-            "batch_id": batch_id,
-            "status": "running",
-            "items": state,
-            "started_at": started,
-            "heartbeat": time.time(),
-            "pid": os.getpid(),
-        }
-        if current_id is not None:
-            payload["current_item"] = current_id
-        if extra_log:
-            payload["last_log"] = extra_log
-        _atomic_write(status_path, payload)
+        with state_lock:
+            if current_id is not None:
+                current_id_ref[0] = current_id
+            if extra_log is not None:
+                last_log_ref[0] = extra_log
+        _atomic_write(status_path, _build_payload())
+
+    # Heartbeat thread refreshes batch_status.json every 15 s.
+    # Critical when a per-item worker takes 10-30+ min — without
+    # this the local poller flags the runner as dead even though
+    # it's just blocked inside subprocess.run.
+    HEARTBEAT_S = 15
+    stop_hb = threading.Event()
+    def _heartbeat_loop():
+        while not stop_hb.is_set():
+            try:
+                _atomic_write(status_path, _build_payload())
+            except Exception:
+                pass
+            stop_hb.wait(HEARTBEAT_S)
+    hb_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+    hb_thread.start()
 
     def _cancelled():
         return bool(cancel_flag and os.path.exists(cancel_flag))
@@ -249,9 +277,10 @@ def main():
     for it in items:
         if _cancelled():
             print(f"[runner] cancel.flag present → stopping early", flush=True)
-            for k, v in state.items():
-                if v.get("status") == "pending":
-                    state[k] = {"status": "cancelled"}
+            with state_lock:
+                for k, v in state.items():
+                    if v.get("status") == "pending":
+                        state[k] = {"status": "cancelled"}
             break
 
         item_id = it["id"]
@@ -265,26 +294,35 @@ def main():
                 with open(item_st) as f:
                     prev = json.load(f)
                 if prev.get("status") == "completed":
-                    state[item_id] = {"status": "completed", "skipped": True}
+                    with state_lock:
+                        state[item_id] = {"status": "completed", "skipped": True}
                     _flush(extra_log=f"{item_id}: already completed, skipping")
                     continue
         except Exception:
             pass
 
-        state[item_id] = {"status": "running"}
+        with state_lock:
+            state[item_id] = {"status": "running"}
         _flush(current_id=item_id, extra_log=f"starting {item_id}")
         try:
             rc = subprocess.run(
                 [python_exe, "-u", worker_py, bundle, item_st],
                 cwd=os.path.dirname(worker_py),
             ).returncode
-            state[item_id] = (
-                {"status": "completed"} if rc == 0
-                else {"status": "failed", "rc": rc}
-            )
+            with state_lock:
+                state[item_id] = (
+                    {"status": "completed"} if rc == 0
+                    else {"status": "failed", "rc": rc}
+                )
         except Exception as e:
-            state[item_id] = {"status": "failed", "error": str(e)}
+            with state_lock:
+                state[item_id] = {"status": "failed", "error": str(e)}
+        with state_lock:
+            current_id_ref[0] = None
         _flush(extra_log=f"finished {item_id}: {state[item_id]['status']}")
+
+    stop_hb.set()
+    hb_thread.join(timeout=2)
 
     final_status = "cancelled" if _cancelled() else "completed"
     _atomic_write(status_path, {

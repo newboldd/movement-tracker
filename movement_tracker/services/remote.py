@@ -5669,6 +5669,7 @@ def poll_remote_preproc_batch(
     last_heartbeat = None
     last_log_size = 0
     _consec_scp_failures = 0
+    _stale_warned = False
     try:
         while True:
             _check_cancel()
@@ -5767,11 +5768,24 @@ def poll_remote_preproc_batch(
                 logfile.write(f"=== Batch failed: {st.get('error', '?')} ===\n")
                 logfile.flush()
                 break
-            # Heartbeat timeout: 5 min without an update → runner likely dead.
+            # Heartbeat timeout: 5 min without an update → runner
+            # MIGHT be dead (or just blocked inside a long
+            # ``subprocess.run`` from the old non-threaded runner).
+            # New runner refreshes heartbeat every 15 s via a
+            # background thread, so a stale heartbeat there really
+            # does mean trouble.  Either way: log ONCE per stale
+            # period, not every poll cycle.
             if last_heartbeat and (time.time() - last_heartbeat > 300):
-                logfile.write("  WARN: runner heartbeat stale > 5 min\n")
-                logfile.flush()
-                # Don't bail — just keep checking; user can cancel.
+                if not _stale_warned:
+                    logfile.write(
+                        "  WARN: runner heartbeat stale > 5 min "
+                        "(may be a long subprocess.run on an old "
+                        "runner build — will re-log if it recovers)\n"
+                    )
+                    logfile.flush()
+                    _stale_warned = True
+            else:
+                _stale_warned = False
 
         # Final job-status flush.
         with get_db_ctx() as _db:
@@ -6670,16 +6684,17 @@ runs each subject sequentially via ``remote_preproc_worker.py``,
 updates ``batch_status.json`` after each subject so the local poller
 knows what's been finished and can pull outputs back.
 
-Per-subject heartbeats (status.json file the per-subject worker
-already writes) tell the poller intra-subject progress.  The
-batch status reports which subject is currently active and the
-running set of (subject → outcome) pairs.
+A background heartbeat thread keeps ``batch_status.json`` fresh
+WHILE the per-subject worker is running — without it the
+heartbeat would only refresh between subjects (every 10-30+ min)
+and the local poller would falsely flag the bake as dead.
 """
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 
@@ -6712,19 +6727,47 @@ def main():
     sub_state = {s["name"]: {"status": "pending"} for s in subjects}
     started = time.time()
 
-    def _flush(extra=None):
-        payload = {
-            "status": "running",
-            "subjects": sub_state,
-            "started_at": started,
-            "heartbeat": time.time(),
-            "pid": os.getpid(),
-        }
+    # State guarded by _state_lock so the heartbeat thread can read
+    # the current sub_state without racing the main thread that
+    # updates it between subjects.
+    _state_lock = threading.Lock()
+    _current_sub = [None]   # mutable via [0] for closure access
+
+    def _build_payload(extra=None):
+        with _state_lock:
+            payload = {
+                "status": "running",
+                "subjects": dict(sub_state),
+                "started_at": started,
+                "heartbeat": time.time(),
+                "pid": os.getpid(),
+                "current_subject": _current_sub[0],
+            }
         if extra:
             payload.update(extra)
-        _write_status_atomic(status_path, payload)
+        return payload
 
-    _flush({"current_subject": None})
+    def _flush(extra=None):
+        _write_status_atomic(status_path, _build_payload(extra))
+
+    # Background heartbeat thread: rewrites batch_status.json every
+    # HEARTBEAT_S seconds with a fresh timestamp.  Without this, a
+    # long ``subprocess.run`` (e.g. a 20-min ``stable`` bake) leaves
+    # the heartbeat stale and the local poller spams "runner
+    # heartbeat stale > 5 min" warnings.
+    HEARTBEAT_S = 15
+    _stop_hb = threading.Event()
+    def _heartbeat_loop():
+        while not _stop_hb.is_set():
+            try:
+                _flush()
+            except Exception:
+                pass
+            _stop_hb.wait(HEARTBEAT_S)
+    hb_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+    hb_thread.start()
+
+    _flush()
 
     for s in subjects:
         sub_name = s["name"]
@@ -6738,29 +6781,38 @@ def main():
                 with open(sub_status_path) as f:
                     prev = json.load(f)
                 if prev.get("status") == "completed":
-                    sub_state[sub_name] = {"status": "completed", "skipped": True}
-                    _flush({"current_subject": None,
-                             "log": f"  {sub_name}: already completed, skipping"})
+                    with _state_lock:
+                        sub_state[sub_name] = {"status": "completed", "skipped": True}
+                    _flush({"log": f"  {sub_name}: already completed, skipping"})
                     continue
         except Exception:
             pass
 
-        sub_state[sub_name] = {"status": "running"}
-        _flush({"current_subject": sub_name,
-                 "log": f"  starting {sub_name}"})
+        with _state_lock:
+            sub_state[sub_name] = {"status": "running"}
+            _current_sub[0] = sub_name
+        _flush({"log": f"  starting {sub_name}"})
         try:
             rc = subprocess.run(
                 [python_exe, "-u", worker_py, bundle_path, sub_status_path],
                 cwd=os.path.dirname(worker_py),
             ).returncode
-            if rc == 0:
-                sub_state[sub_name] = {"status": "completed"}
-            else:
-                sub_state[sub_name] = {"status": "failed", "rc": rc}
+            with _state_lock:
+                if rc == 0:
+                    sub_state[sub_name] = {"status": "completed"}
+                else:
+                    sub_state[sub_name] = {"status": "failed", "rc": rc}
         except Exception as e:
-            sub_state[sub_name] = {"status": "failed", "error": str(e)}
-        _flush({"current_subject": None,
-                 "log": f"  finished {sub_name}: {sub_state[sub_name]['status']}"})
+            with _state_lock:
+                sub_state[sub_name] = {"status": "failed", "error": str(e)}
+        with _state_lock:
+            _current_sub[0] = None
+        _flush({"log": f"  finished {sub_name}: {sub_state[sub_name]['status']}"})
+
+    # Stop the heartbeat thread before the final flush so it can't
+    # overwrite the "completed" status with a "running" one.
+    _stop_hb.set()
+    hb_thread.join(timeout=2)
 
     # Final flush — batch complete.
     final_status = ("completed" if all(v.get("status") == "completed"
