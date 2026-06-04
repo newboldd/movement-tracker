@@ -392,11 +392,26 @@ def run_stereo_align(subject_name: str, trial_idx: int,
     # the app now treats as the "MP" labels.  Falls back to the
     # forward-only pass for trials that don't have a combined npz
     # yet.
+    mp_source = "combined"
     mp = load_mediapipe_combined_prelabels(subject_name)
+    if mp is not None:
+        # Per-trial loader stitches a subject-wide array and leaves
+        # NaN for trials that don't have a combined.npz on disk.  If
+        # the window we actually care about is all-NaN, combined
+        # doesn't cover this trial — fall back to forward instead of
+        # running phase correlation against a sea of NaN.
+        _os_win = mp["OS_landmarks"][start_frame:start_frame + max(n_frames, 1)]
+        if _os_win.size and not np.isfinite(_os_win).any():
+            mp = None
+            mp_source = "forward (combined empty for this trial)"
+    else:
+        mp_source = "forward (combined missing)"
     if mp is None:
         mp = load_mediapipe_prelabels(subject_name)
     if mp is None:
         raise FileNotFoundError(f"MediaPipe prelabels not found for {subject_name}")
+    print(f"[stereo_align] {subject_name} frames {start_frame}+{n_frames}: "
+          f"MP source = {mp_source}", flush=True)
     OS_lm = mp["OS_landmarks"]
     OD_lm = mp["OD_landmarks"]
     N_total, N_joints, _ = OS_lm.shape
