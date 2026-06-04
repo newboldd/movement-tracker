@@ -5842,6 +5842,16 @@ def poll_remote_preproc_batch(
                 "finished_at=CURRENT_TIMESTAMP WHERE id=?",
                 (final_status, err, job_id),
             )
+            # Also flip the matching job_queue row to terminal state.
+            # The queue worker that spawned us already returned (so
+            # the poller can outlive it), so without this update the
+            # job_queue row sticks at status='running' forever and the
+            # UI's running list keeps showing the (long-finished) job.
+            _db.execute(
+                "UPDATE job_queue SET status=?, error_msg=?, "
+                "finished_at=CURRENT_TIMESTAMP WHERE job_id=?",
+                (final_status, err, job_id),
+            )
     except InterruptedError:
         logfile.write("  poller cancelled by user — killing remote runner\n")
         logfile.flush()
@@ -5852,6 +5862,10 @@ def poll_remote_preproc_batch(
             _db.execute(
                 "UPDATE jobs SET status='cancelled', "
                 "finished_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,),
+            )
+            _db.execute(
+                "UPDATE job_queue SET status='cancelled', "
+                "finished_at=CURRENT_TIMESTAMP WHERE job_id=?", (job_id,),
             )
     except Exception as e:
         logger.exception(f"poll_remote_preproc_batch {job_id}: {e}")
@@ -5865,6 +5879,11 @@ def poll_remote_preproc_batch(
             _db.execute(
                 "UPDATE jobs SET status='failed', error_msg=?, "
                 "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                (f"poller: {str(e)[:400]}", job_id),
+            )
+            _db.execute(
+                "UPDATE job_queue SET status='failed', error_msg=?, "
+                "finished_at=CURRENT_TIMESTAMP WHERE job_id=?",
                 (f"poller: {str(e)[:400]}", job_id),
             )
     finally:

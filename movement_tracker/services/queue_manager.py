@@ -1580,6 +1580,14 @@ class QueueManager:
                     )
                     poller.start()
                     registry._threads[job_id] = poller
+                    # Hand lifecycle off to the poller — DO NOT fall
+                    # through to the queue worker's final-status flush
+                    # below, which would otherwise read jobs.status
+                    # (still 'running' here) and write that back to
+                    # job_queue.status, stranding the row at 'running'
+                    # forever. The poller writes BOTH jobs and
+                    # job_queue terminal status when it exits.
+                    return
 
                 elif job_type in ("vision", "pose", "skeleton_v1", "skeleton_v2"):
                     # These don't have remote handlers yet — run locally
