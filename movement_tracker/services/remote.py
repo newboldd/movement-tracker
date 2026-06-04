@@ -5314,6 +5314,38 @@ def dispatch_remote_preproc_batch(
             )
         return {"error": msg}
 
+    # ── Silent-failure helpers — audit (b) ────────────────────────
+    # The dispatcher accumulated bugs where unchecked subprocess.run
+    # calls failed quietly and the job continued in a broken state
+    # (missing video uploads, undeployed code, etc.).  Every remote
+    # mkdir / scp / sentinel write now flows through one of these
+    # helpers so failures land in runner.log instead of going dark.
+    def _remote_py(script: str, *, label: str, timeout: int = 30,
+                    fatal: bool = False) -> bool:
+        """Run ``python -c`` on the remote; log a warning on rc != 0.
+        Returns True on success.  When ``fatal=True``, raises
+        RuntimeError so the dispatcher's outer try/except converts
+        it into a _fail() (job marked failed, runner not launched)."""
+        try:
+            res = subprocess.run(
+                _py_cmd(cfg, f"\"{script}\""),
+                capture_output=True, text=True, timeout=timeout,
+            )
+            if res.returncode == 0:
+                return True
+            msg = (res.stderr or res.stdout or "").strip()[:200]
+            logfile.write(f"  WARN: {label} rc={res.returncode}: {msg}\n")
+            logfile.flush()
+            if fatal:
+                raise RuntimeError(f"{label} failed: {msg}")
+            return False
+        except subprocess.TimeoutExpired:
+            logfile.write(f"  WARN: {label} timed out\n")
+            logfile.flush()
+            if fatal:
+                raise
+            return False
+
     try:
         # Reachability probe.
         probe = subprocess.run(
@@ -5323,11 +5355,13 @@ def dispatch_remote_preproc_batch(
         if probe.returncode != 0 or "ok" not in probe.stdout:
             return _fail(f"remote unreachable: {probe.stderr[:200]}")
 
-        # Mint state dir + per-subject work dirs.
-        subprocess.run(
-            _py_cmd(cfg, f"\"import os; os.makedirs(r'{state_dir}', exist_ok=True); "
-                          f"os.makedirs(r'{_wd}/preproc_modules', exist_ok=True)\""),
-            capture_output=True, timeout=20,
+        # Mint state dir + per-subject work dirs.  Fatal — if these
+        # mkdirs fail the rest of the dispatch can't succeed, so
+        # surface the failure now instead of silently breaking later.
+        _remote_py(
+            f"import os; os.makedirs(r'{state_dir}', exist_ok=True); "
+            f"os.makedirs(r'{_wd}/preproc_modules', exist_ok=True)",
+            label="state_dir mkdir", timeout=20, fatal=True,
         )
 
         # Group trials by subject.
@@ -5452,51 +5486,59 @@ def dispatch_remote_preproc_batch(
         # worker is shipped and a job that reuses an existing
         # batch_id dispatches, _scp_if_changed will see the size
         # changed and push the new version.
+        # Code uploads: _scp_if_changed already logs success.  We also
+        # check its return tuple now and fatal-fail if any code upload
+        # actually fails (vs. just skipping due to size match) — code
+        # files are tiny and required, so a network blip dropping them
+        # silently would leave workers running stale logic.
+        _code_upload_ok = True
         service_dir = Path(__file__).parent
         for mod_file in ("camera_motion.py", "background.py", "ffmpeg.py"):
             mp = service_dir / mod_file
             if not mp.exists():
                 continue
-            _scp_if_changed(
+            ok, _ = _scp_if_changed(
                 cfg, str(mp), f"{modules_dir}/{mod_file}",
                 timeout=60, logfile=logfile, label=f"module {mod_file}: ",
             )
+            if not ok:
+                _code_upload_ok = False
         # Worker script (per-subject).
         worker_local = os.path.join(_tf.gettempdir(),
                                       f"remote_preproc_worker_{job_id}.py")
         with open(worker_local, "w") as f:
             f.write(_REMOTE_PREPROC_WORKER)
         worker_remote = f"{modules_dir}/remote_preproc_worker.py"
-        _scp_if_changed(cfg, worker_local, worker_remote,
-                         timeout=30, logfile=logfile, label="worker: ")
+        ok, _ = _scp_if_changed(cfg, worker_local, worker_remote,
+                                 timeout=30, logfile=logfile, label="worker: ")
+        if not ok:
+            _code_upload_ok = False
         # Batch runner script (loops subjects).
         runner_local = os.path.join(_tf.gettempdir(),
                                       f"remote_preproc_batch_runner_{job_id}.py")
         with open(runner_local, "w") as f:
             f.write(_REMOTE_PREPROC_BATCH_RUNNER)
         runner_remote = f"{state_dir}/batch_runner.py"
-        _scp_if_changed(cfg, runner_local, runner_remote,
-                         timeout=30, logfile=logfile, label="runner: ")
+        ok, _ = _scp_if_changed(cfg, runner_local, runner_remote,
+                                 timeout=30, logfile=logfile, label="runner: ")
+        if not ok:
+            _code_upload_ok = False
+        if not _code_upload_ok:
+            return _fail("one or more code uploads failed — refusing to "
+                          "launch runner with possibly stale code")
 
         # ── Per-subject mkdir (ALWAYS run; cheap, idempotent) ──
         # The worker reads ``data_dir/<sub>/mediapipe_prelabels.npz``
         # (where ``data_dir = <work>/preproc_<sub>``), so the
-        # ``<sub>/<sub>/`` dir must exist every dispatch.  Previously
-        # this mkdir lived inside the upload-skip block; on resume
-        # with the sentinel present, fresh batch_ids whose dirs
-        # hadn't been created elsewhere would silently fail at the
-        # worker's npz read.  Hoisted out, batched into a single
-        # SSH round-trip across all subjects.
+        # ``<sub>/<sub>/`` dir must exist every dispatch.
         if by_subj:
             mkdir_lines = ["import os"]
             for sn in by_subj.keys():
                 mkdir_lines.append(
                     f"os.makedirs(r'{_wd}/preproc_{sn}/{sn}', exist_ok=True)"
                 )
-            subprocess.run(
-                _py_cmd(cfg, f"\"{';'.join(mkdir_lines)}\""),
-                capture_output=True, timeout=30,
-            )
+            _remote_py(";".join(mkdir_lines),
+                       label="per-subject <sub>/<sub>/ mkdir", timeout=30)
 
         if uploads_already_done:
             logfile.write("  uploads_complete sentinel present — skipping data upload phase\n")
@@ -5504,19 +5546,22 @@ def dispatch_remote_preproc_batch(
         else:
             logfile.write(f"  uploading inputs for {n_subj} subject(s)...\n")
             logfile.flush()
-            # ── Per-subject: videos dir + video + npz uploads ──
-            # Trial dicts were hydrated above; here we just push the
-            # actual files (skip-if-present).  The ``<sub>/<sub>/``
-            # mkdir was hoisted out above so it runs every dispatch;
-            # ``videos/`` mkdir stays inside since it only matters
-            # when we're about to upload videos into it.
+            # Track every data-scp's outcome.  The uploads_complete
+            # sentinel can ONLY be written after a fully successful
+            # pass — otherwise a partial upload (network blip on one
+            # video) marks itself complete, every later dispatch
+            # skips the missing files, and the worker fails with
+            # "Cannot open video".  This is bug #14 of the rollout.
+            all_uploads_ok = True
+            n_uploaded = 0
+            n_failed = 0
+
             for i, (sn, sub_trials) in enumerate(by_subj.items()):
                 _check_cancel()
                 remote_work = f"{_wd}/preproc_{sn}"
-                subprocess.run(
-                    _py_cmd(cfg, f"\"import os; "
-                                  f"os.makedirs(r'{remote_work}/videos', exist_ok=True)\""),
-                    capture_output=True, timeout=15,
+                _remote_py(
+                    f"import os; os.makedirs(r'{remote_work}/videos', exist_ok=True)",
+                    label=f"{sn}/videos mkdir", timeout=15,
                 )
                 for t in sub_trials:
                     vname = t.get("video_name")
@@ -5524,16 +5569,21 @@ def dispatch_remote_preproc_batch(
                         continue
                     local_v = str(settings.video_path / vname)
                     if not os.path.exists(local_v):
+                        # Local file missing isn't an upload-side
+                        # failure (sentinel can still be written),
+                        # but it IS a job-level failure waiting to
+                        # happen at the worker — log it.
+                        logfile.write(
+                            f"  WARN: {sn}/{vname} not found locally; "
+                            f"worker will fail on this trial\n"
+                        )
+                        logfile.flush()
                         continue
                     # Two candidate locations on the remote:
                     #   preproc_<sub>/videos/<v>  — where future
                     #     preproc jobs upload by default
                     #   deidentify_<sub>/<v>      — where prior
                     #     Render / Deidentify jobs uploaded
-                    # If either has a matching file we reuse it
-                    # (legacy ``remote_preproc`` had this fallback;
-                    # the new dispatcher lost it in the rewrite,
-                    # causing every video to re-upload).
                     preproc_v = t["video_remote_path"]
                     deidentify_v = f"{_wd}/deidentify_{sn}/{vname}"
                     probe = subprocess.run(
@@ -5544,44 +5594,80 @@ def dispatch_remote_preproc_batch(
                             f"else 'N'))\""),
                         capture_output=True, text=True, timeout=15,
                     )
+                    if probe.returncode != 0:
+                        logfile.write(
+                            f"  WARN: {sn}/{vname} location probe failed "
+                            f"(rc={probe.returncode}): "
+                            f"{(probe.stderr or '').strip()[:120]}\n"
+                        )
+                        logfile.flush()
+                        all_uploads_ok = False
+                        n_failed += 1
+                        continue
                     where = (probe.stdout or "").strip()
                     if where == "D":
-                        # Point the bundle at the deidentify path —
-                        # the worker's _install_stubs reads
-                        # t["video_remote_path"] verbatim, so this
-                        # just works without copy/symlink.
                         t["video_remote_path"] = deidentify_v
                         logfile.write(f"  {sn}/{vname}: reusing deidentify upload\n")
                         logfile.flush()
                     else:
-                        # Either already at the preproc path (skip
-                        # via _scp_if_changed) or missing entirely
-                        # (upload).
-                        _scp_if_changed(cfg, local_v, preproc_v,
-                                         timeout=600, logfile=logfile,
-                                         label=f"{sn}/{vname}: ")
+                        ok, _ = _scp_if_changed(
+                            cfg, local_v, preproc_v,
+                            timeout=600, logfile=logfile,
+                            label=f"{sn}/{vname}: ",
+                        )
+                        if ok:
+                            n_uploaded += 1
+                        else:
+                            all_uploads_ok = False
+                            n_failed += 1
                 # MP prelabels for this subject.
                 mp_npz_local = settings.dlc_path / sn / "mediapipe_prelabels.npz"
                 if mp_npz_local.exists():
-                    _scp_if_changed(cfg, str(mp_npz_local),
-                                     f"{remote_work}/{sn}/mediapipe_prelabels.npz",
-                                     timeout=300, logfile=logfile,
-                                     label=f"{sn}/mp_prelabels: ")
+                    ok, _ = _scp_if_changed(
+                        cfg, str(mp_npz_local),
+                        f"{remote_work}/{sn}/mediapipe_prelabels.npz",
+                        timeout=300, logfile=logfile,
+                        label=f"{sn}/mp_prelabels: ",
+                    )
+                    if not ok:
+                        all_uploads_ok = False
+                        n_failed += 1
                 pose_npz_local = settings.dlc_path / sn / "pose_prelabels.npz"
                 if pose_npz_local.exists():
-                    _scp_if_changed(cfg, str(pose_npz_local),
-                                     f"{remote_work}/{sn}/pose_prelabels.npz",
-                                     timeout=300, logfile=logfile,
-                                     label=f"{sn}/pose_prelabels: ")
+                    ok, _ = _scp_if_changed(
+                        cfg, str(pose_npz_local),
+                        f"{remote_work}/{sn}/pose_prelabels.npz",
+                        timeout=300, logfile=logfile,
+                        label=f"{sn}/pose_prelabels: ",
+                    )
+                    if not ok:
+                        all_uploads_ok = False
+                        n_failed += 1
 
-            # Mark uploads complete.
-            subprocess.run(
-                _py_cmd(cfg,
-                    f"\"import json,time; "
-                    f"open(r'{uploads_complete_remote}','w').write(json.dumps({{'at':time.time()}}))\""),
-                capture_output=True, timeout=15,
-            )
-            logfile.write("  uploads_complete sentinel written\n"); logfile.flush()
+            # Sentinel write — only after a fully successful pass.
+            # On partial failure, leave the sentinel absent so the
+            # NEXT dispatch will retry the failed scps instead of
+            # silently skipping them.
+            if all_uploads_ok:
+                ok = _remote_py(
+                    f"import json,time; "
+                    f"open(r'{uploads_complete_remote}','w').write("
+                    f"json.dumps({{'at':time.time()}}))",
+                    label="uploads_complete sentinel write", timeout=15,
+                )
+                if ok:
+                    logfile.write(
+                        f"  uploads_complete sentinel written "
+                        f"({n_uploaded} new uploads, 0 failures)\n"
+                    )
+                    logfile.flush()
+            else:
+                logfile.write(
+                    f"  WARN: {n_failed} upload(s) failed — sentinel NOT "
+                    f"written; next dispatch will retry. Continuing with "
+                    f"bundle/launch using whatever uploaded successfully.\n"
+                )
+                logfile.flush()
 
         if upload_only:
             return {"batch_id": batch_id}
@@ -5596,9 +5682,9 @@ def dispatch_remote_preproc_batch(
         for i, (sn, sub_trials) in enumerate(by_subj.items()):
             remote_work = f"{_wd}/preproc_{sn}"
             run_dir = f"{remote_work}/run_{job_id}"
-            subprocess.run(
-                _py_cmd(cfg, f"\"import os; os.makedirs(r'{run_dir}', exist_ok=True)\""),
-                capture_output=True, timeout=15,
+            _remote_py(
+                f"import os; os.makedirs(r'{run_dir}', exist_ok=True)",
+                label=f"{sn}/run_{job_id} mkdir", timeout=15,
             )
             # video_remote_path is set by the always-run hydration
             # block above; nothing else to do here.
@@ -5760,8 +5846,25 @@ def poll_remote_preproc_batch(
                 f"if os.path.isdir(d) else '')\""),
             capture_output=True, text=True, timeout=30,
         )
+        if listing.returncode != 0:
+            logfile.write(
+                f"  WARN: {sub_name} download: listdir failed "
+                f"(rc={listing.returncode}): "
+                f"{(listing.stderr or '').strip()[:160]}\n"
+            )
+            logfile.flush()
+            return False
         stems = [s for s in (listing.stdout or "").strip().split(",") if s]
+        if not stems:
+            logfile.write(
+                f"  WARN: {sub_name} download: no trial stems found at "
+                f"{remote_dir} (worker may have failed before writing)\n"
+            )
+            logfile.flush()
+            return False
         any_ok = False
+        n_files_ok = 0
+        n_files_missing = 0
         for stem in stems:
             local_dir = local_root / stem
             local_dir.mkdir(parents=True, exist_ok=True)
@@ -5774,6 +5877,16 @@ def poll_remote_preproc_batch(
                 )
                 if local_p.exists():
                     any_ok = True
+                    n_files_ok += 1
+                else:
+                    n_files_missing += 1
+        if n_files_missing > 0:
+            logfile.write(
+                f"  {sub_name} download: {n_files_ok} ok, "
+                f"{n_files_missing} missing across {len(stems)} trial(s) "
+                f"(missing files usually mean the worker bailed mid-phase)\n"
+            )
+            logfile.flush()
         return any_ok
 
     logfile = open(log_path, "a", buffering=1)
