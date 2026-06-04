@@ -281,6 +281,20 @@
                     <span id="stereoHybridConfVal" style="min-width:24px; text-align:right; color:var(--text);">0.00</span>
                 </span>
 
+                <!-- 1c''. Stereo Fill -- filtered MP combined with
+                     per-camera donations from the best available
+                     stereo bake (Hybrid > Image).  Only populated
+                     when an mp_filter_params.json sidecar is
+                     present for the trial.  Shares its swatch with
+                     Stereo (hybrid) since it's a derived view. -->
+                <span class="stage-row" data-stage="stereo_fill"
+                      style="color:var(--text-muted);padding-left:18px;"
+                      title="Filtered MP combined; for joints where one camera was filtered and the stereo confidence is > 0.4, the filtered cell is replaced with the stereo-corrected point.  Requires a saved MP Filter and at least one Stereo Correct bake.">
+                    <span class="layer-swatch" style="background:#80deea;"></span> Stereo Fill</span>
+                <input type="checkbox" id="showStereoFill2D" style="margin:0;justify-self:center;">
+                <input type="checkbox" id="showStereoFill3D" style="margin:0;justify-self:center;">
+                <span></span>
+
                 <!-- 1d. Outline -- the current camera's hand boundary
                      polygon from the preproc bake. -->
                 <span style="color:var(--text-muted);"><span class="layer-swatch" style="background:#ffd54f;"></span> Outline</span>
@@ -1327,7 +1341,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=403" type="module"></script>
+    <script src="/static/js/labels.js?v=404" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

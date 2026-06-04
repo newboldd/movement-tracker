@@ -78,6 +78,8 @@ const manoViewer = (() => {
     let showStatic3D = false;
     let showCombined2D = false;
     let showCombined3D = false;
+    let showStereoFill2D = false;
+    let showStereoFill3D = false;
     let showReverseSkel = true;
     let showCroppedSkel = true;
     let showStaticSkel = true;
@@ -649,7 +651,7 @@ const manoViewer = (() => {
 
     // Three.js
     let scene, camera3d, renderer;
-    let manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, filteredGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup;
+    let manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, filteredGroup, stereoFillGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup;
     let camera3dInit = false;
 
     // Scene-space orbit: rotate content around hand center while camera stays fixed
@@ -1730,6 +1732,7 @@ const manoViewer = (() => {
         $('showCropped2D')?.addEventListener('change', e => { showCropped2D = e.target.checked; updateLayerFlags(); });
         $('showStatic2D')?.addEventListener('change', e => { showStatic2D = e.target.checked; updateLayerFlags(); });
         $('showCombined2D')?.addEventListener('change', e => { showCombined2D = e.target.checked; updateLayerFlags(); });
+        $('showStereoFill2D')?.addEventListener('change', e => { showStereoFill2D = e.target.checked; updateLayerFlags(); });
         // Helper: clear the selected-joint marker if none of the three
         // Stereo variants is visible anymore.
         const _maybeClearStereoSelected = () => {
@@ -1991,6 +1994,7 @@ const manoViewer = (() => {
         $('showCropped3D')?.addEventListener('change', e => { showCropped3D = e.target.checked; updateLayerFlags(); });
         $('showStatic3D')?.addEventListener('change', e => { showStatic3D = e.target.checked; updateLayerFlags(); });
         $('showCombined3D')?.addEventListener('change', e => { showCombined3D = e.target.checked; updateLayerFlags(); });
+        $('showStereoFill3D')?.addEventListener('change', e => { showStereoFill3D = e.target.checked; updateLayerFlags(); });
         $('showMano2D').addEventListener('change', e => { showMano2D = e.target.checked; updateLayerFlags(); _updateHandDiagramColor(); });
         $('showMano3D').addEventListener('change', e => { showMano3D = e.target.checked; updateLayerFlags(); _updateHandDiagramColor(); });
         $('showSkelV2_2D').addEventListener('change', e => {
@@ -4152,6 +4156,11 @@ const manoViewer = (() => {
         const combinedKp = isLeft
             ? trialData.combined_tracked_L
             : trialData.combined_tracked_R;
+        // Stereo Fill — filtered MP combined with per-camera donations
+        // from the best available stereo bake (Hybrid > Image).
+        const stereoFillKp = isLeft
+            ? trialData.stereo_fill_tracked_L
+            : trialData.stereo_fill_tracked_R;
 
         // All 2D data is in camera-half coords — no offset needed
         const manoXOff = 0;
@@ -4455,6 +4464,19 @@ const manoViewer = (() => {
                 const x = combinedKp[fn][j][0] * pixelScale;
                 const y = combinedKp[fn][j][1] * pixelScale;
                 drawCross(x, y, '#ffa726', 4);
+            }
+        }
+
+        // Stereo Fill — same dots as Filtered, but with stereo
+        // donations replacing the filtered cell where the stereo
+        // confidence was high.  Cyan (#80deea).  Source already
+        // applied server-side so we just draw whatever's there.
+        if (showStereoFill2D && stereoFillKp && stereoFillKp[fn]) {
+            for (let j = 0; j < 21; j++) {
+                if (!isJointVisible(j) || !stereoFillKp[fn][j]) continue;
+                const x = stereoFillKp[fn][j][0] * pixelScale;
+                const y = stereoFillKp[fn][j][1] * pixelScale;
+                drawCross(x, y, '#80deea', 4);
             }
         }
 
@@ -5552,6 +5574,7 @@ const manoViewer = (() => {
             const rev  = _getMetricData('reverse', metric);
             const stt  = _getMetricData('static', metric);
             const cmb  = _getMetricData('combined', metric);
+            const sFill = _getMetricData('stereo_fill', metric);
             const vis  = _getMetricData('vision', metric);
             const dlc  = isAng ? null : _xformSeries(trialData.distances_dlc?.[metric]);
             const chk = (arr, isA) => {
@@ -5570,6 +5593,7 @@ const manoViewer = (() => {
             if (showReverse2D || showReverse3D) chk(rev, isAng);
             if (showStatic2D || showStatic3D) chk(stt, isAng);
             if (showCombined2D || showCombined3D) chk(cmb, isAng);
+            if (showStereoFill2D || showStereoFill3D) chk(sFill, isAng);
             if (showVision2D || showVision3D) chk(vis, isAng);
             if (showDLC || showDLC3D) chk(dlc, isAng);
             if (showHeatmap2D || showHeatmap3D) chk(_getMetricData('heatmap', metric), isAng);
@@ -5742,6 +5766,7 @@ const manoViewer = (() => {
             skeleton: 'lime', skel_v2: '#ff9800', skel_legacy: '#e040fb',
             mp: '#00cccc', cropped: '#7cb342', reverse: '#e040fb',
             static: '#26c6da', combined: '#ffa726', filtered: '#fff176',
+            stereo_fill: '#80deea',
             vision: '#2196f3', dlc: '#ff4444',
             prev: '#b35b00', heatmap: '#ff6600',
             hrnet_centroid:  '#ff9966',
@@ -5827,6 +5852,7 @@ const manoViewer = (() => {
             const rawReverse = _getMetricData('reverse',     metric);
             const rawStatic   = _getMetricData('static',    metric);
             const rawCombined = _getMetricData('combined',  metric);
+            const rawStereoFill = _getMetricData('stereo_fill', metric);
             const rawVis     = _getMetricData('vision',      metric);
             const rawDlc   = isAng ? null : _xformSeries(trialData.distances_dlc?.[metric]);
 
@@ -5856,6 +5882,9 @@ const manoViewer = (() => {
             // the two can be compared side-by-side when both rows
             // are on.
             if (showFiltered2D || showFiltered3D)      drawSeries(_applyMask(rawCombined, filMask), useSourceColor ? SOURCE_COLORS.filtered  : metricColor, 'filtered',    toY, abdDash);
+            // Stereo Fill — distance plot of the filtered-with-stereo-
+            // donation series the server bakes alongside the model.
+            if (showStereoFill2D || showStereoFill3D)  drawSeries(rawStereoFill, useSourceColor ? SOURCE_COLORS.stereo_fill : metricColor, 'stereo_fill', toY, abdDash);
             if (showVision2D || showVision3D)         drawSeries(_applyMask(rawVis,   visMask),  useSourceColor ? SOURCE_COLORS.vision      : metricColor, 'vision',      toY, abdDash);
             if (showDLC || showDLC3D)                 drawSeries(rawDlc,                                                     useSourceColor ? SOURCE_COLORS.dlc         : metricColor, 'dlc',         toY, abdDash);
             if (showHeatmap2D || showHeatmap3D) {
@@ -6438,12 +6467,13 @@ const manoViewer = (() => {
         staticGroup = new THREE.Group();
         combinedGroup = new THREE.Group();
         filteredGroup = new THREE.Group();
+        stereoFillGroup = new THREE.Group();
         visionGroup = new THREE.Group();
         dlcGroup = new THREE.Group();
         poseGroup = new THREE.Group();
         heatmapGroup = new THREE.Group();
         angleArcGroup = new THREE.Group();
-        scene.add(manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, filteredGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup);
+        scene.add(manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, filteredGroup, stereoFillGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup);
 
         renderer.render(scene, camera3d);
 
@@ -6748,7 +6778,7 @@ const manoViewer = (() => {
         let arcSrcKey = null;
 
         // Clear groups
-        [manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, filteredGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup].forEach(g => {
+        [manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, filteredGroup, stereoFillGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup].forEach(g => {
             while (g.children.length) {
                 const child = g.children[0];
                 g.remove(child);
@@ -6765,6 +6795,7 @@ const manoViewer = (() => {
         const reverse3d = trialData.reverse_joints_3d?.[fn];
         const static3d = trialData.static_joints_3d?.[fn];
         const combined3d = trialData.combined_joints_3d?.[fn];
+        const stereoFill3d = trialData.stereo_fill_joints_3d?.[fn];
         const vision3d = trialData.vision_joints_3d?.[fn];
 
         const sphereGeom = new THREE.SphereGeometry(2.5, 12, 8);
@@ -7361,6 +7392,31 @@ const manoViewer = (() => {
             }
         }
 
+        // Stereo Fill 3D — combined-with-donations triangulated by
+        // the server (cyan).  Skel renders are unconditional —
+        // there's no Stereo-Fill-specific skel toggle.
+        if (showStereoFill3D && stereoFill3d) {
+            const sfMat = new THREE.MeshPhongMaterial({ color: 0x80deea, emissive: 0x006978 });
+            const sfBoneMat = new THREE.MeshPhongMaterial({ color: 0x80deea, emissive: 0x004d57 });
+            for (let j = 0; j < 21; j++) {
+                if (!isJointVisible(j) || !stereoFill3d[j]) continue;
+                const sphere = new THREE.Mesh(sphereGeom, sfMat);
+                sphere.position.copy(orbitPt(getScenePos(stereoFill3d, j)));
+                stereoFillGroup.add(sphere);
+            }
+            if (trialData.skeleton) {
+                trialData.skeleton.forEach(([i, j]) => {
+                    if (!isBoneVisible(i, j) || !stereoFill3d[i] || !stereoFill3d[j]) return;
+                    const bone = makeBone(
+                        orbitPt(getScenePos(stereoFill3d, i)),
+                        orbitPt(getScenePos(stereoFill3d, j)),
+                        1.0, sfBoneMat
+                    );
+                    if (bone) stereoFillGroup.add(bone);
+                });
+            }
+        }
+
         // Filtered = Combined 3D with masked joints removed.  A
         // joint is hidden when the MP-Filter joint mask flags it
         // at the current frame (any-camera).  Bones that touch a
@@ -7730,6 +7786,7 @@ const manoViewer = (() => {
         staticGroup.visible = showStatic3D;
         combinedGroup.visible = showCombined3D;
         filteredGroup.visible = showFiltered3D;
+        stereoFillGroup.visible = showStereoFill3D;
         visionGroup.visible = showVision3D;
         dlcGroup.visible = showDLC3D;
 
@@ -8100,6 +8157,7 @@ const manoViewer = (() => {
         const hasReverse  = _hasTracked('reverse_tracked_L')  || _hasTracked('reverse_tracked_R');
         const hasStatic   = _hasTracked('static_tracked_L')   || _hasTracked('static_tracked_R');
         const hasCombined = _hasTracked('combined_tracked_L') || _hasTracked('combined_tracked_R');
+        const hasStereoFill = _hasTracked('stereo_fill_tracked_L') || _hasTracked('stereo_fill_tracked_R');
         const hasPose     = _hasTracked('pose_tracked_L')     || _hasTracked('pose_tracked_R');
         for (const [id, ok] of [
             ['showCropped2D',  hasCropped],  ['showCropped3D',  hasCropped],
@@ -8109,6 +8167,9 @@ const manoViewer = (() => {
             // Filtered = Combined with the MP-Filter mask applied;
             // available exactly when Combined is.
             ['showFiltered2D', hasCombined], ['showFiltered3D', hasCombined],
+            // Stereo Fill = Filtered + stereo donations; populated
+            // when an mp_filter sidecar AND a stereo bake both exist.
+            ['showStereoFill2D', hasStereoFill], ['showStereoFill3D', hasStereoFill],
             ['showPose2D',     hasPose],     ['showPose3D',     hasPose],
         ]) {
             _setLayerAvail(id, ok);

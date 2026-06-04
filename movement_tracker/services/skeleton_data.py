@@ -1861,6 +1861,13 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
         "stereo_hybrid_tracked_R": None,
         "stereo_hybrid_response": None,
         "has_stereo_hybrid": False,
+        # Stereo Fill — filtered MP combined with per-camera stereo
+        # donations.  Computed below iff mp_filter_params.json
+        # sidecar exists AND at least one stereo variant exists.
+        "stereo_fill_tracked_L": None,
+        "stereo_fill_tracked_R": None,
+        "stereo_fill_joints_3d": None,
+        "has_stereo_fill": False,
         # Per-frame hand outlines (original camera coords), one entry
         # per trial frame: {OS: [[x,y],...], OD: [...] | None}.
         # Populated below when outlines.json + camera_trajectory are
@@ -1905,6 +1912,7 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
         "distances_reverse": distances_reverse,
         "distances_static": distances_static,
         "distances_combined": distances_combined,
+        "distances_stereo_fill": None,    # filled in below when computed
         "distances_vision": distances_vision,
         "distances_heatmap": distances_heatmap,
         "distances_hrnet_centroid":  distances_hrnet_centroid,
@@ -2098,6 +2106,116 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
             ]
     except Exception as _e:
         logger.debug(f"stereo_align load skipped: {_e}")
+
+    # ── Stereo Fill ─────────────────────────────────────────────────
+    # Filtered MP combined with per-camera donations from the best
+    # available stereo bake (Hybrid > Image).  When ONE camera is
+    # filtered for a joint AND the stereo confidence at that joint
+    # is above ``conf_min``, the filtered cell is replaced with the
+    # stereo-corrected point.  Both-filtered or low-confidence
+    # cells are left blank.  No mp_filter sidecar or no stereo →
+    # the whole block is skipped and the keys stay None.
+    try:
+        from .mp_filter import (
+            load_saved_filter_params, detect_mask_from_params,
+            build_stereo_fill,
+        )
+        _sf_sidecar = _skeleton_dir(subject_name) / trial_stem / "mp_filter_params.json"
+        _sf_params = load_saved_filter_params(_sf_sidecar)
+        # Prefer Hybrid over Image — both compute the same shape
+        # of shifts/response, hybrid just runs a smarter Pass-1
+        # vote and a masked phase corr per joint.
+        _sf_choice = None
+        if _sf_params is not None:
+            for _mode in ("hybrid", "image"):
+                _sa = load_stereo_align(subject_name, _stereo_trial_idx, mode=_mode) \
+                      if _stereo_trial_idx is not None else None
+                if _sa is not None and "shifts" in _sa and "response" in _sa:
+                    _sf_choice = (_mode, _sa)
+                    break
+        if _sf_params is not None and _sf_choice is not None:
+            _mode, _sa = _sf_choice
+            # ── Stereo arrays in (N, 21, 2) image space ──
+            # Same anchoring logic as _emit_stereo above.
+            _shifts = _sa["shifts"]
+            _resp_arr = _sa["response"]
+            _n_sa = min(N, _shifts.shape[0])
+            _base_L = np.where(np.isfinite(combined_tracked_L[:_n_sa]),
+                                combined_tracked_L[:_n_sa],
+                                mp_tracked_L[:_n_sa])
+            _base_R = np.where(np.isfinite(combined_tracked_R[:_n_sa]),
+                                combined_tracked_R[:_n_sa],
+                                mp_tracked_R[:_n_sa])
+            _stereo_L = np.full((N, 21, 2), np.nan)
+            _stereo_R = np.full((N, 21, 2), np.nan)
+            _stereo_L[:_n_sa, :, 0] = _base_L[:, :, 0] - _shifts[:_n_sa, :, 0]
+            _stereo_L[:_n_sa, :, 1] = _base_L[:, :, 1] - _shifts[:_n_sa, :, 1]
+            _stereo_R[:_n_sa, :, 0] = _base_R[:, :, 0] + _shifts[:_n_sa, :, 0]
+            _stereo_R[:_n_sa, :, 1] = _base_R[:, :, 1] + _shifts[:_n_sa, :, 1]
+            _resp = np.full((N, 21), np.nan)
+            _resp[:_n_sa] = _resp_arr[:_n_sa]
+            # ── Camera mask (matches what Skel Fit v1 sees) ──
+            # detect_mask needs an init_3d and per-cam ancillary
+            # signals; build them from MP combined the same way
+            # the v1 pre-pass does.
+            from .calibration import triangulate_points
+            _mp_L_full = np.where(np.isfinite(combined_tracked_L),
+                                    combined_tracked_L, mp_tracked_L)
+            _mp_R_full = np.where(np.isfinite(combined_tracked_R),
+                                    combined_tracked_R, mp_tracked_R)
+            _init_3d = np.full((N, 21, 3), np.nan)
+            if calib is not None:
+                for _j in range(21):
+                    _init_3d[:, _j, :] = triangulate_points(
+                        _mp_L_full[:, _j, :], _mp_R_full[:, _j, :], calib)
+            # Wrist-fallback so velocity / accel arrays don't NaN-spike.
+            _valid = (~np.isnan(_mp_L_full[:, 0, 0])
+                       & ~np.isnan(_mp_R_full[:, 0, 0]))
+            if calib is not None:
+                _valid = _valid & ~np.isnan(_init_3d[:, 0, 0])
+            for _i in range(N):
+                if not _valid[_i]:
+                    _init_3d[_i, :, :] = np.nan
+                    continue
+                for _j in range(21):
+                    if np.isnan(_init_3d[_i, _j, 0]):
+                        if not np.isnan(_init_3d[_i, 0, 0]):
+                            _init_3d[_i, _j] = _init_3d[_i, 0]
+                        else:
+                            _init_3d[_i, _j] = [0.0, 0.0, 500.0]
+            _shift_mag = np.linalg.norm(_shifts, axis=-1) if _shifts.ndim == 3 else None
+            _, _cam_mask, _ = detect_mask_from_params(
+                _sf_params, _init_3d, _mp_L_full, _mp_R_full, HAND_SKELETON,
+                calib=calib,
+                stereo_shift_mag=_shift_mag,
+                stereo_response=_resp_arr,
+            )
+            # ── Apply the fill ──
+            _fL, _fR = build_stereo_fill(
+                _mp_L_full, _mp_R_full,
+                _stereo_L, _stereo_R, _resp, _cam_mask,
+                conf_min=0.4,
+            )
+            # ── 3D triangulation + distances ──
+            _f3d = np.full((N, 21, 3), np.nan)
+            if calib is not None:
+                for _j in range(21):
+                    _f3d[:, _j, :] = triangulate_points(
+                        _fL[:, _j, :], _fR[:, _j, :], calib)
+            if calib is not None:
+                _dist_sf = _compute_distances(_f3d)
+                _dist_sf.update(_compute_mcp_distances(_f3d))
+            else:
+                _dist_sf = _compute_distances_2d(_fL)
+            result["stereo_fill_tracked_L"] = _points_to_list(_fL)
+            result["stereo_fill_tracked_R"] = _points_to_list(_fR)
+            result["stereo_fill_joints_3d"] = _points_to_list(_f3d)
+            result["stereo_fill_source"]    = _mode
+            result["has_stereo_fill"] = bool(np.any(~np.isnan(_fL))
+                                              or np.any(~np.isnan(_fR)))
+            result["distances_stereo_fill"] = _dist_sf
+    except Exception as _e:
+        logger.debug(f"stereo_fill skipped: {_e}")
 
     # ── Per-frame outlines (ref-space -> original camera coords) ────
     # Loaded from outlines.json baked by the preproc "Compute boundary

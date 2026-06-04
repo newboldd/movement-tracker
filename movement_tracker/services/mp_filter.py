@@ -587,3 +587,151 @@ def detect_mask(
 
     joint = cam.any(axis=-1)
     return joint, cam, per_signal
+
+
+# ──────────────────────────────────────────────────────────────────
+# Sidecar helpers — both skeleton_data.py (Stereo Fill emission) and
+# skeleton_v1.py (saved-filter pre-pass) read the same JSON sidecar
+# and run detect_mask with the same defaults, so we share one call.
+# ──────────────────────────────────────────────────────────────────
+
+def load_saved_filter_params(sidecar_path) -> dict | None:
+    """Read a per-trial ``mp_filter_params.json`` sidecar.
+
+    Returns the decoded dict on success, ``None`` when the file
+    is missing or unparseable.
+    """
+    from pathlib import Path
+    p = Path(sidecar_path)
+    if not p.exists():
+        return None
+    try:
+        import json
+        return json.loads(p.read_text())
+    except Exception:
+        return None
+
+
+def detect_mask_from_params(
+    saved_params: dict,
+    init_3d: np.ndarray,
+    mp_L: np.ndarray,
+    mp_R: np.ndarray,
+    bones,
+    *,
+    calib=None,
+    confidence_L=None,
+    confidence_R=None,
+    hrnet_L=None,
+    hrnet_R=None,
+    stereo_shift_mag=None,
+    stereo_response=None,
+):
+    """Run :func:`detect_mask` with thresholds pulled from a saved
+    sidecar dict.  Defaults match the ones the UI ships with so
+    older sidecars that don't include the newer keys still produce
+    sensible output.
+    """
+    _mpf = saved_params or {}
+    return detect_mask(
+        init_3d, mp_L, mp_R, bones,
+        calib=calib,
+        confidence_L=confidence_L, confidence_R=confidence_R,
+        hrnet_L=hrnet_L,           hrnet_R=hrnet_R,
+        stereo_shift_mag=stereo_shift_mag,
+        stereo_response=stereo_response,
+        enable_vel=bool(_mpf.get("enable_vel", False)),
+        vel_k=float(_mpf.get("vel_k", 6.0)),
+        enable_accel=bool(_mpf.get("enable_accel", True)),
+        accel_k=float(_mpf.get("accel_k", 6.0)),
+        enable_bone=bool(_mpf.get("enable_bone", True)),
+        bone_k=float(_mpf.get("bone_k", 6.0)),
+        enable_ydisp=bool(_mpf.get("enable_ydisp", False)),
+        ydisp_px=float(_mpf.get("ydisp_px", 5.0)),
+        enable_z=bool(_mpf.get("enable_z", False)),
+        z_k=float(_mpf.get("z_k", 6.0)),
+        enable_mpconf=bool(_mpf.get("enable_mpconf", False)),
+        mpconf_min=float(_mpf.get("mpconf_min", 0.5)),
+        enable_stereo=bool(_mpf.get("enable_stereo", False)),
+        stereo_px=float(_mpf.get("stereo_px", 5.0)),
+        enable_stereo_hybrid=bool(_mpf.get("enable_stereo_hybrid", False)),
+        stereo_hybrid_px=float(_mpf.get("stereo_hybrid_px", 10.0)),
+        stereo_hybrid_conf_min=float(_mpf.get("stereo_hybrid_conf_min", 0.2)),
+        enable_hrnet=bool(_mpf.get("enable_hrnet", False)),
+        hrnet_min=float(_mpf.get("hrnet_min", 0.2)),
+    )
+
+
+def build_stereo_fill(
+    combined_L: np.ndarray, combined_R: np.ndarray,
+    stereo_L: np.ndarray, stereo_R: np.ndarray,
+    stereo_response: np.ndarray,
+    camera_mask: np.ndarray,
+    conf_min: float = 0.4,
+):
+    """Substitute filtered MP labels with stereo labels where
+    confident; leave both-filtered or low-confidence cells blank.
+
+    Parameters
+    ----------
+    combined_L, combined_R : (N, J, 2)
+        MP combined 2D keypoints, NaN where missing.
+    stereo_L, stereo_R : (N, J, 2)
+        Stereo-corrected 2D keypoints from the chosen stereo
+        variant (hybrid preferred over image).
+    stereo_response : (N, J)
+        Per-(frame, joint) phase-corr confidence baked alongside
+        the shifts.  Cells with ``response > conf_min`` may donate.
+    camera_mask : (N, J, 2) bool
+        The MP-Filter per-camera flag mask (True = "this camera
+        was filtered out for this (frame, joint)").
+    conf_min : float
+        Confidence cut for accepting a stereo donation.
+
+    Returns
+    -------
+    fill_L, fill_R : (N, J, 2) float
+        Each cell is either combined (when the camera wasn't
+        filtered), stereo (when filtered + confident partner),
+        or NaN (both filtered, or partner not confident enough).
+    """
+    N, J = combined_L.shape[0], combined_L.shape[1]
+    fill_L = combined_L.copy()
+    fill_R = combined_R.copy()
+    # Align stereo arrays to (N, J, 2) — shorter trials get NaN.
+    def _pad(arr):
+        out = np.full((N, J, 2), np.nan)
+        if arr is None:
+            return out
+        m = min(N, arr.shape[0])
+        out[:m] = arr[:m]
+        return out
+    sL = _pad(stereo_L)
+    sR = _pad(stereo_R)
+    resp = np.full((N, J), np.nan)
+    if stereo_response is not None:
+        m = min(N, stereo_response.shape[0])
+        resp[:m] = stereo_response[:m]
+
+    fL = camera_mask[..., 0]
+    fR = camera_mask[..., 1]
+    conf_ok = np.where(np.isfinite(resp), resp > conf_min, False)
+
+    # Both filtered → drop both.
+    both = fL & fR
+    fill_L[both] = np.nan
+    fill_R[both] = np.nan
+
+    # L filtered only → donate from stereo_L if confident, else NaN.
+    only_L = fL & ~fR
+    donate_L = only_L & conf_ok
+    fill_L[only_L] = np.nan
+    fill_L[donate_L] = sL[donate_L]
+
+    # R filtered only → donate from stereo_R if confident, else NaN.
+    only_R = fR & ~fL
+    donate_R = only_R & conf_ok
+    fill_R[only_R] = np.nan
+    fill_R[donate_R] = sR[donate_R]
+
+    return fill_L, fill_R
