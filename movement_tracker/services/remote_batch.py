@@ -108,16 +108,26 @@ logger = logging.getLogger(__name__)
 # Layout helpers — one work_dir / subjects / shared / batches tree.
 # ──────────────────────────────────────────────────────────────────
 
+def _work_dir(cfg: RemoteConfig) -> str:
+    """Backslash-normalised work_dir.  SCP rejects mixed-slash paths
+    on Windows (``C:\\Users\\...\\workdir/subjects/...`` silently
+    returns "No such file"), so every path builder funnels through
+    here.  See poll_remote_preproc_batch story for the bug this
+    caught.
+    """
+    return cfg.work_dir.replace("\\", "/")
+
+
 def shared_modules_remote(cfg: RemoteConfig, job_type: str) -> str:
-    return f"{cfg.work_dir}/shared/modules/{job_type}"
+    return f"{_work_dir(cfg)}/shared/modules/{job_type}"
 
 
 def shared_scripts_remote(cfg: RemoteConfig) -> str:
-    return f"{cfg.work_dir}/shared/scripts"
+    return f"{_work_dir(cfg)}/shared/scripts"
 
 
 def subject_remote(cfg: RemoteConfig, subject: str) -> str:
-    return f"{cfg.work_dir}/subjects/{subject}"
+    return f"{_work_dir(cfg)}/subjects/{subject}"
 
 
 def subject_videos_remote(cfg: RemoteConfig, subject: str) -> str:
@@ -125,7 +135,7 @@ def subject_videos_remote(cfg: RemoteConfig, subject: str) -> str:
 
 
 def batch_state_remote(cfg: RemoteConfig, batch_id: str) -> str:
-    return f"{cfg.work_dir}/batches/{batch_id}"
+    return f"{_work_dir(cfg)}/batches/{batch_id}"
 
 
 # ──────────────────────────────────────────────────────────────────

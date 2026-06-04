@@ -5141,7 +5141,13 @@ def resume_remote_preproc(
 
 
 def _preproc_batch_state_dir(cfg, batch_id: str) -> str:
-    return f"{cfg.work_dir}/preproc_batches/{batch_id}"
+    # Normalize backslashes — Windows ``cfg.work_dir`` is
+    # ``C:\Users\...`` and SCP rejects paths that mix \\ and /,
+    # silently returning "No such file" so the poller's SCP fail
+    # loop never logs an error.  All remote paths in this module
+    # should be built off the normalized form.
+    wd = cfg.work_dir.replace("\\", "/")
+    return f"{wd}/preproc_batches/{batch_id}"
 
 
 def _kill_remote_preproc_runner(
@@ -5179,7 +5185,8 @@ def _kill_remote_preproc_runner(
     # runner script can be hardened later to check for this between
     # subjects.  Cheap regardless.
     if batch_id:
-        sentinel = f"{cfg.work_dir}/preproc_batches/{batch_id}/cancel.flag"
+        _wd = cfg.work_dir.replace("\\", "/")
+        sentinel = f"{_wd}/preproc_batches/{batch_id}/cancel.flag"
         script += (
             f"; open(r'{sentinel}', 'w').write('1')"
         )
@@ -5258,6 +5265,11 @@ def dispatch_remote_preproc_batch(
     from ..config import get_settings
     from .video import build_trial_map
     settings = get_settings()
+    # Backslash-free work_dir — SCP silently fails on mixed-slash
+    # paths like ``C:\Users\...\work_dir/preproc_batches/...``,
+    # which caused job 1317's poller to loop forever without
+    # logging.  Use _wd everywhere we build a remote path.
+    _wd = cfg.work_dir.replace("\\", "/")
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
     # Reuse batch_id from params_json when present (resume path).
@@ -5314,7 +5326,7 @@ def dispatch_remote_preproc_batch(
         # Mint state dir + per-subject work dirs.
         subprocess.run(
             _py_cmd(cfg, f"\"import os; os.makedirs(r'{state_dir}', exist_ok=True); "
-                          f"os.makedirs(r'{cfg.work_dir}/preproc_modules', exist_ok=True)\""),
+                          f"os.makedirs(r'{_wd}/preproc_modules', exist_ok=True)\""),
             capture_output=True, timeout=20,
         )
 
@@ -5345,9 +5357,9 @@ def dispatch_remote_preproc_batch(
         # dicts that come off params_json from the JS submit are
         # missing most of these.
         from .video import build_trial_map
-        modules_dir = f"{cfg.work_dir}/preproc_modules"
+        modules_dir = f"{_wd}/preproc_modules"
         for sn, sub_trials in by_subj.items():
-            remote_work = f"{cfg.work_dir}/preproc_{sn}"
+            remote_work = f"{_wd}/preproc_{sn}"
             all_trials = build_trial_map(sn)
             for t in sub_trials:
                 try:
@@ -5402,7 +5414,7 @@ def dispatch_remote_preproc_batch(
             # actual files (skip-if-present).
             for i, (sn, sub_trials) in enumerate(by_subj.items()):
                 _check_cancel()
-                remote_work = f"{cfg.work_dir}/preproc_{sn}"
+                remote_work = f"{_wd}/preproc_{sn}"
                 run_dir = f"{remote_work}/run_{job_id}"
                 subprocess.run(
                     _py_cmd(cfg, f"\"import os; os.makedirs(r'{run_dir}', exist_ok=True); "
@@ -5427,7 +5439,7 @@ def dispatch_remote_preproc_batch(
                     # the new dispatcher lost it in the rewrite,
                     # causing every video to re-upload).
                     preproc_v = t["video_remote_path"]
-                    deidentify_v = f"{cfg.work_dir}/deidentify_{sn}/{vname}"
+                    deidentify_v = f"{_wd}/deidentify_{sn}/{vname}"
                     probe = subprocess.run(
                         _py_cmd(cfg,
                             f"\"import os; "
@@ -5481,13 +5493,13 @@ def dispatch_remote_preproc_batch(
         # ── Per-subject bundle.json (always re-write; cheap) ──
         bundle_specs = []   # list of {name, bundle_path, status_path}
         for i, (sn, sub_trials) in enumerate(by_subj.items()):
-            remote_work = f"{cfg.work_dir}/preproc_{sn}"
+            remote_work = f"{_wd}/preproc_{sn}"
             run_dir = f"{remote_work}/run_{job_id}"
             # video_remote_path is set by the always-run hydration
             # block above; nothing else to do here.
             bundle = {
                 "subject_name": sn,
-                "modules_dir":  f"{cfg.work_dir}/preproc_modules",
+                "modules_dir":  f"{_wd}/preproc_modules",
                 "data_dir":     remote_work,
                 "trials":       sub_trials,
             }
@@ -5510,7 +5522,7 @@ def dispatch_remote_preproc_batch(
         batch_spec = {
             "job_id":      job_id,
             "batch_id":    batch_id,
-            "worker_path": f"{cfg.work_dir}/preproc_modules/remote_preproc_worker.py",
+            "worker_path": f"{_wd}/preproc_modules/remote_preproc_worker.py",
             "python":      cfg.python_executable,
             "subjects":    bundle_specs,
         }
@@ -5599,6 +5611,10 @@ def poll_remote_preproc_batch(
     import json as _json
     from ..config import get_settings
     settings = get_settings()
+    # See dispatch_remote_preproc_batch — SCP rejects mixed-slash
+    # paths so every remote-path build must use _wd (work_dir with
+    # backslashes normalized to forward slashes).
+    _wd = cfg.work_dir.replace("\\", "/")
     state_dir = _preproc_batch_state_dir(cfg, batch_id)
     status_remote = f"{state_dir}/batch_status.json"
     runner_log    = f"{state_dir}/runner.log"
@@ -5619,7 +5635,7 @@ def poll_remote_preproc_batch(
     )
 
     def _download_subject(sub_name):
-        remote_dir = f"{cfg.work_dir}/preproc_{sub_name}/{sub_name}/preproc"
+        remote_dir = f"{_wd}/preproc_{sub_name}/{sub_name}/preproc"
         local_root = settings.dlc_path / sub_name / "preproc"
         local_root.mkdir(parents=True, exist_ok=True)
         # First find which trial stems exist on the remote.
@@ -5652,6 +5668,7 @@ def poll_remote_preproc_batch(
     downloaded_subs: set[str] = set()
     last_heartbeat = None
     last_log_size = 0
+    _consec_scp_failures = 0
     try:
         while True:
             _check_cancel()
@@ -5665,7 +5682,18 @@ def poll_remote_preproc_batch(
             )
             if _dl.returncode != 0:
                 # Either the runner hasn't written yet or network blipped.
+                # Log the first time + every 20th retry so silent
+                # SCP-failure loops can't burn forever unnoticed
+                # (e.g. mixed-slash path that SCP rejects).
+                _consec_scp_failures += 1
+                if _consec_scp_failures in (1, 5, 20, 60) or _consec_scp_failures % 60 == 0:
+                    logfile.write(
+                        f"  status SCP failed (attempt {_consec_scp_failures}): "
+                        f"rc={_dl.returncode} stderr={(_dl.stderr or '').strip()[:160]}\n"
+                    )
+                    logfile.flush()
                 continue
+            _consec_scp_failures = 0
             try:
                 with open(local_status) as f:
                     st = _json.load(f)
@@ -5879,7 +5907,9 @@ def remote_preproc(
     from .video import build_trial_map
 
     settings = get_settings()
-    remote_work = f"{cfg.work_dir}/preproc_{subject_name}"
+    # Backslash-free work_dir (see _preproc_batch_state_dir for context).
+    _wd = cfg.work_dir.replace("\\", "/")
+    remote_work = f"{_wd}/preproc_{subject_name}"
     remote_run  = f"{remote_work}/run_{job_id}"
     remote_status = f"{remote_run}/status.json"
     remote_log    = f"{remote_run}/render.log"
@@ -5995,7 +6025,7 @@ def remote_preproc(
                 # Also check the legacy deidentify_<subject> work dir —
                 # that's where Render/Deidentify jobs have already
                 # uploaded videos for the same subject.
-                deidentify_video = f"{cfg.work_dir}/deidentify_{subject_name}/{vname}"
+                deidentify_video = f"{_wd}/deidentify_{subject_name}/{vname}"
                 # Probe both candidate locations on the remote.
                 probe = subprocess.run(
                     _py_cmd(cfg,
@@ -6088,7 +6118,7 @@ def remote_preproc(
             # this phase entirely (saves ~4 SSH round-trips per
             # subject); first call in a batch must run with the flag
             # False to seed the shared dir.
-            modules_dir = f"{cfg.work_dir}/preproc_modules"
+            modules_dir = f"{_wd}/preproc_modules"
             if skip_shared_uploads:
                 logfile.write("  shared uploads (modules + worker): skipping per caller\n")
                 logfile.flush()
