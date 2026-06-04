@@ -6792,11 +6792,35 @@ def main():
             sub_state[sub_name] = {"status": "running"}
             _current_sub[0] = sub_name
         _flush({"log": f"  starting {sub_name}"})
+        # Isolate the worker's process state from the runner's.
+        # Inheriting the runner's open file handles (which includes
+        # the runner's stdout → runner.log) into a Python child that
+        # loads cv2 / mediapipe / CUDA DLLs causes 0xC0000142
+        # (STATUS_DLL_INIT_FAILED) on the SECOND and subsequent
+        # worker spawns — the loader state in the parent gets into
+        # a condition where the next child's DllMain hooks fail.
+        # The fix: close inheritance, give the worker its own log
+        # file, detach the process from the runner's console group.
         try:
-            rc = subprocess.run(
-                [python_exe, "-u", worker_py, bundle_path, sub_status_path],
+            worker_log = os.path.join(os.path.dirname(sub_status_path),
+                                      "worker.log")
+            os.makedirs(os.path.dirname(worker_log), exist_ok=True)
+            popen_kwargs = dict(
                 cwd=os.path.dirname(worker_py),
-            ).returncode
+                stdin=subprocess.DEVNULL,
+                close_fds=True,
+            )
+            if os.name == "nt":
+                # 0x00000008 DETACHED_PROCESS, 0x00000200 CREATE_NEW_PROCESS_GROUP
+                popen_kwargs["creationflags"] = 0x00000008 | 0x00000200
+            with open(worker_log, "ab") as logf:
+                popen_kwargs["stdout"] = logf
+                popen_kwargs["stderr"] = subprocess.STDOUT
+                p = subprocess.Popen(
+                    [python_exe, "-u", worker_py, bundle_path, sub_status_path],
+                    **popen_kwargs,
+                )
+                rc = p.wait()
             with _state_lock:
                 if rc == 0:
                     sub_state[sub_name] = {"status": "completed"}
