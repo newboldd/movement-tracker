@@ -475,6 +475,14 @@ def _build_movement_params(
 
     # Track previous amplitude per trial for relative amplitude
     prev_amp_by_trial: dict[int, float | None] = {}
+    # Per-trial previous-movement frame trackers — used to compute
+    # interval scalars between consecutive movements (O-O, C-C,
+    # P-O, C-O variants of IMI).  ``imi`` (the legacy field) stays
+    # P-P only for back-compat with explore + group-comparison
+    # cached endpoints.
+    prev_open_by_trial:  dict[int, int | None] = {}
+    prev_close_by_trial: dict[int, int | None] = {}
+    prev_peak_by_trial:  dict[int, int | None] = {}
 
     for idx, pk in enumerate(peaks):
         fps = frame_fps[pk] if pk < len(frame_fps) else 60
@@ -504,6 +512,38 @@ def _build_movement_params(
             prev_ti = frame_trial[prev_pk] if prev_pk < len(frame_trial) else 0
             if prev_ti == ti:
                 imi = round((pk - prev_pk) / fps, 4)
+
+        # Additional inter-movement intervals (same trial only).
+        # ``imi`` above is P-P; these mirror the Individual-results
+        # IMI radio's O-O / C-C / P-O / C-O variants and let the
+        # Explore page aggregate (mean / CV / sequence-effect) each
+        # one as its own variable.  All in seconds.
+        imi_oo = imi_cc = imi_po = imi_co = None
+        prev_open  = prev_open_by_trial.get(ti)
+        prev_close = prev_close_by_trial.get(ti)
+        prev_peak  = prev_peak_by_trial.get(ti)
+        if open_f is not None and prev_open is not None:
+            imi_oo = round((open_f - prev_open) / fps, 4)
+        if close_f is not None and prev_close is not None:
+            imi_cc = round((close_f - prev_close) / fps, 4)
+        if open_f is not None and prev_peak is not None:
+            imi_po = round((open_f - prev_peak) / fps, 4)
+        if open_f is not None and prev_close is not None:
+            imi_co = round((open_f - prev_close) / fps, 4)
+        # Update per-trial trackers for the next movement.
+        prev_open_by_trial[ti]  = open_f
+        prev_close_by_trial[ti] = close_f
+        prev_peak_by_trial[ti]  = pk
+
+        # Intra-movement durations (no cross-movement dependency).
+        # O-P (open → peak) and P-C (peak → close) — opening and
+        # closing phase durations within a single tap.
+        dur_op = None
+        if open_f is not None:
+            dur_op = round((pk - open_f) / fps, 4)
+        dur_pc = None
+        if close_f is not None:
+            dur_pc = round((close_f - pk) / fps, 4)
 
         # Amplitude
         pk_dist = distances[pk] if pk < len(distances) else None
@@ -593,6 +633,12 @@ def _build_movement_params(
             "close_frame_local": close_frame_local,
             "peak_frame_local": peak_frame_local,
             "imi": imi,
+            "imi_oo": imi_oo,
+            "imi_cc": imi_cc,
+            "imi_po": imi_po,
+            "imi_co": imi_co,
+            "dur_op": dur_op,
+            "dur_pc": dur_pc,
             "amplitude": amplitude,
             "rel_amplitude": rel_amplitude,
             "peak_open_vel": peak_open_vel,
@@ -1537,6 +1583,11 @@ def get_group_comparison(include_auto: bool = Query(False),
                 raise RuntimeError("cache missing movement_similarity")
             if subjs and "residual_vs_mean" not in subjs[0]:
                 raise RuntimeError("cache missing residual_vs_mean")
+            # New movement-interval scalars (P-P / O-O / C-C / P-O /
+            # C-O / O-P / P-C) were added together — sniff one to know
+            # whether the whole batch is present.  Missing → recompute.
+            if subjs and "mean_dur_op" not in subjs[0]:
+                raise RuntimeError("cache missing dur_op aggregates")
             return data
         except Exception:
             pass
@@ -1547,7 +1598,9 @@ def get_group_comparison(include_auto: bool = Query(False),
         ).fetchall()
 
     PARAM_KEYS = [
-        "imi", "amplitude", "rel_amplitude", "power",
+        "imi", "imi_oo", "imi_cc", "imi_po", "imi_co",
+        "dur_op", "dur_pc",
+        "amplitude", "rel_amplitude", "power",
         "peak_open_vel", "peak_close_vel",
         "mean_open_vel", "mean_close_vel",
     ]
@@ -1705,8 +1758,20 @@ _CLINICAL_VARS = [
 ]
 
 # Per-movement parameter base labels (units in parentheses).
+# Intervals come in two flavours:
+#   • Inter-movement (between consecutive movements within a trial):
+#     P-P (legacy ``imi``), O-O, C-C, P-O, C-O — same five variants
+#     that drive the Individual-Results page IMI radio.
+#   • Intra-movement (within a single tap):
+#     O-P (opening-phase duration), P-C (closing-phase duration).
 _MOVE_PARAM_LABELS = {
-    "imi": "IMI (s)",
+    "imi": "P-P Interval (s)",
+    "imi_oo": "O-O Interval (s)",
+    "imi_cc": "C-C Interval (s)",
+    "imi_po": "P-O Interval (s)",
+    "imi_co": "C-O Interval (s)",
+    "dur_op": "O-P Duration (s)",
+    "dur_pc": "P-C Duration (s)",
     "amplitude": "Amplitude (mm)",
     "rel_amplitude": "Rel. Amplitude",
     "power": "Power (mm²/s)",
@@ -1858,6 +1923,11 @@ def get_explore_variables(include_auto: bool = Query(False),
             # Same for the residual-vs-reference fields.
             if subjs and "residual_vs_mean" not in (subjs[0].get("vars") or {}):
                 raise RuntimeError("cache missing residual_vs_mean")
+            # New movement-interval scalars (P-P / O-O / C-C / P-O /
+            # C-O / O-P / P-C) — added in one batch; sniff one to know
+            # whether the cache pre-dates them.
+            if subjs and "mean_dur_op" not in (subjs[0].get("vars") or {}):
+                raise RuntimeError("cache missing dur_op aggregates")
             return data
         except Exception:
             pass    # corrupt cache → recompute

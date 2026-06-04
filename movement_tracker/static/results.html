@@ -114,6 +114,12 @@
                     <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Close of one movement to Open of the next">
                         <input type="radio" name="imiRef" value="co"> C-O
                     </label>
+                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Open to Peak within the same movement (opening-phase duration)">
+                        <input type="radio" name="imiRef" value="op"> O-P
+                    </label>
+                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Peak to Close within the same movement (closing-phase duration)">
+                        <input type="radio" name="imiRef" value="pc"> P-C
+                    </label>
                     <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Hide every interval plot">
                         <input type="radio" name="imiRef" value="off"> off
                     </label>
@@ -136,6 +142,8 @@
                         <option value="cc">C-C</option>
                         <option value="po">P-O</option>
                         <option value="co">C-O</option>
+                        <option value="op">O-P</option>
+                        <option value="pc">P-C</option>
                     </select>
                 </label>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
@@ -470,6 +478,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=124"></script>
+    <script src="/static/js/results.js?v=125"></script>
 </body>
 </html>

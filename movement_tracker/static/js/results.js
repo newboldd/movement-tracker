@@ -921,18 +921,28 @@ function renderIntervalParamPlots() {
         const meta = frameMeta[ti] || { fps: 60 };
         const xs = [], ys = [];
         ms.forEach((m, i) => {
-            if (i === 0) return;
-            const prev = ms[i - 1][keys.from];
-            const cur = m[keys.to];
-            if (prev == null || cur == null) return;
-            if (!isFinite(prev) || !isFinite(cur)) return;
-            const dt = (cur - prev) / (meta.fps || 60);
+            // Intra-movement (O-P, P-C): same movement, every index;
+            // inter-movement: needs prev movement, skip i=0.
+            let dt;
+            if (keys.intra) {
+                const from = m[keys.from], to = m[keys.to];
+                if (from == null || to == null) return;
+                if (!isFinite(from) || !isFinite(to)) return;
+                dt = (to - from) / (meta.fps || 60);
+            } else {
+                if (i === 0) return;
+                const prev = ms[i - 1][keys.from];
+                const cur = m[keys.to];
+                if (prev == null || cur == null) return;
+                if (!isFinite(prev) || !isFinite(cur)) return;
+                dt = (cur - prev) / (meta.fps || 60);
+            }
             if (!(dt > 0)) return;
             // Relative amplitude = m[i].amplitude / m[i-1].amplitude.
             // For every other param, just read the field directly.
             let yv;
             if (yParam === 'relative_amplitude') {
-                const a = m.amplitude, ap = ms[i - 1].amplitude;
+                const a = m.amplitude, ap = ms[i - 1]?.amplitude;
                 if (a == null || ap == null || !isFinite(a) || !isFinite(ap) || ap === 0) return;
                 yv = a / ap;
             } else {
@@ -3656,12 +3666,17 @@ function renderDistancePlot(divId, trial, yRange, width, overlayTraces, shapes) 
 //   co       → close of movement i → open of movement i+1
 //   off / unknown → null (caller should skip rendering).
 function _imiKeys(refVal) {
+    // ``intra: true`` means the interval is computed WITHIN a single
+    // movement (O-P opening-phase, P-C closing-phase).  Everything
+    // else is between consecutive movements.
     switch (refVal) {
-        case 'pp': return { from: 'peak_frame',  to: 'peak_frame'  };
-        case 'oo': return { from: 'open_frame',  to: 'open_frame'  };
-        case 'cc': return { from: 'close_frame', to: 'close_frame' };
-        case 'po': return { from: 'peak_frame',  to: 'open_frame'  };
-        case 'co': return { from: 'close_frame', to: 'open_frame'  };
+        case 'pp': return { from: 'peak_frame',  to: 'peak_frame',  intra: false };
+        case 'oo': return { from: 'open_frame',  to: 'open_frame',  intra: false };
+        case 'cc': return { from: 'close_frame', to: 'close_frame', intra: false };
+        case 'po': return { from: 'peak_frame',  to: 'open_frame',  intra: false };
+        case 'co': return { from: 'close_frame', to: 'open_frame',  intra: false };
+        case 'op': return { from: 'open_frame',  to: 'peak_frame',  intra: true  };
+        case 'pc': return { from: 'peak_frame',  to: 'close_frame', intra: true  };
         default:   return null;
     }
 }
@@ -3671,24 +3686,42 @@ function renderIMIPlot(divId, trial, trialStart, trialMovs, fps, refVal, width) 
     const keys = _imiKeys(refVal);
     if (!keys) return;
     const xs = [], ys = [];
-    let prevFromLocal = null;
-    (trialMovs || []).forEach(m => {
-        const fTo = m[keys.to];
-        if (prevFromLocal != null && fTo != null && isFinite(fTo)) {
+    if (keys.intra) {
+        // Intra-movement durations: read ``from`` and ``to`` off the
+        // SAME movement.  Skip movements that lack either frame.
+        (trialMovs || []).forEach(m => {
+            const fFrom = m[keys.from];
+            const fTo   = m[keys.to];
+            if (fFrom == null || fTo == null || !isFinite(fFrom) || !isFinite(fTo)) return;
             const toLocal = fTo - trialStart;
-            if (toLocal >= 0) {
-                const dt = (toLocal - prevFromLocal) / fpsT;
-                if (isFinite(dt) && dt > 0) {
-                    xs.push(+(toLocal / fpsT).toFixed(3));
-                    ys.push(+dt.toFixed(3));
+            if (toLocal < 0) return;
+            const dt = (fTo - fFrom) / fpsT;
+            if (!isFinite(dt) || dt <= 0) return;
+            xs.push(+(toLocal / fpsT).toFixed(3));
+            ys.push(+dt.toFixed(3));
+        });
+    } else {
+        // Inter-movement intervals: previous movement's ``from``
+        // frame to current movement's ``to`` frame.
+        let prevFromLocal = null;
+        (trialMovs || []).forEach(m => {
+            const fTo = m[keys.to];
+            if (prevFromLocal != null && fTo != null && isFinite(fTo)) {
+                const toLocal = fTo - trialStart;
+                if (toLocal >= 0) {
+                    const dt = (toLocal - prevFromLocal) / fpsT;
+                    if (isFinite(dt) && dt > 0) {
+                        xs.push(+(toLocal / fpsT).toFixed(3));
+                        ys.push(+dt.toFixed(3));
+                    }
                 }
             }
-        }
-        const fFrom = m[keys.from];
-        prevFromLocal = (fFrom != null && isFinite(fFrom))
-            ? fFrom - trialStart
-            : null;
-    });
+            const fFrom = m[keys.from];
+            prevFromLocal = (fFrom != null && isFinite(fFrom))
+                ? fFrom - trialStart
+                : null;
+        });
+    }
     const trace = {
         x: xs, y: ys,
         type: 'scatter', mode: 'lines+markers',
