@@ -40,39 +40,76 @@ def _robust_z(values: np.ndarray, axis: int = 0):
     return np.abs(values - med) / mad, med, mad
 
 
+def _step_with_lookback(arr: np.ndarray) -> np.ndarray:
+    """Per-(t, j) 2D step magnitude from ``arr[t]`` to the closest
+    finite previous frame within a 2-frame lookback window.
+
+    Per-camera: when ``arr[t-1, j]`` has any NaN, fall back to the
+    1-frame-prior reference (``arr[t-2, j]``).  When BOTH are NaN
+    the entry stays NaN — meaning "this camera's velocity at t is
+    undefined" — so blame attribution can route around it instead
+    of returning a noisy zero.
+    """
+    N = arr.shape[0]
+    s1 = np.full((N, arr.shape[1]), np.nan, dtype=np.float64)
+    if N >= 2:
+        s1[1:] = np.linalg.norm(arr[1:] - arr[:-1], axis=-1)
+    s2 = np.full((N, arr.shape[1]), np.nan, dtype=np.float64)
+    if N >= 3:
+        s2[2:] = np.linalg.norm(arr[2:] - arr[:-2], axis=-1)
+    # np.linalg.norm propagates NaN, so s1 is NaN whenever EITHER
+    # arr[t] or arr[t-1] had a NaN coord — exactly when we want
+    # the lookback fallback.
+    return np.where(np.isfinite(s1), s1, s2)
+
+
 def _camera_blame_from_2d_step(
     mp_L: np.ndarray, mp_R: np.ndarray,
     joint_mask: np.ndarray,
     k_blame: float = 2.0,
 ) -> np.ndarray:
-    """Distribute a per-(frame, joint) flag onto the L/R cameras.
+    """Distribute a per-(frame, joint) flag onto the L/R cameras
+    based on 2D step magnitude vs. the most recent finite previous
+    frame (up to 2 frames back, per camera independently).
 
-    Comparable 2D step magnitudes → both cameras.  NaN-safe.
+    Decision ladder:
+      * one side's step is NaN  → blame the other side.
+      * both NaN                → blame both.
+      * dL > k_blame × dR       → blame L only.
+      * dR > k_blame × dL       → blame R only.
+      * otherwise (comparable)  → blame the LARGER step.  Exact
+                                  ties (often dL == dR == 0)     →
+                                  blame both.
     """
     N, J = mp_L.shape[0], mp_L.shape[1]
     out = np.zeros((N, J, 2), dtype=bool)
     if N < 2:
         return out
-    # Per-(frame, joint) 2D step magnitudes.
-    step_L = np.zeros((N, J), dtype=np.float64)
-    step_R = np.zeros((N, J), dtype=np.float64)
-    step_L[1:] = np.linalg.norm(mp_L[1:] - mp_L[:-1], axis=-1)
-    step_R[1:] = np.linalg.norm(mp_R[1:] - mp_R[:-1], axis=-1)
+    step_L = _step_with_lookback(mp_L)
+    step_R = _step_with_lookback(mp_R)
     tj = np.argwhere(joint_mask)
     for t, j in tj:
         dL = step_L[t, j]
         dR = step_R[t, j]
-        if np.isnan(dL) and np.isnan(dR):
+        nanL = np.isnan(dL)
+        nanR = np.isnan(dR)
+        if nanL and nanR:
             out[t, j, 0] = True; out[t, j, 1] = True
-        elif np.isnan(dL):
+        elif nanL:
             out[t, j, 1] = True
-        elif np.isnan(dR):
+        elif nanR:
             out[t, j, 0] = True
         elif dL > k_blame * dR:
             out[t, j, 0] = True
         elif dR > k_blame * dL:
             out[t, j, 1] = True
+        elif dL > dR:
+            # Comparable, but L still moved more — blame L alone.
+            out[t, j, 0] = True
+        elif dR > dL:
+            out[t, j, 1] = True
         else:
+            # Exact equality (almost always dL == dR == 0).
             out[t, j, 0] = True; out[t, j, 1] = True
     return out
 
@@ -440,12 +477,16 @@ def build_signal_data(
             stereo_hybrid_resp[:m] = R[:m]
 
     # ── Camera-attribution helpers (2D + 3D step magnitudes) ──
-    step_2d_L = np.zeros((N, J), dtype=np.float64)
-    step_2d_R = np.zeros((N, J), dtype=np.float64)
+    # 2D steps now do a 1-frame lookback fallback so blame
+    # attribution still works when the previous frame's label was
+    # NaN.  See ``_step_with_lookback`` for the convention.  NaN
+    # entries mean "no usable reference within 2 frames" — the
+    # consumer (attrib3D in labels.js, _camera_blame_from_2d_step
+    # here) should treat those as "can't blame this side".
+    step_2d_L = _step_with_lookback(mp_L)
+    step_2d_R = _step_with_lookback(mp_R)
     step_3d = np.zeros((N, J), dtype=np.float64)
     if N > 1:
-        step_2d_L[1:] = np.linalg.norm(mp_L[1:] - mp_L[:-1], axis=-1)
-        step_2d_R[1:] = np.linalg.norm(mp_R[1:] - mp_R[:-1], axis=-1)
         step_3d[1:] = np.linalg.norm(init_3d[1:] - init_3d[:-1], axis=-1)
 
     # ── Per-camera scalars (MP conf / HRnet scores) ───────────

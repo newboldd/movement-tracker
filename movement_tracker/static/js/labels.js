@@ -8809,6 +8809,10 @@ const manoViewer = (() => {
         const isFin = (v) => Number.isFinite(v);
 
         const attrib3D = (t, j) => {
+            // step_2d_L/R already carry a 1-frame lookback fallback
+            // baked in server-side, so NaN here genuinely means
+            // "no usable previous label within 2 frames" → can't
+            // blame this side, route the flag to the partner.
             const dL = A.step_2d_L ? A.step_2d_L[idx2(t, j)] : NaN;
             const dR = A.step_2d_R ? A.step_2d_R[idx2(t, j)] : NaN;
             const okL = isFin(dL), okR = isFin(dR);
@@ -8817,6 +8821,11 @@ const manoViewer = (() => {
             if (!okR) { cam[idxC(t,j,0)] = 1; return 1; }
             if (dL > K_BLAME * dR) { cam[idxC(t,j,0)] = 1; return 1; }
             if (dR > K_BLAME * dL) { cam[idxC(t,j,1)] = 1; return 1; }
+            // Comparable steps — blame the larger one rather than
+            // defaulting to "both".  Exact tie (typically dL ==
+            // dR == 0) still blames both.
+            if (dL > dR) { cam[idxC(t,j,0)] = 1; return 1; }
+            if (dR > dL) { cam[idxC(t,j,1)] = 1; return 1; }
             cam[idxC(t,j,0)] = 1; cam[idxC(t,j,1)] = 1; return 2;
         };
 
