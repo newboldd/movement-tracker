@@ -5377,38 +5377,46 @@ def dispatch_remote_preproc_batch(
                 t["start_frame"]       = int(tr.get("start_frame", 0))
                 t["fps"]               = float(tr.get("fps", 30.0))
 
+        # ── Code uploads (ALWAYS run; skip-if-unchanged via size) ──
+        # These MUST live outside the uploads_complete-sentinel guard.
+        # The sentinel only proves data files (videos, npz) finished
+        # uploading; it tells you nothing about whether the code on
+        # the remote is up to date.  When a fix to the runner or
+        # worker is shipped and a job that reuses an existing
+        # batch_id dispatches, _scp_if_changed will see the size
+        # changed and push the new version.
+        service_dir = Path(__file__).parent
+        for mod_file in ("camera_motion.py", "background.py", "ffmpeg.py"):
+            mp = service_dir / mod_file
+            if not mp.exists():
+                continue
+            _scp_if_changed(
+                cfg, str(mp), f"{modules_dir}/{mod_file}",
+                timeout=60, logfile=logfile, label=f"module {mod_file}: ",
+            )
+        # Worker script (per-subject).
+        worker_local = os.path.join(_tf.gettempdir(),
+                                      f"remote_preproc_worker_{job_id}.py")
+        with open(worker_local, "w") as f:
+            f.write(_REMOTE_PREPROC_WORKER)
+        worker_remote = f"{modules_dir}/remote_preproc_worker.py"
+        _scp_if_changed(cfg, worker_local, worker_remote,
+                         timeout=30, logfile=logfile, label="worker: ")
+        # Batch runner script (loops subjects).
+        runner_local = os.path.join(_tf.gettempdir(),
+                                      f"remote_preproc_batch_runner_{job_id}.py")
+        with open(runner_local, "w") as f:
+            f.write(_REMOTE_PREPROC_BATCH_RUNNER)
+        runner_remote = f"{state_dir}/batch_runner.py"
+        _scp_if_changed(cfg, runner_local, runner_remote,
+                         timeout=30, logfile=logfile, label="runner: ")
+
         if uploads_already_done:
-            logfile.write("  uploads_complete sentinel present — skipping upload phase\n")
+            logfile.write("  uploads_complete sentinel present — skipping data upload phase\n")
             logfile.flush()
         else:
             logfile.write(f"  uploading inputs for {n_subj} subject(s)...\n")
             logfile.flush()
-            # ── Shared modules + scripts (upload once, idempotent) ──
-            service_dir = Path(__file__).parent
-            for mod_file in ("camera_motion.py", "background.py", "ffmpeg.py"):
-                mp = service_dir / mod_file
-                if not mp.exists():
-                    continue
-                _scp_if_changed(
-                    cfg, str(mp), f"{modules_dir}/{mod_file}",
-                    timeout=60, logfile=logfile, label=f"module {mod_file}: ",
-                )
-            # Worker script (per-subject).
-            worker_local = os.path.join(_tf.gettempdir(),
-                                          f"remote_preproc_worker_{job_id}.py")
-            with open(worker_local, "w") as f:
-                f.write(_REMOTE_PREPROC_WORKER)
-            worker_remote = f"{modules_dir}/remote_preproc_worker.py"
-            _scp_if_changed(cfg, worker_local, worker_remote,
-                             timeout=30, logfile=logfile, label="worker: ")
-            # Batch runner script (loops subjects).
-            runner_local = os.path.join(_tf.gettempdir(),
-                                          f"remote_preproc_batch_runner_{job_id}.py")
-            with open(runner_local, "w") as f:
-                f.write(_REMOTE_PREPROC_BATCH_RUNNER)
-            runner_remote = f"{state_dir}/batch_runner.py"
-            _scp_if_changed(cfg, runner_local, runner_remote,
-                             timeout=30, logfile=logfile, label="runner: ")
             # ── Per-subject: dir + video + npz uploads ──
             # Trial dicts were hydrated above; here we just push the
             # actual files (skip-if-present).
