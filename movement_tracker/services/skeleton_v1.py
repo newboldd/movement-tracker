@@ -304,7 +304,10 @@ def run_skeleton_v1_fit(
         _stereo_R_v = None
         try:
             from .stereo_align import load_stereo_align
-            from .video import build_trial_map
+            # build_trial_map is already module-imported at the top;
+            # re-importing it here would rebind it as a local for
+            # the whole function and break the earlier call at the
+            # start of run_skeleton_v1_fit.
             _trial_idx = next(
                 (i for i, t in enumerate(build_trial_map(subject_name))
                  if t.get("trial_name") == trial_stem),
