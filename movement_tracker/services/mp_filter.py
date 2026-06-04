@@ -670,7 +670,7 @@ def build_stereo_fill(
     conf_min: float = 0.4,
 ):
     """Substitute filtered MP labels with stereo labels where
-    confident; leave both-filtered or low-confidence cells blank.
+    confident; otherwise drop the whole joint on both cameras.
 
     Parameters
     ----------
@@ -691,9 +691,15 @@ def build_stereo_fill(
     Returns
     -------
     fill_L, fill_R : (N, J, 2) float
-        Each cell is either combined (when the camera wasn't
-        filtered), stereo (when filtered + confident partner),
-        or NaN (both filtered, or partner not confident enough).
+        Per-(frame, joint) decision:
+          * neither filtered                         → combined on both
+          * exactly one filtered, response > conf_min → stereo on that
+            camera, combined on the partner
+          * exactly one filtered, response ≤ conf_min → NaN on BOTH
+            (the joint stays filtered — we don't fall back to MP
+            combined on the unfiltered camera because the joint is
+            untrustworthy in 3D either way)
+          * both filtered                             → NaN on both
     """
     N, J = combined_L.shape[0], combined_L.shape[1]
     fill_L = combined_L.copy()
@@ -717,21 +723,30 @@ def build_stereo_fill(
     fR = camera_mask[..., 1]
     conf_ok = np.where(np.isfinite(resp), resp > conf_min, False)
 
-    # Both filtered → drop both.
-    both = fL & fR
-    fill_L[both] = np.nan
-    fill_R[both] = np.nan
+    # Cells where EITHER camera was filtered.  For these we either
+    # donate from stereo or drop the entire joint; combined-on-the-
+    # unfiltered-side is never the answer (otherwise we'd be making
+    # the joint look "fine" when 3D triangulation is impossible).
+    either = fL | fR
+    drop = either & ~conf_ok          # both filtered, or one filtered + bad conf
+    donate_L = (fL & ~fR) & conf_ok   # exactly L filtered, conf OK
+    donate_R = (fR & ~fL) & conf_ok   # exactly R filtered, conf OK
 
-    # L filtered only → donate from stereo_L if confident, else NaN.
-    only_L = fL & ~fR
-    donate_L = only_L & conf_ok
-    fill_L[only_L] = np.nan
+    fill_L[drop] = np.nan
+    fill_R[drop] = np.nan
     fill_L[donate_L] = sL[donate_L]
-
-    # R filtered only → donate from stereo_R if confident, else NaN.
-    only_R = fR & ~fL
-    donate_R = only_R & conf_ok
-    fill_R[only_R] = np.nan
+    # combined_R was already correct for donate_L cells (R wasn't
+    # filtered), so leave fill_R alone there.
     fill_R[donate_R] = sR[donate_R]
+
+    # If BOTH cameras were filtered AND conf was high enough that
+    # `drop` excluded the cell, we still need to drop it — donating
+    # to both sides doesn't make sense (the shift is a single
+    # vector that mirrors L vs R, so substituting both ends gives a
+    # joint at the SAME image-space displacement on both cameras,
+    # which is meaningless for 3D).
+    both_filtered = fL & fR
+    fill_L[both_filtered] = np.nan
+    fill_R[both_filtered] = np.nan
 
     return fill_L, fill_R
