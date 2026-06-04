@@ -30,6 +30,20 @@ const manoViewer = (() => {
     // has_calib, has_mp_conf, has_hrnet }.
     let _mpFilterData = null;
     let _mpFilterDataFetch = null;     // in-flight Promise to dedupe
+    // Saved Stereo-panel per-mode knobs from the trial's npz files;
+    // loaded lazily on first panel-open, cleared on trial switch.
+    // Declared at module scope (not inside the event-setup block)
+    // because loadTrial — which runs on init() before that block —
+    // also touches it.
+    let _stereoSavedParams = {};
+    // Stereo panel helpers — bound to the real implementations
+    // inside the event-setup block.  Module-scope placeholders so
+    // loadTrial() can call them on trial switch (it runs from
+    // init() before the event-setup block defines the real ones,
+    // and the panel won't be open at that point anyway, so the
+    // no-op placeholders are safe).
+    let _fetchStereoSavedParams = async () => {};
+    let _applyStereoSavedForCurrentMode = () => {};
     // Filtered MediaPipe overlay toggles — independent of MP Filter
     // panel visibility.  When on, Filtered keypoints / wireframe /
     // distance trace are drawn using Combined-data-minus-mask.
@@ -1797,7 +1811,8 @@ const manoViewer = (() => {
         // npz for the selected mode, or falls back to these when no
         // npz exists yet.
         const _STEREO_DEFAULTS = { mask_dilate_px: 10, gauss_center_weight: 0.0 };
-        let _stereoSavedParams = {};   // per-mode: { mask_dilate_px, gauss_center_weight }
+        // _stereoSavedParams is declared at module scope above so
+        // loadTrial() can reset it on trial switch.
         const _setStereoDilate = (pxOrNull) => {
             const px = (pxOrNull == null) ? _STEREO_DEFAULTS.mask_dilate_px : pxOrNull;
             const s = $('stereoDilateSlider');
@@ -1814,7 +1829,9 @@ const manoViewer = (() => {
         };
         // Pull saved params from the server for all three modes.  Cached
         // until the trial changes (loadTrial() resets _stereoSavedParams).
-        const _fetchStereoSavedParams = async () => {
+        // Assigned (not declared) so the module-scope placeholder
+        // above gets the real impl after init runs.
+        _fetchStereoSavedParams = async () => {
             if (!subjectId || currentTrialIdx < 0 || !trials?.[currentTrialIdx]) return;
             try {
                 const t = trials[currentTrialIdx].trial_idx;
@@ -1827,7 +1844,8 @@ const manoViewer = (() => {
         // Apply saved params for the currently-selected radio.  Falls
         // back to factory defaults for any field the saved npz didn't
         // store (or when no npz exists for that mode yet).
-        const _applyStereoSavedForCurrentMode = () => {
+        // Assigned (not declared) — see note on _fetchStereoSavedParams.
+        _applyStereoSavedForCurrentMode = () => {
             const m = document.querySelector('input[name="stereoMode"]:checked');
             const mode = m ? m.value : 'image';
             const saved = _stereoSavedParams[mode] || {};
