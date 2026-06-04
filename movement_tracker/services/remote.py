@@ -5358,6 +5358,10 @@ def dispatch_remote_preproc_batch(
         # missing most of these.
         from .video import build_trial_map
         modules_dir = f"{_wd}/preproc_modules"
+        # First pass: hydrate trial dicts with default video_remote_path
+        # = preproc_<sub>/videos/<v>.  We'll rewrite to the deidentify
+        # path below if the video only lives there.
+        _hydrated_pairs: list[tuple] = []  # (subject, vname, trial_dict)
         for sn, sub_trials in by_subj.items():
             remote_work = f"{_wd}/preproc_{sn}"
             all_trials = build_trial_map(sn)
@@ -5376,6 +5380,69 @@ def dispatch_remote_preproc_batch(
                 t["frame_count"]       = int(tr.get("frame_count", 0))
                 t["start_frame"]       = int(tr.get("start_frame", 0))
                 t["fps"]               = float(tr.get("fps", 30.0))
+                _hydrated_pairs.append((sn, vname, t))
+
+        # ── Deidentify-path fallback (ALWAYS run; one SSH round-trip) ──
+        # Many videos were originally uploaded by the Deidentify job to
+        # ``<work>/deidentify_<sub>/<v>.mp4``; the legacy preproc
+        # dispatcher reuses those instead of re-uploading.  But that
+        # path-rewriting logic used to live INSIDE the upload-skip block,
+        # so when ``uploads_complete`` was set from a prior dispatch the
+        # rewrite never fired and the bundle.json pointed at a non-
+        # existent ``preproc_<sub>/videos/<v>.mp4``.  Symptom: worker
+        # bailed with ``RuntimeError: Cannot open video`` on the very
+        # first trial whose video had been uploaded only via deidentify.
+        # Fix: probe in a single batched SSH call here, every dispatch,
+        # so video_remote_path is always correct before bundle.json
+        # gets written.
+        if _hydrated_pairs:
+            probe_lines = ["import os"]
+            for i, (sn, vname, _t) in enumerate(_hydrated_pairs):
+                pre = f"{_wd}/preproc_{sn}/videos/{vname}"
+                did = f"{_wd}/deidentify_{sn}/{vname}"
+                probe_lines.append(
+                    f"print({i},'P' if os.path.exists(r'{pre}') "
+                    f"else ('D' if os.path.exists(r'{did}') else 'X'))"
+                )
+            probe_script = ";".join(probe_lines)
+            try:
+                probe_out = subprocess.run(
+                    _py_cmd(cfg, f"\"{probe_script}\""),
+                    capture_output=True, text=True, timeout=60,
+                )
+                if probe_out.returncode == 0:
+                    rewrite_count = 0
+                    for ln in (probe_out.stdout or "").splitlines():
+                        ln = ln.strip()
+                        if not ln:
+                            continue
+                        try:
+                            idx_s, loc = ln.split(None, 1)
+                            idx = int(idx_s)
+                        except ValueError:
+                            continue
+                        if idx < 0 or idx >= len(_hydrated_pairs):
+                            continue
+                        sn_i, vname_i, t_i = _hydrated_pairs[idx]
+                        if loc == "D":
+                            t_i["video_remote_path"] = f"{_wd}/deidentify_{sn_i}/{vname_i}"
+                            rewrite_count += 1
+                    if rewrite_count:
+                        logfile.write(
+                            f"  rewrote {rewrite_count} video_remote_path → "
+                            f"deidentify_<sub>/<v>.mp4 (fallback)\n"
+                        )
+                        logfile.flush()
+                else:
+                    logfile.write(
+                        f"  WARN: video-location probe failed "
+                        f"(rc={probe_out.returncode}): "
+                        f"{(probe_out.stderr or '').strip()[:200]}\n"
+                    )
+                    logfile.flush()
+            except subprocess.TimeoutExpired:
+                logfile.write("  WARN: video-location probe timed out\n")
+                logfile.flush()
 
         # ── Code uploads (ALWAYS run; skip-if-unchanged via size) ──
         # These MUST live outside the uploads_complete-sentinel guard.
