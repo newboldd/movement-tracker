@@ -1862,12 +1862,6 @@ def load_skeleton_trial_data(
         "stereo_tracked_R": None,
         "stereo_response": None,
         "has_stereo": False,
-        # Stereo (outline-based) -- the same alignment but driven by
-        # the preproc-baked hand outlines instead of raw pixels.
-        "stereo_outline_tracked_L": None,
-        "stereo_outline_tracked_R": None,
-        "stereo_outline_response": None,
-        "has_stereo_outline": False,
         # Stereo (hybrid) -- Pass 1 outline-vote, Pass 2 image phase-corr.
         "stereo_hybrid_tracked_L": None,
         "stereo_hybrid_tracked_R": None,
@@ -2090,17 +2084,11 @@ def load_skeleton_trial_data(
 
         sa = (load_stereo_align(subject_name, _stereo_trial_idx, mode="image")
               if _stereo_trial_idx is not None else None)
-        sa_out = (load_stereo_align(subject_name, _stereo_trial_idx, mode="outline")
-                  if _stereo_trial_idx is not None else None)
         sa_hyb = (load_stereo_align(subject_name, _stereo_trial_idx, mode="hybrid")
                   if _stereo_trial_idx is not None else None)
         if sa is not None:
             _emit_stereo(sa, "stereo_tracked_L", "stereo_tracked_R",
                          "stereo_response", "has_stereo")
-        if sa_out is not None:
-            _emit_stereo(sa_out, "stereo_outline_tracked_L",
-                         "stereo_outline_tracked_R",
-                         "stereo_outline_response", "has_stereo_outline")
         if sa_hyb is not None:
             _emit_stereo(sa_hyb, "stereo_hybrid_tracked_L",
                          "stereo_hybrid_tracked_R",

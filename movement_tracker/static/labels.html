@@ -255,20 +255,6 @@
                     <span id="stereoConfVal" style="min-width:24px; text-align:right; color:var(--text);">0.00</span>
                 </span>
 
-                <!-- 1c. Stereo (outline) -- same alignment but driven
-                     by the preproc-baked hand outlines instead of the
-                     raw image. -->
-                <span style="color:var(--text-muted);padding-left:18px;"><span class="layer-swatch" style="background:#ce93d8;"></span> Stereo (outline)</span>
-                <input type="checkbox" id="showStereoOutline2D" style="margin:0;justify-self:center;">
-                <span></span><span></span>
-                <!-- Stereo (outline) confidence threshold -- same as the
-                     Stereo slider but for the outline-driven variant. -->
-                <span id="stereoOutlineConfWrap" style="grid-column: 1 / -1; display:none; align-items:center; gap:6px; padding:0 4px 4px 28px; font-size:10px; color:var(--text-muted); white-space:nowrap;">
-                    <span title="Hide light-purple X's whose phase-correlation confidence is below this value">conf ≥</span>
-                    <input type="range" id="stereoOutlineConfSlider" min="0" max="1" step="0.02" value="0" style="flex:1; height:5px; cursor:pointer; min-width:0;">
-                    <span id="stereoOutlineConfVal" style="min-width:24px; text-align:right; color:var(--text);">0.00</span>
-                </span>
-
                 <!-- 1c'. Stereo (hybrid) -- Pass 1 outline-vote +
                      Pass 2 raw-image phase-corr.  No outlines shown
                      inside the per-joint bbox. -->
@@ -494,14 +480,10 @@
                     Phase-correlate cropped patches around each MP label across cameras (no label info used).  Stereo model then draws the partner-camera label translated into the current view so cross-camera disagreement is visible.
                 </div>
                 <div style="display:flex;gap:10px;align-items:center;font-size:11px;color:var(--text-muted);margin-bottom:6px;"
-                     title="Image: raw video crops for both passes.  Outline: preproc-baked hand silhouette for both passes (whole-outline vote + per-joint mask phase-corr).  Hybrid: outline vote for the global pass, raw image phase-corr for the per-joint pass.">
+                     title="Image: raw video crops for both passes.  Hybrid: outline vote for the global pass, raw image phase-corr for the per-joint pass.">
                     <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
                         <input type="radio" name="stereoMode" value="image" id="stereoModeImage" checked style="margin:0;">
                         Image
-                    </label>
-                    <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
-                        <input type="radio" name="stereoMode" value="outline" id="stereoModeOutline" style="margin:0;">
-                        Outline
                     </label>
                     <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
                         <input type="radio" name="stereoMode" value="hybrid" id="stereoModeHybrid" style="margin:0;">
@@ -887,10 +869,6 @@
                     <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
                         <input type="radio" name="v3StereoMode" value="image" id="v3StereoModeImage" checked style="margin:0;">
                         Image
-                    </label>
-                    <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
-                        <input type="radio" name="v3StereoMode" value="outline" id="v3StereoModeOutline" style="margin:0;">
-                        Outline
                     </label>
                     <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
                         <input type="radio" name="v3StereoMode" value="hybrid" id="v3StereoModeHybrid" style="margin:0;">
@@ -1316,7 +1294,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=408" type="module"></script>
+    <script src="/static/js/labels.js?v=409" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

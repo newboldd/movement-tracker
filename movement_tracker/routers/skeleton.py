@@ -1140,17 +1140,14 @@ def run_fit(subject_id: int, req: FitRequest) -> dict:
 
 class StereoAlignRequest(BaseModel):
     trial_idx: int
-    # Legacy flag (still accepted): True == mode="outline".
-    use_outline: bool = False
-    # "image" | "outline" | "hybrid".  If unset, falls back to
-    # use_outline.
+    # "image" | "hybrid".  Default "image" when unset.
     mode: str | None = None
     # Hybrid only: dilate the outline mask by N pixels before applying
-    # to the per-joint image crops.  Ignored for other modes.
+    # to the per-joint image crops.  Ignored for image mode.
     mask_dilate_px: int = 10
-    # Image + hybrid: strength of a 2D Gaussian centred on each MP
-    # label that weights the Pass-2 phase correlation toward pixels
-    # near the joint.  0 = uniform, 1 = sharp.  Ignored in outline.
+    # Strength of a 2D Gaussian centred on each MP label that weights
+    # the Pass-2 phase correlation toward pixels near the joint.
+    # 0 = uniform, 1 = sharp.
     gauss_center_weight: float = 0.0
 
 
@@ -1161,9 +1158,8 @@ def trial_stereo_params(subject_id: int, trial_idx: int) -> dict:
 
     The Labels page opens the Stereo panel pre-filled with whatever
     settings produced the existing npz for the currently-selected
-    radio (image / outline / hybrid).  Modes with no baked npz are
-    omitted from the response — the frontend falls back to defaults
-    for those.
+    radio (image / hybrid).  Modes with no baked npz are omitted
+    from the response — the frontend falls back to defaults.
     """
     from ..services.stereo_align import load_stereo_align
     name = _subject_name(subject_id)
@@ -1171,7 +1167,7 @@ def trial_stereo_params(subject_id: int, trial_idx: int) -> dict:
     if trial_idx < 0 or trial_idx >= len(trials):
         raise HTTPException(400, "trial_idx out of range")
     out: dict[str, dict] = {}
-    for mode in ("image", "outline", "hybrid"):
+    for mode in ("image", "hybrid"):
         sa = load_stereo_align(name, trial_idx, mode=mode)
         if sa is None:
             continue
@@ -1183,7 +1179,6 @@ def trial_stereo_params(subject_id: int, trial_idx: int) -> dict:
             v = int(sa["mask_dilate_px"])
             entry["mask_dilate_px"] = None if v < 0 else v
         if "gauss_center_weight" in sa:
-            # -1.0 sentinel = "not applicable" (outline mode).
             g = float(sa["gauss_center_weight"])
             entry["gauss_center_weight"] = None if g < 0 else g
         out[mode] = entry
@@ -1239,7 +1234,7 @@ def run_stereo(subject_id: int, req: StereoAlignRequest) -> dict:
                 with get_db_ctx() as db:
                     db.execute("UPDATE jobs SET progress_pct=? WHERE id=?",
                                (int(pct), job_id))
-            _mode = (req.mode or ("outline" if req.use_outline else "image"))
+            _mode = req.mode or "image"
             run_stereo_align(name, req.trial_idx,
                              progress_callback=on_progress,
                              cancel_event=cancel_event,
@@ -1559,7 +1554,7 @@ class MPErrorRequest(BaseModel):
     stage: str | None = None
     # Step 0: Stereo-correction config (v3 fit only).  Defaults are a
     # no-op when stereo_dist_px == 0.
-    stereo_mode: str = "image"        # image / outline / hybrid
+    stereo_mode: str = "image"        # image / hybrid
     mask_dilate_px: int = 10           # hybrid only
     gauss_center_weight: float = 0.0   # image + hybrid
     stereo_conf: float = 0.0           # min confidence to consider a stereo label

@@ -98,8 +98,6 @@ const manoViewer = (() => {
     let showStereo2D = false;
     let stereoSelectedJoint = null;   // joint whose per-joint bbox to draw
     let stereoConfThreshold = 0;      // hide markers with response < this
-    let showStereoOutline2D = false;  // outline-driven stereo variant
-    let stereoOutlineConfThreshold = 0;  // same, for outline variant
     let showStereoHybrid2D = false;   // outline-vote Pass 1 + image Pass 2
     let stereoHybridConfThreshold = 0;
     let showOutline2D = false;        // per-frame hand boundary polygon
@@ -1749,7 +1747,7 @@ const manoViewer = (() => {
         // Helper: clear the selected-joint marker if none of the three
         // Stereo variants is visible anymore.
         const _maybeClearStereoSelected = () => {
-            if (!showStereo2D && !showStereoOutline2D && !showStereoHybrid2D) {
+            if (!showStereo2D && !showStereoHybrid2D) {
                 stereoSelectedJoint = null;
             }
         };
@@ -1764,19 +1762,6 @@ const manoViewer = (() => {
             stereoConfThreshold = parseFloat(e.target.value);
             const lbl = $('stereoConfVal');
             if (lbl) lbl.textContent = stereoConfThreshold.toFixed(2);
-            render();
-        });
-        $('showStereoOutline2D')?.addEventListener('change', e => {
-            showStereoOutline2D = e.target.checked;
-            _maybeClearStereoSelected();
-            const wrap = $('stereoOutlineConfWrap');
-            if (wrap) wrap.style.display = showStereoOutline2D ? 'flex' : 'none';
-            updateLayerFlags();
-        });
-        $('stereoOutlineConfSlider')?.addEventListener('input', e => {
-            stereoOutlineConfThreshold = parseFloat(e.target.value);
-            const lbl = $('stereoOutlineConfVal');
-            if (lbl) lbl.textContent = stereoOutlineConfThreshold.toFixed(2);
             render();
         });
         $('showStereoHybrid2D')?.addEventListener('change', e => {
@@ -1975,16 +1960,13 @@ const manoViewer = (() => {
                             if (cb && !cb.checked) {
                                 cb.checked = true;
                                 if (varName === 'showStereo2D') showStereo2D = true;
-                                else if (varName === 'showStereoOutline2D') showStereoOutline2D = true;
                                 else if (varName === 'showStereoHybrid2D') showStereoHybrid2D = true;
                                 const wrap = $(wrapId);
                                 if (wrap) wrap.style.display = 'flex';
                                 updateLayerFlags();
                             }
                         };
-                        if (stereoMode === 'outline') {
-                            _autoOn('showStereoOutline2D', 'showStereoOutline2D', 'stereoOutlineConfWrap');
-                        } else if (stereoMode === 'hybrid') {
+                        if (stereoMode === 'hybrid') {
                             _autoOn('showStereoHybrid2D', 'showStereoHybrid2D', 'stereoHybridConfWrap');
                         } else {
                             _autoOn('showStereo2D', 'showStereo2D', 'stereoConfWrap');
@@ -2975,7 +2957,7 @@ const manoViewer = (() => {
     /** When a Stereo-model joint is selected and at least one of the
      *  three Stereo variants is visible, return the OLD-camera stereo
      *  label position for that joint and the joint index.  Priority:
-     *  Hybrid > Outline > Image.  Returns null if no selection / no
+     *  Hybrid > Image.  Returns null if no selection / no
      *  visible variant / no data this frame. */
     function _stereoTargetForSwitch(fn, oldIsLeft) {
         if (stereoSelectedJoint == null || !trialData) return null;
@@ -2989,8 +2971,6 @@ const manoViewer = (() => {
         return (
             trySrc(showStereoHybrid2D,  'has_stereo_hybrid',
                    'stereo_hybrid_tracked_L',  'stereo_hybrid_tracked_R')
-            || trySrc(showStereoOutline2D, 'has_stereo_outline',
-                      'stereo_outline_tracked_L', 'stereo_outline_tracked_R')
             || trySrc(showStereo2D,        'has_stereo',
                       'stereo_tracked_L',         'stereo_tracked_R')
         );
@@ -4580,109 +4560,6 @@ const manoViewer = (() => {
                     if (conf > 1) conf = 1;
                     const size = 4 * (0.3 + 0.7 * conf);
                     drawCross(x, y, '#e91e63', size);
-                }
-            }
-        }
-
-        // Stereo (outline) -- same display as Stereo but driven by
-        // the outline-based alignment + light-purple crosses
-        // (#ce93d8).  No hand-wide bbox -- the whole-hand alignment
-        // uses the ENTIRE outline, not a cropped patch.  Per-joint
-        // dashed bbox on click, same as Stereo.
-        if (showStereoOutline2D && trialData?.has_stereo_outline) {
-            const stereoKp = isLeft ? trialData.stereo_outline_tracked_L
-                                    : trialData.stereo_outline_tracked_R;
-            const mpHere = isLeft ? trialData.mp_tracked_L
-                                  : trialData.mp_tracked_R;
-            const mpOther = isLeft ? trialData.mp_tracked_R
-                                   : trialData.mp_tracked_L;
-            // Per-joint bbox for selected joint (dashed) + the outlines
-            // INSIDE it that were consumed by the per-joint alignment
-            // (yellow = current camera, green = opposite camera shifted
-            // so its MP joint sits on the current joint -- the same
-            // MP-centering the phase-corr aligns on).
-            if (stereoSelectedJoint != null && mpHere && mpHere[fn]) {
-                const pt = mpHere[fn][stereoSelectedJoint];
-                if (pt) {
-                    const perJoint = trialData.stereo_crop_halves_per_joint;
-                    const ch = (Array.isArray(perJoint) && perJoint[stereoSelectedJoint] != null)
-                        ? perJoint[stereoSelectedJoint]
-                        : (trialData.stereo_crop_half != null ? trialData.stereo_crop_half : 40);
-                    const cx = pt[0] * pixelScale;
-                    const cy = pt[1] * pixelScale;
-                    const w = (2 * ch + 1) * pixelScale;
-                    const bx = cx - w / 2, by = cy - w / 2;
-                    // Outlines clipped to the bbox.
-                    if (trialData.has_outlines) {
-                        const curOut = isLeft ? trialData.outlines_L?.[fn]
-                                              : trialData.outlines_R?.[fn];
-                        const oppOut = isLeft ? trialData.outlines_R?.[fn]
-                                              : trialData.outlines_L?.[fn];
-                        const mpOpp = (mpOther && mpOther[fn])
-                            ? mpOther[fn][stereoSelectedJoint] : null;
-                        ctx.save();
-                        ctx.beginPath();
-                        ctx.rect(bx, by, w, w);
-                        ctx.clip();
-                        // Yellow current outline at native position.
-                        if (curOut && curOut.length >= 3) {
-                            ctx.strokeStyle = '#ffd54f';
-                            ctx.lineWidth = 0.6;
-                            ctx.lineJoin = 'round';
-                            ctx.lineCap = 'round';
-                            ctx.beginPath();
-                            ctx.moveTo(curOut[0][0] * pixelScale, curOut[0][1] * pixelScale);
-                            for (let i = 1; i < curOut.length; i++) {
-                                ctx.lineTo(curOut[i][0] * pixelScale, curOut[i][1] * pixelScale);
-                            }
-                            ctx.closePath();
-                            ctx.stroke();
-                        }
-                        // Green opposite outline translated by
-                        // (mp_current - mp_opposite) so joint centres
-                        // line up.
-                        if (oppOut && oppOut.length >= 3 && mpOpp) {
-                            const tx = (pt[0] - mpOpp[0]) * pixelScale;
-                            const ty = (pt[1] - mpOpp[1]) * pixelScale;
-                            ctx.strokeStyle = '#66bb6a';
-                            ctx.lineWidth = 0.6;
-                            ctx.lineJoin = 'round';
-                            ctx.lineCap = 'round';
-                            ctx.beginPath();
-                            ctx.moveTo(oppOut[0][0] * pixelScale + tx,
-                                       oppOut[0][1] * pixelScale + ty);
-                            for (let i = 1; i < oppOut.length; i++) {
-                                ctx.lineTo(oppOut[i][0] * pixelScale + tx,
-                                           oppOut[i][1] * pixelScale + ty);
-                            }
-                            ctx.closePath();
-                            ctx.stroke();
-                        }
-                        ctx.restore();
-                    }
-                    // Dashed bbox over the clipped outlines.
-                    ctx.save();
-                    ctx.strokeStyle = '#ce93d8';
-                    ctx.lineWidth = 1.2;
-                    ctx.setLineDash([4, 3]);
-                    ctx.strokeRect(bx, by, w, w);
-                    ctx.setLineDash([]);
-                    ctx.restore();
-                }
-            }
-            if (stereoKp && stereoKp[fn]) {
-                const respFrame = trialData.stereo_outline_response?.[fn];
-                for (let j = 0; j < 21; j++) {
-                    if (!isJointVisible(j) || !stereoKp[fn][j]) continue;
-                    const rawConf = (respFrame && respFrame[j] != null) ? respFrame[j] : 0;
-                    if (rawConf < stereoOutlineConfThreshold) continue;
-                    const x = stereoKp[fn][j][0] * pixelScale;
-                    const y = stereoKp[fn][j][1] * pixelScale;
-                    let conf = rawConf;
-                    if (conf < 0) conf = 0;
-                    if (conf > 1) conf = 1;
-                    const size = 4 * (0.3 + 0.7 * conf);
-                    drawCross(x, y, '#ce93d8', size);
                 }
             }
         }
@@ -6583,7 +6460,6 @@ const manoViewer = (() => {
             // so we have to do the hit-test HERE rather than on the
             // videoCanvas (whose click handler the overlay blocks).
             if ((showStereo2D && trialData?.has_stereo)
-                || (showStereoOutline2D && trialData?.has_stereo_outline)
                 || (showStereoHybrid2D && trialData?.has_stereo_hybrid)) {
                 const cRect = canvas.getBoundingClientRect();
                 const cmx = (e.clientX - cRect.left - offsetX) / scale;
@@ -6601,10 +6477,6 @@ const manoViewer = (() => {
                 if (showStereo2D && trialData?.has_stereo) {
                     candidates.push(_isLeft ? trialData.stereo_tracked_L
                                             : trialData.stereo_tracked_R);
-                }
-                if (showStereoOutline2D && trialData?.has_stereo_outline) {
-                    candidates.push(_isLeft ? trialData.stereo_outline_tracked_L
-                                            : trialData.stereo_outline_tracked_R);
                 }
                 if (showStereoHybrid2D && trialData?.has_stereo_hybrid) {
                     candidates.push(_isLeft ? trialData.stereo_hybrid_tracked_L
@@ -8052,15 +7924,6 @@ const manoViewer = (() => {
         stereoSelectedJoint = null;
         const _scw = $('stereoConfWrap');
         if (_scw) _scw.style.display = (showStereo2D && hasStereo) ? 'flex' : 'none';
-        // Stereo (outline) + Outline layer availability.
-        const hasStereoOutline = !!(trialData && trialData.has_stereo_outline);
-        _setLayerAvail('showStereoOutline2D', hasStereoOutline);
-        if (!hasStereoOutline && $('showStereoOutline2D')) {
-            $('showStereoOutline2D').checked = false;
-            showStereoOutline2D = false;
-        }
-        const _socw = $('stereoOutlineConfWrap');
-        if (_socw) _socw.style.display = (showStereoOutline2D && hasStereoOutline) ? 'flex' : 'none';
         const hasStereoHybrid = !!(trialData && trialData.has_stereo_hybrid);
         _setLayerAvail('showStereoHybrid2D', hasStereoHybrid);
         if (!hasStereoHybrid && $('showStereoHybrid2D')) {
