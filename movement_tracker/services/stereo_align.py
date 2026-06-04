@@ -380,14 +380,21 @@ def run_stereo_align(subject_name: str, trial_idx: int,
     video_path  = trial["video_path"]
     stem        = trial["trial_name"]
 
-    from .mediapipe_prelabel import has_mediapipe_data, load_mediapipe_prelabels
+    from .mediapipe_prelabel import (
+        has_mediapipe_data, load_mediapipe_prelabels,
+        load_mediapipe_combined_prelabels,
+    )
     if not has_mediapipe_data(subject_name):
         raise FileNotFoundError(f"MediaPipe prelabels not found for {subject_name}")
-    # Use the layout-aware loader — handles the per-trial layout
-    # (<dlc>/<subject>/<trial>/mediapipe.npz, the current default)
-    # AND the legacy combined mediapipe_prelabels.npz, instead of
-    # hard-coding the legacy path.
-    mp = load_mediapipe_prelabels(subject_name)
+    # Prefer the per-trial MP Combined fusion (forward + reverse +
+    # static + cropped, per-camera bone-length tie-break) when it
+    # exists — that's the canonical per-camera input the rest of
+    # the app now treats as the "MP" labels.  Falls back to the
+    # forward-only pass for trials that don't have a combined npz
+    # yet.
+    mp = load_mediapipe_combined_prelabels(subject_name)
+    if mp is None:
+        mp = load_mediapipe_prelabels(subject_name)
     if mp is None:
         raise FileNotFoundError(f"MediaPipe prelabels not found for {subject_name}")
     OS_lm = mp["OS_landmarks"]
