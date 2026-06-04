@@ -261,41 +261,30 @@ def _signal_stereo_reproj(init_3d, mp_L, mp_R, calib, stereo_px: float):
     return out
 
 
-def _signal_stereo_hybrid_conf(stereo_response, N, J, stereo_hybrid_conf_min: float):
-    """Per-(frame, joint) hybrid-stereo phase-correlation response
-    below threshold.
+def _signal_stereo_hybrid(stereo_shift_mag, stereo_response,
+                           mp_L, mp_R, N, J,
+                           stereo_hybrid_px: float,
+                           stereo_hybrid_conf_min: float,
+                           k_blame_camera: float):
+    """Per-(frame, joint) hybrid-stereo correction distance, gated
+    by phase-correlation confidence.
 
-    ``stereo_response`` is the per-(frame, joint) confidence value
-    that cv2.phaseCorrelate returned for the per-joint pass in the
-    hybrid bake (range ~[0, 1]).  Low response means the shift
-    that's now driving the stereo overlay is unreliable.  Flags
-    both cameras together (same as the distance signal — the
-    confidence is per-joint, not per-camera).  No hybrid npz →
-    no-op.
-    """
-    out = np.zeros((N, J, 2), dtype=bool)
-    if stereo_response is None:
-        return out
-    R = np.asarray(stereo_response, dtype=np.float64)
-    if R.ndim != 2 or R.shape[1] != J:
-        return out
-    m = min(N, R.shape[0])
-    bad = np.where(np.isfinite(R[:m]), R[:m] < stereo_hybrid_conf_min, False)
-    out[:m, :, 0] = bad
-    out[:m, :, 1] = bad
-    return out
+    Three-step decision:
 
+    1. If the per-joint phase-corr response is below
+       ``stereo_hybrid_conf_min``, skip — the shift baked into
+       stereo_align_hybrid.npz is unreliable, so we have no basis
+       to call its distance "wrong" either.
+    2. If the shift magnitude is at-or-under
+       ``stereo_hybrid_px``, the per-joint stereo distance is in
+       the normal range — no flag.
+    3. Otherwise (confident shift, large distance) attribute the
+       error to one camera via the 2D-jump rule shared with every
+       other MP-Filter signal.
 
-def _signal_stereo_hybrid(stereo_shift_mag, N, J, stereo_hybrid_px: float):
-    """Per-(frame, joint) hybrid-stereo correction distance.
-
-    ``stereo_shift_mag`` is the 2D Euclidean magnitude of the
-    per-joint shift baked by Stereo Correct (hybrid mode) — the
-    distance from each MP combined label to its stereo-corrected
-    point.  Flags both cameras together when the shift exceeds the
-    threshold (the shift is applied antisymmetrically to L and R
-    by the same magnitude, so there is no per-camera attribution
-    naturally available at this signal).  No hybrid npz → no-op.
+    Returns the standard per-(frame, joint, camera) bool mask.
+    NaN-safe; missing response treated as "fails the gate" so we
+    don't false-positive on frames where stereo wasn't run.
     """
     out = np.zeros((N, J, 2), dtype=bool)
     if stereo_shift_mag is None:
@@ -304,10 +293,22 @@ def _signal_stereo_hybrid(stereo_shift_mag, N, J, stereo_hybrid_px: float):
     if S.ndim != 2 or S.shape[1] != J:
         return out
     m = min(N, S.shape[0])
-    bad = np.where(np.isfinite(S[:m]), S[:m] > stereo_hybrid_px, False)
-    out[:m, :, 0] = bad
-    out[:m, :, 1] = bad
-    return out
+    big_shift = np.zeros((N, J), dtype=bool)
+    big_shift[:m] = np.where(np.isfinite(S[:m]),
+                               S[:m] > stereo_hybrid_px, False)
+    conf_ok = np.zeros((N, J), dtype=bool)
+    if stereo_response is not None:
+        R = np.asarray(stereo_response, dtype=np.float64)
+        if R.ndim == 2 and R.shape[1] == J:
+            mr = min(N, R.shape[0])
+            conf_ok[:mr] = np.where(np.isfinite(R[:mr]),
+                                      R[:mr] >= stereo_hybrid_conf_min,
+                                      False)
+    else:
+        # No response array → can't gate; trust the distance check.
+        conf_ok[:] = True
+    flag = big_shift & conf_ok
+    return _camera_blame_from_2d_step(mp_L, mp_R, flag, k_blame_camera)
 
 
 def _signal_hrnet(hrnet_L, hrnet_R, N, J, hrnet_min: float):
@@ -529,13 +530,11 @@ def detect_mask(
     # Stereo reproj (px)
     enable_stereo: bool = False,
     stereo_px: float = 5.0,
-    # Stereo error (hybrid shift magnitude, px)
+    # Stereo error: dist threshold (px) gated by min conf (≥).
     enable_stereo_hybrid: bool = False,
     stereo_hybrid_px: float = 10.0,
-    stereo_shift_mag=None,
-    # Stereo confidence (hybrid phase-corr response, ≥)
-    enable_stereo_hybrid_conf: bool = False,
     stereo_hybrid_conf_min: float = 0.2,
+    stereo_shift_mag=None,
     stereo_response=None,
     # HRnet (≥)
     enable_hrnet: bool = False,
@@ -578,11 +577,11 @@ def detect_mask(
         _add("stereo_reproj", _signal_stereo_reproj(init_3d, mp_L, mp_R, calib, stereo_px))
     if enable_stereo_hybrid and stereo_shift_mag is not None:
         _add("stereo_hybrid",
-             _signal_stereo_hybrid(stereo_shift_mag, N, J, stereo_hybrid_px))
-    if enable_stereo_hybrid_conf and stereo_response is not None:
-        _add("stereo_hybrid_conf",
-             _signal_stereo_hybrid_conf(stereo_response, N, J,
-                                          stereo_hybrid_conf_min))
+             _signal_stereo_hybrid(stereo_shift_mag, stereo_response,
+                                     mp_L, mp_R, N, J,
+                                     stereo_hybrid_px,
+                                     stereo_hybrid_conf_min,
+                                     k_blame_camera))
     if enable_hrnet and (hrnet_L is not None or hrnet_R is not None):
         _add("hrnet",        _signal_hrnet(hrnet_L, hrnet_R, N, J, hrnet_min))
 

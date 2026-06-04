@@ -413,7 +413,6 @@ class OutlierPreviewRequest(BaseModel):
     stereo_px: float = 5.0
     enable_stereo_hybrid: bool = False
     stereo_hybrid_px: float = 10.0
-    enable_stereo_hybrid_conf: bool = False
     stereo_hybrid_conf_min: float = 0.2
     enable_hrnet: bool = False
     hrnet_min: float = 0.2
@@ -769,12 +768,12 @@ def outlier_preview(subject_id: int, req: OutlierPreviewRequest) -> dict:
         return np.asarray(a)[valid_idx]
 
     # Hybrid stereo: per-joint shift magnitude (px) + per-joint
-    # phase-corr response (~[0,1]) for the "Stereo error"
-    # distance / confidence sliders.  Both lazy-loaded from the
-    # hybrid npz iff at least one signal is enabled.
+    # phase-corr response (~[0,1]).  Confidence acts as a gate on
+    # the distance check, so both arrays are loaded together iff
+    # the Stereo error signal is enabled.
     _stereo_shift_mag_v = None
     _stereo_response_v = None
-    if req.enable_stereo_hybrid or req.enable_stereo_hybrid_conf:
+    if req.enable_stereo_hybrid:
         try:
             from ..services.stereo_align import load_stereo_align
             _sa_hyb = load_stereo_align(name, req.trial_idx, mode='hybrid')
@@ -812,9 +811,8 @@ def outlier_preview(subject_id: int, req: OutlierPreviewRequest) -> dict:
         enable_stereo=req.enable_stereo,  stereo_px=req.stereo_px,
         enable_stereo_hybrid=req.enable_stereo_hybrid,
         stereo_hybrid_px=req.stereo_hybrid_px,
-        stereo_shift_mag=_stereo_shift_mag_v,
-        enable_stereo_hybrid_conf=req.enable_stereo_hybrid_conf,
         stereo_hybrid_conf_min=req.stereo_hybrid_conf_min,
+        stereo_shift_mag=_stereo_shift_mag_v,
         stereo_response=_stereo_response_v,
         enable_hrnet=req.enable_hrnet,    hrnet_min=req.hrnet_min,
     )

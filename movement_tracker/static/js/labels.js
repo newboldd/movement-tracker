@@ -8814,42 +8814,39 @@ const manoViewer = (() => {
         }
 
         if (p.enable_stereo_hybrid) {
-            // Per-(frame, joint) hybrid stereo correction distance.
-            // Same magnitude on both cameras (the shift is applied
-            // antisymmetrically by ±|shift|), so flag both together
-            // when over threshold.
+            // Two-stage: conf gates dist.  For each (t, j):
+            //   1. conf < conf_min  → skip (treated as too noisy
+            //                          to call its distance wrong)
+            //   2. dist > dist_px   → attrib3D (camera attribution
+            //                          via 2D-jump, same as every
+            //                          other MP-Filter signal)
+            // Conf-row count reports cells dropped by the gate
+            // (informational — not flagged anywhere).
             let count = 0;
+            let gated = 0;
             const sh = A.stereo_hybrid_mag;
+            const sr = A.stereo_hybrid_resp;
             if (sh) {
                 for (let t = 0; t < N; t++) {
                     for (let j = 0; j < J; j++) {
-                        const v = sh[idx2(t, j)];
-                        if (isFin(v) && v > p.stereo_hybrid_px) {
-                            cam[idxC(t,j,0)] = 1; cam[idxC(t,j,1)] = 1; count += 2;
+                        const d = sh[idx2(t, j)];
+                        if (!isFin(d)) continue;
+                        const r = sr ? sr[idx2(t, j)] : NaN;
+                        if (isFin(r) && r < p.stereo_hybrid_conf_min) {
+                            gated += 1;     // conf gate dropped it
+                            continue;
+                        }
+                        // Cell with no conf data passes through —
+                        // we have no basis to gate.  Same fallback
+                        // as the server-side signal.
+                        if (d > p.stereo_hybrid_px) {
+                            count += attrib3D(t, j);
                         }
                     }
                 }
             }
             _addPerSignal('stereo_hybrid', count);
-        }
-
-        if (p.enable_stereo_hybrid_conf) {
-            // Per-(frame, joint) phase-corr response; low ⇒
-            // unreliable shift.  Flag both cameras together — the
-            // confidence is per-joint, not per-camera.
-            let count = 0;
-            const sr = A.stereo_hybrid_resp;
-            if (sr) {
-                for (let t = 0; t < N; t++) {
-                    for (let j = 0; j < J; j++) {
-                        const v = sr[idx2(t, j)];
-                        if (isFin(v) && v < p.stereo_hybrid_conf_min) {
-                            cam[idxC(t,j,0)] = 1; cam[idxC(t,j,1)] = 1; count += 2;
-                        }
-                    }
-                }
-            }
-            _addPerSignal('stereo_hybrid_conf', count);
+            _addPerSignal('stereo_hybrid_gated', gated);
         }
 
         if (p.enable_stereo) {
@@ -8943,6 +8940,10 @@ const manoViewer = (() => {
             vel: 'velocity', accel: 'acceleration', bone: 'bone',
             ydisp: 'ydisp', z: 'z_outlier', mpconf: 'mp_confidence',
             stereo: 'stereo_reproj', hrnet: 'hrnet',
+            stereoHybrid: 'stereo_hybrid',
+            // Conf row is a gate, not a flag — count shows joint-
+            // frames excluded by the gate.
+            stereoHybridConf: 'stereo_hybrid_gated',
         };
         for (const sig of _MPF_SIGNALS) {
             const cnt = out.perSignal[lookup[sig.id]];
