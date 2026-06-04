@@ -413,6 +413,8 @@ class OutlierPreviewRequest(BaseModel):
     stereo_px: float = 5.0
     enable_stereo_hybrid: bool = False
     stereo_hybrid_px: float = 10.0
+    enable_stereo_hybrid_conf: bool = False
+    stereo_hybrid_conf_min: float = 0.2
     enable_hrnet: bool = False
     hrnet_min: float = 0.2
 
@@ -582,10 +584,12 @@ def mp_filter_data(subject_id: int, trial_idx: int) -> dict:
                 else:
                     init_3d[i, j] = [0.0, 0.0, 500.0]
 
-    # Hybrid stereo shift magnitude (px) — distance from each MP
-    # combined label to its stereo-corrected point.  NaN-padded
+    # Hybrid stereo: per-joint shift magnitude (px) AND per-joint
+    # phase-correlation response (~[0,1] confidence).  Both drive
+    # the "Stereo error" pair of MP-Filter sliders.  NaN-padded
     # when the trial doesn't have a hybrid stereo_align npz.
     stereo_shift_mag = None
+    stereo_response = None
     try:
         from ..services.stereo_align import load_stereo_align
         _sa_hyb = load_stereo_align(name, trial_idx, mode='hybrid')
@@ -593,8 +597,13 @@ def mp_filter_data(subject_id: int, trial_idx: int) -> dict:
             _sh = np.asarray(_sa_hyb["shifts"], dtype=np.float64)
             if _sh.ndim == 3 and _sh.shape[1] == 21 and _sh.shape[2] == 2:
                 stereo_shift_mag = np.linalg.norm(_sh, axis=-1)
+        if _sa_hyb is not None and "response" in _sa_hyb:
+            _rsp = np.asarray(_sa_hyb["response"], dtype=np.float64)
+            if _rsp.ndim == 2 and _rsp.shape[1] == 21:
+                stereo_response = _rsp
     except Exception:
         stereo_shift_mag = None
+        stereo_response = None
 
     arrays = build_signal_data(
         init_3d, mp_L, mp_R, BONES,
@@ -602,6 +611,7 @@ def mp_filter_data(subject_id: int, trial_idx: int) -> dict:
         confidence_L=conf_L, confidence_R=conf_R,
         hrnet_L=hrnet_L,    hrnet_R=hrnet_R,
         stereo_shift_mag=stereo_shift_mag,
+        stereo_response=stereo_response,
     )
 
     # Encode each numpy array as a base64 Float32 blob.  Python's
@@ -758,26 +768,33 @@ def outlier_preview(subject_id: int, req: OutlierPreviewRequest) -> dict:
         if a is None: return None
         return np.asarray(a)[valid_idx]
 
-    # Hybrid stereo shift magnitude (px) for the "Stereo error"
-    # signal — distance from each MP combined label to its
-    # stereo-corrected point.  None when no hybrid npz exists.
+    # Hybrid stereo: per-joint shift magnitude (px) + per-joint
+    # phase-corr response (~[0,1]) for the "Stereo error"
+    # distance / confidence sliders.  Both lazy-loaded from the
+    # hybrid npz iff at least one signal is enabled.
     _stereo_shift_mag_v = None
-    if req.enable_stereo_hybrid:
+    _stereo_response_v = None
+    if req.enable_stereo_hybrid or req.enable_stereo_hybrid_conf:
         try:
             from ..services.stereo_align import load_stereo_align
             _sa_hyb = load_stereo_align(name, req.trial_idx, mode='hybrid')
-            if _sa_hyb is not None and "shifts" in _sa_hyb:
-                _sh = np.asarray(_sa_hyb["shifts"], dtype=np.float64)
-                if _sh.ndim == 3 and _sh.shape[1] == 21 and _sh.shape[2] == 2:
-                    _mag = np.linalg.norm(_sh, axis=-1)        # (N_sa, 21)
-                    # Stitch into the trial-length array, then slice by
-                    # valid_idx to align with init_3d / mp_L[valid_idx].
-                    _full = np.full((N_total, 21), np.nan, dtype=np.float64)
-                    _m = min(N_total, _mag.shape[0])
-                    _full[:_m] = _mag[:_m]
-                    _stereo_shift_mag_v = _full[valid_idx]
+            if _sa_hyb is not None:
+                def _stitch(arr):
+                    full = np.full((N_total, 21), np.nan, dtype=np.float64)
+                    m = min(N_total, arr.shape[0])
+                    full[:m] = arr[:m]
+                    return full[valid_idx]
+                if "shifts" in _sa_hyb:
+                    _sh = np.asarray(_sa_hyb["shifts"], dtype=np.float64)
+                    if _sh.ndim == 3 and _sh.shape[1] == 21 and _sh.shape[2] == 2:
+                        _stereo_shift_mag_v = _stitch(np.linalg.norm(_sh, axis=-1))
+                if "response" in _sa_hyb:
+                    _rsp = np.asarray(_sa_hyb["response"], dtype=np.float64)
+                    if _rsp.ndim == 2 and _rsp.shape[1] == 21:
+                        _stereo_response_v = _stitch(_rsp)
         except Exception:
             _stereo_shift_mag_v = None
+            _stereo_response_v = None
 
     joint_v, cam_v, per_signal = detect_mask(
         init_3d,
@@ -796,6 +813,9 @@ def outlier_preview(subject_id: int, req: OutlierPreviewRequest) -> dict:
         enable_stereo_hybrid=req.enable_stereo_hybrid,
         stereo_hybrid_px=req.stereo_hybrid_px,
         stereo_shift_mag=_stereo_shift_mag_v,
+        enable_stereo_hybrid_conf=req.enable_stereo_hybrid_conf,
+        stereo_hybrid_conf_min=req.stereo_hybrid_conf_min,
+        stereo_response=_stereo_response_v,
         enable_hrnet=req.enable_hrnet,    hrnet_min=req.hrnet_min,
     )
     joint_full = np.zeros((N_total, 21), dtype=bool)

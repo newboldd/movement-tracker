@@ -261,6 +261,31 @@ def _signal_stereo_reproj(init_3d, mp_L, mp_R, calib, stereo_px: float):
     return out
 
 
+def _signal_stereo_hybrid_conf(stereo_response, N, J, stereo_hybrid_conf_min: float):
+    """Per-(frame, joint) hybrid-stereo phase-correlation response
+    below threshold.
+
+    ``stereo_response`` is the per-(frame, joint) confidence value
+    that cv2.phaseCorrelate returned for the per-joint pass in the
+    hybrid bake (range ~[0, 1]).  Low response means the shift
+    that's now driving the stereo overlay is unreliable.  Flags
+    both cameras together (same as the distance signal — the
+    confidence is per-joint, not per-camera).  No hybrid npz →
+    no-op.
+    """
+    out = np.zeros((N, J, 2), dtype=bool)
+    if stereo_response is None:
+        return out
+    R = np.asarray(stereo_response, dtype=np.float64)
+    if R.ndim != 2 or R.shape[1] != J:
+        return out
+    m = min(N, R.shape[0])
+    bad = np.where(np.isfinite(R[:m]), R[:m] < stereo_hybrid_conf_min, False)
+    out[:m, :, 0] = bad
+    out[:m, :, 1] = bad
+    return out
+
+
 def _signal_stereo_hybrid(stereo_shift_mag, N, J, stereo_hybrid_px: float):
     """Per-(frame, joint) hybrid-stereo correction distance.
 
@@ -316,6 +341,7 @@ def build_signal_data(
     hrnet_L=None,
     hrnet_R=None,
     stereo_shift_mag=None,
+    stereo_response=None,
 ) -> dict:
     """Compute every signal's RAW per-(frame, joint[, camera]) array
     once for a trial.  Returns float32 numpy arrays the caller can
@@ -402,6 +428,15 @@ def build_signal_data(
         if S.ndim == 2 and S.shape[1] == J:
             m = min(N, S.shape[0])
             stereo_hybrid_mag[:m] = S[:m]
+    # ── Hybrid-stereo phase-corr response (≈[0,1]) ────────────
+    # Per-(frame, joint) confidence baked alongside the shift in
+    # the hybrid npz.  NaN where missing.
+    stereo_hybrid_resp = np.full((N, J), np.nan, dtype=np.float64)
+    if stereo_response is not None:
+        R = np.asarray(stereo_response, dtype=np.float64)
+        if R.ndim == 2 and R.shape[1] == J:
+            m = min(N, R.shape[0])
+            stereo_hybrid_resp[:m] = R[:m]
 
     # ── Camera-attribution helpers (2D + 3D step magnitudes) ──
     step_2d_L = np.zeros((N, J), dtype=np.float64)
@@ -444,6 +479,7 @@ def build_signal_data(
         "stereo_dev_L":   stereo_dev_L.astype(f32),
         "stereo_dev_R":   stereo_dev_R.astype(f32),
         "stereo_hybrid_mag": stereo_hybrid_mag.astype(f32),
+        "stereo_hybrid_resp": stereo_hybrid_resp.astype(f32),
         "step_2d_L":      step_2d_L.astype(f32),
         "step_2d_R":      step_2d_R.astype(f32),
         "step_3d":        step_3d.astype(f32),
@@ -497,6 +533,10 @@ def detect_mask(
     enable_stereo_hybrid: bool = False,
     stereo_hybrid_px: float = 10.0,
     stereo_shift_mag=None,
+    # Stereo confidence (hybrid phase-corr response, ≥)
+    enable_stereo_hybrid_conf: bool = False,
+    stereo_hybrid_conf_min: float = 0.2,
+    stereo_response=None,
     # HRnet (≥)
     enable_hrnet: bool = False,
     hrnet_min: float = 0.2,
@@ -539,6 +579,10 @@ def detect_mask(
     if enable_stereo_hybrid and stereo_shift_mag is not None:
         _add("stereo_hybrid",
              _signal_stereo_hybrid(stereo_shift_mag, N, J, stereo_hybrid_px))
+    if enable_stereo_hybrid_conf and stereo_response is not None:
+        _add("stereo_hybrid_conf",
+             _signal_stereo_hybrid_conf(stereo_response, N, J,
+                                          stereo_hybrid_conf_min))
     if enable_hrnet and (hrnet_L is not None or hrnet_R is not None):
         _add("hrnet",        _signal_hrnet(hrnet_L, hrnet_R, N, J, hrnet_min))
 

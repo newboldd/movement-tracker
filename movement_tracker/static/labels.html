@@ -850,10 +850,17 @@
                 </div>
                 <div class="mp-filter-signal" data-signal="stereoHybrid"
                      title="Distance (px) from each MP combined label to its hybrid-stereo-corrected point.  Flags joint+frame pairs where Stereo Correct (hybrid) had to translate the label by more than the threshold to make the two cameras agree.  Requires the trial to have a hybrid stereo_align npz.">
-                    <label><input type="checkbox" id="mpfEnableStereoHybrid"> Stereo error (px)</label>
+                    <label><input type="checkbox" id="mpfEnableStereoHybrid"> Stereo error — dist (px)</label>
                     <span class="mpf-val" id="mpfValStereoHybrid">10.0</span>
                     <span class="mpf-count" id="mpfCountStereoHybrid"></span>
                     <input type="range" id="mpfSliderStereoHybrid" min="0.5" max="50" step="0.5" value="10">
+                </div>
+                <div class="mp-filter-signal" data-signal="stereoHybridConf"
+                     title="Hybrid-stereo phase-correlation response (~[0,1]) per joint per frame.  Low response means Stereo Correct (hybrid) couldn'\''t find a confident match between OS and OD crops, so the shift it baked is unreliable.  Flags joint+frame pairs below the threshold.">
+                    <label><input type="checkbox" id="mpfEnableStereoHybridConf"> Stereo error — conf (≥)</label>
+                    <span class="mpf-val" id="mpfValStereoHybridConf">0.20</span>
+                    <span class="mpf-count" id="mpfCountStereoHybridConf"></span>
+                    <input type="range" id="mpfSliderStereoHybridConf" min="0" max="1" step="0.01" value="0.2">
                 </div>
                 <div class="mp-filter-signal" data-signal="hrnet"
                      title="Per-joint HRnet peak score; below the threshold means HRnet wasn'\''t confident.  Requires HRnet to have been run on this trial.">
@@ -1320,7 +1327,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=401" type="module"></script>
+    <script src="/static/js/labels.js?v=402" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

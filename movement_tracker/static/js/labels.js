@@ -8662,6 +8662,7 @@ const manoViewer = (() => {
         { id: 'mpconf', fmt: v => v.toFixed(2), keys: ['enable_mpconf', 'mpconf_min'] },
         { id: 'stereo', fmt: v => v.toFixed(1), keys: ['enable_stereo', 'stereo_px'] },
         { id: 'stereoHybrid', fmt: v => v.toFixed(1), keys: ['enable_stereo_hybrid', 'stereo_hybrid_px'] },
+        { id: 'stereoHybridConf', fmt: v => v.toFixed(2), keys: ['enable_stereo_hybrid_conf', 'stereo_hybrid_conf_min'] },
         { id: 'hrnet',  fmt: v => v.toFixed(2), keys: ['enable_hrnet',  'hrnet_min'] },
     ];
     const _MPF_CAP = id => id.charAt(0).toUpperCase() + id.slice(1);
@@ -8830,6 +8831,25 @@ const manoViewer = (() => {
                 }
             }
             _addPerSignal('stereo_hybrid', count);
+        }
+
+        if (p.enable_stereo_hybrid_conf) {
+            // Per-(frame, joint) phase-corr response; low ⇒
+            // unreliable shift.  Flag both cameras together — the
+            // confidence is per-joint, not per-camera.
+            let count = 0;
+            const sr = A.stereo_hybrid_resp;
+            if (sr) {
+                for (let t = 0; t < N; t++) {
+                    for (let j = 0; j < J; j++) {
+                        const v = sr[idx2(t, j)];
+                        if (isFin(v) && v < p.stereo_hybrid_conf_min) {
+                            cam[idxC(t,j,0)] = 1; cam[idxC(t,j,1)] = 1; count += 2;
+                        }
+                    }
+                }
+            }
+            _addPerSignal('stereo_hybrid_conf', count);
         }
 
         if (p.enable_stereo) {
