@@ -5491,10 +5491,19 @@ def dispatch_remote_preproc_batch(
             return {"batch_id": batch_id}
 
         # ── Per-subject bundle.json (always re-write; cheap) ──
+        # ``run_<job_id>/`` dir must exist BEFORE the bundle scp.
+        # When the upload phase was skipped (uploads_complete sentinel
+        # present from a prior dispatch that reused this batch_id),
+        # the mkdir loop above didn't run, so we create the run_dir
+        # here too — idempotent via exist_ok=True.
         bundle_specs = []   # list of {name, bundle_path, status_path}
         for i, (sn, sub_trials) in enumerate(by_subj.items()):
             remote_work = f"{_wd}/preproc_{sn}"
             run_dir = f"{remote_work}/run_{job_id}"
+            subprocess.run(
+                _py_cmd(cfg, f"\"import os; os.makedirs(r'{run_dir}', exist_ok=True)\""),
+                capture_output=True, timeout=15,
+            )
             # video_remote_path is set by the always-run hydration
             # block above; nothing else to do here.
             bundle = {
@@ -5508,10 +5517,20 @@ def dispatch_remote_preproc_batch(
             with open(bundle_local, "w") as bf:
                 _json.dump(bundle, bf)
             bundle_remote = f"{run_dir}/bundle.json"
-            subprocess.run(
+            scp_res = subprocess.run(
                 _scp_base_args(cfg) + [bundle_local, f"{cfg.host}:{bundle_remote}"],
                 capture_output=True, text=True, timeout=30,
             )
+            if scp_res.returncode != 0:
+                # Surface scp failures — silent failure here meant
+                # job 1318 ran with zero bundle.json uploaded and
+                # every subject failed with FileNotFoundError.
+                logfile.write(
+                    f"  WARN: bundle scp failed for {sn} "
+                    f"(rc={scp_res.returncode}): "
+                    f"{(scp_res.stderr or scp_res.stdout or '').strip()[:200]}\n"
+                )
+                logfile.flush()
             bundle_specs.append({
                 "name":          sn,
                 "bundle_path":   bundle_remote,
