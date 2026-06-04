@@ -75,8 +75,11 @@
     sync();
 })();
 
-// Static-site mode: only a subset of source × seq_mode × (hand, trial)
-// combinations is exported as JSON, so hide what we don't ship.
+// Static-site mode: only a subset of source × (hand, trial) combos
+// is exported as JSON, so hide what we don't ship.  seq_mode is no
+// longer a cache axis — every model's seq fields are embedded in
+// each cached file — so the seq-mode dropdown stays unrestricted
+// on the public site.
 (function _trimStaticResultsControls() {
     if (!window.STATIC_RESULTS) return;
     const drop = (selectId, values) => {
@@ -94,7 +97,6 @@
         });
     };
     drop('groupHandSelect',        ['L', 'R', 'larger_se', 'smaller_se']);
-    drop('groupSeqTypeSelect',     ['none', 'linear']);
     // Skeleton-fit v1 is now part of the default static cache, so
     // keep it in the dropdown; mp_forward still isn't exported and
     // stays trimmed in static mode.

@@ -65,8 +65,11 @@ const $ = (id) => document.getElementById(id);
 })();
 
 // Static-site mode (GitHub Pages export): only a subset of source ×
-// seq_mode × hand × trial combinations is exported as JSON, so hide
-// the unsupported choices from the UI.
+// hand × trial combinations is exported as JSON, so hide the
+// unsupported choices from the UI.  seq_mode is NOT in the cache
+// key any more — every model's seq fields are embedded in each
+// cached file, so all seq-mode options stay available on the
+// public site.
 (function _trimStaticControls() {
     if (!window.STATIC_RESULTS) return;
     const drop = (selectId, values) => {
@@ -90,8 +93,6 @@ const $ = (id) => document.getElementById(id);
         'corrections': 'DLC',
         'mp_combined': 'MediaPipe',
     });
-    // Seq Type: drop Linear (the public deploy only ships exp_*).
-    drop('exSeqTypeSelect', ['none', 'linear']);
     // Hand: only the three pairs we ship.
     drop('exHandSelect',    ['L', 'R', 'larger_se', 'smaller_se']);
     // Hand+Trial constraint: more/less only with last, average only
