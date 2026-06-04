@@ -5103,26 +5103,38 @@ def remote_preproc(
                        bytes=int(_npz_bytes))
             _set_progress(25)
 
-            # ── Phase 4: upload source modules (always refresh) ──────
+            # ── Phase 4: upload source modules (shared across subjects) ──
+            # Modules are subject-agnostic Python files (~130 KB total)
+            # so they live in a batch-wide dir rather than under each
+            # ``preproc_<subject>/``.  Skip-if-same-size means second
+            # and subsequent subjects in a batch reuse the upload.
+            # When you edit a module locally, ``_scp_if_changed`` sees
+            # the new size and re-pushes automatically.
             _mods_t0 = time.perf_counter()
             service_dir = Path(__file__).parent
-            modules_dir = f"{remote_work}/modules"
+            modules_dir = f"{cfg.work_dir}/preproc_modules"
+            subprocess.run(
+                _py_cmd(cfg, f"\"import os; os.makedirs(r'{modules_dir}', exist_ok=True)\""),
+                capture_output=True, timeout=15,
+            )
+            _n_mod_uploaded = 0; _n_mod_skipped = 0
             for mod_file in ("camera_motion.py", "background.py", "ffmpeg.py"):
                 mp = service_dir / mod_file
                 if not mp.exists():
                     continue
-                up = subprocess.run(
-                    _scp_base_args(cfg) + [str(mp), f"{cfg.host}:{modules_dir}/"],
-                    capture_output=True, text=True, timeout=60,
+                ok, action = _scp_if_changed(
+                    cfg, str(mp), f"{modules_dir}/{mod_file}",
+                    timeout=60, logfile=logfile, label=f"module {mod_file}: ",
                 )
-                if up.returncode != 0:
-                    logfile.write(f"  WARN: module {mod_file} upload failed\n")
-                else:
-                    logfile.write(f"  uploaded module {mod_file}\n")
-                logfile.flush()
+                if ok and action == "uploaded":
+                    _n_mod_uploaded += 1
+                elif ok and action == "skipped":
+                    _n_mod_skipped += 1
             _check_cancel()
             add_stage(job_id, "upload_modules",
-                       time.perf_counter() - _mods_t0, outcome="ok")
+                       time.perf_counter() - _mods_t0,
+                       outcome="ok",
+                       uploaded=_n_mod_uploaded, skipped=_n_mod_skipped)
             _set_progress(30)
 
             # ── Phase 5: write + upload bundle and worker script ─────
