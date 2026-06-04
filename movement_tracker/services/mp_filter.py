@@ -40,62 +40,86 @@ def _robust_z(values: np.ndarray, axis: int = 0):
     return np.abs(values - med) / mad, med, mad
 
 
+def _leave_one_out_poly_kernel(
+    window: int = 5, degree: int = 2,
+) -> np.ndarray:
+    """Build a (2*window+1,)-length kernel ``c`` such that
+
+        prediction_at_t = sum_k c[k] * arr[t - window + k]
+
+    is the value at offset 0 of the polynomial of degree ``degree``
+    least-squares-fit through ``arr`` at offsets
+    ``[-window … -1, 1 … window]``.  The centre entry ``c[window]``
+    is 0 by construction (the value at t is EXCLUDED from the fit).
+
+    Cached at module level since (window, degree) is fixed.
+    """
+    offsets = np.concatenate([np.arange(-window, 0),
+                              np.arange(1, window + 1)]).astype(np.float64)
+    A = np.vander(offsets, degree + 1, increasing=True)   # (2w, d+1)
+    # const-term row of the least-squares solver, equivalent to
+    # picking out the polynomial's value at offset 0.
+    coef = np.linalg.pinv(A.T @ A) @ A.T                  # (d+1, 2w)
+    const = coef[0, :]                                    # (2w,)
+    kernel = np.zeros(2 * window + 1, dtype=np.float64)
+    kernel[:window] = const[:window]
+    kernel[window + 1:] = const[window:]
+    return kernel
+
+
+_POLY_KERNEL_CACHE: dict[tuple[int, int], np.ndarray] = {}
+
+
 def _residual_vs_polyfit(
     arr: np.ndarray, window: int = 5, degree: int = 2,
 ) -> np.ndarray:
     """Per-(t, j) residual of ``arr[t, j]`` against a polynomial fit
     through its neighbours.
 
-    For each (t, j) we fit a quadratic to the points
-    ``arr[t-window:t+window+1, j]`` EXCLUDING t itself (NaN-filtered)
-    and report the distance from ``arr[t, j]`` to the polynomial's
+    For each (t, j) we fit a degree-``degree`` polynomial to the
+    points ``arr[t-window:t+window+1, j]`` EXCLUDING t itself and
+    report the distance from ``arr[t, j]`` to the polynomial's
     prediction at frame t.
 
     Rationale: raw frame-to-frame step magnitude treats fast natural
-    motion the same as a sudden label glitch — both have big
-    step.  A polynomial residual separates them: smooth real motion
-    matches the local fit so the residual stays small, while an
-    outlier label deviates sharply from the neighbouring trajectory.
+    motion the same as a sudden label glitch — both have big step.
+    A polynomial residual separates them: smooth real motion matches
+    the local fit so the residual stays small, while an outlier
+    label deviates sharply from the surrounding trajectory.
 
-    Returns ``(N, J)`` float64; entries are NaN where ``arr[t, j]``
-    itself is NaN or where we couldn't find ``degree+1`` finite
-    neighbours in the window.
+    Vectorised: a single leave-one-out kernel built once from a
+    ``(2*window+1)``-length design matrix is applied to a sliding
+    window over ``arr`` via matrix multiplication.  Boundary
+    frames within ``window`` of either edge get NaN residual
+    (no full window available).  Cells where any neighbour in the
+    window is NaN also produce NaN residual (the matmul
+    propagates) — the consumer treats those as "can't blame this
+    side", same as for boundary cells.
+
+    Returns ``(N, J)`` float64.
     """
     N, J = arr.shape[0], arr.shape[1]
     out = np.full((N, J), np.nan, dtype=np.float64)
-    if N < degree + 2:
+    W = 2 * window + 1
+    if N < W:
         return out
-    for j in range(J):
-        col_x = arr[:, j, 0]
-        col_y = arr[:, j, 1]
-        for t in range(N):
-            cx = col_x[t]
-            cy = col_y[t]
-            if not (np.isfinite(cx) and np.isfinite(cy)):
-                continue
-            lo = max(0, t - window)
-            hi = min(N, t + window + 1)
-            ts = np.arange(lo, hi, dtype=np.float64)
-            mask = ts != t
-            ts_n = ts[mask]
-            xs_n = col_x[lo:hi][mask]
-            ys_n = col_y[lo:hi][mask]
-            ok = np.isfinite(xs_n) & np.isfinite(ys_n)
-            if int(ok.sum()) < degree + 1:
-                continue
-            ts_v = ts_n[ok]
-            xs_v = xs_n[ok]
-            ys_v = ys_n[ok]
-            try:
-                px = np.polyfit(ts_v, xs_v, degree)
-                py = np.polyfit(ts_v, ys_v, degree)
-            except (np.linalg.LinAlgError, ValueError):
-                continue
-            xp = np.polyval(px, t)
-            yp = np.polyval(py, t)
-            dx = cx - xp
-            dy = cy - yp
-            out[t, j] = float(np.sqrt(dx * dx + dy * dy))
+    key = (window, degree)
+    kernel = _POLY_KERNEL_CACHE.get(key)
+    if kernel is None:
+        kernel = _leave_one_out_poly_kernel(window, degree)
+        _POLY_KERNEL_CACHE[key] = kernel
+    # sliding_window_view: (N - W + 1, J, W) for each dim.
+    swv_x = np.lib.stride_tricks.sliding_window_view(arr[:, :, 0], W, axis=0)
+    swv_y = np.lib.stride_tricks.sliding_window_view(arr[:, :, 1], W, axis=0)
+    pred_x_int = swv_x @ kernel                           # (N - W + 1, J)
+    pred_y_int = swv_y @ kernel
+    pred_x = np.full((N, J), np.nan)
+    pred_y = np.full((N, J), np.nan)
+    pred_x[window:window + pred_x_int.shape[0]] = pred_x_int
+    pred_y[window:window + pred_y_int.shape[0]] = pred_y_int
+    dx = arr[..., 0] - pred_x
+    dy = arr[..., 1] - pred_y
+    out = np.sqrt(dx * dx + dy * dy)
     return out
 
 
