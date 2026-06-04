@@ -2032,18 +2032,35 @@ def load_skeleton_trial_data(subject_name: str, trial_stem: str) -> dict[str, An
         )
         def _emit_stereo(sa, key_L, key_R, key_resp, key_has):
             """Translate MP labels by the per-joint shifts from ``sa``
-            and write them into ``result`` under the given keys."""
+            and write them into ``result`` under the given keys.
+
+            ``stereo_align`` now computes shifts off MP combined
+            (with a per-trial fallback to forward), so we anchor the
+            translated output to combined whenever combined covers
+            this trial — otherwise the output is forward-plus-shifts
+            which doesn't line up with what the user sees in MP
+            combined on the Labels page.  Per-joint: if combined is
+            NaN for a joint at a given frame, fall back to forward
+            for just that cell.
+            """
             if sa is None:
                 return
             shifts = sa["shifts"]                 # (N_sa, 21, 2)
             resp = sa["response"]                 # (N_sa, 21)
             n_sa = min(N, shifts.shape[0])
+            # Per-cell base: combined where finite, else forward
+            base_L = np.where(np.isfinite(combined_tracked_L[:n_sa]),
+                              combined_tracked_L[:n_sa],
+                              mp_tracked_L[:n_sa])
+            base_R = np.where(np.isfinite(combined_tracked_R[:n_sa]),
+                              combined_tracked_R[:n_sa],
+                              mp_tracked_R[:n_sa])
             stereo_R = np.full((N, 21, 2), np.nan)
             stereo_L = np.full((N, 21, 2), np.nan)
-            stereo_R[:n_sa, :, 0] = mp_tracked_R[:n_sa, :, 0] + shifts[:n_sa, :, 0]
-            stereo_R[:n_sa, :, 1] = mp_tracked_R[:n_sa, :, 1] + shifts[:n_sa, :, 1]
-            stereo_L[:n_sa, :, 0] = mp_tracked_L[:n_sa, :, 0] - shifts[:n_sa, :, 0]
-            stereo_L[:n_sa, :, 1] = mp_tracked_L[:n_sa, :, 1] - shifts[:n_sa, :, 1]
+            stereo_R[:n_sa, :, 0] = base_R[:, :, 0] + shifts[:n_sa, :, 0]
+            stereo_R[:n_sa, :, 1] = base_R[:, :, 1] + shifts[:n_sa, :, 1]
+            stereo_L[:n_sa, :, 0] = base_L[:, :, 0] - shifts[:n_sa, :, 0]
+            stereo_L[:n_sa, :, 1] = base_L[:, :, 1] - shifts[:n_sa, :, 1]
             result[key_L] = _points_to_list(stereo_L)
             result[key_R] = _points_to_list(stereo_R)
             result[key_resp] = [[_nan_to_none(round(float(resp[t, j]), 3))
