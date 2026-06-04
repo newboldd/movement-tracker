@@ -5818,12 +5818,21 @@ def poll_remote_preproc_batch(
         trials_list = params.get("trials") or []
         n_ok = sum(1 for t in trials_list if t.get("outcome") == "ok")
         n_total = len(trials_list)
-        err = None if n_ok == n_total else f"{n_ok}/{n_total} succeeded"
+        # Status semantics:
+        #   all OK         → completed (no error_msg)
+        #   some OK        → completed (partial; show "n/N succeeded")
+        #   none OK        → failed    (whole batch unusable; same msg)
+        if n_ok == n_total:
+            final_status, err = "completed", None
+        elif n_ok > 0:
+            final_status, err = "completed", f"{n_ok}/{n_total} succeeded"
+        else:
+            final_status, err = "failed", f"0/{n_total} succeeded"
         with get_db_ctx() as _db:
             _db.execute(
                 "UPDATE jobs SET status=?, error_msg=?, progress_pct=100, "
                 "finished_at=CURRENT_TIMESTAMP WHERE id=?",
-                ("completed", err, job_id),
+                (final_status, err, job_id),
             )
     except InterruptedError:
         logfile.write("  poller cancelled by user — killing remote runner\n")
