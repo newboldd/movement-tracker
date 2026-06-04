@@ -5478,22 +5478,43 @@ def dispatch_remote_preproc_batch(
         _scp_if_changed(cfg, runner_local, runner_remote,
                          timeout=30, logfile=logfile, label="runner: ")
 
+        # ── Per-subject mkdir (ALWAYS run; cheap, idempotent) ──
+        # The worker reads ``data_dir/<sub>/mediapipe_prelabels.npz``
+        # (where ``data_dir = <work>/preproc_<sub>``), so the
+        # ``<sub>/<sub>/`` dir must exist every dispatch.  Previously
+        # this mkdir lived inside the upload-skip block; on resume
+        # with the sentinel present, fresh batch_ids whose dirs
+        # hadn't been created elsewhere would silently fail at the
+        # worker's npz read.  Hoisted out, batched into a single
+        # SSH round-trip across all subjects.
+        if by_subj:
+            mkdir_lines = ["import os"]
+            for sn in by_subj.keys():
+                mkdir_lines.append(
+                    f"os.makedirs(r'{_wd}/preproc_{sn}/{sn}', exist_ok=True)"
+                )
+            subprocess.run(
+                _py_cmd(cfg, f"\"{';'.join(mkdir_lines)}\""),
+                capture_output=True, timeout=30,
+            )
+
         if uploads_already_done:
             logfile.write("  uploads_complete sentinel present — skipping data upload phase\n")
             logfile.flush()
         else:
             logfile.write(f"  uploading inputs for {n_subj} subject(s)...\n")
             logfile.flush()
-            # ── Per-subject: dir + video + npz uploads ──
+            # ── Per-subject: videos dir + video + npz uploads ──
             # Trial dicts were hydrated above; here we just push the
-            # actual files (skip-if-present).
+            # actual files (skip-if-present).  The ``<sub>/<sub>/``
+            # mkdir was hoisted out above so it runs every dispatch;
+            # ``videos/`` mkdir stays inside since it only matters
+            # when we're about to upload videos into it.
             for i, (sn, sub_trials) in enumerate(by_subj.items()):
                 _check_cancel()
                 remote_work = f"{_wd}/preproc_{sn}"
-                run_dir = f"{remote_work}/run_{job_id}"
                 subprocess.run(
-                    _py_cmd(cfg, f"\"import os; os.makedirs(r'{run_dir}', exist_ok=True); "
-                                  f"os.makedirs(r'{remote_work}/{sn}', exist_ok=True); "
+                    _py_cmd(cfg, f"\"import os; "
                                   f"os.makedirs(r'{remote_work}/videos', exist_ok=True)\""),
                     capture_output=True, timeout=15,
                 )
