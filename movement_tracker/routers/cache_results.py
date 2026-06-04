@@ -68,10 +68,17 @@ def _run_export_for_page(page: str) -> None:
     Uses TestClient against the live FastAPI app so the responses
     reuse the warm ``_EXPORT_MOVE_CACHE`` and avoid duplicating any
     of the iteration logic that lives in the script.
+
+    A row is inserted into ``job_queue`` so the rebuild surfaces in
+    the Jobs-page Local CPU lane with a live progress bar.  No
+    matching ``jobs`` row — that table requires a subject_id and
+    cache rebuilds don't have one; the queue row carries its own
+    ``progress_pct`` via the COALESCE in queue_manager.get_state.
     """
     from fastapi.testclient import TestClient
     from ..app import app
     from ..services.cache_config import get_page_combos
+    from ..db import get_db_ctx
     from pathlib import Path
     import json
 
@@ -95,6 +102,55 @@ def _run_export_for_page(page: str) -> None:
         import re
         return re.sub(r"[^A-Za-z0-9]+", "_", url.lstrip("/")) + ".json"
 
+    # Display label for the Local CPU lane row.  parseSubjects() in
+    # remote.js renders subject_ids as the row's subject column, so
+    # putting a human-readable string in there lets the existing
+    # rendering code surface "Cache Results: Group" /
+    # "Cache Results: Explore" without any UI changes.
+    display = f"Cache Results: {'Group' if page == 'group' else 'Explore'}"
+    job_type = f"cache_{page}"
+
+    queue_row_id: int | None = None
+    try:
+        with get_db_ctx() as _db:
+            cur = _db.execute(
+                "INSERT INTO job_queue "
+                "(job_type, subject_ids, resource, status, position, "
+                "execution_target, started_at, progress_pct) "
+                "VALUES (?, ?, 'cpu', 'running', 0, 'local-cpu', "
+                "CURRENT_TIMESTAMP, 0)",
+                (job_type, json.dumps([display])),
+            )
+            queue_row_id = cur.lastrowid
+    except Exception:
+        logger.exception("cache rebuild: failed to insert queue row")
+
+    def _set_queue_progress(pct: float) -> None:
+        if queue_row_id is None: return
+        try:
+            with get_db_ctx() as _db:
+                _db.execute(
+                    "UPDATE job_queue SET progress_pct=? WHERE id=?",
+                    (float(pct), queue_row_id),
+                )
+        except Exception:
+            pass
+
+    def _finalize_queue(status: str, error: str | None = None) -> None:
+        if queue_row_id is None: return
+        try:
+            with get_db_ctx() as _db:
+                _db.execute(
+                    "UPDATE job_queue SET status=?, error_msg=?, "
+                    "finished_at=CURRENT_TIMESTAMP, "
+                    "progress_pct=? WHERE id=?",
+                    (status, error,
+                     100.0 if status == 'completed' else None,
+                     queue_row_id),
+                )
+        except Exception:
+            pass
+
     with _LOCK:
         _RUNS[page]["status"] = "running"
         _RUNS[page]["n_total"] = n_total
@@ -114,16 +170,19 @@ def _run_export_for_page(page: str) -> None:
                 n_done += 1
                 with _LOCK:
                     _RUNS[page]["n_done"] = n_done
+                _set_queue_progress(round(100.0 * n_done / max(1, n_total), 1))
 
         with _LOCK:
             _RUNS[page]["status"] = "done"
             _RUNS[page]["n_written"] = n_written
             _RUNS[page]["finished"] = time.time()
+        _finalize_queue("completed")
     except Exception as e:
         logger.exception("cache rebuild for %s failed", page)
         with _LOCK:
             _RUNS[page]["status"] = "error"
             _RUNS[page]["error"] = str(e)
+        _finalize_queue("failed", str(e)[:500])
 
 
 @router.post("/rebuild/{page}")

@@ -348,6 +348,21 @@ def _migrate_add_execution_target(conn):
         logger.info("Added execution_target column to job_queue table")
 
 
+def _migrate_add_queue_progress(conn):
+    """Add progress_pct column to job_queue.
+
+    Lets queue rows that aren't backed by a ``jobs`` row (e.g. cache
+    rebuilds — there's no subject to satisfy ``jobs.subject_id NOT
+    NULL``) still report progress to the Jobs-page running list.
+    Read via COALESCE(j.progress_pct, q.progress_pct) so the
+    existing per-subject jobs path is unchanged.
+    """
+    columns = _get_table_columns(conn, "job_queue")
+    if "progress_pct" not in columns:
+        conn.execute("ALTER TABLE job_queue ADD COLUMN progress_pct REAL DEFAULT 0")
+        logger.info("Added progress_pct column to job_queue table")
+
+
 def _migrate_add_diagnosis(conn):
     """Add diagnosis column to subjects table if missing."""
     columns = _get_table_columns(conn, "subjects")
@@ -707,6 +722,7 @@ def init_db():
 
     if "job_queue" in tables:
         _migrate_add_execution_target(conn)
+        _migrate_add_queue_progress(conn)
         conn.commit()
 
     _migrate_add_subject_events(conn)

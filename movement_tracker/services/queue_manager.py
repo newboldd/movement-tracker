@@ -198,8 +198,16 @@ class QueueManager:
                 "ORDER BY position",
             ).fetchall()
             running = db.execute(
-                "SELECT q.*, j.progress_pct, j.epoch_info, j.log_path, j.params_json, "
-                "j.tmux_session FROM job_queue q "
+                # COALESCE on progress_pct so queue rows without a
+                # linked jobs row (cache rebuilds — no subject to
+                # satisfy jobs.subject_id NOT NULL) still report
+                # progress from q.progress_pct.  Per-subject jobs
+                # keep their behaviour: j.progress_pct wins when
+                # present.
+                "SELECT q.*, "
+                "COALESCE(j.progress_pct, q.progress_pct, 0) AS progress_pct, "
+                "j.epoch_info, j.log_path, j.params_json, j.tmux_session "
+                "FROM job_queue q "
                 "LEFT JOIN jobs j ON q.job_id = j.id "
                 "WHERE q.status = 'running' ORDER BY q.started_at",
             ).fetchall()
