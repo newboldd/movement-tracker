@@ -4844,6 +4844,166 @@ if __name__ == "__main__":
 '''
 
 
+def resume_remote_preproc(
+    job_id: int,
+    cfg: RemoteConfig,
+    log_path: str,
+    registry,
+) -> None:
+    """Resume monitoring a multi-subject preproc job after a server restart.
+
+    Walks the saved ``params_json.trials`` list, groups by subject, and
+    for each subject:
+
+      * If outcomes already record completion (all trials ok/failed),
+        skip the subject.
+      * Otherwise, hand back off to :func:`remote_preproc` for that
+        subject's trial set.  remote_preproc's Phase 1 walks the
+        existing files on the remote, Phase 2-5 skip everything via
+        ``_scp_if_changed`` (pre-upload pass already shipped them),
+        Phase 6 finds a stale ``status.json`` and Phase 7's poller
+        attaches to the detached worker that's still running.  If
+        the worker had already finished, the poller's first iteration
+        sees ``status=completed`` and Phase 8 just pulls outputs.
+
+    The same multi-subject loop and per-trial outcome bookkeeping
+    that ``queue_manager`` uses is re-implemented here so a resumed
+    job behaves identically to one that ran inline.
+    """
+    import json as _json
+    from collections import defaultdict
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    try:
+        with open(log_path, "a") as _lf:
+            _lf.write(f"\n=== Resuming preproc job {job_id} after server restart ===\n")
+    except OSError:
+        pass
+    try:
+        with get_db_ctx() as db:
+            row = db.execute(
+                "SELECT params_json, extra_params_json FROM jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+        if not row:
+            logger.warning(f"resume_remote_preproc: job {job_id} not in DB")
+            return
+        params_raw = row["params_json"] or row["extra_params_json"] or "{}"
+        try:
+            params = _json.loads(params_raw)
+        except Exception:
+            params = {}
+        trials_batch = params.get("trials") or []
+        if not trials_batch:
+            logger.warning(f"resume_remote_preproc: job {job_id} has no trials list")
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status='failed', error_msg='resume: no trials', "
+                    "finished_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,),
+                )
+            return
+        # Flip phase to "running" — by the time a restart happens, the
+        # upload pass is either done or interrupted; either way, the
+        # bar should track work-pass progress from here.
+        params["phase"] = "running"
+        with get_db_ctx() as db:
+            db.execute(
+                "UPDATE jobs SET params_json=? WHERE id=?",
+                (_json.dumps(params), job_id),
+            )
+
+        def _record_outcome(_sub_name, _stem, _outcome, _bt):
+            for _t in trials_batch:
+                if (_t.get("subject_name") == _sub_name
+                        and _t.get("trial_name") == _stem):
+                    _t["outcome"] = _outcome
+                    break
+            try:
+                with get_db_ctx() as _db:
+                    _db.execute(
+                        "UPDATE jobs SET params_json=? WHERE id=?",
+                        (_json.dumps(params), job_id),
+                    )
+            except Exception:
+                pass
+
+        by_subj = defaultdict(list)
+        for t in trials_batch:
+            sn = t.get("subject_name")
+            if sn:
+                by_subj[sn].append(t)
+        # Subjects whose every trial already has an outcome are done.
+        pending_subjects = [
+            (sn, sub_trials) for sn, sub_trials in by_subj.items()
+            if any(not _t.get("outcome") for _t in sub_trials)
+        ]
+        n_pend = len(pending_subjects)
+        try:
+            with open(log_path, "a") as _lf:
+                _lf.write(
+                    f"  {n_pend} subject(s) remaining "
+                    f"({len(by_subj) - n_pend} already done)\n"
+                )
+        except OSError:
+            pass
+        if n_pend == 0:
+            # Everything already complete — just finalise the job.
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status='completed', progress_pct=100, "
+                    "finished_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,),
+                )
+            return
+
+        _had_failure = False
+        _was_cancelled = False
+        for _i, (sn, sub_trials) in enumerate(pending_subjects):
+            try:
+                remote_preproc(
+                    job_id=job_id, cfg=cfg, subject_name=sn,
+                    log_path=log_path, registry=registry,
+                    trials=sub_trials,
+                    finalize=(_i == n_pend - 1),
+                    # On resume, modules + worker may or may not be on
+                    # the remote — we don't know.  Safest is to let the
+                    # first call probe via skip_shared_uploads=False;
+                    # _scp_if_changed makes it a no-op when present.
+                    skip_shared_uploads=(_i != 0),
+                    on_trial_outcome=_record_outcome,
+                )
+            except InterruptedError:
+                _was_cancelled = True
+                for _t in sub_trials:
+                    if not _t.get("outcome"):
+                        _t["outcome"] = "cancelled"
+                break
+            except Exception as _se:
+                _had_failure = True
+                logger.exception(f"resume preproc subject {sn} failed: {_se}")
+                for _t in sub_trials:
+                    if not _t.get("outcome"):
+                        _t["outcome"] = "failed"
+                continue
+        # Final aggregation (mirrors the inline path).
+        _n_ok = sum(1 for _t in trials_batch if _t.get("outcome") == "ok")
+        _n_total = len(trials_batch)
+        _final_status = "cancelled" if _was_cancelled else "completed"
+        _final_err = None if _n_ok == _n_total else f"{_n_ok}/{_n_total} succeeded"
+        with get_db_ctx() as db:
+            db.execute(
+                "UPDATE jobs SET params_json=?, status=?, error_msg=?, "
+                "progress_pct=100, finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                (_json.dumps(params), _final_status, _final_err, job_id),
+            )
+    except Exception as e:
+        logger.exception(f"resume_remote_preproc {job_id} failed: {e}")
+        with get_db_ctx() as db:
+            db.execute(
+                "UPDATE jobs SET status='failed', error_msg=?, "
+                "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                (f"resume: {str(e)[:400]}", job_id),
+            )
+
+
 # ─── Remote preproc (camera trajectory + background/mask bake) ─────────
 
 
@@ -4857,6 +5017,7 @@ def remote_preproc(
     finalize: bool = True,
     on_trial_outcome=None,
     upload_only: bool = False,
+    skip_shared_uploads: bool = False,
 ) -> dict:
     """Remote preproc: per-trial camera-trajectory + background/mask bake.
 
@@ -4969,8 +5130,8 @@ def remote_preproc(
                 "fps": float(tr.get("fps", 30.0)),
             })
 
-        with open(log_path, "w") as logfile:
-            logfile.write(f"=== Remote preproc for {subject_name} "
+        with open(log_path, "a") as logfile:
+            logfile.write(f"\n=== Remote preproc for {subject_name} "
                           f"({len(bundle_trials)} trials) ===\n")
             logfile.flush()
 
@@ -5104,38 +5265,40 @@ def remote_preproc(
             _set_progress(25)
 
             # ── Phase 4: upload source modules (shared across subjects) ──
-            # Modules are subject-agnostic Python files (~130 KB total)
-            # so they live in a batch-wide dir rather than under each
-            # ``preproc_<subject>/``.  Skip-if-same-size means second
-            # and subsequent subjects in a batch reuse the upload.
-            # When you edit a module locally, ``_scp_if_changed`` sees
-            # the new size and re-pushes automatically.
-            _mods_t0 = time.perf_counter()
-            service_dir = Path(__file__).parent
+            # Modules + worker script live in a batch-wide dir rather
+            # than per-subject.  ``skip_shared_uploads=True`` skips
+            # this phase entirely (saves ~4 SSH round-trips per
+            # subject); first call in a batch must run with the flag
+            # False to seed the shared dir.
             modules_dir = f"{cfg.work_dir}/preproc_modules"
-            subprocess.run(
-                _py_cmd(cfg, f"\"import os; os.makedirs(r'{modules_dir}', exist_ok=True)\""),
-                capture_output=True, timeout=15,
-            )
-            _n_mod_uploaded = 0; _n_mod_skipped = 0
-            for mod_file in ("camera_motion.py", "background.py", "ffmpeg.py"):
-                mp = service_dir / mod_file
-                if not mp.exists():
-                    continue
-                ok, action = _scp_if_changed(
-                    cfg, str(mp), f"{modules_dir}/{mod_file}",
-                    timeout=60, logfile=logfile, label=f"module {mod_file}: ",
+            if skip_shared_uploads:
+                logfile.write("  shared uploads (modules + worker): skipping per caller\n")
+                logfile.flush()
+            else:
+                _mods_t0 = time.perf_counter()
+                service_dir = Path(__file__).parent
+                subprocess.run(
+                    _py_cmd(cfg, f"\"import os; os.makedirs(r'{modules_dir}', exist_ok=True)\""),
+                    capture_output=True, timeout=15,
                 )
-                if ok and action == "uploaded":
-                    _n_mod_uploaded += 1
-                elif ok and action == "skipped":
-                    _n_mod_skipped += 1
-            _check_cancel()
-            add_stage(job_id, "upload_modules",
-                       time.perf_counter() - _mods_t0,
-                       outcome="ok",
-                       uploaded=_n_mod_uploaded, skipped=_n_mod_skipped)
-            _set_progress(30)
+                _n_mod_uploaded = 0; _n_mod_skipped = 0
+                for mod_file in ("camera_motion.py", "background.py", "ffmpeg.py"):
+                    mp = service_dir / mod_file
+                    if not mp.exists():
+                        continue
+                    ok, action = _scp_if_changed(
+                        cfg, str(mp), f"{modules_dir}/{mod_file}",
+                        timeout=60, logfile=logfile, label=f"module {mod_file}: ",
+                    )
+                    if ok and action == "uploaded":
+                        _n_mod_uploaded += 1
+                    elif ok and action == "skipped":
+                        _n_mod_skipped += 1
+                _check_cancel()
+                add_stage(job_id, "upload_modules",
+                           time.perf_counter() - _mods_t0,
+                           outcome="ok",
+                           uploaded=_n_mod_uploaded, skipped=_n_mod_skipped)
 
             # ── Phase 5: write + upload bundle and worker script ─────
             import tempfile as _tf
@@ -5159,17 +5322,24 @@ def remote_preproc(
                 _fail(f"Bundle upload failed: {up.stderr[:200]}")
                 return
 
-            worker_path = os.path.join(_tf.gettempdir(), f"remote_preproc_worker_{job_id}.py")
-            with open(worker_path, "w") as wf:
-                wf.write(_REMOTE_PREPROC_WORKER)
-            subprocess.run(
-                _scp_base_args(cfg) + [worker_path,
-                                        f"{cfg.host}:{remote_work}/remote_preproc_worker.py"],
-                capture_output=True, timeout=30,
-            )
-            logfile.write("  uploaded worker script\n"); logfile.flush()
+            # Worker script (subject-agnostic content) shares the
+            # batch-wide preproc_modules/ dir alongside the .py
+            # modules.  Phase 6's launch command points there.
+            worker_remote = f"{modules_dir}/remote_preproc_worker.py"
+            if not skip_shared_uploads:
+                worker_path = os.path.join(_tf.gettempdir(),
+                                            f"remote_preproc_worker_{job_id}.py")
+                with open(worker_path, "w") as wf:
+                    wf.write(_REMOTE_PREPROC_WORKER)
+                _wok, _wact = _scp_if_changed(
+                    cfg, worker_path, worker_remote,
+                    timeout=30, logfile=logfile, label="worker script: ",
+                )
+                if not _wok:
+                    _fail("Worker script upload failed")
+                    return {"n_ok": 0, "n_total": len(bundle_trials),
+                            "error": "worker upload"}
             _check_cancel()
-            _set_progress(35)
 
             # Pre-upload pass for multi-subject batching: caller is going
             # to come back later (after every subject's files are on the
@@ -5192,7 +5362,7 @@ def remote_preproc(
                 f"\"import subprocess, os, time; "
                 f"log_fh = open(r'{remote_log}', 'w'); "
                 f"args = [r'{cfg.python_executable}', '-u', "
-                f"r'{remote_work}/remote_preproc_worker.py', "
+                f"r'{worker_remote}', "
                 f"r'{remote_run}/bundle.json', "
                 f"r'{remote_status}']; "
                 f"flags = 0x01000200 if os.name == 'nt' else 0; "
@@ -5562,18 +5732,31 @@ def main():
 
         # Now safe to import the real compute modules.
         from camera_motion import compute_camera_trajectory
-        from background    import compute_stable, compute_background
+        from background    import (
+            compute_stable, compute_background,
+            refine_background, compute_outlines_all,
+        )
 
         n_total = len(trials)
+        # Per-trial apportioning matches the local queue-manager flow:
+        # trajectory 15%, stable 45%, background 10%, refine 5%, outlines 25%.
+        # Cumulative anchors per trial: 0, 15, 60, 70, 75, 100.
+        _W_TRAJ = 0.15
+        _W_STABLE = 0.45
+        _W_BG = 0.10
+        _W_REFINE = 0.05
+        _W_OUTLINES = 0.25
+        _CUM_STABLE = _W_TRAJ
+        _CUM_BG = _CUM_STABLE + _W_STABLE
+        _CUM_REFINE = _CUM_BG + _W_BG
+        _CUM_OUTLINES = _CUM_REFINE + _W_REFINE
         for i, t in enumerate(trials):
             tname = t["trial_name"]
             ti = int(t["trial_idx"])
             print(f"=== [{i+1}/{n_total}] {tname}: trajectory ===", flush=True)
 
-            # Per-trial split: trajectory ~20%, stable ~60%, background ~20%.
-            # Hand boundary is computed on demand from the UI; no extra bake.
             def _on_traj(pct, _i=i, _n=n_total):
-                local = 100.0 * (_i + (pct / 100.0) * 0.20) / _n
+                local = 100.0 * (_i + (pct / 100.0) * _W_TRAJ) / _n
                 _write_status(status_file, status="running", phase="trajectory",
                               current_trial=tname, progress_pct=local)
             compute_camera_trajectory(
@@ -5581,7 +5764,7 @@ def main():
 
             print(f"=== [{i+1}/{n_total}] {tname}: stable ===", flush=True)
             def _on_stable(pct, _i=i, _n=n_total):
-                local = 100.0 * (_i + 0.20 + (pct / 100.0) * 0.60) / _n
+                local = 100.0 * (_i + _CUM_STABLE + (pct / 100.0) * _W_STABLE) / _n
                 _write_status(status_file, status="running", phase="stable",
                               current_trial=tname, progress_pct=local)
             compute_stable(
@@ -5589,11 +5772,27 @@ def main():
 
             print(f"=== [{i+1}/{n_total}] {tname}: background ===", flush=True)
             def _on_bg(pct, _i=i, _n=n_total):
-                local = 100.0 * (_i + 0.80 + (pct / 100.0) * 0.20) / _n
+                local = 100.0 * (_i + _CUM_BG + (pct / 100.0) * _W_BG) / _n
                 _write_status(status_file, status="running", phase="background",
                               current_trial=tname, progress_pct=local)
             compute_background(
                 subject_name, ti, progress_callback=_on_bg)
+
+            print(f"=== [{i+1}/{n_total}] {tname}: refine ===", flush=True)
+            def _on_refine(pct, _i=i, _n=n_total):
+                local = 100.0 * (_i + _CUM_REFINE + (pct / 100.0) * _W_REFINE) / _n
+                _write_status(status_file, status="running", phase="refine",
+                              current_trial=tname, progress_pct=local)
+            refine_background(
+                subject_name, ti, progress_callback=_on_refine)
+
+            print(f"=== [{i+1}/{n_total}] {tname}: outlines ===", flush=True)
+            def _on_out(pct, _i=i, _n=n_total):
+                local = 100.0 * (_i + _CUM_OUTLINES + (pct / 100.0) * _W_OUTLINES) / _n
+                _write_status(status_file, status="running", phase="outlines",
+                              current_trial=tname, progress_pct=local)
+            compute_outlines_all(
+                subject_name, ti, progress_callback=_on_out)
 
         _write_status(status_file, status="completed", progress_pct=100)
         print("=== All trials done ===", flush=True)

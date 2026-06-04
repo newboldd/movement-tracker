@@ -2059,6 +2059,16 @@ async function pollLocalJobs() {
         for (const job of jobs) {
             const name = job.subject_name || ('Subject ' + job.subject_id);
             const pct = job.progress_pct || 0;
+            // Preproc-batch "uploading" phase: show the word instead
+            // of "0%" while every subject's videos go up.  Cleared
+            // automatically once the queue manager flips phase to
+            // "running" at the start of the work pass.
+            let _uploading = false;
+            try {
+                const _p = job.params_json ? JSON.parse(job.params_json)
+                    : (job.extra_params_json ? JSON.parse(job.extra_params_json) : null);
+                if (_p && _p.phase === 'uploading') _uploading = true;
+            } catch {}
             const subjectIds = JSON.stringify([job.subject_id]);
             const isPending = job.status === 'pending';
             html += `
@@ -2066,12 +2076,14 @@ async function pollLocalJobs() {
                     <span class="job-indicator ${isPending ? 'job-pending' : 'job-running'}"></span>
                     <span class="type">${job.job_type}</span>
                     <span style="flex:1;min-width:0;display:flex;align-items:center;gap:4px;overflow:hidden;"><span class="subjects" style="flex:none;" title="${name}">${name}</span>${trialBadge(job)}</span>
-                    ${isPending ? '<span style="font-size:11px;color:var(--text-muted);">Queued</span>' : `
+                    ${isPending ? '<span style="font-size:11px;color:var(--text-muted);">Queued</span>' : (_uploading ? `
+                    <span style="font-size:11px;color:var(--text-muted);font-style:italic;">uploading</span>
+                    <button class="btn btn-sm" onclick="viewJobLogLive(${job.id})">Log</button>` : `
                     <div class="progress-bar" style="width:80px;">
                         <div class="fill" style="width:${pct}%"></div>
                     </div>
                     <span style="font-size:11px;">${pct.toFixed(0)}%</span>
-                    <button class="btn btn-sm" onclick="viewJobLogLive(${job.id})">Log</button>`}
+                    <button class="btn btn-sm" onclick="viewJobLogLive(${job.id})">Log</button>`)}
                     <button class="btn btn-sm btn-danger" onclick="cancelLocalJob(${job.id})">Cancel</button>
                 </div>
             `;
@@ -2716,7 +2728,19 @@ async function _refreshTrialsModal() {
             const typeStr = TYPE_LABEL[j.job_type] || j.job_type || '';
             const resource = (j.remote_host && j.remote_host !== 'localhost')
                 ? 'Remote' : 'Local';
-            titleEl.textContent = `${typeStr} · ${resource} · ${j.status} (${pct}%)`;
+            // Preproc batch: while every subject's videos are still
+            // uploading the progress_pct stays at 0 — show the
+            // "uploading" phase from params.phase instead of "0%".
+            let pctOrPhase = `${pct}%`;
+            try {
+                const _params = item.params_json
+                    ? JSON.parse(item.params_json) : (item.extra_params_json
+                        ? JSON.parse(item.extra_params_json) : null);
+                if (_params && _params.phase === 'uploading') {
+                    pctOrPhase = 'uploading';
+                }
+            } catch {}
+            titleEl.textContent = `${typeStr} · ${resource} · ${j.status} (${pctOrPhase})`;
         }
         // Tailor the legend to the job's execution target.  Local
         // jobs skip the upload + remote-only-completed stages; the

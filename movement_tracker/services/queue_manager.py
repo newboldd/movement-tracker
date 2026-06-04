@@ -1508,15 +1508,19 @@ class QueueManager:
                         "trial_idx": ep.get("trial_idx"),
                         "trial_name": ep.get("trial_name"),
                     }]
-                    # Initialise per-trial chips so the detail panel
-                    # renders a pending dot for every selected trial
-                    # before any work starts.
-                    for t in trials_batch:
-                        t.setdefault("outcome", "pending")
+                    # Per-trial chip-state convention (mirrors what the
+                    # detail-panel chip renderer in static/js/remote.js
+                    # already expects):
+                    #   uploaded missing + outcome missing   → dim blue (uploading)
+                    #   uploaded=true   + outcome missing    → accent blue (queued)
+                    #   uploaded=true   + outcome="ok"       → green
+                    #   outcome="failed"                      → red
+                    # No initial outcome — leave blank so chips start dim.
                     _job_params = dict(ep); _job_params["trials"] = trials_batch
+                    _job_params["phase"] = "uploading"
                     with get_db_ctx() as _db:
                         _db.execute(
-                            "UPDATE jobs SET params_json=? WHERE id=?",
+                            "UPDATE jobs SET params_json=?, progress_pct=0 WHERE id=?",
                             (_json.dumps(_job_params), job_id),
                         )
 
@@ -1564,6 +1568,11 @@ class QueueManager:
                                 )
                         except OSError:
                             pass
+                        # Track whether the SHARED uploads (modules +
+                        # worker script in preproc_modules/) have been
+                        # done yet — only the first subject in the batch
+                        # needs to do them.
+                        _shared_uploaded = False
                         for sn, sub_trials in by_subj.items():
                             try:
                                 remote_preproc(
@@ -1573,7 +1582,22 @@ class QueueManager:
                                     trials=sub_trials,
                                     finalize=False,
                                     upload_only=True,
+                                    skip_shared_uploads=_shared_uploaded,
                                 )
+                                # First successful call seeded the
+                                # shared dir; later calls can skip.
+                                _shared_uploaded = True
+                                # Mark this subject's trials as uploaded
+                                # so chips flip dim blue → accent blue
+                                # the moment the detail-panel poller
+                                # next refreshes (every ~3 s).
+                                for _t in sub_trials:
+                                    _t["uploaded"] = True
+                                with get_db_ctx() as _db:
+                                    _db.execute(
+                                        "UPDATE jobs SET params_json=? WHERE id=?",
+                                        (_json.dumps(_job_params), job_id),
+                                    )
                             except InterruptedError:
                                 _was_cancelled = True
                                 break
@@ -1586,7 +1610,7 @@ class QueueManager:
                                 # videos didn't upload; mark them failed
                                 # now and skip in the work pass below.
                                 for _t in sub_trials:
-                                    if _t.get("outcome") == "pending":
+                                    if not _t.get("uploaded"):
                                         _t["outcome"] = "failed"
                         try:
                             with open(log_path, "a") as _lf:
@@ -1596,9 +1620,21 @@ class QueueManager:
                                 )
                         except OSError:
                             pass
+                        # Pre-upload finished — flip phase from
+                        # "uploading" to "running" so the detail-panel
+                        # progress bar swaps "Uploading..." for "%".
+                        _job_params["phase"] = "running"
+                        with get_db_ctx() as _db:
+                            _db.execute(
+                                "UPDATE jobs SET params_json=? WHERE id=?",
+                                (_json.dumps(_job_params), job_id),
+                            )
                         # ── Work pass: per-subject worker launch + poll +
                         # download.  Uploads in remote_preproc skip
                         # because the pre-upload pass already ran.
+                        # Track subject index so we can scale the
+                        # parent job's progress across the batch
+                        # (each subject contributes 1 / n_subj).
                         for _i, (sn, sub_trials) in enumerate(by_subj.items()):
                             if _was_cancelled:
                                 break
@@ -1616,6 +1652,7 @@ class QueueManager:
                                     registry=registry,
                                     trials=sub_trials,
                                     finalize=(_i == n_subj - 1),
+                                    skip_shared_uploads=True,
                                     on_trial_outcome=_record_outcome,
                                 )
                             except InterruptedError:
