@@ -732,11 +732,15 @@ class QueueManager:
 
                     elif job_type == "preproc":
                         # Per-trial preproc: trajectory -> Stabilize
-                        # (stable.mp4) -> Background (background.npz).
-                        # Hand boundary is computed on demand per
-                        # frame from the UI, no fourth stage.
+                        # (stable.mp4) -> Background (background.npz)
+                        # -> Refine bg (Remove stump) -> Outlines for
+                        # every frame (outlines.json).  Matches the
+                        # five Compute buttons on the Pre-proc page.
                         from ..services.camera_motion import compute_camera_trajectory
-                        from ..services.background import compute_stable, compute_background, refine_background
+                        from ..services.background import (
+                            compute_stable, compute_background, refine_background,
+                            compute_outlines_all,
+                        )
                         from ..services.jobs import registry as job_registry
                         from ..services.video import build_trial_map
                         from ..services.job_history import stage_timer, finalize_job_record
@@ -803,9 +807,16 @@ class QueueManager:
                                 tname = t.get("trial_name") or f"trial_{tidx}"
                                 _log(f"[{i+1}/{n_total}] {sub} {tname} (idx {tidx})")
                                 try:
-                                    # Phase A: trajectory (~20%).
+                                    # Phase weights — reapportioned to make room
+                                    # for the new outlines bake.  Roughly:
+                                    #   trajectory  15%   (camera motion estimate)
+                                    #   stable      45%   (full-res warp + encode)
+                                    #   background  10%   (sample + temporal median)
+                                    #   refine       5%   (skin colour pass on the bg)
+                                    #   outlines    25%   (per-frame Otsu+contour)
+                                    # Cumulative anchors: 0, 15, 60, 70, 75, 100.
                                     def _on_traj(pct, _i=i):
-                                        _preproc_progress(_i, pct * 0.20, 0.20)
+                                        _preproc_progress(_i, pct * 0.15, 0.15)
                                     _log("  compute_camera_trajectory...")
                                     with stage_timer(job_id, "compute_trajectory",
                                                       subject=sub, trial=tname,
@@ -816,10 +827,8 @@ class QueueManager:
                                             cancel_event=cancel_event,
                                         )
                                     _log("  compute_camera_trajectory done")
-                                    # Phase B: stabilize (~60% -- the
-                                    # full-res warp + encode pass).
                                     def _on_stable(pct, _i=i):
-                                        _preproc_progress(_i, 20 + pct * 0.60, 0.60)
+                                        _preproc_progress(_i, 15 + pct * 0.45, 0.45)
                                     _log("  compute_stable...")
                                     with stage_timer(job_id, "compute_stable",
                                                       subject=sub, trial=tname,
@@ -830,10 +839,8 @@ class QueueManager:
                                             cancel_event=cancel_event,
                                         )
                                     _log("  compute_stable done")
-                                    # Phase C: background median (~15%)
-                                    # then stump removal (~5%).
                                     def _on_bg(pct, _i=i):
-                                        _preproc_progress(_i, 80 + pct * 0.15, 0.15)
+                                        _preproc_progress(_i, 60 + pct * 0.10, 0.10)
                                     _log("  compute_background...")
                                     with stage_timer(job_id, "compute_background",
                                                       subject=sub, trial=tname,
@@ -845,7 +852,7 @@ class QueueManager:
                                         )
                                     _log("  compute_background done")
                                     def _on_refine(pct, _i=i):
-                                        _preproc_progress(_i, 95 + pct * 0.05, 0.05)
+                                        _preproc_progress(_i, 70 + pct * 0.05, 0.05)
                                     _log("  refine_background...")
                                     with stage_timer(job_id, "refine_background",
                                                       subject=sub, trial=tname,
@@ -856,6 +863,18 @@ class QueueManager:
                                             cancel_event=cancel_event,
                                         )
                                     _log("  refine_background done")
+                                    def _on_outlines(pct, _i=i):
+                                        _preproc_progress(_i, 75 + pct * 0.25, 0.25)
+                                    _log("  compute_outlines_all...")
+                                    with stage_timer(job_id, "compute_outlines",
+                                                      subject=sub, trial=tname,
+                                                      target="local"):
+                                        compute_outlines_all(
+                                            sub, tidx,
+                                            progress_callback=_on_outlines,
+                                            cancel_event=cancel_event,
+                                        )
+                                    _log("  compute_outlines_all done")
                                 except InterruptedError:
                                     was_cancelled = True
                                     _log(f"  CANCELLED at {sub}/{tname}")

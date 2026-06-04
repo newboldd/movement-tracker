@@ -672,7 +672,7 @@
             return;
         }
         const palmSlider = $('palmGrowSlider');
-        const palmGrowPx = palmSlider ? parseInt(palmSlider.value, 10) : 15;
+        const palmGrowPx = palmSlider ? parseInt(palmSlider.value, 10) : 30;
         const colorDilateSlider = $('colorDilateSlider');
         const colorDilatePx = colorDilateSlider
             ? parseInt(colorDilateSlider.value, 10) : 0;
@@ -703,12 +703,12 @@
             const s = $(id); return s ? parseFloat(s.value) : dflt;
         };
         await _runPreprocJob('compute_outlines', 'outlinesBakeStatus', {
-            dilation_px:          _i('fgDilateSlider', 14),
-            open_radius_px:       _i('fgOpenSlider', 0),
-            bg_edge_band_thresh:  _f('bgEdgeThreshSlider', 0.35),
-            bg_edge_band_dilate:  _i('bgEdgeBandSlider', 3),
-            bg_edge_open_radius:  _i('bgEdgeClipSlider', 5),
-            threshold_scale:      _f('outlineThreshSlider', 1.0),
+            dilation_px:          _i('fgDilateSlider', 35),
+            open_radius_px:       _i('fgOpenSlider', 5),
+            bg_edge_band_thresh:  _f('bgEdgeThreshSlider', 0.4),
+            bg_edge_band_dilate:  _i('bgEdgeBandSlider', 1),
+            bg_edge_open_radius:  _i('bgEdgeClipSlider', 1),
+            threshold_scale:      _f('outlineThreshSlider', 0.6),
         });
     }
 
@@ -735,7 +735,7 @@
         const beClipSlider = $('bgEdgeClipSlider');
         const beClip = beClipSlider ? parseInt(beClipSlider.value, 10) : 5;
         const threshSlider = $('outlineThreshSlider');
-        const threshScale = threshSlider ? parseFloat(threshSlider.value) : 1.0;
+        const threshScale = threshSlider ? parseFloat(threshSlider.value) : 0.6;
         const frame = currentFrame;
         const seq = ++outlineFetchSeq;
         const includeFg = showFgFill ? 1 : 0;
@@ -1047,7 +1047,7 @@
             ? (refinedFullOD || bgFullOD)
             : (refinedFullOS || bgFullOS);
         if (!bcv || !bcv.width) return null;
-        const thr = parseFloat(($('bgEdgeThreshSlider') || {}).value || 0.35);
+        const thr = parseFloat(($('bgEdgeThreshSlider') || {}).value || 0.4);
         const band = parseInt(($('bgEdgeBandSlider') || {}).value || 3, 10);
         const key = `${side}|${bcv.width}x${bcv.height}|${thr}|${band}`;
         const cached = _bgEdge[side];
@@ -1876,7 +1876,7 @@
         const _showDilPreview = _fgSlider
             && (document.activeElement === _fgSlider) && mpKeypoints;
         if (_showDilPreview) {
-            const dilation = parseInt(_fgSlider.value, 10) || 14;
+            const dilation = parseInt(_fgSlider.value, 10) || 35;
             // Choose coord system: live frame uses raw MP, every other
             // overlay (stable / fg / bg) draws on ref-space
             // pixels so we need the warped keypoints.
@@ -1953,7 +1953,7 @@
             if (f) {
                 const _hasPt = j => f[j] && f[j][0] != null && f[j][1] != null;
                 const palmSlider = $('palmGrowSlider');
-                const palmGrow = palmSlider ? parseInt(palmSlider.value, 10) : 15;
+                const palmGrow = palmSlider ? parseInt(palmSlider.value, 10) : 30;
                 // Server builds the palm zone from the BG-mask gate
                 // (~dilation 14 full-res) then dilates by palm_grow_px.
                 const palmThick = Math.max(2, (14 + palmGrow) * 2);
