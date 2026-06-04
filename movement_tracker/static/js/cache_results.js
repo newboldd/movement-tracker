@@ -34,8 +34,10 @@
     }
     function _cfgEq(a, b) {
         if (!a || !b) return false;
+        // seq_modes was removed from the cache config — each cache
+        // file now embeds every sequence-effect model, so it's no
+        // longer a configurable axis.
         return _arrEq(a.sources,    b.sources)
-            && _arrEq(a.seq_modes,  b.seq_modes)
             && _arrEq(a.hand_trial, b.hand_trial);
     }
     function _cloneCfg(c) { return JSON.parse(JSON.stringify(c)); }
@@ -101,9 +103,8 @@
         grid.appendChild(_buildCheckboxGroup('Sources',
             domains.sources, labels.sources, cfg.sources,
             (v, on) => _toggleAxis('sources', v, on)));
-        grid.appendChild(_buildCheckboxGroup('Sequence modes',
-            domains.seq_modes, labels.seq_modes, cfg.seq_modes,
-            (v, on) => _toggleAxis('seq_modes', v, on)));
+        // Sequence-mode checkboxes removed — every cache file now
+        // embeds all seq-effect models, so this isn't a knob anymore.
         grid.appendChild(_buildHandTrialGrid(cfg));
         body.appendChild(grid);
 
