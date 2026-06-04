@@ -1973,7 +1973,24 @@ function renderLane4(elementId, resource, target, state) {
         //     batches because their global pct sweeps through 85-100%
         //     repeatedly during normal inference.
         const showHrnetDownloadPhase = isHrnet && !_isBatch && isRemote;
-        const remotePhase = (isRemote && pct === 0) ? 'Uploading...'
+        // The "Uploading..." label is for the legacy single-trial
+        // remote jobs whose progress jumps from 0 → mid-range when
+        // the worker actually starts running.  For the new
+        // preproc-batch flow (and anything else that sets
+        // params.phase explicitly) we use the phase field as the
+        // source of truth instead of the pct === 0 proxy: phase
+        // "uploading" → "Uploading..."; phase "running" → show the
+        // progress bar at whatever pct says, even when pct is 0
+        // (first subject hasn't finished yet but the bake IS
+        // running).
+        let _explicitPhase = null;
+        try {
+            const _pj = item.params_json ? JSON.parse(item.params_json) : null;
+            if (_pj && typeof _pj.phase === 'string') _explicitPhase = _pj.phase;
+        } catch {}
+        const remotePhase = (_explicitPhase === 'uploading') ? 'Uploading...'
+                          : (_explicitPhase === 'running') ? null
+                          : (isRemote && pct === 0) ? 'Uploading...'
                           : (showHrnetDownloadPhase && pct >= 85 && pct < 100) ? 'Downloading...'
                           : null;
         const timeInfo = remotePhase ? { display: '', tooltip: '' }
