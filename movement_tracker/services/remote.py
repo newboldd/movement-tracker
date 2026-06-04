@@ -5893,7 +5893,33 @@ def poll_remote_preproc_batch(
     logfile.write(f"\n=== Poller attached to batch {batch_id} ===\n")
     logfile.flush()
 
+    # Pre-populate ``downloaded_subs`` from the persisted per-trial
+    # outcomes so a poller that reattaches after a server restart
+    # doesn't re-SCP outputs for subjects whose downloads already
+    # finished.  ``_update_trial_outcomes`` stamps every trial of a
+    # subject with the same outcome string, so a subject is "already
+    # downloaded" iff at least one of its trials has a non-null
+    # outcome — that's the signal we used to set downloaded_subs.add
+    # in a previous session.
     downloaded_subs: set[str] = set()
+    try:
+        with get_db_ctx() as _db:
+            _row = _db.execute(
+                "SELECT params_json FROM jobs WHERE id=?", (job_id,),
+            ).fetchone()
+        _persisted = _json.loads(_row["params_json"] or "{}") if _row else {}
+        for _t in (_persisted.get("trials") or []):
+            if _t.get("outcome") and _t.get("subject_name"):
+                downloaded_subs.add(_t["subject_name"])
+    except Exception:
+        pass
+    if downloaded_subs:
+        logfile.write(
+            f"  resume: {len(downloaded_subs)} subject(s) already "
+            f"downloaded in a prior session — skipping their outputs\n"
+        )
+        logfile.flush()
+
     last_heartbeat = None
     last_log_size = 0
     _consec_scp_failures = 0
