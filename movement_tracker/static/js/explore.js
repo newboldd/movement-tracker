@@ -981,20 +981,16 @@ $('exCopyBtn').addEventListener('click', async () => {
         const SCALE = 2;
         // Plotly.toImage(div, ...) reads ``div._fullData`` /
         // ``div._fullLayout``, which are populated asynchronously
-        // by the most recent newPlot/restyle/relayout.  If toImage
-        // fires before that async pass completes, the exported PNG
-        // shows the PREVIOUS plot.  ``div.data`` / ``div.layout``
-        // are set synchronously, so we pass them as an explicit
-        // figure object and route through a no-op relayout to flush
-        // any in-flight update before the snapshot.
-        try { await Promise.resolve(Plotly.relayout(div, {})); }
-        catch (_) {}
-        const fig = {
-            data:   div.data   || [],
-            layout: div.layout || {},
-            config: { displayModeBar: false },
-        };
-        const url = await Plotly.toImage(fig, {
+        // by the most recent newPlot/restyle/relayout — if toImage
+        // fires before that pass settles, the exported PNG shows
+        // the PREVIOUS plot.  ``Plotly.Plots.redraw(div)`` forces
+        // a full sync re-render of the on-screen plot AND updates
+        // _fullData / _fullLayout synchronously, so the snapshot
+        // immediately after matches what's visible.  Wrapped in
+        // try/catch so a flush failure (e.g. plot not yet
+        // initialised) falls through to the snapshot anyway.
+        try { await Plotly.Plots.redraw(div); } catch (_) {}
+        const url = await Plotly.toImage(div, {
             format: 'png',
             width:  div.clientWidth  || 900,
             height: div.clientHeight || 520,
