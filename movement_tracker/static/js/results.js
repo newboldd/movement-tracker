@@ -4629,12 +4629,19 @@ async function loadGroup() {
 
     try {
         const src = document.getElementById('groupSourceSelect')?.value || 'auto';
-        const seqMode = document.getElementById('groupSeqModeSelect')?.value || 'linear_full';
         const hand = document.getElementById('groupHandSelect')?.value || 'more';
         const trial = document.getElementById('groupTrialSelect')?.value || 'last';
-        cachedGroup = await API.get(
-            `/api/results/group?include_auto=true&source=${src}&seq_mode=${seqMode}` +
-            `&hand=${hand}&trial=${trial}`);
+        // seq_mode is no longer part of the cache key — each cache
+        // file embeds every seq-effect model.  Only include it for
+        // larger_se / smaller_se hand picks (live-computed; the
+        // chosen hand depends on the model).
+        let url = `/api/results/group?include_auto=true&source=${src}`
+                + `&hand=${hand}&trial=${trial}`;
+        if (hand === 'larger_se' || hand === 'smaller_se') {
+            const seqMode = document.getElementById('groupSeqModeSelect')?.value || 'linear_full';
+            url += `&seq_mode=${seqMode}`;
+        }
+        cachedGroup = await API.get(url);
         _initGroupSubjectChecked();
         // If the user has the DLC-group filter on for a non-DLC
         // source, pre-fetch the DLC subject set so the first render
@@ -4690,17 +4697,22 @@ function _dlcFilterActive() {
 
 async function _ensureDlcSubjectSet() {
     // Build a per-combo cache key from the controls that affect which
-    // subjects the API would return.
-    const seqMode = document.getElementById('groupSeqModeSelect')?.value || 'linear_full';
+    // subjects the API would return.  seq_mode only matters for the
+    // SE-hand picks; the rest of the response is independent of it.
     const hand    = document.getElementById('groupHandSelect')?.value    || 'more';
     const trial   = document.getElementById('groupTrialSelect')?.value   || 'last';
     const includeAuto = document.getElementById('includeAutoToggle')?.checked ? '1' : '0';
+    const isSE = (hand === 'larger_se' || hand === 'smaller_se');
+    const seqMode = isSE
+        ? (document.getElementById('groupSeqModeSelect')?.value || 'linear_full')
+        : '';
     const key = [seqMode, hand, trial, includeAuto].join('|');
     if (_dlcSubjectNames && _dlcSubjectKey === key) return _dlcSubjectNames;
     try {
-        const data = await API.get(
-            `/api/results/group?include_auto=true&source=corrections&seq_mode=${seqMode}`
-          + `&hand=${hand}&trial=${trial}`);
+        let url = `/api/results/group?include_auto=true&source=corrections`
+                + `&hand=${hand}&trial=${trial}`;
+        if (isSE) url += `&seq_mode=${seqMode}`;
+        const data = await API.get(url);
         const subs = (data && data.subjects) || [];
         // /api/results/group only returns subjects that produced
         // at least two movements under the requested source — so
@@ -4980,13 +4992,20 @@ function renderGroupPlots() {
     const _reverseY = (m, row) =>
         row.field === 'mean' && (m.id === 'peak_close_vel' || m.id === 'mean_close_vel');
 
-    // Sequence-Effect row uses R² (seq_*) or slope (seqslope_*) per the
-    // radio next to the Sequence-effect dropdown.
+    // Sequence-Effect row uses R² (seq_<mode>_*) or slope
+    // (seqslope_<mode>_*) per the radio next to the Sequence-effect
+    // dropdown.  Each cached subject record carries fields for every
+    // embedded model (linear_full / linear_first10 / linear_multi /
+    // exp_*); the selected seq_mode picks which one to read.
     const seqMetric = document.querySelector('#groupSeqMetric input:checked')?.value || 'r2';
-    const _key = (spec, row) =>
-        (row.field === 'seq' && seqMetric === 'slope')
-            ? spec.key.replace(/^seq_/, 'seqslope_')
-            : spec.key;
+    const seqMode = document.getElementById('groupSeqModeSelect')?.value || 'linear_full';
+    const _key = (spec, row) => {
+        if (row.field !== 'seq') return spec.key;
+        if (seqMode === 'none') return null;   // 'none' has no per-mode data
+        const param = spec.key.replace(/^seq_/, '');
+        const prefix = seqMetric === 'slope' ? 'seqslope' : 'seq';
+        return `${prefix}_${seqMode}_${param}`;
+    };
 
     // Per-row Y-axis label.  Sequence Effect row picks up "(R²)" or
     // "(slope)" depending on the radio next to the seq-effect dropdown.
@@ -5004,8 +5023,12 @@ function renderGroupPlots() {
         visibleMetrics.forEach(m => {
             const spec = m[row.field];
             if (!spec) return;
+            const k = _key(spec, row);
+            // seq_mode === 'none' returns null — the row has nothing
+            // to plot, so paint an empty placeholder and move on.
+            if (k == null) return;
             const divId = `grpPlot_${m.id}_${row.field}`;
-            renderGroupBar(divId, data, _key(spec, row), _reverseY(m, row), _yLabelFor(row));
+            renderGroupBar(divId, data, k, _reverseY(m, row), _yLabelFor(row));
         });
     });
 
@@ -5015,8 +5038,10 @@ function renderGroupPlots() {
         visibleMetrics.forEach(m => {
             const spec = m[row.field];
             if (!spec) return;
+            const k = _key(spec, row);
+            if (k == null) return;
             const divId = `grpPlotDose_${m.id}_${row.field}`;
-            renderDoseScatter(divId, data, _key(spec, row), _reverseY(m, row), _yLabelFor(row));
+            renderDoseScatter(divId, data, k, _reverseY(m, row), _yLabelFor(row));
         });
     });
 }
@@ -5523,10 +5548,20 @@ document.getElementById('groupSourceSelect')?.addEventListener('change', () => {
     loadGroup();
 });
 document.getElementById('groupSeqModeSelect')?.addEventListener('change', () => {
-    // The DLC subject set is keyed on seq_mode too — invalidate.
-    _dlcSubjectNames = null; _dlcSubjectKey = null;
-    cachedGroup = null;
-    loadGroup();
+    // seq_mode is no longer part of the cache key — every seq model
+    // is embedded in the cached payload, so a model change is a pure
+    // re-render.  Exception: SE-hand picks (larger_se/smaller_se)
+    // depend on the chosen model for the per-subject hand selection,
+    // so refetch in that case.
+    const hand = document.getElementById('groupHandSelect')?.value || 'more';
+    const isSE = (hand === 'larger_se' || hand === 'smaller_se');
+    if (isSE) {
+        _dlcSubjectNames = null; _dlcSubjectKey = null;
+        cachedGroup = null;
+        loadGroup();
+    } else if (cachedGroup) {
+        renderGroupPlots();
+    }
 });
 ['groupHandSelect', 'groupTrialSelect'].forEach(id =>
     document.getElementById(id)?.addEventListener('change', () => {

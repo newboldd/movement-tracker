@@ -4,9 +4,11 @@ site that can be hosted on GitHub Pages — no server, no data drive.
 
 The Results pages only ever issue four read-only GET endpoints:
     GET /api/subjects
-    GET /api/results/group?include_auto=true&source=<src>&seq_mode=<mode>
+    GET /api/results/group?include_auto=true&source=<src>&hand=<h>&trial=<t>
     GET /api/results/{id}/traces?source=<src>
     GET /api/results/{id}/movements?source=<src>
+Sequence-effect models are embedded in each group/explore cache file
+rather than fanned out into separate URLs.
 
 This script drives the real FastAPI app (via TestClient, so the JSON is
 identical to the live server), saves each response to ``data/`` with a
@@ -39,8 +41,8 @@ def _load_combos():
     g = get_page_combos("group")
     e = get_page_combos("explore")
     return (
-        g["sources"], g["seq_modes"], [(h, t) for h, t in g["hand_trial"]],
-        e["sources"], e["seq_modes"], [(h, t) for h, t in e["hand_trial"]],
+        g["sources"], [(h, t) for h, t in g["hand_trial"]],
+        e["sources"], [(h, t) for h, t in e["hand_trial"]],
     )
 
 
@@ -69,18 +71,21 @@ def main() -> None:
     def _stale(url: str, payload) -> bool:
         """Decide whether an already-cached payload is missing fields
         that were added after it was first written — in which case we
-        force a re-fetch.  Add new sentinels here as the schema evolves."""
+        force a re-fetch.  Add new sentinels here as the schema evolves.
+        """
         if not isinstance(payload, dict):
             return False
         subjs = payload.get("subjects")
         if not isinstance(subjs, list) or not subjs:
             return False
         s0 = subjs[0]
+        # Per-mode seq fields — the seq_mode-axis refactor.  Older
+        # caches lacked these.
         if "/api/results/explore" in url:
             vars0 = s0.get("vars") or {}
-            return "movement_similarity" not in vars0
+            return "seq_linear_full_amplitude" not in vars0
         if "/api/results/group" in url:
-            return "movement_similarity" not in s0
+            return "seq_linear_full_amplitude" not in s0
         return False
 
     def dump(url: str, *, always: bool = False) -> dict | list | None:
@@ -107,23 +112,23 @@ def main() -> None:
     subjects = dump("/api/subjects") or []
     print(f"  {len(subjects)} subjects")
 
-    (G_SOURCES, G_SEQ_MODES, G_HAND_TRIAL,
-     E_SOURCES, E_SEQ_MODES, E_HAND_TRIAL) = _load_combos()
+    (G_SOURCES, G_HAND_TRIAL,
+     E_SOURCES, E_HAND_TRIAL) = _load_combos()
 
-    # Group comparison: source × seq_mode × explicit (hand, trial)
-    # pairs (include_auto always true on the group page).
+    # Group comparison: source × explicit (hand, trial) pairs (include_
+    # auto always true on the group page).  Each cached file embeds
+    # all seq_mode variants, so the seq-mode dropdown is a frontend
+    # relabel rather than a re-fetch.
     for src in G_SOURCES:
-        for sm in G_SEQ_MODES:
-            for hd, tr in G_HAND_TRIAL:
-                dump(f"/api/results/group?include_auto=true&source={src}"
-                     f"&seq_mode={sm}&hand={hd}&trial={tr}")
+        for hd, tr in G_HAND_TRIAL:
+            dump(f"/api/results/group?include_auto=true&source={src}"
+                 f"&hand={hd}&trial={tr}")
 
     # Explore (Variable Explorer) — same shape, narrower set.
     for src in E_SOURCES:
-        for sm in E_SEQ_MODES:
-            for hd, tr in E_HAND_TRIAL:
-                dump(f"/api/results/explore?include_auto=true&source={src}"
-                     f"&seq_mode={sm}&hand={hd}&trial={tr}")
+        for hd, tr in E_HAND_TRIAL:
+            dump(f"/api/results/explore?include_auto=true&source={src}"
+                 f"&hand={hd}&trial={tr}")
 
     # Per-subject traces + movements — once per source the user picked
     # for either page (union, since traces are page-agnostic).

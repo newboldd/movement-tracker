@@ -81,11 +81,13 @@ def _run_export_for_page(page: str) -> None:
 
     combos = get_page_combos(page)
     sources    = combos["sources"]
-    seq_modes  = combos["seq_modes"]
     hand_trial = combos["hand_trial"]
 
     endpoint = "group" if page == "group" else "explore"
-    n_total = len(sources) * len(seq_modes) * len(hand_trial)
+    # seq_mode is no longer a cache axis — each cached file embeds
+    # all sequence-effect models — so the fanout is just sources ×
+    # hand_trial.  6× fewer files than the pre-refactor layout.
+    n_total = len(sources) * len(hand_trial)
     n_done = 0
     n_written = 0
 
@@ -100,19 +102,18 @@ def _run_export_for_page(page: str) -> None:
 
     try:
         for src in sources:
-            for sm in seq_modes:
-                for hd, tr in hand_trial:
-                    url = (f"/api/results/{endpoint}?include_auto=true"
-                           f"&source={src}&seq_mode={sm}"
-                           f"&hand={hd}&trial={tr}")
-                    out = site_data / _flatten(url)
-                    resp = client.get(url)
-                    if resp.status_code == 200:
-                        out.write_text(json.dumps(resp.json()))
-                        n_written += 1
-                    n_done += 1
-                    with _LOCK:
-                        _RUNS[page]["n_done"] = n_done
+            for hd, tr in hand_trial:
+                url = (f"/api/results/{endpoint}?include_auto=true"
+                       f"&source={src}"
+                       f"&hand={hd}&trial={tr}")
+                out = site_data / _flatten(url)
+                resp = client.get(url)
+                if resp.status_code == 200:
+                    out.write_text(json.dumps(resp.json()))
+                    n_written += 1
+                n_done += 1
+                with _LOCK:
+                    _RUNS[page]["n_done"] = n_done
 
         with _LOCK:
             _RUNS[page]["status"] = "done"

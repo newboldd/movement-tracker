@@ -1509,8 +1509,13 @@ def regenerate_group_cache(include_auto: bool = Query(False),
     given query combo and overwrite the on-disk cache JSON.  Useful
     after editing a subject's events — drop in a new copy of the
     cached file so subsequent visits to the page (here or on the
-    static site) reflect the change."""
-    cache = _group_cache_path(include_auto, source, seq_mode, hand, trial)
+    static site) reflect the change.
+
+    ``seq_mode`` is accepted for back-compat with old frontends but
+    doesn't affect the cache key — every model is embedded in the
+    one cache file per (source, hand, trial).
+    """
+    cache = _group_cache_path(include_auto, source, hand, trial)
     if cache is not None and cache.is_file():
         try:
             cache.unlink()
@@ -1559,11 +1564,18 @@ def get_group_comparison(include_auto: bool = Query(False),
     # Saves the multi-second aggregation pass when the user is just
     # browsing the Group Comparison page.  Falls through if the cache
     # is missing, unreadable, or stale (predates newer fields).
-    cache = _group_cache_path(include_auto, source, seq_mode, hand, trial)
+    cache = _group_cache_path(include_auto, source, hand, trial)
     if cache is not None and cache.is_file():
         try:
             data = _json.loads(cache.read_text())
             subjs = data.get("subjects") or []
+            # Per-mode seq fields — sentinel for the new cache schema.
+            # Any cache written before the seq_mode-axis refactor
+            # lacks these, so we treat it as stale and recompute.
+            if subjs and "seq_linear_full_amplitude" not in subjs[0]:
+                raise RuntimeError("cache pre-dates per-mode seq fields")
+            # Newer-but-still-derivable additions can stay in the
+            # hot path:
             if subjs and "variance_amplitude" not in subjs[0]:
                 # variance (σ) = |cv * mean| — derive instead of recompute.
                 for s in subjs:
@@ -1577,17 +1589,6 @@ def get_group_comparison(include_auto: bool = Query(False),
                             s[f"variance_{base}"] = None
                         else:
                             s[f"variance_{base}"] = round(abs(float(cv_v) * float(m_v)), 4)
-            # Movement-similarity keys can't be derived; fall through
-            # to live compute if any cached subject is missing them.
-            if subjs and "movement_similarity" not in subjs[0]:
-                raise RuntimeError("cache missing movement_similarity")
-            if subjs and "residual_vs_mean" not in subjs[0]:
-                raise RuntimeError("cache missing residual_vs_mean")
-            # New movement-interval scalars (P-P / O-O / C-C / P-O /
-            # C-O / O-P / P-C) were added together — sniff one to know
-            # whether the whole batch is present.  Missing → recompute.
-            if subjs and "mean_dur_op" not in subjs[0]:
-                raise RuntimeError("cache missing dur_op aggregates")
             return data
         except Exception:
             pass
@@ -1713,6 +1714,7 @@ def get_group_comparison(include_auto: bool = Query(False),
                     vals.append(float(v))
             entry[out_key] = round(float(np.mean(vals)), 4) if vals else None
 
+        from ..services.cache_config import ALL_SEQ_MODES_TO_EMBED
         for key in PARAM_KEYS:
             vals = [m[key] for m in movements if m[key] is not None]
             if vals:
@@ -1722,19 +1724,23 @@ def get_group_comparison(include_auto: bool = Query(False),
                 entry[f"variance_{key}"] = round(float(std_v), 4)
                 entry[f"cv_{key}"] = round(float(std_v / abs(mean_v)), 4) if mean_v != 0 else None
 
-                # Sequence effect under the selected mode (closing
-                # velocities are negated inside the helper so the effect
-                # reflects changes in magnitude).  Expose both R² (the
-                # group "Sequence Effect" row) and slope (explore page).
-                se = _sequence_effect(movements, key, seq_mode)
-                entry[f"seq_{key}"] = se["r2"] if se else None
-                entry[f"seqslope_{key}"] = se["slope"] if se else None
+                # Sequence effect under EVERY embedded model — closing
+                # velocities are negated inside _sequence_effect so the
+                # effect reflects changes in magnitude.  Emits both R²
+                # (group "Sequence Effect" row) and slope (explore page)
+                # per model, so the frontend's seq-mode dropdown can
+                # switch instantly without a re-fetch.
+                for _sm in ALL_SEQ_MODES_TO_EMBED:
+                    se = _sequence_effect(movements, key, _sm)
+                    entry[f"seq_{_sm}_{key}"] = se["r2"] if se else None
+                    entry[f"seqslope_{_sm}_{key}"] = se["slope"] if se else None
             else:
                 entry[f"mean_{key}"] = None
                 entry[f"variance_{key}"] = None
                 entry[f"cv_{key}"] = None
-                entry[f"seq_{key}"] = None
-                entry[f"seqslope_{key}"] = None
+                for _sm in ALL_SEQ_MODES_TO_EMBED:
+                    entry[f"seq_{_sm}_{key}"] = None
+                    entry[f"seqslope_{_sm}_{key}"] = None
 
         # Frequency = 1 / mean IMI
         mean_imi = entry.get("mean_imi")
@@ -1811,9 +1817,15 @@ def _explore_variable_catalog() -> list[dict]:
 
 def _explore_value_keys() -> list[str]:
     """Underlying per-subject value keys the UI looks up."""
+    from ..services.cache_config import ALL_SEQ_MODES_TO_EMBED
     keys = [k for k, _ in _CLINICAL_VARS] + ["frequency"]
     for k in _MOVE_PARAM_LABELS:
-        keys += [f"mean_{k}", f"variance_{k}", f"cv_{k}", f"seq_{k}", f"seqslope_{k}"]
+        keys += [f"mean_{k}", f"variance_{k}", f"cv_{k}"]
+        # Per-mode seq fields — the frontend reads
+        # ``seq_<mode>_<param>`` / ``seqslope_<mode>_<param>`` based
+        # on the user's seq-mode dropdown choice.
+        for _sm in ALL_SEQ_MODES_TO_EMBED:
+            keys += [f"seq_{_sm}_{k}", f"seqslope_{_sm}_{k}"]
     keys += ["movement_similarity", "movement_similarity_open",
              "movement_similarity_peak", "movement_similarity_close",
              "residual_vs_mean", "residual_vs_median"]
@@ -1837,20 +1849,27 @@ def _explore_combos() -> dict: return _get_page_combos("explore")
 
 
 def _static_cache_path(endpoint: str, include_auto: bool,
-                        source: str, seq_mode: str, hand: str, trial: str,
-                        srcs: set, sms: set, hand_trial: set):
+                        source: str, hand: str, trial: str,
+                        srcs: set, hand_trial: set):
     """Return Path to a cached JSON for the given combo, or None if the
     combination wasn't exported (no cache to read).
 
     ``hand_trial`` is the set of (hand, trial) tuples we actually ship —
     e.g. (more, last), (less, last), (average, average) — so an
-    in-between like (more, average) doesn't pretend to have a cache."""
+    in-between like (more, average) doesn't pretend to have a cache.
+
+    ``seq_mode`` is intentionally NOT part of the cache key; each
+    cached file embeds the seq-effect results for every model in
+    ``cache_config.ALL_SEQ_MODES_TO_EMBED``.  SE-hand selections
+    (``larger_se`` / ``smaller_se``) still depend on the chosen
+    seq_mode, so they're not cached and live-compute below.
+    """
     if not include_auto: return None
     if source not in srcs: return None
-    if seq_mode not in sms: return None
+    if hand in ("larger_se", "smaller_se"): return None
     if (hand, trial) not in hand_trial: return None
     name = (f"api_results_{endpoint}_include_auto_true_source_{source}_"
-            f"seq_mode_{seq_mode}_hand_{hand}_trial_{trial}.json")
+            f"hand_{hand}_trial_{trial}.json")
     return _SITE_DATA_DIR / name
 
 
@@ -1858,17 +1877,17 @@ def _as_pair_set(pairs):
     return {tuple(p) for p in pairs}
 
 
-def _explore_cache_path(include_auto, source, seq_mode, hand, trial):
+def _explore_cache_path(include_auto, source, hand, trial):
     c = _explore_combos()
-    return _static_cache_path("explore", include_auto, source, seq_mode, hand, trial,
-                              set(c["sources"]), set(c["seq_modes"]),
+    return _static_cache_path("explore", include_auto, source, hand, trial,
+                              set(c["sources"]),
                               _as_pair_set(c["hand_trial"]))
 
 
-def _group_cache_path(include_auto, source, seq_mode, hand, trial):
+def _group_cache_path(include_auto, source, hand, trial):
     c = _group_combos()
-    return _static_cache_path("group", include_auto, source, seq_mode, hand, trial,
-                              set(c["sources"]), set(c["seq_modes"]),
+    return _static_cache_path("group", include_auto, source, hand, trial,
+                              set(c["sources"]),
                               _as_pair_set(c["hand_trial"]))
 
 
@@ -1885,18 +1904,23 @@ def get_explore_variables(include_auto: bool = Query(False),
     returning a flat ``vars`` dict per subject plus a variable catalog
     the UI builds its dropdowns from.
     """
-    # Cache check: for the small subset of (source × seq_mode × hand ×
-    # trial) combinations that the static-site exporter writes out, just
-    # return the pre-computed JSON.  Everything else (or a stale cache
-    # missing newer fields) falls through to live computation below.
-    cache = _explore_cache_path(include_auto, source, seq_mode, hand, trial)
+    # Cache check: for the (source × hand × trial) combos the static-
+    # site exporter writes out, return the pre-computed JSON.
+    # Everything else (or a stale cache missing the per-mode seq
+    # fields) falls through to live computation below.  ``seq_mode``
+    # is intentionally ignored for the cache key — per-mode seq fields
+    # are embedded in every cache.
+    cache = _explore_cache_path(include_auto, source, hand, trial)
     if cache is not None and cache.is_file():
         try:
             data = _json.loads(cache.read_text())
-            # Older caches predate the `variance_*` keys.  Variance (σ) is
-            # just |cv * mean|, so derive it on the fly instead of forcing
-            # a full re-export.
             subjs = data.get("subjects") or []
+            # Sentinel for the new cache schema.  Old per-seq_mode
+            # caches lacked per-mode seq fields — any pre-refactor
+            # cache → recompute.
+            if subjs and "seq_linear_full_amplitude" not in (subjs[0].get("vars") or {}):
+                raise RuntimeError("cache pre-dates per-mode seq fields")
+            # Newer-but-derivable: variance (σ) = |cv * mean|.
             if subjs and "variance_amplitude" not in (subjs[0].get("vars") or {}):
                 for s in subjs:
                     vars_ = s.get("vars") or {}
@@ -1911,23 +1935,10 @@ def get_explore_variables(include_auto: bool = Query(False),
                         else:
                             vars_[f"variance_{base}"] = round(abs(float(cv_v) * float(m_v)), 4)
                     s["vars"] = vars_
-            # Ensure the catalog advertises the variance keys.
             cat = data.get("catalog") or {}
             if "variance" not in (cat.get("aggregators") or []):
                 cat.setdefault("aggregators", []).append("variance")
                 data["catalog"] = cat
-            # Movement-similarity keys can't be derived from cached
-            # values; fall through to live compute when missing.
-            if subjs and "movement_similarity" not in (subjs[0].get("vars") or {}):
-                raise RuntimeError("cache missing movement_similarity")
-            # Same for the residual-vs-reference fields.
-            if subjs and "residual_vs_mean" not in (subjs[0].get("vars") or {}):
-                raise RuntimeError("cache missing residual_vs_mean")
-            # New movement-interval scalars (P-P / O-O / C-C / P-O /
-            # C-O / O-P / P-C) — added in one batch; sniff one to know
-            # whether the cache pre-dates them.
-            if subjs and "mean_dur_op" not in (subjs[0].get("vars") or {}):
-                raise RuntimeError("cache missing dur_op aggregates")
             return data
         except Exception:
             pass    # corrupt cache → recompute

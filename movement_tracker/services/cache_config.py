@@ -1,8 +1,7 @@
 """Per-page static-cache configuration.
 
-Single source of truth for which (source × seq_mode × hand × trial)
-combinations are pre-computed and shipped to the public GitHub Pages
-site.  Read by:
+Single source of truth for which (source × hand × trial) combinations
+are pre-computed and shipped to the public GitHub Pages site.  Read by:
 
   * ``routers/results.py`` (``_GROUP_STATIC_*`` / ``_EXPLORE_STATIC_*``
     sets) to decide whether a request can be served from a cached
@@ -31,14 +30,28 @@ _CACHE_PATH = DATA_DIR / "cache_config.json"
 
 # Universe of values each axis can take — used by the UI to render
 # checkbox grids and by validation when the user submits new settings.
+#
+# seq_mode is intentionally NOT an axis of the cache config.  Every
+# cached entry embeds ``seq_<mode>_<key>`` + ``seqslope_<mode>_<key>``
+# fields for ALL_SEQ_MODES_TO_EMBED below, so switching the sequence
+# model on the frontend re-reads different fields off the same JSON
+# without a network round-trip.  (Sequence-effect-derived SE-hand
+# picks — ``larger_se``/``smaller_se`` — still depend on the chosen
+# model and live-compute when requested.)
 OPTION_DOMAINS = {
     "sources":   ["auto", "corrections", "mp_combined", "mp_forward", "skeleton_v1", "skeleton_v2"],
-    "seq_modes": ["none",
-                  "linear_full", "linear_first10", "linear_multi",
-                  "exp_full",    "exp_first10",    "exp_multi"],
     "hands":     ["more", "less", "L", "R", "average", "larger_se", "smaller_se"],
     "trials":    ["first", "last", "average"],
 }
+
+# Sequence-effect models computed and embedded in every cached file.
+# ``none`` is excluded — it just hides the seq display and contains
+# no unique data — and any new model added here automatically lands
+# in every cache on the next rebuild.
+ALL_SEQ_MODES_TO_EMBED = [
+    "linear_full", "linear_first10", "linear_multi",
+    "exp_full",    "exp_first10",    "exp_multi",
+]
 
 # Human-friendly labels for the UI.  Keys mirror the OPTION_DOMAINS
 # values; entries omitted from the maps render as raw values.
@@ -50,15 +63,6 @@ OPTION_LABELS = {
         "mp_forward":   "MP forward",
         "skeleton_v1":  "Skel fit v1",
         "skeleton_v2":  "Skel fit v2",
-    },
-    "seq_modes": {
-        "none":            "None",
-        "linear_full":     "Linear (full)",
-        "linear_first10":  "Linear (first 10)",
-        "linear_multi":    "Linear (multi-seq)",
-        "exp_full":        "Exponential (full)",
-        "exp_first10":     "Exponential (first 10)",
-        "exp_multi":       "Exponential (multi-seq)",
     },
     "hands": {
         "more":       "More affected",
@@ -77,31 +81,32 @@ OPTION_LABELS = {
 }
 
 # Defaults shipped before the user customises.  These mirror the
-# previous hard-coded ``_GROUP_STATIC_*`` / ``_EXPLORE_STATIC_*``
-# sets so first-run behaviour is unchanged.
+# previous hard-coded ``_GROUP_STATIC_*`` / ``_EXPLORE_STATIC_*`` sets
+# so first-run behaviour is unchanged — minus the seq_mode axis,
+# which is now embedded per-cache rather than fanned out.
 _DEFAULT_CFG: dict = {
     "group": {
         # Skeleton fit v1 is now a first-class source for head-to-head
         # comparison with DLC and MP on the Group Comparison page.
-        "sources":   ["auto", "corrections", "mp_combined", "skeleton_v1"],
-        "seq_modes": ["exp_full", "exp_first10", "exp_multi"],
+        "sources":    ["auto", "corrections", "mp_combined", "skeleton_v1"],
         "hand_trial": [["more", "last"], ["less", "last"], ["average", "average"]],
     },
     "explore": {
-        "sources":   ["auto", "corrections", "mp_combined", "skeleton_v1"],
-        "seq_modes": ["exp_full", "exp_first10", "exp_multi"],
+        "sources":    ["auto", "corrections", "mp_combined", "skeleton_v1"],
         "hand_trial": [["more", "last"], ["less", "last"], ["average", "average"]],
     },
 }
 
 
 def _validate_page_cfg(cfg: dict) -> dict:
-    """Drop unknown values and de-dupe; returns a cleaned copy."""
+    """Drop unknown values and de-dupe; returns a cleaned copy.
+
+    ``seq_modes`` from older configs is silently dropped — every
+    cache now embeds all sequence-effect models regardless.
+    """
     out = {}
     out["sources"] = sorted({s for s in cfg.get("sources", [])
                               if s in OPTION_DOMAINS["sources"]})
-    out["seq_modes"] = sorted({s for s in cfg.get("seq_modes", [])
-                                if s in OPTION_DOMAINS["seq_modes"]})
     pairs = []
     seen = set()
     for p in cfg.get("hand_trial", []):
@@ -130,7 +135,7 @@ def load_cache_config() -> dict:
             # Make sure each page has at least one value per axis so
             # the cache isn't a hard 404 wall.
             for page in ("group", "explore"):
-                for axis in ("sources", "seq_modes", "hand_trial"):
+                for axis in ("sources", "hand_trial"):
                     if not cfg[page][axis]:
                         cfg[page][axis] = list(_DEFAULT_CFG[page][axis])
             return cfg

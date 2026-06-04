@@ -119,17 +119,25 @@ const $ = (id) => document.getElementById(id);
 async function loadExplore() {
     const plot = $('explorePlot');
     const src = $('exSourceSelect').value || 'auto';
-    const sm = $('exSeqModeSelect').value || 'linear_full';
     const hand = $('exHandSelect')?.value || 'more';
     const trial = $('exTrialSelect')?.value || 'last';
     // Always fetch with auto events available; the include-auto toggle
     // only controls which subjects are checked by default (matches the
     // Group Comparison page).
     plot.innerHTML = '<div class="results-no-data">Loading…</div>';
+    // For SE-hand selections the chosen-hand pick depends on the
+    // seq_mode model, so we still pass it on the URL — the live
+    // backend reads it for that case.  For other hands the URL is
+    // the same regardless of seq_mode, which lets the static-site
+    // export hit a single per-(source, hand, trial) cache file.
+    let url = `/api/results/explore?include_auto=true&source=${src}`
+            + `&hand=${hand}&trial=${trial}`;
+    if (hand === 'larger_se' || hand === 'smaller_se') {
+        const sm = $('exSeqModeSelect')?.value || 'linear_full';
+        url += `&seq_mode=${sm}`;
+    }
     try {
-        _data = await API.get(
-            `/api/results/explore?include_auto=true&source=${src}&seq_mode=${sm}` +
-            `&hand=${hand}&trial=${trial}`);
+        _data = await API.get(url);
         _varMeta = {};
         _data.variables.forEach(v => {
             _varMeta[v.key] = { label: v.label, aggregatable: !!v.aggregatable };
@@ -211,7 +219,10 @@ function _seqMetric(prefix) {
 }
 
 // Effective data key + display label for a select, applying the
-// aggregate radio when the variable is aggregatable.
+// aggregate radio when the variable is aggregatable.  Sequence-
+// effect data is stored per-model: ``seq_<seq_mode>_<base>`` and
+// ``seqslope_<seq_mode>_<base>``.  Switching the seq_mode dropdown
+// just re-reads different fields off the same payload.
 function _resolve(prefix) {
     const sel = $(prefix === 'X' ? 'exVarX' : 'exVarY');
     const base = sel.value;
@@ -219,8 +230,15 @@ function _resolve(prefix) {
     if (!meta.aggregatable) return { key: base, label: meta.label };
     const agg = _agg(prefix);
     if (agg === 'seq') {
+        const sm = $('exSeqModeSelect')?.value || 'linear_full';
+        // seq_mode === 'none' has no per-mode data — nothing to plot.
+        if (sm === 'none') {
+            return { key: `__seq_none_${base}`, label: `Seq. Effect ${meta.label}` };
+        }
         const m = _seqMetric(prefix);
-        const key = m === 'slope' ? `seqslope_${base}` : `seq_${base}`;
+        const key = m === 'slope'
+            ? `seqslope_${sm}_${base}`
+            : `seq_${sm}_${base}`;
         const tag = m === 'slope' ? '(slope)' : '(R²)';
         return { key, label: `Seq. Effect ${tag} ${meta.label}` };
     }
@@ -873,8 +891,22 @@ function renderBar() {
 }
 
 // ── Listeners ──────────────────────────────────────────────────
-['exSourceSelect', 'exSeqModeSelect', 'exHandSelect', 'exTrialSelect'].forEach(id =>
+// Source / hand / trial changes need a refetch (the cache key
+// includes those).  seq_mode is NOT part of the cache key any
+// more — every mode's seq fields are embedded in the same JSON,
+// so changing it is a pure re-render.  Exception: ``larger_se``
+// / ``smaller_se`` hand selections live-compute, and the chosen
+// hand depends on seq_mode, so for those we still refetch.
+['exSourceSelect', 'exHandSelect', 'exTrialSelect'].forEach(id =>
     $(id).addEventListener('change', loadExplore));
+$('exSeqModeSelect')?.addEventListener('change', () => {
+    const h = $('exHandSelect')?.value;
+    if (h === 'larger_se' || h === 'smaller_se') {
+        loadExplore();
+    } else if (_data) {
+        render();
+    }
+});
 
 // Include-auto: toggle only the default-checked state of subjects
 // without complete saved events (no re-fetch — auto data is already
