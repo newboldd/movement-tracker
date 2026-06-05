@@ -4735,11 +4735,16 @@ async function _ensureDlcSubjectSet() {
 function _activeGroupSubjects() {
     if (!cachedGroup || !cachedGroup.subjects) return [];
     const dlcOn = _dlcFilterActive();
-    const consentOn = !!document.getElementById('updatedConsentFilter')?.checked;
+    // "Include Clinic Consents" checkbox (default UNCHECKED).  When
+    // unchecked we restrict to subjects with ``updated_consent``
+    // (the newer "New Consent" flag on the Subjects dashboard);
+    // when checked we also include the older Clinic-Consent
+    // subjects (no consent filter).
+    const includeClinic = !!document.getElementById('updatedConsentFilter')?.checked;
     return cachedGroup.subjects.filter(s => {
         if (!_groupSubjectChecked[s.name]) return false;
         if (dlcOn && _dlcSubjectNames && !_dlcSubjectNames.has(s.name)) return false;
-        if (consentOn && !s.updated_consent) return false;
+        if (!includeClinic && !s.updated_consent) return false;
         return true;
     });
 }

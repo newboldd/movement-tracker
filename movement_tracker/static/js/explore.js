@@ -308,10 +308,15 @@ function _renderSubjectList() {
 
 function _activeSubjects() {
     if (!_data || !_data.subjects) return [];
-    const consentOn = !!document.getElementById('exUpdatedConsent')?.checked;
+    // "Include Clinic Consents" checkbox (default UNCHECKED).  When
+    // unchecked we restrict to subjects with ``updated_consent``
+    // (the newer "New Consent" flag on the Subjects dashboard);
+    // when checked we also include the older Clinic-Consent
+    // subjects (no consent filter).
+    const includeClinic = !!document.getElementById('exUpdatedConsent')?.checked;
     return _data.subjects.filter(s => {
         if (!_subjChecked[s.name]) return false;
-        if (consentOn && !s.updated_consent) return false;
+        if (!includeClinic && !s.updated_consent) return false;
         return true;
     });
 }

@@ -410,7 +410,7 @@
                 </label>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
                 <label><input type="checkbox" id="includeAutoToggle"> Include auto-detected events</label>
-                <label title="Restrict the plotted group to subjects flagged 'Updated consent' on the Subjects dashboard."><input type="checkbox" id="updatedConsentFilter"> Updated consent only</label>
+                <label title="Unchecked (default): show only subjects flagged 'Updated consent' on the Subjects dashboard.  Check to also include older Clinic-Consent subjects."><input type="checkbox" id="updatedConsentFilter"> Include Clinic Consents</label>
                 <button class="btn btn-sm" id="groupSelectAllBtn" type="button">All</button>
                 <button class="btn btn-sm" id="groupRegenerateBtn" type="button"
                         title="Recompute and overwrite the cached JSON for the current grouping (use after editing a subject's events).">Regenerate</button>
@@ -479,6 +479,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=128"></script>
+    <script src="/static/js/results.js?v=129"></script>
 </body>
 </html>
