@@ -434,9 +434,9 @@ function _wireIntervalDrag(divId) {
             const rect = div.getBoundingClientRect();
             const px = e.clientX - rect.left;
             const edge = _hitTestIntervalEdge(trialIdx, ax, px);
-            if (edge) { div.style.cursor = 'col-resize'; return; }
+            if (edge) { _setPlotCursor(div, 'col-resize'); return; }
             const inside = _hitTestIntervalInside(trialIdx, ax, px);
-            div.style.cursor = inside ? 'move' : '';
+            _setPlotCursor(div, inside ? 'move' : '');
             return;
         }
         const rect = div.getBoundingClientRect();
@@ -506,14 +506,30 @@ function _wireIntervalDrag(divId) {
     div.addEventListener('pointerup', finish);
     div.addEventListener('pointercancel', () => {
         down = null; _clearPreview(trialIdx);
-        div.style.cursor = '';
+        _setPlotCursor(div, '');
     });
 
     // Hover detection for the per-interval action button.
     div.addEventListener('mousemove', (e) => _onIntervalHover(divId, e));
     div.addEventListener('mouseleave', () => {
         _scheduleHoverHide(trialIdx);
-        if (!down) div.style.cursor = '';
+        if (!down) _setPlotCursor(div, '');
+    });
+}
+
+// Plotly's draglayer (``<rect class="nsewdrag drag">``) sits on top
+// of the plot div with its own ``cursor: crosshair`` style, which
+// beats ``div.style.cursor`` until the user starts dragging.  To
+// surface the resize / move hint on hover (not just during drag),
+// stamp the cursor on the drag layer too.
+function _setPlotCursor(div, cur) {
+    div.style.cursor = cur;
+    // Plotly draws several "drag" rects (nsewdrag for the plot
+    // area, plus n/s/e/w/edge handles for axis-edge drags).
+    // Targeting them all keeps the cursor consistent no matter
+    // which sub-region the pointer is over.
+    div.querySelectorAll('.drag').forEach(el => {
+        el.style.cursor = cur;
     });
 }
 
