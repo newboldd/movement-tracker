@@ -391,21 +391,33 @@ function _wireIntervalDrag(divId) {
         const yax = div._fullLayout.yaxis;
         if (yax && yax._offset != null
                 && (py < yax._offset || py > yax._offset + yax._length)) return;
-        // First check whether the press landed on the edge of an
-        // existing interval — if so, enter resize mode.
+        // Edge → resize.  Inside (but not edge) → move the whole
+        // interval.  Empty space → start a new drag-mark gesture.
         const hit = _hitTestIntervalEdge(trialIdx, ax, px);
         if (hit) {
             down = {
                 mode: 'resize', clientX0: e.clientX,
                 intervalIdx: hit.intervalIdx, edge: hit.edge, ax,
             };
-            _hideHoverButton(trialIdx);
         } else {
-            down = {
-                mode: 'new', clientX0: e.clientX,
-                startData: ax.p2c(px - ax._offset), ax,
-                additive: !!(e.shiftKey || e.ctrlKey || e.metaKey),
-            };
+            const inside = _hitTestIntervalInside(trialIdx, ax, px);
+            if (inside) {
+                const iv = (_intervals[trialIdx] || [])[inside.intervalIdx];
+                down = {
+                    mode: 'move', clientX0: e.clientX,
+                    intervalIdx: inside.intervalIdx,
+                    startData: ax.p2c(px - ax._offset),
+                    origX0: iv ? iv.x0 : 0,
+                    origX1: iv ? iv.x1 : 0,
+                    ax,
+                };
+            } else {
+                down = {
+                    mode: 'new', clientX0: e.clientX,
+                    startData: ax.p2c(px - ax._offset), ax,
+                    additive: !!(e.shiftKey || e.ctrlKey || e.metaKey),
+                };
+            }
         }
         try { div.setPointerCapture(e.pointerId); } catch (_) {}
         e.preventDefault();
@@ -413,14 +425,18 @@ function _wireIntervalDrag(divId) {
 
     div.addEventListener('pointermove', (e) => {
         if (!down) {
-            // No drag in progress — update cursor based on edge
-            // proximity so the user can see what's grabbable.
+            // No drag in progress — update cursor: col-resize on
+            // edges (drag to resize), move inside (drag to slide
+            // the whole interval), default elsewhere (drag to
+            // make a new interval).
             const ax = div._fullLayout && div._fullLayout.xaxis;
             if (!ax || ax._offset == null) return;
             const rect = div.getBoundingClientRect();
             const px = e.clientX - rect.left;
-            const hover = _hitTestIntervalEdge(trialIdx, ax, px);
-            div.style.cursor = hover ? 'col-resize' : '';
+            const edge = _hitTestIntervalEdge(trialIdx, ax, px);
+            if (edge) { div.style.cursor = 'col-resize'; return; }
+            const inside = _hitTestIntervalInside(trialIdx, ax, px);
+            div.style.cursor = inside ? 'move' : '';
             return;
         }
         const rect = div.getBoundingClientRect();
@@ -438,6 +454,16 @@ function _wireIntervalDrag(divId) {
                 iv.x1 = Math.max(cur, iv.x0 + Math.abs(minW || 0.01));
             }
             _rebuildShapesForTrial(trialIdx);
+            _updateHoverButtonContent(trialIdx, down.intervalIdx);
+        } else if (down.mode === 'move') {
+            const list = _intervals[trialIdx] || [];
+            const iv = list[down.intervalIdx];
+            if (!iv) return;
+            const shift = cur - down.startData;
+            iv.x0 = down.origX0 + shift;
+            iv.x1 = down.origX1 + shift;
+            _rebuildShapesForTrial(trialIdx);
+            _showHoverButton(trialIdx, down.intervalIdx);
         } else {
             const x0 = Math.min(down.startData, cur);
             const x1 = Math.max(down.startData, cur);
@@ -451,9 +477,11 @@ function _wireIntervalDrag(divId) {
         const rect = div.getBoundingClientRect();
         const cur = ax.p2c(e.clientX - rect.left - ax._offset);
         const movedPx = Math.abs(e.clientX - down.clientX0);
-        if (down.mode === 'resize') {
+        if (down.mode === 'resize' || down.mode === 'move') {
             down = null;
-            // Suppress the trailing native-click for this gesture.
+            // Suppress the trailing native-click for this gesture
+            // (a drag that ended inside an interval would otherwise
+            // be re-interpreted as a click on the cursor handler).
             div._suppressClickUntil = performance.now() + 250;
             // Final rebuild — pointermove already updated bands live.
             _rebuildShapesForTrial(trialIdx);
@@ -506,6 +534,26 @@ function _hitTestIntervalEdge(trialIdx, ax, px) {
         if (d1 <= TOL && d1 < bestDist) { best = { intervalIdx: i, edge: 'x1' }; bestDist = d1; }
     });
     return best;
+}
+
+// Return { intervalIdx } if the plot-pixel ``px`` lies STRICTLY
+// inside an interval (excluding the 6-px edge hit zone) on this
+// trial; otherwise null.  Edge hits win first (resize); inside
+// hits drive the whole-interval drag.
+function _hitTestIntervalInside(trialIdx, ax, px) {
+    const list = _intervals[trialIdx] || [];
+    if (!list.length) return null;
+    const TOL = 6;
+    const xData = ax.p2c(px - ax._offset);
+    for (let i = 0; i < list.length; i++) {
+        const iv = list[i];
+        if (xData < iv.x0 || xData > iv.x1) continue;
+        const px0 = ax.d2p(iv.x0) + ax._offset;
+        const px1 = ax.d2p(iv.x1) + ax._offset;
+        if (Math.abs(px - px0) <= TOL || Math.abs(px - px1) <= TOL) continue;
+        return { intervalIdx: i };
+    }
+    return null;
 }
 
 function _hideHoverButton(trialIdx) {
@@ -581,6 +629,12 @@ function _ensureHoverButton(trialIdx) {
     march.textContent = 'March across';
     march.title = 'Tile this interval forward across the trial';
     march.style.cssText = 'border:none;background:transparent;color:#1976D2;font-weight:600;cursor:pointer;padding:0 2px;font-size:11px;';
+    // Live read-out of the interval's duration (and frequency once
+    // marched).  Updated every pointermove via _updateHoverButtonContent
+    // so the user sees the value tick as they drag.
+    const stats = document.createElement('span');
+    stats.className = 'iv-stats';
+    stats.style.cssText = 'color:#444;font-variant-numeric:tabular-nums;padding:0 4px;font-size:11px;border-left:1px solid rgba(0,0,0,0.15);';
     const del = document.createElement('button');
     del.type = 'button';
     del.className = 'iv-del';
@@ -588,6 +642,7 @@ function _ensureHoverButton(trialIdx) {
     del.title = 'Delete this interval';
     del.style.cssText = 'border:none;background:transparent;color:#c62828;font-weight:700;cursor:pointer;padding:0 2px;font-size:12px;';
     btn.appendChild(march);
+    btn.appendChild(stats);
     btn.appendChild(del);
     // Stay open while pointer is over the button itself.
     btn.addEventListener('mouseenter', () => { if (_hoverHideT) clearTimeout(_hoverHideT); });
@@ -598,7 +653,7 @@ function _ensureHoverButton(trialIdx) {
         const list = _intervals[trialIdx] || [];
         if (idx == null || !list[idx]) return;
         list[idx].marched = !list[idx].marched;
-        march.textContent = list[idx].marched ? 'Stop march' : 'March across';
+        _updateHoverButtonContent(trialIdx, idx);
         _rebuildShapesForTrial(trialIdx);
     });
     del.addEventListener('click', (e) => {
@@ -625,6 +680,31 @@ function _scheduleHoverHide(trialIdx) {
     }, 180);
 }
 
+// Update just the readout strings on the hover button (march/stop
+// label, duration in ms, frequency in Hz iff marched).  Used during
+// drag so the numbers tick live without re-running the positioning
+// math every frame.
+function _updateHoverButtonContent(trialIdx, intervalIdx) {
+    const wrapper = document.getElementById(`trialWrap_${trialIdx}`);
+    const btn = wrapper && wrapper.querySelector(':scope > .interval-actions');
+    if (!btn) return;
+    const list = _intervals[trialIdx] || [];
+    const iv = list[intervalIdx];
+    if (!iv) return;
+    const march = btn.querySelector('.iv-march');
+    if (march) march.textContent = iv.marched ? 'Stop march' : 'March across';
+    const stats = btn.querySelector('.iv-stats');
+    if (stats) {
+        const durSec = Math.max(0, iv.x1 - iv.x0);
+        const durMs = Math.round(durSec * 1000);
+        let txt = `${durMs} ms`;
+        if (iv.marched && durSec > 0) {
+            txt += ` · ${(1 / durSec).toFixed(2)} Hz`;
+        }
+        stats.textContent = txt;
+    }
+}
+
 function _showHoverButton(trialIdx, intervalIdx) {
     if (_hoverHideT) { clearTimeout(_hoverHideT); _hoverHideT = null; }
     const btn = _ensureHoverButton(trialIdx);
@@ -633,9 +713,8 @@ function _showHoverButton(trialIdx, intervalIdx) {
     const list = _intervals[trialIdx] || [];
     const iv = list[intervalIdx];
     if (!iv) return;
-    // Update march/stop label.
-    const march = btn.querySelector('.iv-march');
-    if (march) march.textContent = iv.marched ? 'Stop march' : 'March across';
+    // Update march/stop label + the duration/frequency readout.
+    _updateHoverButtonContent(trialIdx, intervalIdx);
     // Position centered over the interval on the distance plot.
     // The wrapper is the offset parent; the distance plot now sits
     // inside an inner flex row with a sticky y-axis column to its
