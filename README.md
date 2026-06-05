@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://creativecommons.org/licenses/by-nc/4.0/"><img alt="License: CC BY-NC 4.0" src="https://img.shields.io/badge/license-CC--BY--NC--4.0-blue.svg"></a>
+  <a href="LICENSE"><img alt="License: BUSL-1.1" src="https://img.shields.io/badge/license-BUSL--1.1-blue.svg"></a>
   <a href="#"><img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9+-3776ab.svg?logo=python&logoColor=white"></a>
   <a href="https://fastapi.tiangolo.com/"><img alt="FastAPI" src="https://img.shields.io/badge/web-FastAPI-009688?logo=fastapi&logoColor=white"></a>
   <a href="https://deeplabcut.github.io/DeepLabCut/"><img alt="DeepLabCut" src="https://img.shields.io/badge/pose-DeepLabCut-555.svg"></a>
@@ -124,7 +124,7 @@ If you use this software in published research, please cite it:
   author  = {Newbold, Dillan},
   title   = {Movement Tracker},
   url     = {https://github.com/newboldd/movement-tracker},
-  license = {CC-BY-NC-4.0}
+  license = {BUSL-1.1}
 }
 ```
 
@@ -134,11 +134,13 @@ A [`CITATION.cff`](CITATION.cff) file is included so GitHub shows a **Cite this 
 
 ## 📜 License
 
-<a href="https://creativecommons.org/licenses/by-nc/4.0/">
-  <img src="https://licensebuttons.net/l/by-nc/4.0/88x31.png" alt="CC BY-NC 4.0">
-</a>
+[**Business Source License 1.1**](LICENSE) — see [`LICENSE`](LICENSE) for the full terms.
 
-[**CC BY-NC 4.0**](https://creativecommons.org/licenses/by-nc/4.0/) — free for academic and non-commercial use. For commercial licensing, please get in touch.
+- **Additional Use Grant:** free for non-commercial academic research and educational purposes without restriction.
+- **Change Date:** four years from the date each version is first published.
+- **Change License:** MIT.
+
+For commercial use before the Change Date, please get in touch.
 
 <p align="center">
   <sub>Built for neurological research. Made open for clinicians and scientists to make video-based measurements.</sub>

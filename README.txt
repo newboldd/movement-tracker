@@ -157,10 +157,10 @@ If you use this software in your research, please cite it:
 
 ```bibtex
 @software{newbold_movement_tracker,
-  author  = {Newbold, David},
+  author  = {Newbold, Dillan},
   title   = {Movement Tracker},
   url     = {https://github.com/newboldd/movement-tracker},
-  license = {CC-BY-NC-4.0}
+  license = {BUSL-1.1}
 }
 ```
 
@@ -170,5 +170,10 @@ A [CITATION.cff](CITATION.cff) file is included; GitHub shows a "Cite this repos
 
 ## License
 
-[CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) — free for academic and non-commercial use.
-If you intend to use this in a commercial product, please get in touch.
+[Business Source License 1.1](LICENSE) — see [LICENSE](LICENSE) for the full terms.
+
+- Additional Use Grant: free for non-commercial academic research and educational purposes without restriction.
+- Change Date: four years from the date each version is first published.
+- Change License: MIT.
+
+If you intend to use this in a commercial product before the Change Date, please get in touch.

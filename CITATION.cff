@@ -7,7 +7,7 @@ abstract: >
   Designed for clinical research on fine motor impairment.
 authors:
   - family-names: Newbold
-    given-names: David
+    given-names: Dillan
 repository-code: https://github.com/newboldd/movement-tracker
-license: CC-BY-NC-4.0
+license: BUSL-1.1
 type: software
