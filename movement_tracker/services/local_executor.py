@@ -248,6 +248,29 @@ class LocalExecutor:
 
         def on_complete(jid, returncode):
             logger.info(f"Worker {job_type} for {subject_name} exited with code {returncode}")
+            # On non-zero exit, surface the tail of the worker's log
+            # file to the main process log so first-time users see
+            # the actual ImportError / Traceback inline instead of
+            # having to hunt for the log file under <DATA_DIR>/dlc/
+            # .logs/.  The worker captures both stdout and stderr to
+            # this path.
+            if returncode != 0:
+                try:
+                    if log_path and os.path.exists(log_path):
+                        with open(log_path, "r", encoding="utf-8",
+                                   errors="replace") as _lf:
+                            tail = _lf.readlines()[-30:]
+                        if tail:
+                            logger.error(
+                                "Worker %s for %s rc=%d — last %d log "
+                                "lines from %s:\n%s",
+                                job_type, subject_name, returncode,
+                                len(tail), log_path,
+                                "".join(tail).rstrip(),
+                            )
+                except Exception:
+                    logger.exception(
+                        "Failed to read worker log tail at %s", log_path)
 
         registry.launch(
             job_id=job_id,
