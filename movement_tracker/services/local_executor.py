@@ -234,8 +234,18 @@ class LocalExecutor:
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
         python = sys.executable
+        # Invoke the worker by its absolute path rather than
+        # ``python -m movement_tracker.services.worker``.  On Windows
+        # portable Python the ``python3XX._pth`` file overrides
+        # ``sys.path``; ``-m`` then can't find the package even with
+        # cwd set and PYTHONPATH populated (PYTHONPATH is ignored
+        # under ``_pth``).  An absolute-path invocation bypasses
+        # that — worker.py itself prepends PROJECT_DIR to sys.path
+        # at module load so its internal ``from movement_tracker.*``
+        # imports work.
+        worker_py = str(Path(__file__).resolve().parent / "worker.py")
         cmd = [
-            python, "-m", "movement_tracker.services.worker",
+            python, worker_py,
             "--job-type", job_type,
             "--subject", subject_name,
             "--job-id", str(job_id),

@@ -14,6 +14,22 @@ import argparse
 import os
 import sys
 
+# Bootstrap sys.path so absolute-path invocations work on Windows
+# portable Python.  The embeddable Python distribution that
+# ``run.bat`` installs uses a ``python3XX._pth`` file that overrides
+# ``sys.path`` AND ignores ``PYTHONPATH`` — so neither cwd nor
+# PYTHONPATH-based imports of ``movement_tracker`` succeed when
+# this script is launched by absolute path.  Insert PROJECT_DIR
+# (the parent of the ``movement_tracker/`` package) explicitly so
+# the ``from movement_tracker.services.* import …`` calls below
+# resolve.  Idempotent: skipped when already on sys.path (e.g. when
+# the worker is invoked the old way via ``python -m
+# movement_tracker.services.worker`` from a non-portable Python).
+_PROJECT_DIR = os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))
+if _PROJECT_DIR not in sys.path:
+    sys.path.insert(0, _PROJECT_DIR)
+
 
 def _progress_printer(job_id: int):
     """Return a progress callback that prints to stdout for the monitor to parse."""
