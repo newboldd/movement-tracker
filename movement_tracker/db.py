@@ -60,6 +60,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     tmux_session TEXT,
     error_msg TEXT,
     epoch_info TEXT,
+    -- Mirror of the _migrate_add_job_params ALTER so fresh installs
+    -- (where job_queue/jobs don't exist when migrations run) still
+    -- end up with the column the rest of the app expects.
+    params_json TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     started_at TIMESTAMP,
     finished_at TIMESTAMP
@@ -95,6 +99,11 @@ CREATE TABLE IF NOT EXISTS job_queue (
     job_id              INTEGER,
     position            INTEGER NOT NULL,
     execution_target    TEXT NOT NULL DEFAULT 'remote',
+    -- Mirror of the _migrate_add_queue_progress + _migrate_add_job_
+    -- params ALTERs so fresh installs end up with these columns the
+    -- queue manager + cache rebuild expect.
+    progress_pct        REAL DEFAULT 0,
+    extra_params_json   TEXT,
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     started_at          TIMESTAMP,
     finished_at         TIMESTAMP,
