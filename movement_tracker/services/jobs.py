@@ -39,7 +39,21 @@ class JobRegistry:
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
         # Merge provided env with current environment
-        popen_env = os.environ.copy() if env is None else env
+        popen_env = os.environ.copy() if env is None else dict(env)
+
+        # Embeddable/portable Python on Windows ships with a
+        # ``python3XX._pth`` file that overrides ``sys.path`` and
+        # does NOT include ``.`` (cwd).  Passing ``cwd=PROJECT_DIR``
+        # to Popen sets the subprocess's cwd but the ``_pth`` still
+        # wins, so ``python -m movement_tracker.services.worker``
+        # fails with ``ModuleNotFoundError: No module named
+        # 'movement_tracker'``.  Prepending PROJECT_DIR to
+        # PYTHONPATH does work — Python honors PYTHONPATH even
+        # under a ``_pth`` override.
+        _existing_pp = popen_env.get("PYTHONPATH", "")
+        popen_env["PYTHONPATH"] = (str(PROJECT_DIR)
+                                    + (os.pathsep + _existing_pp
+                                        if _existing_pp else ""))
 
         proc = subprocess.Popen(
             cmd,
