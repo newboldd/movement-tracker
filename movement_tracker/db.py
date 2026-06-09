@@ -653,15 +653,28 @@ def _migrate_add_crop_box_model(conn):
 
 
 def _migrate_add_job_params(conn):
-    """Add params_json column to jobs, and extra_params_json to job_queue."""
-    columns = _get_table_columns(conn, "jobs")
-    if "params_json" not in columns:
-        conn.execute("ALTER TABLE jobs ADD COLUMN params_json TEXT")
-        logger.info("Added params_json column to jobs table")
-    columns_q = _get_table_columns(conn, "job_queue")
-    if "extra_params_json" not in columns_q:
-        conn.execute("ALTER TABLE job_queue ADD COLUMN extra_params_json TEXT")
-        logger.info("Added extra_params_json column to job_queue table")
+    """Add params_json column to jobs, and extra_params_json to job_queue.
+
+    Each ALTER is gated on the target table actually existing —
+    PRAGMA table_info on a missing table returns an empty list, so
+    the "column not in []" check would otherwise pass and the
+    ALTER would raise ``no such table``.  Caller should also gate
+    with ``"jobs" in tables`` for symmetry with the other
+    migrations, but this belt-and-suspenders avoids a crash if a
+    future caller forgets.
+    """
+    tables = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "jobs" in tables:
+        columns = _get_table_columns(conn, "jobs")
+        if "params_json" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN params_json TEXT")
+            logger.info("Added params_json column to jobs table")
+    if "job_queue" in tables:
+        columns_q = _get_table_columns(conn, "job_queue")
+        if "extra_params_json" not in columns_q:
+            conn.execute("ALTER TABLE job_queue ADD COLUMN extra_params_json TEXT")
+            logger.info("Added extra_params_json column to job_queue table")
 
 
 def _migrate_add_face_detections(conn):
@@ -753,8 +766,16 @@ def init_db():
     _migrate_add_crop_box_model(conn)
     conn.commit()
 
-    _migrate_add_job_params(conn)
-    conn.commit()
+    # ``_migrate_add_job_params`` ALTERs ``jobs`` + ``job_queue`` —
+    # on a fresh install those tables don't exist yet (SCHEMA below
+    # hasn't run), and ``_get_table_columns`` returns [] for a
+    # missing table so the "if not in columns" check passes and the
+    # ALTER blows up with "no such table: jobs".  Gate on the
+    # tables actually existing first, matching the pattern used by
+    # the other ``jobs`` / ``job_queue`` migrations above.
+    if "jobs" in tables or "job_queue" in tables:
+        _migrate_add_job_params(conn)
+        conn.commit()
 
     _migrate_add_remote_downloads(conn)
     conn.commit()
