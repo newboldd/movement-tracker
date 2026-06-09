@@ -611,12 +611,21 @@ def _migrate_add_crop_box_model(conn):
     and doesn't support altering constraints. We recreate the table.
     """
     try:
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(mp_crop_boxes)").fetchall()]
+        # ``conn.row_factory = dict_factory`` (see get_db) — rows are
+        # DICTS, not tuples.  Earlier versions of this migration used
+        # ``r[1]`` / ``r[0]`` integer indexing, which raised KeyError
+        # and got silently swallowed by the bare ``except`` below.
+        # On a fresh install that meant the model_name column never
+        # got added, and the next call to executescript(SCHEMA)
+        # tripped on the ``CREATE INDEX … ON mp_crop_boxes(model_name)``
+        # statement with "no such column: model_name".
+        cols = _get_table_columns(conn, "mp_crop_boxes")
         if cols and "model_name" in cols:
             return  # already migrated
 
         # Check if a previous failed migration left the renamed table
-        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        tables = {r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         has_old = "_mp_crop_boxes_old" in tables
         has_current = "mp_crop_boxes" in tables
 
