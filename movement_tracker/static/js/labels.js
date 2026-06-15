@@ -7915,9 +7915,11 @@ const manoViewer = (() => {
         showSkelErrors = _errorStages.size > 0;
         if (_errorStages.size > 0) _scheduleMPErrorRecompute();
 
-        // MediaPipe
-        _setLayerAvail('showMP2D', hasMP);
-        _setLayerAvail('showMP3D', hasMP3D);
+        // MediaPipe — row shows if either 2D or 3D has data; individual
+        // checkbox disabled state still tracks its own flag.
+        const hasMPAny = hasMP || hasMP3D;
+        _setLayerAvail('showMP2D', hasMP,   hasMPAny);
+        _setLayerAvail('showMP3D', hasMP3D, hasMPAny);
         if (!hasMP) {
             if ($('showMP2D')) { $('showMP2D').checked = false; showMP2D = false; }
         }
@@ -7955,9 +7957,10 @@ const manoViewer = (() => {
         }
 
         // Vision
-        _setLayerAvail('showVision2D', hasVision);
-        _setLayerAvail('showVision3D', hasVision3D);
-        _setLayerAvail('showVisionSkel', hasVision);
+        const hasVisionAny = hasVision || hasVision3D;
+        _setLayerAvail('showVision2D',  hasVision,   hasVisionAny);
+        _setLayerAvail('showVision3D',  hasVision3D, hasVisionAny);
+        _setLayerAvail('showVisionSkel', hasVision,  hasVisionAny);
         if (!hasVision) {
             if ($('showVision2D')) { $('showVision2D').checked = false; showVision2D = false; }
             if ($('showVision3D')) { $('showVision3D').checked = false; showVision3D = false; }
@@ -8024,8 +8027,9 @@ const manoViewer = (() => {
             return false;
         };
         const hasDLC3D = _hasFlat3D('dlc_3d_thumb') || _hasFlat3D('dlc_3d_index');
-        _setLayerAvail('showDLC', hasDLCData);
-        _setLayerAvail('showDLC3D', hasDLC3D);
+        const hasDLCAny = hasDLCData || hasDLC3D;
+        _setLayerAvail('showDLC',   hasDLCData, hasDLCAny);
+        _setLayerAvail('showDLC3D', hasDLC3D,   hasDLCAny);
         if (!hasDLCData) {
             if ($('showDLC')) { $('showDLC').checked = false; showDLC = false; }
         }
@@ -8092,15 +8096,18 @@ const manoViewer = (() => {
         _setModelToggleAvail('heatmap', hasHRnet3D);
     }
 
-    function _setLayerAvail(id, available) {
+    function _setLayerAvail(id, available, rowAvail) {
+        // ``rowAvail`` (when supplied) controls whether the WHOLE row is
+        // displayed; ``available`` only toggles this individual
+        // checkbox's disabled state.  Use rowAvail to keep a row visible
+        // whenever ANY of its cells has data — without it, paired calls
+        // like (showMP2D, hasMP) + (showMP3D, hasMP3D) end up hiding the
+        // row whenever the second flag is false even when the first is
+        // true (e.g. forward-MP-only on an uncalibrated subject).
         const el = $(id);
         if (!el) return;
         el.disabled = !available;
-        // Hide the whole row when this model isn't available instead
-        // of dimming it.  The sidebar uses a 4-column grid of
-        // [name, 2D, 3D, err] cells with no per-row wrapper, so we
-        // walk back from the 2D checkbox to the name span and forward
-        // through the next three cells, toggling each.
+        const rowVisible = (rowAvail === undefined) ? available : rowAvail;
         let name = el.previousElementSibling;
         while (name && name.tagName === 'INPUT') name = name.previousElementSibling;
         if (name && name.tagName === 'SPAN' && name.textContent.trim()) {
@@ -8110,12 +8117,12 @@ const manoViewer = (() => {
                 cells.push(n);
                 n = n.nextElementSibling;
             }
-            const disp = available ? '' : 'none';
+            const disp = rowVisible ? '' : 'none';
             for (const c of cells) c.style.display = disp;
         } else {
             // Fallback for rows whose structure doesn't match (e.g.
             // hidden master inputs): just toggle the input directly.
-            el.style.display = available ? '' : 'none';
+            el.style.display = rowVisible ? '' : 'none';
         }
     }
 
