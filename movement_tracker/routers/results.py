@@ -1537,6 +1537,58 @@ def _compute_fft(scores: np.ndarray, fps: float):
 
 _INDEX_TIP_JOINT_IDX = 8        # MediaPipe joint index for the index fingertip
 _INDEX_BODYPART_NAME = "index"  # DLC bodypart label for the same point
+# Palm anchor = wrist + the four MCP joints (index, middle, ring, pinky).
+# Per-frame mean gives a stable palm-center point used as the PCA origin.
+_PALM_JOINT_IDXS = (0, 5, 9, 13, 17)
+
+
+def _warp_pts_2d(pts: np.ndarray, H_stack: np.ndarray) -> np.ndarray:
+    """Apply per-frame homography H_stack[i] (3x3) to pts[i] (M, 2).
+
+    pts: (T, M, 2)   H_stack: (T, 3, 3).
+    Returns the warped (T, M, 2) — NaN frames or NaN H pass through.
+    """
+    T, M, _ = pts.shape
+    out = np.full_like(pts, np.nan)
+    if H_stack is None or H_stack.shape[0] == 0:
+        return out
+    K = min(T, H_stack.shape[0])
+    for i in range(K):
+        H = H_stack[i]
+        if not np.all(np.isfinite(H)):
+            continue
+        for j in range(M):
+            x, y = pts[i, j, 0], pts[i, j, 1]
+            if not (np.isfinite(x) and np.isfinite(y)):
+                continue
+            v = H @ np.array([x, y, 1.0], dtype=np.float64)
+            if abs(v[2]) < 1e-9:
+                continue
+            out[i, j, 0] = v[0] / v[2]
+            out[i, j, 1] = v[1] / v[2]
+    return out
+
+
+def _per_camera_palm_2d(subject_name: str, source: str):
+    """Subject-wide per-camera palm-joint arrays (N, 5, 2) for sources
+    that expose all 21 MP joints.  Returns (None, None) for sources
+    that only carry the index tip (e.g. DLC ``corrections``).
+    """
+    if source in ("mp_combined", "mediapipe", "mp_forward", "auto"):
+        prefer_combined = source in ("mp_combined", "auto")
+        mp = get_mediapipe_for_session(subject_name, prefer_combined=prefer_combined)
+        if mp is None:
+            return None, None
+        os_lm = mp.get("OS_landmarks")
+        od_lm = mp.get("OD_landmarks")
+        if os_lm is None:
+            return None, None
+        idxs = list(_PALM_JOINT_IDXS)
+        os_palm = np.asarray(os_lm[:, idxs, :], dtype=float)
+        od_palm = (np.asarray(od_lm[:, idxs, :], dtype=float)
+                    if od_lm is not None else None)
+        return os_palm, od_palm
+    return None, None
 
 
 def _per_camera_index_tip_2d(subject_name: str, source: str):
@@ -1593,18 +1645,31 @@ def _per_camera_index_tip_2d(subject_name: str, source: str):
 def _index_tip_per_trial(subject_name: str, source: str, trials: list[dict]):
     """Per-trial index-tip trajectories for the chosen source.
 
+    Two corrections are applied before returning:
+      * Camera-motion compensation (per-camera 2D sources only):
+        each frame's tip and palm 2D coords are warped through the
+        ``H_to_ref`` homography from the trial's
+        ``camera_trajectory.npz``, so the trajectory is anchored to
+        the trial's reference frame rather than the moving camera.
+      * Palm-centered origin: the per-trial temporal mean of the
+        palm-joint centroid (wrist + four MCPs) is subtracted from
+        the index-tip trace.  Removes gross hand translation so PCA
+        captures FINGERTIP motion, not where the hand sat in frame.
+
     Returns (positions_per_trial, is_3d, any_data) where
     ``positions_per_trial`` is a list parallel to ``trials``, each
     entry an ndarray of shape (n_frames, 2 or 3) with NaN for
-    missing frames.  ``any_data`` is True iff at least one trial
-    has a non-NaN row.
+    missing frames.
     """
-    # ── Skeleton fit sources: per-trial joints_3d arrays
+    # ── Skeleton fit sources: per-trial joints_3d arrays.
+    # No pixel-space trajectory to warp through, so motion correction
+    # is skipped; palm-mean subtraction still applies.
     if source in ("skeleton_v1", "skeleton_v2", "skeleton_v3"):
         from ..services.skeleton_data import _skeleton_dir
         root = _skeleton_dir(subject_name)
         per_trial = []
         any_data = False
+        palm_idxs = list(_PALM_JOINT_IDXS)
         for t in trials:
             n = int(t.get("frame_count", 0))
             arr = np.full((n, 3), np.nan)
@@ -1615,7 +1680,15 @@ def _index_tip_per_trial(subject_name: str, source: str, trials: list[dict]):
                     j3d = data.get("joints_3d")
                     if j3d is not None and j3d.shape[1] > _INDEX_TIP_JOINT_IDX:
                         m = min(len(j3d), n)
-                        arr[:m] = j3d[:m, _INDEX_TIP_JOINT_IDX, :]
+                        tip = j3d[:m, _INDEX_TIP_JOINT_IDX, :]
+                        palm = j3d[:m, palm_idxs, :]                 # (m, 5, 3)
+                        # Mean across palm joints per frame, then over time.
+                        with np.errstate(invalid="ignore"):
+                            palm_center = np.nanmean(palm, axis=1)   # (m, 3)
+                            palm_origin = np.nanmean(palm_center, axis=0)  # (3,)
+                        if np.all(np.isfinite(palm_origin)):
+                            tip = tip - palm_origin
+                        arr[:m] = tip
                         if np.any(~np.isnan(arr)):
                             any_data = True
                 except Exception:
@@ -1628,33 +1701,132 @@ def _index_tip_per_trial(subject_name: str, source: str, trials: list[dict]):
     if os_2d is None or len(os_2d) == 0:
         return None, False, False
 
-    is_3d = False
-    pos_subject = None
-    if od_2d is not None:
-        try:
-            from ..services.calibration import (
-                get_calibration_for_subject, triangulate_points,
-            )
-            calib = get_calibration_for_subject(subject_name)
-            if calib is not None:
-                pos_subject = triangulate_points(os_2d, od_2d, calib)
-                is_3d = True
-        except Exception:
-            pos_subject = None
-    if pos_subject is None:
-        pos_subject = os_2d.copy()
+    # Optional palm joints (None for DLC ``corrections``: no palm labels).
+    os_palm, od_palm = _per_camera_palm_2d(subject_name, source)
 
-    d = int(pos_subject.shape[1]) if pos_subject.ndim == 2 else (3 if is_3d else 2)
-    per_trial = []
+    # Resolve calibration once.
+    calib = None
+    try:
+        from ..services.calibration import get_calibration_for_subject
+        calib = get_calibration_for_subject(subject_name)
+    except Exception:
+        calib = None
+    triangulate = None
+    if calib is not None and od_2d is not None:
+        try:
+            from ..services.calibration import triangulate_points
+            triangulate = triangulate_points
+        except Exception:
+            triangulate = None
+    is_3d = triangulate is not None
+
+    # Camera trajectory loader (returns None for trials without one).
+    try:
+        from ..services.camera_motion import load_camera_trajectory
+    except Exception:
+        load_camera_trajectory = None
+
+    d = 3 if is_3d else 2
+    per_trial: list[np.ndarray] = []
     any_data = False
     for t in trials:
         s = int(t["start_frame"])
         n = int(t.get("frame_count", 0))
         arr = np.full((n, d), np.nan)
-        e = min(s + n, len(pos_subject))
+
+        # Slice tip + palm into the trial's local window.
+        os_tip_loc = np.full((n, 2), np.nan)
+        e = min(s + n, len(os_2d))
         m = max(0, e - s)
         if m > 0:
-            arr[:m] = pos_subject[s:s + m]
+            os_tip_loc[:m] = os_2d[s:s + m]
+        od_tip_loc = None
+        if od_2d is not None:
+            od_tip_loc = np.full((n, 2), np.nan)
+            e2 = min(s + n, len(od_2d))
+            m2 = max(0, e2 - s)
+            if m2 > 0:
+                od_tip_loc[:m2] = od_2d[s:s + m2]
+
+        os_palm_loc = None
+        od_palm_loc = None
+        n_palm = len(_PALM_JOINT_IDXS)
+        if os_palm is not None:
+            os_palm_loc = np.full((n, n_palm, 2), np.nan)
+            ep = min(s + n, len(os_palm))
+            mp = max(0, ep - s)
+            if mp > 0:
+                os_palm_loc[:mp] = os_palm[s:s + mp]
+        if od_palm is not None:
+            od_palm_loc = np.full((n, n_palm, 2), np.nan)
+            ep = min(s + n, len(od_palm))
+            mp = max(0, ep - s)
+            if mp > 0:
+                od_palm_loc[:mp] = od_palm[s:s + mp]
+
+        # Camera-motion correction: warp tip + palm via H_to_ref.
+        traj = None
+        if load_camera_trajectory is not None:
+            try:
+                traj = load_camera_trajectory(subject_name, t["trial_name"])
+            except Exception:
+                traj = None
+        if traj is not None:
+            ts = int(traj.get("start_frame", 0))
+            HL = traj["H_to_ref_L"]
+            HR = traj["H_to_ref_R"]
+            # The trial-local frame i maps to trajectory index s + i - ts.
+            tlen = HL.shape[0]
+            traj_idx = np.arange(n, dtype=int) + (s - ts)
+            ok = (traj_idx >= 0) & (traj_idx < tlen)
+            if ok.any():
+                idx_ok = traj_idx[ok]
+                # OS warp
+                HL_slice = HL[idx_ok]
+                os_tip_warped = _warp_pts_2d(
+                    os_tip_loc[ok].reshape(-1, 1, 2), HL_slice
+                ).reshape(-1, 2)
+                os_tip_loc[ok] = os_tip_warped
+                if os_palm_loc is not None:
+                    os_palm_loc[ok] = _warp_pts_2d(os_palm_loc[ok], HL_slice)
+                # OD warp
+                if od_tip_loc is not None:
+                    HR_slice = HR[idx_ok]
+                    od_tip_warped = _warp_pts_2d(
+                        od_tip_loc[ok].reshape(-1, 1, 2), HR_slice
+                    ).reshape(-1, 2)
+                    od_tip_loc[ok] = od_tip_warped
+                    if od_palm_loc is not None:
+                        od_palm_loc[ok] = _warp_pts_2d(od_palm_loc[ok], HR_slice)
+
+        # Reconstruct 3D (or fall back to OS 2D) for tip + palm.
+        if is_3d:
+            tip3d = triangulate(os_tip_loc, od_tip_loc, calib)        # (n, 3)
+            palm_center_3d = None
+            if os_palm_loc is not None and od_palm_loc is not None:
+                palm3d = np.full((n, n_palm, 3), np.nan)
+                for j in range(n_palm):
+                    palm3d[:, j, :] = triangulate(
+                        os_palm_loc[:, j, :], od_palm_loc[:, j, :], calib,
+                    )
+                with np.errstate(invalid="ignore"):
+                    palm_center_per_frame = np.nanmean(palm3d, axis=1)   # (n, 3)
+                    palm_center_3d = np.nanmean(palm_center_per_frame, axis=0)
+            if palm_center_3d is not None and np.all(np.isfinite(palm_center_3d)):
+                tip3d = tip3d - palm_center_3d
+            arr[:] = tip3d
+        else:
+            # 2D fallback: tip and palm in OS pixel coords.
+            palm_origin_2d = None
+            if os_palm_loc is not None:
+                with np.errstate(invalid="ignore"):
+                    palm_center_per_frame = np.nanmean(os_palm_loc, axis=1)  # (n, 2)
+                    palm_origin_2d = np.nanmean(palm_center_per_frame, axis=0)
+            tip2d = os_tip_loc.copy()
+            if palm_origin_2d is not None and np.all(np.isfinite(palm_origin_2d)):
+                tip2d = tip2d - palm_origin_2d
+            arr[:] = tip2d
+
         per_trial.append(arr)
         if np.any(~np.isnan(arr)):
             any_data = True
