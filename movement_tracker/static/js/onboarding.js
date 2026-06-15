@@ -1177,8 +1177,55 @@ const onboard = (() => {
             const step2Header = step2.querySelector('h3');
             if (step2Header) step2Header.textContent = 'Edit Subject';
 
-            // Skip camera mode step in edit mode (already set)
+            // In edit mode the trim step shows the same video — hide
+            // step 2's preview so we don't render the same player
+            // twice on the page.
+            const step2Preview = step2.querySelector('.trimmer');
+            if (step2Preview) step2Preview.style.display = 'none';
+
+            // Show step 3 (Camera Mode & Setup) pre-populated with
+            // the subject's saved values.  Skipping it entirely (as
+            // the previous edit-mode flow did) hid information the
+            // user wants to verify before adding new trials AND
+            // prevented ``cameraNames`` / ``selectedCameraSetup``
+            // from being populated, which addSegment() needs for
+            // multicam fanout.  Continue button is hidden — the
+            // saved setup IS the active setup.
+            document.getElementById('step3').style.display = 'block';
             document.getElementById('step3Num').classList.add('done');
+            const confirmCamBtn = document.getElementById('confirmCameraModeBtn');
+            if (confirmCamBtn) confirmCamBtn.style.display = 'none';
+            _preselectCameraMode(cameraMode);
+            selectCameraMode(cameraMode);   // shows the right sub-panel
+            await _loadCameraSetups();
+            // Pre-select the saved setup name in the matching
+            // dropdown and hydrate cameraNames / selectedCameraSetup
+            // so addSegment() works without the wizard's Continue
+            // click.  Best-effort: if the setup is missing from the
+            // dropdown (deleted / renamed), leave both null and the
+            // user will see "-- Select --".
+            const savedSetupName = detail.camera_name || null;
+            if (savedSetupName) {
+                const selId = cameraMode === 'multicam'
+                    ? 'multicamSetupSelect' : 'cameraSetupSelect';
+                const sel = document.getElementById(selId);
+                const match = sel && Array.from(sel.options).find(o =>
+                    o.dataset.name === savedSetupName);
+                if (sel && match) {
+                    sel.value = match.value;
+                    if (match.value.startsWith('preset:')) {
+                        selectedCameraSetup = { name: savedSetupName, preset: true };
+                        cameraNames = ['OS', 'OD'];
+                    } else if (match.value.startsWith('db:')) {
+                        try {
+                            const setupId = parseInt(match.value.replace('db:', ''));
+                            const setup = await API.get(`/api/camera-setups/${setupId}`);
+                            selectedCameraSetup = setup;
+                            cameraNames = setup.camera_names || (cameraMode === 'stereo' ? ['OS', 'OD'] : []);
+                        } catch (_) { /* leave null; trim still usable for single/stereo */ }
+                    }
+                }
+            }
 
             // Open the file browser
             await loadDirectory('');
