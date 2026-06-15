@@ -191,7 +191,7 @@ function renderDiagnosisGroups() {
                         <div style="display:flex;gap:2px;flex-wrap:nowrap;">
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="showDetail(${s.id})">Info</button>
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/preproc?subject=${s.id}'">Preproc</button>
-                            <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/labels?subject=${s.id}'">Labels</button>
+                            <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="sessionStorage.setItem('lastSubjectId','${s.id}');window.location.href='/labels?subject=${s.id}'">Track</button>
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;" onclick="openLabeling(${s.id})">DLC</button>
                             <button class="btn btn-sm" style="white-space:nowrap;padding:2px 5px;font-size:11px;${
                                 (s.stage === 'events_complete' || s.stage === 'complete')
