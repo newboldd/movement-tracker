@@ -1969,18 +1969,16 @@ const deid = (() => {
 
             if (spotDrag.handle === 'move') {
                 if (spot.spot_type !== 'face' && spot.motion_compensate && cameraTraj) {
-                    // Motion-compensated drag: convert the drag delta into
-                    // reference-frame coords so the spot stays locked to
-                    // the same scene point across the trial.  Compute the
-                    // displayed origin at drag start (warp of origRefX,
-                    // origRefY into start frame), add the delta, then warp
-                    // back into reference coords.
+                    // Motion-compensated drag: the offset stays constant,
+                    // so the new warped anchor must equal old warped anchor
+                    // + delta.  Warp the start anchor in, add the delta,
+                    // warp back out.
                     const side = _spotSide(spot);
                     const startDisp = _warpRefToFrame(
                         spotDrag.origRefX, spotDrag.origRefY,
                         side, spotDrag.startFrame);
-                    const newDispX = startDisp.x + dxImg - (spotDrag.origOffX || 0);
-                    const newDispY = startDisp.y + dyImg - (spotDrag.origOffY || 0);
+                    const newDispX = startDisp.x + dxImg;
+                    const newDispY = startDisp.y + dyImg;
                     const newRef = _warpFrameToRef(newDispX, newDispY, side, currentFrame);
                     spot.x = Math.round(newRef.x);
                     spot.y = Math.round(newRef.y);

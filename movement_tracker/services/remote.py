@@ -3811,6 +3811,14 @@ def remote_deidentify(
                         "SELECT * FROM blur_hand_settings WHERE subject_id = ? AND trial_idx = ?",
                         (subj_id, ti)).fetchone()
 
+                trajectory_name = None
+                if any(s.get("motion_compensate") for s in specs):
+                    _local_traj = (settings.dlc_path / subject_name /
+                                   "preproc" / trial["trial_name"] /
+                                   "camera_trajectory.npz")
+                    if _local_traj.exists():
+                        trajectory_name = f"camera_trajectory_{trial['trial_name']}.npz"
+
                 bundle["trials"].append({
                     "trial_idx": ti,
                     "trial_name": trial["trial_name"],
@@ -3821,6 +3829,7 @@ def remote_deidentify(
                     "blur_specs": specs,
                     "face_detections": faces,
                     "hand_settings": dict(hs) if hs else None,
+                    "trajectory_name": trajectory_name,
                 })
 
             # Write bundle to temp file
@@ -3935,6 +3944,25 @@ def remote_deidentify(
                     logfile.write("  Uploaded pose_prelabels.npz (force-fresh)\n")
                 else:
                     logfile.write("  Warning: pose_prelabels.npz upload failed\n")
+            # 3) Camera trajectories — one per trial that uses
+            # motion-compensated custom blur spots.  Always force-fresh.
+            for t in bundle["trials"]:
+                tname = t.get("trajectory_name")
+                if not tname:
+                    continue
+                _local = (dlc_dir / "preproc" / t["trial_name"]
+                          / "camera_trajectory.npz")
+                if not _local.exists():
+                    continue
+                proc = subprocess.run(
+                    _scp_base_args(cfg) + [str(_local),
+                        f"{cfg.host}:{remote_work}/{tname}"],
+                    capture_output=True, timeout=120,
+                )
+                if proc.returncode == 0:
+                    logfile.write(f"  Uploaded {tname}\n")
+                else:
+                    logfile.write(f"  Warning: {tname} upload failed\n")
             logfile.flush()
 
             _update_progress(25)
@@ -4812,6 +4840,10 @@ def main(bundle_path, work_dir, output_dir, status_file):
                              progress_pct=overall, current_trial=trial_name)
                 print(f"PROGRESS:{overall:.1f}", flush=True)
 
+            trajectory_name = trial.get("trajectory_name")
+            trajectory_path = (os.path.join(work_dir, trajectory_name)
+                               if trajectory_name else None)
+
             render_with_blur_specs(
                 input_path=video_path,
                 output_path=output_path,
@@ -4824,6 +4856,7 @@ def main(bundle_path, work_dir, output_dir, status_file):
                 progress_callback=progress_cb,
                 mp_data=mp_data,
                 pose_data=pose_data,
+                trajectory_path=trajectory_path,
             )
 
             print(f"Rendered {trial_name}", flush=True)

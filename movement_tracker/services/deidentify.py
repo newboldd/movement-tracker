@@ -844,7 +844,8 @@ def render_with_blur_specs(input_path: str, output_path: str,
                            frame_count: int | None = None,
                            progress_callback=None,
                            mp_data=None,
-                           pose_data=None) -> dict:
+                           pose_data=None,
+                           trajectory_path: str | None = None) -> dict:
     """Render a video with blur specs matching the frontend preview.
 
     Face-type spots track face detection centroids per frame.
@@ -888,10 +889,23 @@ def render_with_blur_specs(input_path: str, output_path: str,
 
     # Load camera trajectory once if any spec needs motion compensation
     trajectory = None
-    if subject_name and any(_s.get("motion_compensate") for _s in blur_specs):
+    if any(_s.get("motion_compensate") for _s in blur_specs):
         try:
-            from .camera_motion import load_camera_trajectory
-            trajectory = load_camera_trajectory(subject_name, Path(input_path).stem)
+            if trajectory_path and os.path.exists(trajectory_path):
+                # Explicit path (remote workers carry the npz alongside the
+                # video since they have no dlc_path to look it up in).
+                _d = np.load(trajectory_path)
+                trajectory = {
+                    "H_to_ref_L": _d["H_to_ref_L"],
+                    "H_to_ref_R": _d["H_to_ref_R"],
+                    "n_frames": int(_d["n_frames"]),
+                    "start_frame": int(_d["start_frame"]) if "start_frame" in _d.files else 0,
+                    "is_stereo": bool(_d["is_stereo"]) if "is_stereo" in _d.files else True,
+                    "reference_frame": int(_d["reference_frame"]),
+                }
+            elif subject_name:
+                from .camera_motion import load_camera_trajectory
+                trajectory = load_camera_trajectory(subject_name, Path(input_path).stem)
         except Exception as _e:
             logger.warning(f"Failed to load camera trajectory: {_e}")
             trajectory = None
