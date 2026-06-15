@@ -511,8 +511,22 @@ const onboard = (() => {
         const video = document.getElementById('trimVideo');
         video.src = `/api/video-tools/stream?path=${encodeURIComponent(selectedVideoPath)}`;
 
-        inPoint = null;
+        // Start with the full clip selected so the green trim bar
+        // is meaningful from the moment the user sees it.  Default
+        // in=0, out=video.duration once metadata arrives.
+        inPoint = 0;
         outPoint = null;
+        const _onMeta = () => {
+            outPoint = video.duration || 0;
+            updateTrimDisplay();
+        };
+        if (video.readyState >= 1 && video.duration) {
+            _onMeta();
+        } else {
+            video.addEventListener('loadedmetadata', _onMeta, { once: true });
+        }
+
+        _initTrimBar();
         updateTrimDisplay();
         autoAdvanceTrialLabel();
 
@@ -826,10 +840,143 @@ const onboard = (() => {
     }
 
     function updateTrimDisplay() {
-        document.getElementById('inTime').textContent =
-            inPoint !== null ? `In: ${formatTime(inPoint)}` : 'In: --';
-        document.getElementById('outTime').textContent =
-            outPoint !== null ? `Out: ${formatTime(outPoint)}` : 'Out: --';
+        const status = document.getElementById('trimBarStatus');
+        if (status) {
+            const _f = (t) => t == null ? '--' : formatTime(t);
+            const len = (inPoint != null && outPoint != null)
+                ? formatTime(Math.max(0, outPoint - inPoint))
+                : '--';
+            status.textContent =
+                `In: ${_f(inPoint)} · Out: ${_f(outPoint)} · Length: ${len}`;
+        }
+        _renderTrimBar();
+    }
+
+    // ── Trim bar (bright-green in/out handles + draggable fill) ──
+
+    function _renderTrimBar() {
+        const bar = document.getElementById('trimBar');
+        const video = document.getElementById('trimVideo');
+        if (!bar || !video) return;
+        const dur = video.duration || 0;
+        const fill = document.getElementById('trimBarFill');
+        const hIn = document.getElementById('trimHandleIn');
+        const hOut = document.getElementById('trimHandleOut');
+        if (!dur || !isFinite(dur)) {
+            if (fill) fill.style.display = 'none';
+            if (hIn) hIn.style.display = 'none';
+            if (hOut) hOut.style.display = 'none';
+            return;
+        }
+        const inPct = inPoint != null ? (inPoint / dur) * 100 : 0;
+        const outPct = outPoint != null ? (outPoint / dur) * 100 : 100;
+        if (fill) {
+            fill.style.left = inPct + '%';
+            fill.style.width = Math.max(0, outPct - inPct) + '%';
+            fill.style.display = (inPoint != null && outPoint != null) ? '' : 'none';
+        }
+        if (hIn) {
+            hIn.style.left = inPct + '%';
+            hIn.style.display = inPoint != null ? '' : 'none';
+        }
+        if (hOut) {
+            hOut.style.left = outPct + '%';
+            hOut.style.display = outPoint != null ? '' : 'none';
+        }
+    }
+
+    function _initTrimBar() {
+        const bar = document.getElementById('trimBar');
+        const video = document.getElementById('trimVideo');
+        if (!bar || !video || bar._wired) return;
+        bar._wired = true;
+
+        const _pxToTime = (clientX) => {
+            const rect = bar.getBoundingClientRect();
+            const x = Math.max(0, Math.min(clientX - rect.left, rect.width));
+            const dur = video.duration || 0;
+            return rect.width > 0 ? (x / rect.width) * dur : 0;
+        };
+
+        // ``mode`` ∈ {'in', 'out', 'fill', null}.  Captured on
+        // pointerdown, cleared on pointerup/cancel.
+        let mode = null;
+        let downIn = 0, downOut = 0, downX = 0;
+        const _fill = document.getElementById('trimBarFill');
+
+        bar.addEventListener('pointerdown', (e) => {
+            const dur = video.duration || 0;
+            if (!dur) return;
+            const handle = e.target.closest('.trim-bar-handle');
+            const onFill = e.target.classList.contains('trim-bar-fill');
+            if (handle) {
+                mode = handle.dataset.side;   // 'in' | 'out'
+            } else if (onFill && inPoint != null && outPoint != null) {
+                mode = 'fill';
+                downX = e.clientX;
+                downIn = inPoint;
+                downOut = outPoint;
+                if (_fill) _fill.classList.add('dragging');
+            } else {
+                // Empty-track click: snap the nearer handle to the
+                // click position and start dragging it.
+                const t = _pxToTime(e.clientX);
+                const dIn = inPoint != null ? Math.abs(t - inPoint) : Infinity;
+                const dOut = outPoint != null ? Math.abs(t - outPoint) : Infinity;
+                mode = (dIn <= dOut) ? 'in' : 'out';
+                _applyDrag(e.clientX);
+            }
+            try { bar.setPointerCapture(e.pointerId); } catch (_) {}
+            e.preventDefault();
+        });
+
+        bar.addEventListener('pointermove', (e) => {
+            if (!mode) return;
+            _applyDrag(e.clientX);
+        });
+
+        const _end = (e) => {
+            mode = null;
+            if (_fill) _fill.classList.remove('dragging');
+            try { bar.releasePointerCapture(e.pointerId); } catch (_) {}
+        };
+        bar.addEventListener('pointerup', _end);
+        bar.addEventListener('pointercancel', _end);
+
+        function _applyDrag(clientX) {
+            const dur = video.duration || 0;
+            if (!dur) return;
+            if (mode === 'in') {
+                const t = Math.min(
+                    Math.max(0, _pxToTime(clientX)),
+                    (outPoint != null ? outPoint - 0.04 : dur),
+                );
+                inPoint = t;
+                video.currentTime = t;
+            } else if (mode === 'out') {
+                const t = Math.max(
+                    Math.min(dur, _pxToTime(clientX)),
+                    (inPoint != null ? inPoint + 0.04 : 0),
+                );
+                outPoint = t;
+                video.currentTime = t;
+            } else if (mode === 'fill') {
+                const rect = bar.getBoundingClientRect();
+                if (!rect.width) return;
+                const dt = ((clientX - downX) / rect.width) * dur;
+                const span = downOut - downIn;
+                let newIn = downIn + dt;
+                let newOut = downOut + dt;
+                if (newIn < 0) { newIn = 0; newOut = span; }
+                if (newOut > dur) { newOut = dur; newIn = dur - span; }
+                inPoint = newIn;
+                outPoint = newOut;
+                // Spec: when dragging the highlighted region, the
+                // current frame matches the FIRST slider (in-point).
+                video.currentTime = newIn;
+            }
+            updateTrimDisplay();
+        }
     }
 
     function addSegment() {

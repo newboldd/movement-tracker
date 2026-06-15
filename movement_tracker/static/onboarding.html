@@ -47,6 +47,28 @@
             color: var(--text); font-size: 13px; }
         .time-display { font-family: monospace; font-size: 13px; color: var(--text-muted); min-width: 60px; }
 
+        /* Trim bar — bright-green in/out handles on a slim track below
+           the video player.  The fill is the active trim region; click
+           or drag the handles to move them; drag the fill to slide
+           both endpoints together. */
+        .trim-bar { position: relative; height: 16px; margin: 8px 0 4px;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid var(--border); border-radius: 4px;
+            user-select: none; touch-action: none; }
+        .trim-bar-fill { position: absolute; top: 0; bottom: 0;
+            background: #00d030; opacity: 0.55; cursor: grab; }
+        .trim-bar-fill.dragging { cursor: grabbing; opacity: 0.7; }
+        .trim-bar-handle { position: absolute; top: -3px; bottom: -3px;
+            width: 8px; margin-left: -4px;
+            background: #00ff44;
+            border: 2px solid #fff;
+            border-radius: 3px;
+            box-shadow: 0 0 4px rgba(0,0,0,0.4);
+            cursor: ew-resize; }
+        .trim-bar-handle:hover { background: #00ff66; }
+        .trim-bar-status { font-family: monospace; font-size: 12px;
+            color: var(--text-muted); margin-bottom: 4px; }
+
         /* Segment list */
         .segment-list { margin-top: 12px; }
         .segment-item { display: flex; align-items: center; gap: 12px; padding: 8px 12px;
@@ -358,13 +380,14 @@
             </div>
             <div class="trimmer">
                 <video id="trimVideo" controls preload="auto"></video>
+                <div class="trim-bar" id="trimBar"
+                     title="Drag the green handles to set the trim points.  Drag the highlighted region to move both at once.  Pressing I / O still works as a shortcut.">
+                    <div class="trim-bar-fill" id="trimBarFill" style="display:none;"></div>
+                    <div class="trim-bar-handle" id="trimHandleIn" data-side="in" style="display:none;"></div>
+                    <div class="trim-bar-handle" id="trimHandleOut" data-side="out" style="display:none;"></div>
+                </div>
+                <div class="trim-bar-status" id="trimBarStatus">In: -- · Out: -- · Length: --</div>
                 <div class="trim-controls">
-                    <button class="btn btn-sm" onclick="onboard.setInPoint(0)" title="Set in-point to beginning">&#9664;| In</button>
-                    <button class="btn btn-sm" onclick="onboard.setInPoint()" title="Set in-point at current time (I)">Set In (I)</button>
-                    <span class="time-display" id="inTime">In: --</span>
-                    <button class="btn btn-sm" onclick="onboard.setOutPoint()" title="Set out-point at current time (O)">Set Out (O)</button>
-                    <button class="btn btn-sm" onclick="onboard.setOutPoint(-1)" title="Set out-point to end">Out |&#9654;</button>
-                    <span class="time-display" id="outTime">Out: --</span>
                     <input type="text" id="trialLabel" list="trialLabelSuggestions"
                         placeholder="Trial name, e.g. L1"
                         style="width:100px;padding:4px 8px;background:var(--bg);border:1px solid var(--border);
@@ -402,6 +425,6 @@
 
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js?v=8"></script>
-    <script src="/static/js/onboarding.js?v=5"></script>
+    <script src="/static/js/onboarding.js?v=6"></script>
 </body>
 </html>
