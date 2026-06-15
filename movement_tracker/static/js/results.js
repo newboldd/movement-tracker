@@ -823,6 +823,8 @@ function _syncViewMode() {
     const pcaPlots  = document.getElementById('pcaPlots');
     if (distPlots) distPlots.style.display = mode === 'pca' ? 'none' : '';
     if (pcaPlots)  pcaPlots.style.display  = mode === 'pca' ? '' : 'none';
+    const pcaCompCtl = document.getElementById('pcaCompControls');
+    if (pcaCompCtl) pcaCompCtl.style.display = mode === 'pca' ? 'inline-flex' : 'none';
 
     // IMI row only relevant for distances
     const imiRefRow = document.getElementById('imiRefRow');
@@ -912,6 +914,12 @@ function renderFingertipPCA() {
     const overlayClose = document.getElementById('overlayClose')?.checked;
     const overlayPause = document.getElementById('overlayPause')?.checked;
 
+    // PC visibility — default-on when checkbox missing.
+    const _pcOn = ci => {
+        const el = document.getElementById(`showPC${ci + 1}`);
+        return el ? el.checked : true;
+    };
+
     const movByTrial = {};
     if (cachedMovements && cachedMovements.movements) {
         cachedMovements.movements.forEach(m => {
@@ -982,28 +990,52 @@ function renderFingertipPCA() {
 
         const timeDivIds = [];
         const nShow = Math.min(n_comp, 3);
+        // Index of the last VISIBLE PC's time-series row -- that row
+        // gets the X-axis labels and title.  Falls back to the last
+        // PC when nothing is visible (the row stays hidden anyway).
+        let lastVisibleCi = -1;
+        for (let ci = 0; ci < nShow; ci++) {
+            if (_pcOn(ci)) lastVisibleCi = ci;
+        }
+        if (lastVisibleCi < 0) lastVisibleCi = nShow - 1;
         for (let ci = 0; ci < nShow; ci++) {
             const divId = `pcaTime_${idx}_${ci}`;
             timeDivIds.push(divId);
             const div = document.createElement('div');
             div.id = divId;
-            div.style.cssText = `height:${ci === 0 ? 160 : 120}px;width:${plotW}px;`;
+            // Height shrinks per row; PC1 taller for emphasis.  Row
+            // is hidden entirely when its checkbox is off.
+            const visible = _pcOn(ci);
+            div.style.cssText = `height:${ci === 0 ? 160 : 120}px;width:${plotW}px;` +
+                                (visible ? '' : 'display:none;');
             wrapper.appendChild(div);
         }
         block.appendChild(wrapper);
 
-        // FFT plot (not scrolled)
-        const fftDivId = `pcaFft_${idx}`;
-        const fftDiv = document.createElement('div');
-        fftDiv.id = fftDivId;
-        fftDiv.style.cssText = 'height:180px;width:100%;margin-top:4px;';
-        block.appendChild(fftDiv);
+        // FFT row: one plot per PC at 1/3 width so all three fit on a
+        // single line.  Hidden PCs collapse their flex item.
+        const fftDivIds = [];
+        const fftRow = document.createElement('div');
+        fftRow.style.cssText = 'display:flex;gap:8px;margin-top:4px;';
+        for (let ci = 0; ci < nShow; ci++) {
+            const divId = `pcaFft_${idx}_${ci}`;
+            fftDivIds.push(divId);
+            const div = document.createElement('div');
+            div.id = divId;
+            const visible = _pcOn(ci);
+            // flex:1 splits available width evenly across visible PCs.
+            div.style.cssText = `flex:1;min-width:0;height:180px;` +
+                                (visible ? '' : 'display:none;');
+            fftRow.appendChild(div);
+        }
+        block.appendChild(fftRow);
 
         container.appendChild(block);
 
         // --- Render PC time-series ---
         for (let ci = 0; ci < nShow; ci++) {
-            const isLast = ci === nShow - 1;
+            if (!_pcOn(ci)) continue;
+            const isLast = ci === lastVisibleCi;
             const pct    = ev[ci] != null ? ` (${(ev[ci] * 100).toFixed(0)}%)` : '';
             Plotly.newPlot(timeDivIds[ci], [{
                 x: times, y: pc_scores[ci],
@@ -1049,22 +1081,27 @@ function renderFingertipPCA() {
             });
         });
 
-        // --- FFT plot ---
-        if (fft_freqs && fft_freqs.length > 0) {
-            const fftTraces = fft_power.slice(0, nShow).map((power, ci) => ({
-                x: fft_freqs, y: power,
+        // --- FFT plots (one per PC, all on one line) ---
+        for (let ci = 0; ci < nShow; ci++) {
+            if (!_pcOn(ci)) continue;
+            const divId = fftDivIds[ci];
+            if (!fft_freqs || fft_freqs.length === 0 || !fft_power?.[ci]) {
+                const d = document.getElementById(divId);
+                if (d) d.innerHTML = '<div class="results-no-data" style="font-size:12px;color:#999;padding:8px;">FFT not available</div>';
+                continue;
+            }
+            const pct = ev[ci] != null ? ` (${(ev[ci] * 100).toFixed(0)}%)` : '';
+            Plotly.newPlot(divId, [{
+                x: fft_freqs, y: fft_power[ci],
                 type: 'scatter', mode: 'lines',
-                line: { color: PC_COLORS[ci], width: 1.5,
-                        dash: ci === 0 ? 'solid' : ci === 1 ? 'dash' : 'dot' },
-                name: `PC${ci + 1}`,
+                line: { color: PC_COLORS[ci], width: 1.5 },
                 hovertemplate: `%{x:.1f} Hz<br>%{y:.2e}<extra>PC${ci + 1}</extra>`,
-            }));
-            Plotly.newPlot(fftDivId, fftTraces, {
-                margin: { t: 10, r: 20, b: 40, l: 60 },
+            }], {
+                margin: { t: 22, r: 10, b: 38, l: 55 },
                 height: 180,
                 plot_bgcolor: '#fff', paper_bgcolor: '#fff',
-                showlegend: nShow > 1,
-                legend: { orientation: 'h', y: -0.25, font: { size: 11 } },
+                showlegend: false,
+                title: { text: `PC${ci + 1}${pct}`, font: { size: 12 }, x: 0.5, y: 0.97 },
                 xaxis: {
                     title: { text: 'Frequency (Hz)', font: { size: 11 } },
                     showgrid: true, gridcolor: '#eee', zeroline: false,
@@ -1082,8 +1119,6 @@ function renderFingertipPCA() {
                     font: { size: 10, color: '#999' },
                     xanchor: 'left', yanchor: 'top', xshift: 3 }],
             }, { responsive: true, displayModeBar: false });
-        } else {
-            fftDiv.innerHTML = '<div class="results-no-data" style="font-size:12px;color:#999;padding:8px;">FFT not available</div>';
         }
     });
 }
@@ -5799,6 +5834,13 @@ document.querySelectorAll('input[name="imiRef"]').forEach(r => {
         // The compressed IMI strips between dist/vel also depend
         // on the peak/open/close reference — re-render them.
         if (cachedTraces) renderAllDistancePlots();
+    });
+});
+
+// PC visibility checkboxes (PCA view): re-render the PCA plots.
+document.querySelectorAll('#pcaCompControls input[data-pc]').forEach(cb => {
+    cb.addEventListener('change', () => {
+        if (_resultsViewMode === 'pca' && cachedPCA) renderFingertipPCA();
     });
 });
 

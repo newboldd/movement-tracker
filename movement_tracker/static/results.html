@@ -135,6 +135,24 @@
             <div id="distancePlots">
                 <div class="results-no-data">Select a subject to view distance traces</div>
             </div>
+            <div id="pcaCompControls" style="display:none;align-items:center;gap:10px;font-size:12px;color:var(--text-muted);padding:4px 0 6px;">
+                Components:
+                <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;">
+                    <input type="checkbox" id="showPC1" data-pc="0" checked>
+                    <span style="display:inline-block;width:10px;height:10px;background:#2196F3;border-radius:2px;"></span>
+                    PC1
+                </label>
+                <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;">
+                    <input type="checkbox" id="showPC2" data-pc="1" checked>
+                    <span style="display:inline-block;width:10px;height:10px;background:#FF5722;border-radius:2px;"></span>
+                    PC2
+                </label>
+                <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;">
+                    <input type="checkbox" id="showPC3" data-pc="2" checked>
+                    <span style="display:inline-block;width:10px;height:10px;background:#4CAF50;border-radius:2px;"></span>
+                    PC3
+                </label>
+            </div>
             <div id="pcaPlots" style="display:none;"></div>
 
             <!-- Interval × Parameter scatters — one plot per trial.
@@ -487,6 +505,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=132"></script>
+    <script src="/static/js/results.js?v=133"></script>
 </body>
 </html>
