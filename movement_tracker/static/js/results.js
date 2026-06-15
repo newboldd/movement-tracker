@@ -765,6 +765,8 @@ let cachedTraces = null;
 let cachedMovements = null;
 let cachedGroup = null;
 let cachedSequenceAssignments = null; // { byTrial: { trialIdx: {sequences, seq_r2} }, totalSeqs, totalR2 }
+let cachedPCA = null;
+let _resultsViewMode = 'distances';
 
 // Y-range slider state for the distance/velocity trace plots.
 //   _yFull[kind]       → [min, max] data extent (slider bounds)
@@ -812,6 +814,279 @@ const MOVEMENT_DOT_COLOR = '#2196F3';
 const TRIAL_COLORS = [
     '#2196F3', '#FF5722', '#4CAF50', '#9C27B0', '#FF9800', '#00BCD4',
 ];
+
+const PC_COLORS = ['#2196F3', '#FF5722', '#4CAF50'];
+
+function _syncViewMode() {
+    const mode = _resultsViewMode;
+    const distPlots = document.getElementById('distancePlots');
+    const pcaPlots  = document.getElementById('pcaPlots');
+    if (distPlots) distPlots.style.display = mode === 'pca' ? 'none' : '';
+    if (pcaPlots)  pcaPlots.style.display  = mode === 'pca' ? '' : 'none';
+
+    // IMI row only relevant for distances
+    const imiRefRow = document.getElementById('imiRefRow');
+    if (imiRefRow) imiRefRow.style.display = mode === 'pca' ? 'none' : '';
+
+    // Lock Y-axis and its preceding separator only make sense for distances
+    const lockYLabel = document.getElementById('lockYAxis')?.closest('label');
+    if (lockYLabel) {
+        lockYLabel.style.display = mode === 'pca' ? 'none' : '';
+        const sep = lockYLabel.previousElementSibling;
+        if (sep) sep.style.display = mode === 'pca' ? 'none' : '';
+    }
+
+    // Velocity-specific overlay labels (Peak Open/Close Vel + R²)
+    const velLabels = [
+        document.getElementById('overlayPeakOpenVel')?.closest('label'),
+        document.getElementById('overlayPeakCloseVel')?.closest('label'),
+        document.getElementById('overlayR2'),
+    ];
+    const velSep = document.getElementById('overlayPeakOpenVel')
+        ?.closest('label')?.previousElementSibling;
+    velLabels.forEach(el => { if (el) el.style.display = mode === 'pca' ? 'none' : ''; });
+    if (velSep) velSep.style.display = mode === 'pca' ? 'none' : '';
+
+    // Lower sections (IP scatters, movement params, shape overlay) not relevant in PCA mode
+    const ipCtl   = document.getElementById('ipPlotControls');
+    const ipPlots = document.getElementById('ipPlots');
+    const movCtl  = document.getElementById('distMovementControls');
+    const movPlots = document.getElementById('distMovementPlots');
+    const shapeSec = document.getElementById('shapeOverlaySection');
+
+    if (mode === 'pca') {
+        if (ipCtl)   ipCtl.style.display   = 'none';
+        if (ipPlots) ipPlots.innerHTML      = '';
+        if (movCtl)  movCtl.style.display   = 'none';
+        if (movPlots) movPlots.innerHTML    = '';
+        if (shapeSec) shapeSec.style.display = 'none';
+        if (currentSubjectId) {
+            if (!cachedPCA) {
+                loadFingertipPCA(currentSubjectId);
+            } else {
+                renderFingertipPCA();
+            }
+        }
+    } else {
+        // Restore distance view
+        if (cachedTraces && cachedTraces.trials && cachedTraces.trials.length > 0) {
+            renderAllDistancePlots();
+            if (cachedMovements && cachedMovements.movements && cachedMovements.movements.length > 0) {
+                if (ipCtl)  ipCtl.style.display  = '';
+                if (movCtl) movCtl.style.display  = '';
+                renderIntervalParamPlots();
+                renderDistMovementPlots();
+                renderShapeOverlayPlots();
+            }
+        }
+    }
+}
+
+async function loadFingertipPCA(subjectId) {
+    const container = document.getElementById('pcaPlots');
+    if (!container) return;
+    container.innerHTML = '<div class="results-no-data">Loading PCA…</div>';
+    const src = document.getElementById('resultsSourceSelect')?.value || 'auto';
+    try {
+        const data = await API.get(`/api/results/${subjectId}/fingertip_pca?source=${src}`);
+        cachedPCA = data;
+        renderFingertipPCA();
+    } catch (e) {
+        container.innerHTML = `<div class="results-no-data" style="color:#d32f2f;">PCA failed: ${e.message}</div>`;
+    }
+}
+
+function renderFingertipPCA() {
+    const container = document.getElementById('pcaPlots');
+    const data = cachedPCA;
+    if (!container) return;
+    container.innerHTML = '';
+
+    if (!data || !data.trials || data.trials.length === 0) {
+        container.innerHTML = '<div class="results-no-data">No MediaPipe data available for fingertip PCA</div>';
+        return;
+    }
+
+    const overlayPeak  = document.getElementById('overlayPeakDist')?.checked;
+    const overlayOpen  = document.getElementById('overlayOpen')?.checked;
+    const overlayClose = document.getElementById('overlayClose')?.checked;
+    const overlayPause = document.getElementById('overlayPause')?.checked;
+
+    const movByTrial = {};
+    if (cachedMovements && cachedMovements.movements) {
+        cachedMovements.movements.forEach(m => {
+            (movByTrial[m.trial_idx] ||= []).push(m);
+        });
+    }
+
+    const xScaleRaw = parseFloat(document.getElementById('xScaleSlider')?.value);
+    const secPerWidth = isFinite(xScaleRaw) ? (125 - xScaleRaw) : 75;
+    const containerW = container.clientWidth || container.parentElement?.clientWidth || 1200;
+
+    data.trials.forEach((trial, idx) => {
+        const { n_components: n_comp, times, pc_scores, explained_variance: ev,
+                fft_freqs, fft_power, fps = 60 } = trial;
+
+        // Trial reference from cachedTraces for event frame→time conversion
+        const trTrial   = cachedTraces?.trials?.[idx];
+        const trialStart = trTrial?.start_frame ?? 0;
+        const trialEnd   = trTrial?.end_frame   ?? Infinity;
+        const trialMovs  = movByTrial[idx] || [];
+
+        // Event times (seconds into trial)
+        const _evTimes = (field, movs) =>
+            movs.map(m => m[field]).filter(f => f != null)
+                .map(f => (f - trialStart) / fps);
+
+        const peakTimes  = overlayPeak  ? _evTimes('peak_frame',  trialMovs) : [];
+        const openTimes  = overlayOpen  ? _evTimes('open_frame',  trialMovs) : [];
+        const closeTimes = overlayClose ? _evTimes('close_frame', trialMovs) : [];
+        const pauseTimes = [];
+        if (overlayPause && _savedEvents?.pause && trTrial) {
+            _savedEvents.pause.forEach(gf => {
+                if (gf >= trialStart && gf <= trialEnd)
+                    pauseTimes.push((gf - trialStart) / fps);
+            });
+        }
+
+        const _evShapes = (ts, color) => ts.map(t => ({
+            type: 'line', xref: 'x', yref: 'paper',
+            x0: t, x1: t, y0: 0, y1: 1,
+            line: { color, width: 1, dash: 'dot' },
+        }));
+        const eventShapes = [
+            ..._evShapes(peakTimes,  '#FF9800'),
+            ..._evShapes(openTimes,  '#2ca02c'),
+            ..._evShapes(closeTimes, '#d62728'),
+            ..._evShapes(pauseTimes, '#cc66ff'),
+        ];
+
+        const totalSec = times.at(-1) || (times.length / fps);
+        const plotW = Math.max(containerW, (totalSec / secPerWidth) * containerW);
+
+        // --- Block container ---
+        const block = document.createElement('div');
+        block.style.marginBottom = '24px';
+
+        const header = document.createElement('div');
+        header.style.cssText = 'padding:2px 8px 6px;';
+        const trialPart = String(trial.name || '').split('_').pop();
+        const dimLabel  = data.is_3d ? '3D' : '2D';
+        header.innerHTML = `<span style="font-size:13px;font-weight:600;color:#666;">` +
+            `Trial: ${trialPart} — Index Fingertip ${dimLabel} PCA</span>`;
+        block.appendChild(header);
+
+        // Scrollable wrapper for time-series plots
+        const wrapper = document.createElement('div');
+        wrapper.style.cssText = 'overflow-x:auto;width:100%;';
+
+        const timeDivIds = [];
+        const nShow = Math.min(n_comp, 3);
+        for (let ci = 0; ci < nShow; ci++) {
+            const divId = `pcaTime_${idx}_${ci}`;
+            timeDivIds.push(divId);
+            const div = document.createElement('div');
+            div.id = divId;
+            div.style.cssText = `height:${ci === 0 ? 160 : 120}px;width:${plotW}px;`;
+            wrapper.appendChild(div);
+        }
+        block.appendChild(wrapper);
+
+        // FFT plot (not scrolled)
+        const fftDivId = `pcaFft_${idx}`;
+        const fftDiv = document.createElement('div');
+        fftDiv.id = fftDivId;
+        fftDiv.style.cssText = 'height:180px;width:100%;margin-top:4px;';
+        block.appendChild(fftDiv);
+
+        container.appendChild(block);
+
+        // --- Render PC time-series ---
+        for (let ci = 0; ci < nShow; ci++) {
+            const isLast = ci === nShow - 1;
+            const pct    = ev[ci] != null ? ` (${(ev[ci] * 100).toFixed(0)}%)` : '';
+            Plotly.newPlot(timeDivIds[ci], [{
+                x: times, y: pc_scores[ci],
+                type: 'scatter', mode: 'lines',
+                line: { color: PC_COLORS[ci], width: 1 },
+                connectgaps: false,
+                hovertemplate: `%{x:.3f}s<br>PC${ci + 1}: %{y:.2f}<extra></extra>`,
+            }], {
+                margin: { t: ci === 0 ? 8 : 0, r: 20, b: isLast ? 30 : 2, l: 60 },
+                plot_bgcolor: '#fff', paper_bgcolor: '#fff',
+                showlegend: false,
+                shapes: eventShapes,
+                xaxis: {
+                    showticklabels: isLast,
+                    title: isLast ? { text: 'Time (s)', font: { size: 11 } } : undefined,
+                    showgrid: true, gridcolor: '#eee', zeroline: false,
+                },
+                yaxis: {
+                    title: { text: `PC${ci + 1}${pct}`, font: { size: 11 } },
+                    showgrid: true, gridcolor: '#eee',
+                    zeroline: true, zerolinecolor: '#ccc',
+                },
+            }, { responsive: false, displayModeBar: false });
+        }
+
+        // Sync x-axis zoom across PC time plots within this trial
+        timeDivIds.forEach(srcId => {
+            const el = document.getElementById(srcId);
+            if (!el) return;
+            el.on('plotly_relayout', ev_r => {
+                const r0 = ev_r['xaxis.range[0]'], r1 = ev_r['xaxis.range[1]'];
+                timeDivIds.forEach(id => {
+                    if (id === srcId) return;
+                    const t = document.getElementById(id);
+                    if (t && t._fullLayout) {
+                        if (r0 != null && r1 != null) {
+                            Plotly.relayout(t, { 'xaxis.range': [r0, r1] });
+                        } else if (ev_r['xaxis.autorange']) {
+                            Plotly.relayout(t, { 'xaxis.autorange': true });
+                        }
+                    }
+                });
+            });
+        });
+
+        // --- FFT plot ---
+        if (fft_freqs && fft_freqs.length > 0) {
+            const fftTraces = fft_power.slice(0, nShow).map((power, ci) => ({
+                x: fft_freqs, y: power,
+                type: 'scatter', mode: 'lines',
+                line: { color: PC_COLORS[ci], width: 1.5,
+                        dash: ci === 0 ? 'solid' : ci === 1 ? 'dash' : 'dot' },
+                name: `PC${ci + 1}`,
+                hovertemplate: `%{x:.1f} Hz<br>%{y:.2e}<extra>PC${ci + 1}</extra>`,
+            }));
+            Plotly.newPlot(fftDivId, fftTraces, {
+                margin: { t: 10, r: 20, b: 40, l: 60 },
+                height: 180,
+                plot_bgcolor: '#fff', paper_bgcolor: '#fff',
+                showlegend: nShow > 1,
+                legend: { orientation: 'h', y: -0.25, font: { size: 11 } },
+                xaxis: {
+                    title: { text: 'Frequency (Hz)', font: { size: 11 } },
+                    showgrid: true, gridcolor: '#eee', zeroline: false,
+                },
+                yaxis: {
+                    title: { text: 'Power', font: { size: 11 } },
+                    type: 'log', showgrid: true, gridcolor: '#eee',
+                },
+                // Reference line at 10 Hz (physiologic tremor band)
+                shapes: [{ type: 'line', xref: 'x', yref: 'paper',
+                    x0: 10, x1: 10, y0: 0, y1: 1,
+                    line: { color: '#bbb', width: 1, dash: 'dash' } }],
+                annotations: [{ x: 10, y: 1, xref: 'x', yref: 'paper',
+                    text: '10 Hz', showarrow: false,
+                    font: { size: 10, color: '#999' },
+                    xanchor: 'left', yanchor: 'top', xshift: 3 }],
+            }, { responsive: true, displayModeBar: false });
+        } else {
+            fftDiv.innerHTML = '<div class="results-no-data" style="font-size:12px;color:#999;padding:8px;">FFT not available</div>';
+        }
+    });
+}
 
 
 // ── Subject loading ────────────────────────────────────────────
@@ -942,16 +1217,20 @@ async function loadDistances(subjectId) {
             return;
         }
 
-        renderAllDistancePlots();
+        if (_resultsViewMode !== 'pca') {
+            renderAllDistancePlots();
+        }
 
-        // Render movement parameters below distance traces
+        // Render movement parameters below distance traces (distances mode only)
         if (movData && movData.movements && movData.movements.length > 0) {
             cachedMovements = movData;
             cachedSequenceAssignments = null;
-            if (movControls) movControls.style.display = '';
-            renderIntervalParamPlots();
-            renderDistMovementPlots();
-            renderShapeOverlayPlots();
+            if (_resultsViewMode !== 'pca') {
+                if (movControls) movControls.style.display = '';
+                renderIntervalParamPlots();
+                renderDistMovementPlots();
+                renderShapeOverlayPlots();
+            }
         } else {
             if (movControls) movControls.style.display = 'none';
             if (movContainer) movContainer.innerHTML = '';
@@ -961,6 +1240,11 @@ async function loadDistances(subjectId) {
             if (ipC) ipC.innerHTML = '';
             const shapeSec = document.getElementById('shapeOverlaySection');
             if (shapeSec) shapeSec.style.display = 'none';
+        }
+
+        // PCA mode: load/render fingertip PCA (movements already cached above for events)
+        if (_resultsViewMode === 'pca') {
+            _syncViewMode();
         }
     } catch (e) {
         container.innerHTML = `<div class="results-no-data" style="color:#d32f2f;">${e.message}</div>`;
@@ -5524,10 +5808,11 @@ document.querySelectorAll('input[name="imiRef"]').forEach(r => {
  *  stay visible regardless of the lower-bar IMI checkbox state. */
 function _syncImiRefVisibility() { /* intentionally empty */ }
 
-// Overlay controls: re-render distance/velocity plots
+// Overlay controls: re-render distance/velocity plots or PCA plots
 ['overlayPeakDist', 'overlayOpen', 'overlayClose', 'overlayPause', 'overlayPeakOpenVel', 'overlayPeakCloseVel'].forEach(id => {
     document.getElementById(id).addEventListener('change', () => {
-        if (cachedTraces) renderAllDistancePlots();
+        if (_resultsViewMode === 'pca') { if (cachedPCA) renderFingertipPCA(); }
+        else if (cachedTraces) renderAllDistancePlots();
     });
 });
 
@@ -5537,7 +5822,8 @@ function _syncImiRefVisibility() { /* intentionally empty */ }
     const sl = document.getElementById('xScaleSlider');
     if (!sl) return;
     sl.addEventListener('input', () => {
-        if (cachedTraces) renderAllDistancePlots();
+        if (_resultsViewMode === 'pca') { if (cachedPCA) renderFingertipPCA(); }
+        else if (cachedTraces) renderAllDistancePlots();
     });
 })();
 
@@ -5702,12 +5988,18 @@ document.querySelectorAll('#groupSeqMetric input').forEach(r =>
 document.getElementById('resultsSourceSelect')?.addEventListener('change', () => {
     cachedTraces = null;
     cachedMovements = null;
+    cachedPCA = null;
     const activeTab = document.querySelector('.results-tab.active')?.id;
     if (activeTab === 'tabGroup') {
         loadGroup();
     } else if (currentSubjectId) {
         loadDistances(currentSubjectId);
     }
+});
+
+document.getElementById('resultsViewMode')?.addEventListener('change', e => {
+    _resultsViewMode = e.target.value;
+    _syncViewMode();
 });
 
 // ── Init ───────────────────────────────────────────────────────

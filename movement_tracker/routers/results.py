@@ -1499,6 +1499,260 @@ def get_movements(subject_id: int, source: str = Query("auto")) -> dict:
     }
 
 
+def _compute_pca_scores(pos: np.ndarray):
+    """PCA on (n_frames, d) position matrix with possible NaN rows.
+
+    Returns (scores, explained_variance_ratio) or None if too few valid frames.
+    scores: (n_frames, d) — NaN where input rows were NaN.
+    """
+    valid = ~np.any(np.isnan(pos), axis=1)
+    if np.sum(valid) < 10:
+        return None
+    X_v = pos[valid]
+    mean = X_v.mean(axis=0)
+    X_c = X_v - mean
+    _, S, Vt = np.linalg.svd(X_c, full_matrices=False)
+    ev_ratio = (S ** 2) / (S ** 2).sum()
+    scores = np.full(pos.shape, np.nan)
+    scores[valid] = (pos[valid] - mean) @ Vt.T
+    return scores, ev_ratio
+
+
+def _compute_fft(scores: np.ndarray, fps: float):
+    """Power spectrum of a 1-D trace (NaN-interpolated, Hanning windowed)."""
+    valid = ~np.isnan(scores)
+    if np.sum(valid) < 10:
+        return np.array([]), np.array([])
+    x_all = np.arange(len(scores), dtype=float)
+    signal = np.interp(x_all, x_all[valid], scores[valid])
+    signal -= signal.mean()
+    w = np.hanning(len(signal))
+    fft_vals = np.fft.rfft(signal * w)
+    freqs = np.fft.rfftfreq(len(signal), d=1.0 / fps)
+    power = (np.abs(fft_vals) ** 2) / len(signal)
+    cap = min(50.0, fps / 2.0)
+    mask = freqs <= cap
+    return freqs[mask], power[mask]
+
+
+_INDEX_TIP_JOINT_IDX = 8        # MediaPipe joint index for the index fingertip
+_INDEX_BODYPART_NAME = "index"  # DLC bodypart label for the same point
+
+
+def _per_camera_index_tip_2d(subject_name: str, source: str):
+    """Subject-wide per-camera 2D index-tip arrays for the chosen
+    source.
+
+    Returns (os_2d, od_2d) of shape (N_total_frames, 2) each (NaN
+    where missing), or (None, None) if the source has no data.
+    od_2d may be None for mono subjects.  Caller triangulates iff
+    od_2d is not None and a calibration is available.
+    """
+    if source in ("mp_combined", "mediapipe", "mp_forward", "auto"):
+        prefer_combined = source in ("mp_combined", "auto")
+        mp = get_mediapipe_for_session(subject_name, prefer_combined=prefer_combined)
+        if mp is None:
+            return None, None
+        os_lm = mp.get("OS_landmarks")
+        od_lm = mp.get("OD_landmarks")
+        if os_lm is None:
+            return None, None
+        os_2d = np.asarray(os_lm[:, _INDEX_TIP_JOINT_IDX, :], dtype=float)
+        od_2d = (np.asarray(od_lm[:, _INDEX_TIP_JOINT_IDX, :], dtype=float)
+                  if od_lm is not None else None)
+        return os_2d, od_2d
+
+    if source == "corrections":
+        from ..services.dlc_predictions import get_dlc_predictions_for_stage
+        preds = get_dlc_predictions_for_stage(subject_name, "corrections")
+        if not preds:
+            return None, None
+        cam_keys = [k for k, v in preds.items() if isinstance(v, dict)]
+        os_cam = "OS" if "OS" in cam_keys else (cam_keys[0] if cam_keys else None)
+        od_cam = "OD" if "OD" in cam_keys else (cam_keys[1] if len(cam_keys) > 1 else None)
+
+        def _bp_to_array(cam):
+            if not cam: return None
+            bp = preds.get(cam, {}).get(_INDEX_BODYPART_NAME)
+            if not bp: return None
+            arr = np.array(
+                [(p if p is not None else [np.nan, np.nan]) for p in bp],
+                dtype=float,
+            )
+            return arr
+
+        os_2d = _bp_to_array(os_cam)
+        if os_2d is None:
+            return None, None
+        od_2d = _bp_to_array(od_cam)
+        return os_2d, od_2d
+
+    return None, None
+
+
+def _index_tip_per_trial(subject_name: str, source: str, trials: list[dict]):
+    """Per-trial index-tip trajectories for the chosen source.
+
+    Returns (positions_per_trial, is_3d, any_data) where
+    ``positions_per_trial`` is a list parallel to ``trials``, each
+    entry an ndarray of shape (n_frames, 2 or 3) with NaN for
+    missing frames.  ``any_data`` is True iff at least one trial
+    has a non-NaN row.
+    """
+    # ── Skeleton fit sources: per-trial joints_3d arrays
+    if source in ("skeleton_v1", "skeleton_v2", "skeleton_v3"):
+        from ..services.skeleton_data import _skeleton_dir
+        root = _skeleton_dir(subject_name)
+        per_trial = []
+        any_data = False
+        for t in trials:
+            n = int(t.get("frame_count", 0))
+            arr = np.full((n, 3), np.nan)
+            path = root / t["trial_name"] / f"{source}.npz"
+            if path.exists():
+                try:
+                    data = np.load(str(path), allow_pickle=True)
+                    j3d = data.get("joints_3d")
+                    if j3d is not None and j3d.shape[1] > _INDEX_TIP_JOINT_IDX:
+                        m = min(len(j3d), n)
+                        arr[:m] = j3d[:m, _INDEX_TIP_JOINT_IDX, :]
+                        if np.any(~np.isnan(arr)):
+                            any_data = True
+                except Exception:
+                    pass
+            per_trial.append(arr)
+        return per_trial, True, any_data
+
+    # ── Per-camera 2D sources: triangulate to 3D iff calibration exists.
+    os_2d, od_2d = _per_camera_index_tip_2d(subject_name, source)
+    if os_2d is None or len(os_2d) == 0:
+        return None, False, False
+
+    is_3d = False
+    pos_subject = None
+    if od_2d is not None:
+        try:
+            from ..services.calibration import (
+                get_calibration_for_subject, triangulate_points,
+            )
+            calib = get_calibration_for_subject(subject_name)
+            if calib is not None:
+                pos_subject = triangulate_points(os_2d, od_2d, calib)
+                is_3d = True
+        except Exception:
+            pos_subject = None
+    if pos_subject is None:
+        pos_subject = os_2d.copy()
+
+    d = int(pos_subject.shape[1]) if pos_subject.ndim == 2 else (3 if is_3d else 2)
+    per_trial = []
+    any_data = False
+    for t in trials:
+        s = int(t["start_frame"])
+        n = int(t.get("frame_count", 0))
+        arr = np.full((n, d), np.nan)
+        e = min(s + n, len(pos_subject))
+        m = max(0, e - s)
+        if m > 0:
+            arr[:m] = pos_subject[s:s + m]
+        per_trial.append(arr)
+        if np.any(~np.isnan(arr)):
+            any_data = True
+    return per_trial, is_3d, any_data
+
+
+# Auto priority — matches the Individual Results distance loader so
+# the PCA view picks the same source as the distance trace by default.
+_PCA_AUTO_ORDER = (
+    "skeleton_v1", "corrections", "mp_combined", "mp_forward",
+    "skeleton_v2", "skeleton_v3",
+)
+
+
+@router.get("/{subject_id}/fingertip_pca")
+def get_fingertip_pca(subject_id: int, source: str = Query("auto")) -> dict:
+    """Index fingertip PCA trajectories (3D if a stereo calibration
+    is available, else 2D from the OS camera) per trial.
+
+    ``source`` accepts every value the Individual Results page
+    dropdown offers — ``auto`` (priority list below), ``corrections``
+    (DLC corrected), ``mp_combined``, ``mp_forward``,
+    ``skeleton_v1``, ``skeleton_v2`` — and falls back to
+    ``data_source: "none"`` only when NO source can produce any
+    finite index-tip rows for any trial.
+    """
+    subj = _get_subject(subject_id)
+    subject_name = subj["name"]
+
+    trials = build_trial_map(subject_name)
+    if not trials:
+        return {"trials": [], "subject": subject_name,
+                "data_source": "none", "is_3d": False}
+
+    candidates = (_PCA_AUTO_ORDER if source == "auto" else (source,))
+    per_trial = None
+    is_3d = False
+    source_used = "none"
+    for src in candidates:
+        result = _index_tip_per_trial(subject_name, src, trials)
+        if result is None:
+            continue
+        cand_per_trial, cand_is_3d, any_data = result
+        if any_data:
+            per_trial, is_3d, source_used = cand_per_trial, cand_is_3d, src
+            break
+
+    if per_trial is None:
+        return {"trials": [], "subject": subject_name,
+                "data_source": "none", "is_3d": False}
+
+    result_trials = []
+    for i, t in enumerate(trials):
+        pos = per_trial[i]
+        if pos is None or pos.size == 0:
+            continue
+        fps = float(t.get("fps", 60))
+
+        pca_result = _compute_pca_scores(pos)
+        if pca_result is None:
+            continue
+        pc_scores, ev_ratio = pca_result
+        n_comp = pc_scores.shape[1]
+
+        times = [round(i / fps, 4) for i in range(len(pos))]
+
+        fft_freqs: list[float] = []
+        fft_power: list[list[float]] = []
+        for ci in range(n_comp):
+            freqs, power = _compute_fft(pc_scores[:, ci], fps)
+            if len(freqs) and not fft_freqs:
+                fft_freqs = [round(float(f), 3) for f in freqs]
+            fft_power.append([round(float(p), 6) for p in power] if len(power) else [])
+
+        pc_scores_out = []
+        for ci in range(n_comp):
+            col = pc_scores[:, ci]
+            pc_scores_out.append([round(float(v), 3) if np.isfinite(v) else None for v in col])
+
+        result_trials.append({
+            "name": t["trial_name"],
+            "fps": fps,
+            "n_components": n_comp,
+            "times": times,
+            "pc_scores": pc_scores_out,
+            "explained_variance": [round(float(v), 4) for v in ev_ratio],
+            "fft_freqs": fft_freqs,
+            "fft_power": fft_power,
+        })
+
+    return {
+        "trials": result_trials,
+        "subject": subject_name,
+        "data_source": source_used,
+        "is_3d": is_3d,
+    }
+
+
 @router.post("/group/regenerate")
 def regenerate_group_cache(include_auto: bool = Query(False),
                              source: str = Query("auto"),

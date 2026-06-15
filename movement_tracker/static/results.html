@@ -61,6 +61,13 @@
         <!-- Distances Tab -->
         <div id="tabDistances" class="results-tab active">
             <div class="distance-controls" id="distanceControls">
+                <label style="display:flex;align-items:center;gap:6px;margin:0;">View:
+                    <select id="resultsViewMode" style="min-width:145px;">
+                        <option value="distances" selected>Distances / Velocity</option>
+                        <option value="pca">Fingertip PCA</option>
+                    </select>
+                </label>
+                <span id="viewModeSep" style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
                 <label title="Drag right to stretch the traces out (fewer seconds per screen width)."
                        style="display:flex;align-items:center;gap:6px;margin:0;">
                     X scale:
@@ -128,6 +135,7 @@
             <div id="distancePlots">
                 <div class="results-no-data">Select a subject to view distance traces</div>
             </div>
+            <div id="pcaPlots" style="display:none;"></div>
 
             <!-- Interval × Parameter scatters — one plot per trial.
                  X: any interval (O-O / P-P / C-C / P-O / C-O);
@@ -479,6 +487,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=131"></script>
+    <script src="/static/js/results.js?v=132"></script>
 </body>
 </html>
