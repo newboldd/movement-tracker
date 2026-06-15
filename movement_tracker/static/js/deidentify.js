@@ -120,6 +120,11 @@ const deid = (() => {
     // Spot drag state (for on-canvas resize/move)
     let spotDrag = null; // {spotId, handle, startMx, startMy, origSpot}
 
+    // Camera trajectory for motion-compensated custom blur spots.
+    // {available, H_to_ref_L, H_to_ref_R, start_frame, n_frames, is_stereo}
+    // where H_to_ref_* are arrays of flat 9-element row-major matrices.
+    let cameraTraj = null;
+
     // Timeline
     let tlCanvas, tlCtx;
     let tlDragSpot = null;    // spot being dragged (blur spot object, segment object, or 'newhand')
@@ -252,6 +257,7 @@ const deid = (() => {
                 offset_x: s.offset_x || 0, offset_y: s.offset_y || 0,
                 frame_start: s.frame_start, frame_end: s.frame_end,
                 side: s.side || 'full', shape: s.shape || 'oval',
+                motion_compensate: s.motion_compensate ? 1 : 0,
             }));
             const blob = new Blob(
                 [JSON.stringify({ trial_idx: currentTrialIdx, specs })],
@@ -489,10 +495,13 @@ const deid = (() => {
         {
             let fdResp = { faces: [] }, bsResp = { specs: [] };
             try {
-                [fdResp, bsResp] = await Promise.all([
+                let trajResp = null;
+                [fdResp, bsResp, trajResp] = await Promise.all([
                     API.get(`/api/deidentify/${subjectId}/face-detections?trial_idx=${idx}`),
                     API.get(`/api/deidentify/${subjectId}/blur-specs?trial_idx=${idx}`),
+                    API.get(`/api/deidentify/${subjectId}/camera-trajectory?trial_idx=${idx}`).catch(() => null),
                 ]);
+                _setCameraTrajectory(trajResp);
             } catch (e) {}
 
             faceDetections = fdResp.faces || [];
@@ -812,6 +821,84 @@ const deid = (() => {
     }
 
     // ── Get face spot position for current frame (tracks detection centroid) ──
+    function _setCameraTrajectory(resp) {
+        cameraTraj = (resp && resp.available) ? resp : null;
+        const tog = document.getElementById('motionCompToggle');
+        const status = document.getElementById('motionCompStatus');
+        const label = document.getElementById('motionCompLabel');
+        if (tog) tog.disabled = !cameraTraj;
+        if (label) label.style.opacity = cameraTraj ? '' : '0.5';
+        if (status) status.textContent = cameraTraj ? '' : 'no trajectory';
+        // Reflect current spec state (any custom spot with the flag set).
+        const anyOn = blurSpots.some(s => s.spot_type === 'custom' && s.motion_compensate);
+        if (tog) tog.checked = !!anyOn && !!cameraTraj;
+    }
+
+    // Multiply 3x3 (row-major flat 9) by a 2D point: (x, y, 1).
+    function _applyH(H, x, y) {
+        const w = H[6] * x + H[7] * y + H[8];
+        if (Math.abs(w) < 1e-9) return { x, y };
+        return {
+            x: (H[0] * x + H[1] * y + H[2]) / w,
+            y: (H[3] * x + H[4] * y + H[5]) / w,
+        };
+    }
+
+    function _inv3(H) {
+        const a = H[0], b = H[1], c = H[2];
+        const d = H[3], e = H[4], f = H[5];
+        const g = H[6], h = H[7], i = H[8];
+        const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+        if (Math.abs(det) < 1e-12) return null;
+        const inv = [
+             (e * i - f * h),
+            -(b * i - c * h),
+             (b * f - c * e),
+            -(d * i - f * g),
+             (a * i - c * g),
+            -(a * f - c * d),
+             (d * h - e * g),
+            -(a * h - b * g),
+             (a * e - b * d),
+        ];
+        for (let k = 0; k < 9; k++) inv[k] /= det;
+        return inv;
+    }
+
+    function _trajHForSide(side) {
+        if (!cameraTraj) return null;
+        return side === 'right' ? cameraTraj.H_to_ref_R : cameraTraj.H_to_ref_L;
+    }
+
+    function _trajIdxForFrame(frame) {
+        if (!cameraTraj) return -1;
+        const idx = frame - (cameraTraj.start_frame || 0);
+        if (idx < 0 || idx >= cameraTraj.n_frames) return -1;
+        return idx;
+    }
+
+    // Warp a stored (reference-frame) point into the current frame's coords.
+    function _warpRefToFrame(x, y, side, frame) {
+        const H_stack = _trajHForSide(side);
+        const idx = _trajIdxForFrame(frame);
+        if (!H_stack || idx < 0) return { x, y };
+        const Hinv = _inv3(H_stack[idx]);
+        if (!Hinv) return { x, y };
+        return _applyH(Hinv, x, y);
+    }
+
+    // Warp a current-frame display point back into reference coords.
+    function _warpFrameToRef(x, y, side, frame) {
+        const H_stack = _trajHForSide(side);
+        const idx = _trajIdxForFrame(frame);
+        if (!H_stack || idx < 0) return { x, y };
+        return _applyH(H_stack[idx], x, y);
+    }
+
+    function _spotSide(spot) {
+        return spot.side === 'right' ? 'right' : (spot.side === 'left' ? 'left' : 'full');
+    }
+
     function _getSpotPosition(spot) {
         // For face spots: track the nearest face detection centroid + offset
         if (spot.spot_type === 'face' && faceDetections.length > 0) {
@@ -837,6 +924,12 @@ const deid = (() => {
                     };
                 }
             }
+        }
+        // Custom spot with camera-motion compensation: warp the stored
+        // reference-frame coords into the current frame.
+        if (spot.spot_type !== 'face' && spot.motion_compensate && cameraTraj) {
+            const w = _warpRefToFrame(spot.x, spot.y, _spotSide(spot), currentFrame);
+            return { x: w.x + (spot.offset_x || 0), y: w.y + (spot.offset_y || 0) };
         }
         // Fallback: static position + offset
         return { x: spot.x + (spot.offset_x || 0), y: spot.y + (spot.offset_y || 0) };
@@ -1828,6 +1921,9 @@ const deid = (() => {
                         origH: spot.height || spot.radius * 2,
                         origOffX: spot.offset_x || 0,
                         origOffY: spot.offset_y || 0,
+                        origRefX: spot.x,
+                        origRefY: spot.y,
+                        startFrame: currentFrame,
                     };
                     selectedSpotId = hit.spotId;
                     renderSpotList();
@@ -1872,8 +1968,26 @@ const deid = (() => {
             if (!spot) return;
 
             if (spotDrag.handle === 'move') {
-                spot.offset_x = Math.round(spotDrag.origOffX + dxImg);
-                spot.offset_y = Math.round(spotDrag.origOffY + dyImg);
+                if (spot.spot_type !== 'face' && spot.motion_compensate && cameraTraj) {
+                    // Motion-compensated drag: convert the drag delta into
+                    // reference-frame coords so the spot stays locked to
+                    // the same scene point across the trial.  Compute the
+                    // displayed origin at drag start (warp of origRefX,
+                    // origRefY into start frame), add the delta, then warp
+                    // back into reference coords.
+                    const side = _spotSide(spot);
+                    const startDisp = _warpRefToFrame(
+                        spotDrag.origRefX, spotDrag.origRefY,
+                        side, spotDrag.startFrame);
+                    const newDispX = startDisp.x + dxImg - (spotDrag.origOffX || 0);
+                    const newDispY = startDisp.y + dyImg - (spotDrag.origOffY || 0);
+                    const newRef = _warpFrameToRef(newDispX, newDispY, side, currentFrame);
+                    spot.x = Math.round(newRef.x);
+                    spot.y = Math.round(newRef.y);
+                } else {
+                    spot.offset_x = Math.round(spotDrag.origOffX + dxImg);
+                    spot.offset_y = Math.round(spotDrag.origOffY + dyImg);
+                }
             } else if (spotDrag.handle === 'e') {
                 spot.width = Math.max(10, Math.round(spotDrag.origW + dxImg * 2));
             } else if (spotDrag.handle === 'w') {
@@ -2373,6 +2487,44 @@ const deid = (() => {
         }
     }
 
+    // Mass-set motion_compensate on all custom spots for the current trial.
+    // When turning ON: the stored (spot.x, spot.y) is now interpreted as a
+    // reference-frame coord, so we project the CURRENT displayed position
+    // back into ref coords so the spot doesn't visually jump on this frame.
+    // When turning OFF: snapshot the current displayed position into
+    // (spot.x, spot.y) so the spot stays where it is on this frame.
+    function toggleMotionCompensate(enabled) {
+        if (!cameraTraj && enabled) {
+            const tog = document.getElementById('motionCompToggle');
+            if (tog) tog.checked = false;
+            return;
+        }
+        _pushUndo();
+        for (const spot of blurSpots) {
+            if (spot.spot_type === 'face') continue;
+            const side = _spotSide(spot);
+            if (enabled && !spot.motion_compensate) {
+                // Current displayed pos == spot.x + offset (before warp).
+                // After enabling, displayed pos at this frame should match.
+                // So new ref = H_to_ref[frame] @ (spot.x, spot.y) (because
+                // currently no warp was applied).
+                const ref = _warpFrameToRef(spot.x, spot.y, side, currentFrame);
+                spot.x = Math.round(ref.x);
+                spot.y = Math.round(ref.y);
+                spot.motion_compensate = 1;
+            } else if (!enabled && spot.motion_compensate) {
+                // Snapshot the warped position on this frame as the new
+                // static x, y so the spot stays put after disabling.
+                const disp = _warpRefToFrame(spot.x, spot.y, side, currentFrame);
+                spot.x = Math.round(disp.x);
+                spot.y = Math.round(disp.y);
+                spot.motion_compensate = 0;
+            }
+        }
+        scheduleSave();
+        render();
+    }
+
     function toggleSpotShape() {
         // Staging mode -- flip the shape used for the next-created spot.
         if (addingCustom) {
@@ -2848,6 +3000,7 @@ const deid = (() => {
             frame_end: s.frame_end,
             side: s.side || 'full',
             shape: s.shape || 'oval',
+            motion_compensate: s.motion_compensate ? 1 : 0,
         }));
         const statusEl = document.getElementById('statusMsg');
         try {
@@ -3500,6 +3653,7 @@ const deid = (() => {
         toggleAddCustom,
         copyFromOtherCamera,
         toggleSpotShape,
+        toggleMotionCompensate,
         selectSpot,
         deleteSpot,
         updateSpotDim,

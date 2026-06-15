@@ -184,7 +184,8 @@ CREATE TABLE IF NOT EXISTS blur_specs (
     frame_start INTEGER NOT NULL,
     frame_end INTEGER NOT NULL,
     side TEXT DEFAULT 'full',
-    shape TEXT DEFAULT 'oval'
+    shape TEXT DEFAULT 'oval',
+    motion_compensate INTEGER DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_blur_specs ON blur_specs(subject_id, trial_idx);
@@ -550,6 +551,9 @@ def _migrate_add_blur_specs(conn):
         if "shape" not in columns:
             conn.execute("ALTER TABLE blur_specs ADD COLUMN shape TEXT DEFAULT 'oval'")
             logger.info("Added shape column to blur_specs")
+        if "motion_compensate" not in columns:
+            conn.execute("ALTER TABLE blur_specs ADD COLUMN motion_compensate INTEGER DEFAULT 0")
+            logger.info("Added motion_compensate column to blur_specs")
     if "blur_hand_settings" not in tables:
         conn.execute("""
             CREATE TABLE blur_hand_settings (

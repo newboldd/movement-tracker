@@ -214,6 +214,11 @@
                     <div id="spotShapeToggle" style="display:none;margin-top:6px;">
                         <button class="btn btn-sm" onclick="deid.toggleSpotShape()" id="shapeBtn" style="width:100%;font-size:11px;">Shape: Oval</button>
                     </div>
+                    <label id="motionCompLabel" style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-top:6px;" title="When on, custom spots stay locked to the scene as the camera moves; dragging on any frame updates the reference position.">
+                        <input type="checkbox" id="motionCompToggle" onchange="deid.toggleMotionCompensate(this.checked)">
+                        <span>Compensate camera motion</span>
+                        <span id="motionCompStatus" style="font-size:10px;color:var(--text-muted);margin-left:auto;"></span>
+                    </label>
                     <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">
                         Drag edges to resize, drag center to move. Use timeline for frame range.
                     </div>
@@ -352,6 +357,6 @@
 
     <script src="/static/js/api.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
-    <script src="/static/js/deidentify.js?v=57"></script>
+    <script src="/static/js/deidentify.js?v=58"></script>
 </body>
 </html>

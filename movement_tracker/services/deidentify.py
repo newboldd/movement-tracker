@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+from pathlib import Path
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
@@ -885,6 +886,16 @@ def render_with_blur_specs(input_path: str, output_path: str,
             _s["frame_start"] = max(_t_start, int(fs))
             _s["frame_end"] = min(_t_end, int(fe))
 
+    # Load camera trajectory once if any spec needs motion compensation
+    trajectory = None
+    if subject_name and any(_s.get("motion_compensate") for _s in blur_specs):
+        try:
+            from .camera_motion import load_camera_trajectory
+            trajectory = load_camera_trajectory(subject_name, Path(input_path).stem)
+        except Exception as _e:
+            logger.warning(f"Failed to load camera trajectory: {_e}")
+            trajectory = None
+
     # Index face detections by frame_num for fast lookup
     face_by_frame = {}
     for fd in (face_detections or []):
@@ -1411,7 +1422,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
                     right_specs = [s for s in active_specs if s.get("side", "right") == "right"]
 
                     if left_specs:
-                        left_mask = _build_blur_mask(left_specs, half_w, fh, global_frame, face_by_frame, "left")
+                        left_mask = _build_blur_mask(left_specs, half_w, fh, global_frame, face_by_frame, "left", trajectory)
                         hand_mask_l = np.zeros((fh, half_w), dtype=bool)
                         hand_active_l, active_radius_l, active_smooth_l = _hand_active_for_side("left")
                         if hand_active_l:
@@ -1425,7 +1436,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
                         left = _apply_blur_roi(left, left_mask, hand_mask_l)
 
                     if right_specs:
-                        right_mask = _build_blur_mask(right_specs, full_w - half_w, fh, global_frame, face_by_frame, "right")
+                        right_mask = _build_blur_mask(right_specs, full_w - half_w, fh, global_frame, face_by_frame, "right", trajectory)
                         hand_mask_r = np.zeros((fh, full_w - half_w), dtype=bool)
                         hand_active_r, active_radius_r, active_smooth_r = _hand_active_for_side("right")
                         if hand_active_r:
@@ -1440,7 +1451,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
 
                     frame = np.concatenate([left, right], axis=1)
                 else:
-                    blur_mask = _build_blur_mask(active_specs, full_w, fh, global_frame, face_by_frame, "full")
+                    blur_mask = _build_blur_mask(active_specs, full_w, fh, global_frame, face_by_frame, "full", trajectory)
                     hand_mask = np.zeros((fh, full_w), dtype=bool)
                     hand_active_f, active_radius_f, active_smooth_f = _hand_active_for_side("full")
                     if hand_active_f:
@@ -1558,11 +1569,39 @@ def _get_face_centroid(face_by_frame: dict, global_frame: int, side: str,
     return best
 
 
+def _warp_ref_to_frame(x: float, y: float, H_to_ref: np.ndarray) -> tuple[float, float]:
+    """Map a reference-frame point into the current frame via inv(H_to_ref)."""
+    try:
+        H_inv = np.linalg.inv(H_to_ref.astype(np.float64))
+    except np.linalg.LinAlgError:
+        return x, y
+    v = H_inv @ np.array([x, y, 1.0], dtype=np.float64)
+    if abs(v[2]) < 1e-9:
+        return x, y
+    return float(v[0] / v[2]), float(v[1] / v[2])
+
+
 def _build_blur_mask(specs: list[dict], w: int, h: int,
                      global_frame: int, face_by_frame: dict,
-                     side: str) -> np.ndarray:
-    """Build blur mask with ellipses, tracking face centroids for face spots."""
+                     side: str,
+                     trajectory: dict | None = None) -> np.ndarray:
+    """Build blur mask with ellipses, tracking face centroids for face spots.
+
+    When ``trajectory`` is provided AND a custom spec has
+    ``motion_compensate`` truthy, the stored (x, y) is interpreted as
+    a reference-frame position and warped into the current frame.
+    """
     mask = np.zeros((h, w), dtype=np.uint8)
+
+    # Pick the H stack for this side (left half uses L, right uses R,
+    # non-stereo "full" uses L as the only available trajectory).
+    H_stack = None
+    traj_idx = -1
+    if trajectory is not None:
+        H_stack = trajectory["H_to_ref_R"] if side == "right" else trajectory["H_to_ref_L"]
+        traj_idx = global_frame - int(trajectory.get("start_frame", 0))
+        if traj_idx < 0 or traj_idx >= len(H_stack):
+            H_stack = None
 
     for s in specs:
         # Determine center position
@@ -1578,8 +1617,14 @@ def _build_blur_mask(specs: list[dict], w: int, h: int,
             else:
                 cx, cy = cx + ox, cy + oy
         else:
-            # Custom spots: apply offset to stored position
-            cx, cy = cx + ox, cy + oy
+            # Custom spots: optionally warp through camera trajectory,
+            # then apply per-frame offset.
+            if H_stack is not None and s.get("motion_compensate"):
+                # Spots and trajectory are both in per-half pixel coords.
+                wx, wy = _warp_ref_to_frame(cx, cy, H_stack[traj_idx])
+                cx, cy = wx + ox, wy + oy
+            else:
+                cx, cy = cx + ox, cy + oy
 
         # Use width/height if available, otherwise fall back to radius
         # width/height are full dimensions; cv2.ellipse needs semi-axes (half)

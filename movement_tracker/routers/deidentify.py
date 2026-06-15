@@ -202,6 +202,12 @@ def get_frame(
         active_specs = [dict(s) for s in specs
                         if s["frame_start"] <= frame_num <= s["frame_end"]]
 
+        # Load camera trajectory if any active spot wants motion compensation
+        trajectory = None
+        if any(s.get("motion_compensate") for s in active_specs):
+            from ..services.camera_motion import load_camera_trajectory
+            trajectory = load_camera_trajectory(subject_name, trial["trial_name"])
+
         # Build face detection lookup
         face_by_frame = {}
         for fd in face_rows:
@@ -415,8 +421,8 @@ def get_frame(
                 right = frame[:, half_w:, :].copy()
                 left_specs = [s for s in active_specs if s.get("side", "left") == "left"]
                 right_specs = [s for s in active_specs if s.get("side", "right") == "right"]
-                left_mask = _build_blur_mask(left_specs, half_w, fh, frame_num, face_by_frame, "left")
-                right_mask = _build_blur_mask(right_specs, fw - half_w, fh, frame_num, face_by_frame, "right")
+                left_mask = _build_blur_mask(left_specs, half_w, fh, frame_num, face_by_frame, "left", trajectory)
+                right_mask = _build_blur_mask(right_specs, fw - half_w, fh, frame_num, face_by_frame, "right", trajectory)
                 hand_mask_l = np.zeros((fh, half_w), dtype=bool)
                 hand_mask_r = np.zeros((fh, fw - half_w), dtype=bool)
                 if hand_active:
@@ -454,7 +460,7 @@ def get_frame(
                 right = _apply_blur_roi(right, right_mask, hand_mask_r)
                 frame = np.concatenate([left, right], axis=1)
             else:
-                blur_mask = _build_blur_mask(active_specs, fw, fh, frame_num, face_by_frame, "full")
+                blur_mask = _build_blur_mask(active_specs, fw, fh, frame_num, face_by_frame, "full", trajectory)
                 hand_mask = np.zeros((fh, fw), dtype=bool)
                 if hand_active:
                     if mask_source == "hrnet":
@@ -620,6 +626,41 @@ def get_face_detections(subject_id: int, trial_idx: int = Query(...)) -> dict:
         faces.append({"frame": fn, "faces": by_frame[fn]})
 
     return {"faces": faces}
+
+
+# ── Camera trajectory (for motion-compensated blur spots) ─────────────────
+
+@router.get("/{subject_id}/camera-trajectory")
+def get_camera_trajectory(subject_id: int, trial_idx: int = Query(...)) -> dict:
+    """Return per-frame homographies H_to_ref for OS/OD halves.
+
+    When available, the client can warp custom blur spot positions
+    (stored in reference-frame coords) into the current frame.
+    """
+    from ..services.camera_motion import load_camera_trajectory
+
+    with get_db_ctx() as db:
+        subj = db.execute("SELECT name FROM subjects WHERE id = ?", (subject_id,)).fetchone()
+        if not subj:
+            raise HTTPException(404, "Subject not found")
+    name = subj["name"]
+    trials = build_trial_map(name)
+    if trial_idx < 0 or trial_idx >= len(trials):
+        raise HTTPException(400, "trial_idx out of range")
+    trial_stem = trials[trial_idx]["trial_name"]
+    traj = load_camera_trajectory(name, trial_stem)
+    if traj is None:
+        return {"available": False, "trial_stem": trial_stem}
+    return {
+        "available": True,
+        "trial_stem": trial_stem,
+        "reference_frame": int(traj["reference_frame"]),
+        "n_frames": int(traj["n_frames"]),
+        "is_stereo": bool(traj["is_stereo"]),
+        "start_frame": int(traj["start_frame"]),
+        "H_to_ref_L": traj["H_to_ref_L"].reshape(int(traj["n_frames"]), 9).tolist(),
+        "H_to_ref_R": traj["H_to_ref_R"].reshape(int(traj["n_frames"]), 9).tolist(),
+    }
 
 
 # ── Hand coverage (which frames have MP data) ─────────────────────────────
@@ -1017,14 +1058,16 @@ def save_blur_specs(subject_id: int, body: dict = Body(...)) -> dict:
             db.execute(
                 """INSERT INTO blur_specs
                    (subject_id, trial_idx, spot_type, x, y, radius, width, height,
-                    offset_x, offset_y, frame_start, frame_end, side, shape)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    offset_x, offset_y, frame_start, frame_end, side, shape,
+                    motion_compensate)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (subject_id, trial_idx, s.get("spot_type", "face"),
                  s["x"], s["y"], s["radius"],
                  s.get("width"), s.get("height"),
                  s.get("offset_x", 0), s.get("offset_y", 0),
                  s["frame_start"], s["frame_end"],
-                 s.get("side", "full"), s.get("shape", "oval")),
+                 s.get("side", "full"), s.get("shape", "oval"),
+                 1 if s.get("motion_compensate") else 0),
             )
 
     return {"status": "ok", "count": len(specs)}
