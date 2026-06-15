@@ -102,6 +102,19 @@
         }
         .sidebar-section:first-child { margin-top: 0; }
 
+        body.no-models-loaded #handDiagramLabelsWrap,
+        body.no-models-loaded #handDiagramPlotWrap,
+        body.no-models-loaded #manoFitStatus,
+        body.no-models-loaded #runStereoBtn,
+        body.no-models-loaded #fitHRnetBtn,
+        body.no-models-loaded #fitSkeletonBtn,
+        body.no-models-loaded #fitSkeletonLegacyBtn,
+        body.no-models-loaded #mpFilterBtn,
+        body.no-models-loaded .controls-bar,
+        body.no-models-loaded #distanceCanvas {
+            opacity: 0.35;
+            pointer-events: none;
+        }
     </style>
 </head>
 <body>
@@ -1306,7 +1319,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=411" type="module"></script>
+    <script src="/static/js/labels.js?v=412" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

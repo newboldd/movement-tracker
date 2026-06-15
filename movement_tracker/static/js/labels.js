@@ -7874,6 +7874,7 @@ const manoViewer = (() => {
         const _modelsNone = $('modelsNone');
         if (_modelsGrid) _modelsGrid.style.display = _hasAnyModel ? '' : 'none';
         if (_modelsNone) _modelsNone.style.display = _hasAnyModel ? 'none' : '';
+        document.body.classList.toggle('no-models-loaded', !_hasAnyModel);
 
         // Status label only -- model selection is NOT auto-picked.
         // Initial-load defaults are "all unchecked" and any user-set
