@@ -152,6 +152,12 @@
                     <span style="display:inline-block;width:10px;height:10px;background:#4CAF50;border-radius:2px;"></span>
                     PC3
                 </label>
+                <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
+                <label style="display:inline-flex;align-items:center;gap:6px;" title="Box-car smoothing window applied to each power spectrum before plotting.">
+                    FFT smooth
+                    <input type="range" id="pcaFftSmooth" min="0" max="40" step="1" value="0" style="width:120px;">
+                    <span id="pcaFftSmoothVal" style="font-size:11px;color:var(--text-muted);width:32px;">0</span>
+                </label>
             </div>
             <div id="pcaPlots" style="display:none;"></div>
 
@@ -505,6 +511,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=133"></script>
+    <script src="/static/js/results.js?v=134"></script>
 </body>
 </html>

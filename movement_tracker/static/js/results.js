@@ -920,6 +920,35 @@ function renderFingertipPCA() {
         return el ? el.checked : true;
     };
 
+    // FFT smoothing window (centered box-car, half-width = slider value).
+    const fftSmoothRaw = parseInt(document.getElementById('pcaFftSmooth')?.value, 10);
+    const fftSmoothHW = Number.isFinite(fftSmoothRaw) ? Math.max(0, fftSmoothRaw) : 0;
+    const _smoothFft = (power) => {
+        if (!power || fftSmoothHW === 0) return power;
+        const n = power.length;
+        const out = new Array(n);
+        let sum = 0, count = 0;
+        // Prime the leading window.
+        for (let i = 0; i <= fftSmoothHW && i < n; i++) {
+            const v = power[i];
+            if (v != null && Number.isFinite(v)) { sum += v; count++; }
+        }
+        for (let i = 0; i < n; i++) {
+            const lo = i - fftSmoothHW - 1;
+            const hi = i + fftSmoothHW;
+            if (lo >= 0) {
+                const v = power[lo];
+                if (v != null && Number.isFinite(v)) { sum -= v; count--; }
+            }
+            if (hi < n && i > 0) {
+                const v = power[hi];
+                if (v != null && Number.isFinite(v)) { sum += v; count++; }
+            }
+            out[i] = count > 0 ? sum / count : null;
+        }
+        return out;
+    };
+
     const movByTrial = {};
     if (cachedMovements && cachedMovements.movements) {
         cachedMovements.movements.forEach(m => {
@@ -1092,7 +1121,7 @@ function renderFingertipPCA() {
             }
             const pct = ev[ci] != null ? ` (${(ev[ci] * 100).toFixed(0)}%)` : '';
             Plotly.newPlot(divId, [{
-                x: fft_freqs, y: fft_power[ci],
+                x: fft_freqs, y: _smoothFft(fft_power[ci]),
                 type: 'scatter', mode: 'lines',
                 line: { color: PC_COLORS[ci], width: 1.5 },
                 hovertemplate: `%{x:.1f} Hz<br>%{y:.2e}<extra>PC${ci + 1}</extra>`,
@@ -5843,6 +5872,19 @@ document.querySelectorAll('#pcaCompControls input[data-pc]').forEach(cb => {
         if (_resultsViewMode === 'pca' && cachedPCA) renderFingertipPCA();
     });
 });
+
+// FFT smoothing slider: update the readout live, re-render on commit.
+(() => {
+    const slider = document.getElementById('pcaFftSmooth');
+    const readout = document.getElementById('pcaFftSmoothVal');
+    if (!slider) return;
+    slider.addEventListener('input', () => {
+        if (readout) readout.textContent = slider.value;
+    });
+    slider.addEventListener('change', () => {
+        if (_resultsViewMode === 'pca' && cachedPCA) renderFingertipPCA();
+    });
+})();
 
 /** No-op kept for the existing call site — the IMI reference
  *  radios now live in the top overlay bar and also drive the
