@@ -218,6 +218,14 @@ const onboard = (() => {
 
         // Scroll to step 2
         document.getElementById('step2').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+        // In edit mode the subject's name + camera setup are already
+        // saved — the Rename input above is a courtesy, not a gate.
+        // Open the trim step directly so the user can add new trials
+        // to this existing subject without clicking Rename first.
+        if (editMode) {
+            _showTrimStep();
+        }
     }
 
     // ── Step 2: Confirm subject name ─────────────────────────
