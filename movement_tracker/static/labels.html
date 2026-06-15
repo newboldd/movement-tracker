@@ -155,7 +155,19 @@
 
             <!-- Models -->
             <div class="sidebar-section" style="margin-bottom:0;">Models</div>
-            <div style="display:grid;grid-template-columns:1fr 24px 24px 24px;gap:2px 4px;align-items:center;font-size:12px;margin-bottom:4px;margin-top:0;">
+            <!-- "No models yet" placeholder — labels.js toggles this and
+                 the grid below based on whether any 2D / 3D model has
+                 produced data for the current trial. -->
+            <div id="modelsNone" style="display:none;font-size:11px;color:var(--text-muted);
+                 line-height:1.45;padding:6px 4px;margin-bottom:4px;
+                 background:rgba(255,255,255,0.03);border:1px dashed var(--border);
+                 border-radius:4px;">
+                No model output for this trial yet.<br>
+                Run a 2D pose detector (<strong>MediaPipe</strong> /
+                <strong>HRnet</strong>) or train <strong>DeepLabCut</strong>
+                from the <a href="/remote">Jobs page</a> to generate labels.
+            </div>
+            <div id="modelsGrid" style="display:grid;grid-template-columns:1fr 24px 24px 24px;gap:2px 4px;align-items:center;font-size:12px;margin-bottom:4px;margin-top:0;">
                 <span></span>
                 <span style="font-size:9px;color:var(--text-muted);text-align:center;">2D</span>
                 <span style="font-size:9px;color:var(--text-muted);text-align:center;">3D</span>
@@ -1294,7 +1306,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=410" type="module"></script>
+    <script src="/static/js/labels.js?v=411" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

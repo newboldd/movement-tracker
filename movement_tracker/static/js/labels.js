@@ -7860,6 +7860,20 @@ const manoViewer = (() => {
         const hasVision = trialData && trialData.has_vision;
         const hasVision3D = trialData && trialData.has_vision_3d;
         const hasDLC = trialData && trialData.has_dlc;
+        const hasHrnet = !!(trialData && (trialData.has_hrnet
+                                            || trialData.hrnet_peaks_3d));
+        const hasSkelLegacy = !!(trialData && trialData.has_skel_legacy);
+        // If NO 2D / 3D model has produced data for this trial yet,
+        // hide the grid of model rows + 2D/3D/Err checkboxes and
+        // show a placeholder telling the user to run MediaPipe /
+        // HRnet / DeepLabCut from the Jobs page.  Any one signal
+        // turns the grid back on.
+        const _hasAnyModel = !!(hasMP || hasDLC || hasVision || hasFit
+                                  || hasV2 || hasSkelLegacy || hasHrnet);
+        const _modelsGrid = $('modelsGrid');
+        const _modelsNone = $('modelsNone');
+        if (_modelsGrid) _modelsGrid.style.display = _hasAnyModel ? '' : 'none';
+        if (_modelsNone) _modelsNone.style.display = _hasAnyModel ? 'none' : '';
 
         // Status label only -- model selection is NOT auto-picked.
         // Initial-load defaults are "all unchecked" and any user-set
