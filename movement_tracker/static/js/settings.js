@@ -407,5 +407,70 @@ async function applyUpdate() {
     }
 }
 
+// ── Data directory ─────────────────────────────────────────────────
+async function loadDataDir() {
+    const input = document.getElementById('dataDirInput');
+    const help = document.getElementById('dataDirHelp');
+    if (!input) return;
+    try {
+        const r = await API.get('/api/settings/data-dir');
+        input.value = r.current || '';
+        const source = r.source === 'env'
+            ? 'Currently set via MT_DATA_DIR environment variable (overrides this setting).'
+            : r.source === 'bootstrap'
+              ? `Persisted via ${r.bootstrap_file}.`
+              : 'Default (project directory) — no override saved yet.';
+        if (help) help.textContent = source;
+    } catch (e) {
+        if (help) help.textContent = `Failed to read: ${e.message}`;
+    }
+}
+
+async function saveDataDir() {
+    const input = document.getElementById('dataDirInput');
+    const btn = document.getElementById('dataDirSaveBtn');
+    const status = document.getElementById('dataDirStatus');
+    if (!input) return;
+    const path = (input.value || '').trim();
+    if (!path) {
+        status.textContent = 'Enter a path.';
+        status.style.color = 'var(--red, #d32f2f)';
+        return;
+    }
+    if (!confirm(`Switch the data directory to:\n\n${path}\n\nThe app will restart. Continue?`)) return;
+    btn.disabled = true;
+    status.style.color = 'var(--text-muted)';
+    status.textContent = 'Saving…';
+    try {
+        await API.post('/api/settings/data-dir', { path });
+        status.style.color = 'var(--green, #4caf50)';
+        status.textContent = 'Saved. Restarting — refresh in a few seconds.';
+        // Poll for the server to come back up.
+        const start = Date.now();
+        const poll = async () => {
+            if (Date.now() - start > 30000) {
+                status.style.color = 'var(--red, #d32f2f)';
+                status.textContent = 'Server did not return within 30s. Check the terminal.';
+                btn.disabled = false;
+                return;
+            }
+            try {
+                const r = await fetch('/api/settings/data-dir', { cache: 'no-store' });
+                if (r.ok) {
+                    location.reload();
+                    return;
+                }
+            } catch {}
+            setTimeout(poll, 750);
+        };
+        setTimeout(poll, 1500);
+    } catch (e) {
+        status.style.color = 'var(--red, #d32f2f)';
+        status.textContent = `Failed: ${e.message}`;
+        btn.disabled = false;
+    }
+}
+
 // Load on page ready
 loadSettings();
+loadDataDir();

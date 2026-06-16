@@ -206,6 +206,20 @@
         <div id="statusBanner" style="margin-bottom:16px;"></div>
 
         <div class="card settings-form">
+            <!-- Data Directory — top of the page; saving restarts the app -->
+            <div class="form-section" id="dataDirSection">
+                <h3>Data Directory</h3>
+                <div class="form-row">
+                    <label>Path (database, settings.json, dlc/, calibration/ all live here)</label>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <input type="text" id="dataDirInput" placeholder="/path/to/data/movement-tracker" style="flex:1;">
+                        <button class="btn btn-primary" id="dataDirSaveBtn" type="button" onclick="saveDataDir()">Save &amp; restart</button>
+                    </div>
+                    <div class="help" id="dataDirHelp"></div>
+                    <div id="dataDirStatus" style="font-size:12px;margin-top:6px;"></div>
+                </div>
+            </div>
+
             <!-- Updates -->
             <div class="form-section">
                 <h3>Updates</h3>
@@ -600,6 +614,6 @@
 
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/settings.js"></script>
+    <script src="/static/js/settings.js?v=2"></script>
 </body>
 </html>

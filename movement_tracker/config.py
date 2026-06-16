@@ -14,10 +14,31 @@ logger = logging.getLogger(__name__)
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = APP_DIR.parent
 
+# Bootstrap file used by the Settings page to persist a user-chosen
+# data directory across restarts.  Lives under the user's home so the
+# app can find it BEFORE we know DATA_DIR.  Env var still wins.
+BOOTSTRAP_DATA_DIR_FILE = Path.home() / ".movement_tracker" / "data_dir"
+
+
+def _read_bootstrap_data_dir() -> Optional[str]:
+    try:
+        if BOOTSTRAP_DATA_DIR_FILE.is_file():
+            val = BOOTSTRAP_DATA_DIR_FILE.read_text().strip()
+            return val or None
+    except OSError:
+        pass
+    return None
+
+
 # DATA_DIR: where videos, dlc projects, and database live.
 # Defaults to PROJECT_DIR but can be overridden via MT_DATA_DIR env var
-# to keep data separate from code (recommended).
-DATA_DIR = Path(os.environ.get("MT_DATA_DIR", str(PROJECT_DIR)))
+# (highest priority) or the bootstrap file written by Settings → Data
+# Directory.
+DATA_DIR = Path(
+    os.environ.get("MT_DATA_DIR")
+    or _read_bootstrap_data_dir()
+    or str(PROJECT_DIR)
+)
 
 DB_PATH = DATA_DIR / "dlc_app.db"
 SETTINGS_PATH = DATA_DIR / "settings.json"

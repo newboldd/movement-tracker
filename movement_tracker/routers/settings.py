@@ -1,11 +1,17 @@
 """Settings API: read, update, and status check."""
 
+import os
+import sys
+import threading
+import logging
 from pathlib import Path
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Dict, Optional
 
-from ..config import get_settings
+from ..config import get_settings, DATA_DIR, BOOTSTRAP_DATA_DIR_FILE
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -110,6 +116,89 @@ def validate_calibration(req: CalibrationValidate) -> dict:
         return {"valid": True, "error": None}
     except Exception as e:
         return {"valid": False, "error": str(e)}
+
+
+# ── Data directory (DB lives here) ─────────────────────────────────────────
+
+class DataDirReq(BaseModel):
+    path: str
+
+
+@router.get("/data-dir")
+def get_data_dir() -> dict:
+    """Return the current data dir + the override source.
+
+    Source is ``env`` (MT_DATA_DIR set), ``bootstrap`` (saved here),
+    or ``default`` (PROJECT_DIR fallback).
+    """
+    env_val = os.environ.get("MT_DATA_DIR") or None
+    boot_val = None
+    if BOOTSTRAP_DATA_DIR_FILE.is_file():
+        try:
+            boot_val = BOOTSTRAP_DATA_DIR_FILE.read_text().strip() or None
+        except OSError:
+            boot_val = None
+    if env_val:
+        source = "env"
+    elif boot_val:
+        source = "bootstrap"
+    else:
+        source = "default"
+    return {
+        "current": str(DATA_DIR),
+        "bootstrap": boot_val,
+        "env_override": env_val,
+        "source": source,
+        "bootstrap_file": str(BOOTSTRAP_DATA_DIR_FILE),
+    }
+
+
+@router.post("/data-dir")
+def set_data_dir(req: DataDirReq) -> dict:
+    """Persist a new data directory and re-launch the server.
+
+    The path is written to ``~/.movement_tracker/data_dir``; on the
+    next process start ``config.DATA_DIR`` resolves to it.  We
+    immediately re-exec the running interpreter so the DB switches
+    to the new path -- a hot rebind would leave dozens of modules
+    holding the OLD DATA_DIR through their top-level imports.
+    """
+    raw = (req.path or "").strip()
+    if not raw:
+        raise HTTPException(400, "Path is required.")
+    new_path = Path(raw).expanduser()
+    if not new_path.is_absolute():
+        raise HTTPException(400, "Path must be absolute.")
+    try:
+        new_path.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise HTTPException(400, f"Cannot create directory: {e}")
+    if not new_path.is_dir():
+        raise HTTPException(400, "Path is not a directory.")
+
+    try:
+        BOOTSTRAP_DATA_DIR_FILE.parent.mkdir(parents=True, exist_ok=True)
+        BOOTSTRAP_DATA_DIR_FILE.write_text(str(new_path))
+    except OSError as e:
+        raise HTTPException(500, f"Failed to write bootstrap file: {e}")
+
+    # Re-exec on a background thread so the HTTP response gets sent first.
+    def _restart():
+        import time
+        time.sleep(0.5)
+        logger.info(f"Restarting process to switch DATA_DIR -> {new_path}")
+        try:
+            os.execv(sys.executable, [sys.executable, *sys.argv])
+        except Exception as e:
+            logger.error(f"os.execv failed: {e}; exiting so launcher can restart")
+            os._exit(1)
+
+    threading.Thread(target=_restart, daemon=True).start()
+    return {
+        "saved": str(new_path),
+        "bootstrap_file": str(BOOTSTRAP_DATA_DIR_FILE),
+        "restarting": True,
+    }
 
 
 @router.post("/test-remote")
