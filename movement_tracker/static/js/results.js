@@ -1,46 +1,125 @@
 /* Results page: distance traces, movement parameters, group comparison */
 
-// Keep the hidden combined groupSeqModeSelect in sync with the two
-// visible Type + Window selects (the same split the Explore page uses).
-// Individual-tab Sequence Calculation: two sets of radios (Type +
-// Window) keep the hidden combined #distSequenceMode select in sync
-// so renderDistMovementPlots and the sequence-effect math (which
-// already read .value off the select) don't need to change.
-(function _wireSplitDistSeqMode() {
-    const typeRadios = document.querySelectorAll('input[name="distSeqType"]');
-    const winRadios  = document.querySelectorAll('input[name="distSeqWindow"]');
-    const combined   = document.getElementById('distSequenceMode');
-    if (!typeRadios.length || !winRadios.length || !combined) return;
-    const getChecked = (rs, fallback) =>
-        Array.from(rs).find(r => r.checked)?.value || fallback;
+// ── Sequence Segmentation controls ────────────────────────────
+// One state object drives every consumer: the distance-trace
+// sequence shading, the per-trial movement-parameter scatter
+// regression overlay, and the IMI scatter regression overlay.
+// State is mirrored into the hidden #distSequenceMode <select>
+// (legacy interface) so older readers keep working unchanged.
+//
+// Defaults match the historical implementation EXCEPT for the
+// new BIC penalty, which the user opted into making default.
+const _SEQ_DEFAULTS = Object.freeze({
+    model:     'exp',   // 'none' | 'linear' | 'exp' | 'expf' (exp + floor)
+    window:    'multi', // 'full' | 'first10' | 'multi'
+    direction: 'dec',   // 'dec' | 'any'
+    penalty:   'bic',   // 'none' | 'aic' | 'bic'
+    minMoves:  5,
+    minR2:     0.30,
+});
+const _SEQ_STORAGE_KEY = 'mt_seq_config_v1';
+
+function _readSeqSession() {
+    try {
+        const raw = sessionStorage.getItem(_SEQ_STORAGE_KEY);
+        if (!raw) return {};
+        return JSON.parse(raw) || {};
+    } catch (_) { return {}; }
+}
+function _writeSeqSession(state) {
+    try { sessionStorage.setItem(_SEQ_STORAGE_KEY, JSON.stringify(state)); }
+    catch (_) { /* quota */ }
+}
+
+// Public: read the current segmentation config off the controls.
+// Used by every consumer; falls back to defaults when the UI
+// hasn't been built yet (e.g. static export).
+function getSeqConfig() {
+    const $ = (id) => document.getElementById(id);
+    const checked = (name, fb) =>
+        document.querySelector(`input[name="${name}"]:checked`)?.value || fb;
+    return {
+        model:     checked('seqModel',  _SEQ_DEFAULTS.model),
+        window:    checked('seqWindow', _SEQ_DEFAULTS.window),
+        direction: checked('seqDir',    _SEQ_DEFAULTS.direction),
+        penalty:   $('seqPenalty')?.value || _SEQ_DEFAULTS.penalty,
+        minMoves:  parseInt($('seqMinMoves')?.value, 10) || _SEQ_DEFAULTS.minMoves,
+        minR2:     parseFloat($('seqMinR2')?.value)      || _SEQ_DEFAULTS.minR2,
+    };
+}
+
+(function _wireSeqSegmentation() {
+    const $ = (id) => document.getElementById(id);
+    const combined = $('distSequenceMode');
+    const modelRadios = document.querySelectorAll('input[name="seqModel"]');
+    const winRadios   = document.querySelectorAll('input[name="seqWindow"]');
+    const dirRadios   = document.querySelectorAll('input[name="seqDir"]');
+    const penSel      = $('seqPenalty');
+    const minMv       = $('seqMinMoves');
+    const minMvVal    = $('seqMinMovesVal');
+    const minR2       = $('seqMinR2');
+    const minR2Val    = $('seqMinR2Val');
+    const defaultsBtn = $('seqDefaultsBtn');
+    if (!modelRadios.length || !combined) return;
+
+    const setRadio = (name, value) =>
+        document.querySelectorAll(`input[name="${name}"]`).forEach(r =>
+            r.checked = (r.value === value));
+
+    // Apply a config object into the UI (no persistence side-effect).
+    const apply = (cfg) => {
+        setRadio('seqModel',  cfg.model);
+        setRadio('seqWindow', cfg.window);
+        setRadio('seqDir',    cfg.direction);
+        if (penSel)   penSel.value   = cfg.penalty;
+        if (minMv)    minMv.value    = cfg.minMoves;
+        if (minR2)    minR2.value    = cfg.minR2;
+        if (minMvVal) minMvVal.textContent = String(cfg.minMoves);
+        if (minR2Val) minR2Val.textContent = (+cfg.minR2).toFixed(2);
+    };
+
+    // After every change: mirror to the hidden select, persist, and
+    // emit a single change event so listeners re-render once.
     const sync = () => {
-        const t = getChecked(typeRadios, 'exp');
-        const w = getChecked(winRadios, 'multi');
-        // When Type = None, the window doesn't matter — mirror that
-        // visually by dimming + disabling the window radios.
-        const isNone = (t === 'none');
+        const cfg = getSeqConfig();
+        const isNone = cfg.model === 'none';
+        // Dim + disable Window radios when Model = None (no
+        // segmentation runs in that case).
         winRadios.forEach(r => {
             r.disabled = isNone;
             const lbl = r.closest('label');
             if (lbl) lbl.style.opacity = isNone ? '0.4' : '';
         });
-        combined.value = isNone ? 'none' : `${t}_${w}`;
+        // Map (model, window) → the legacy combined string.
+        combined.value = isNone ? 'none' : `${cfg.model}_${cfg.window}`;
+        // Updated readouts.
+        if (minMvVal) minMvVal.textContent = String(cfg.minMoves);
+        if (minR2Val) minR2Val.textContent = (+cfg.minR2).toFixed(2);
+        // Drop any cached multi-seq DP result: the DP depends on
+        // every knob below the radios.
+        cachedSequenceAssignments = null;
+        _writeSeqSession(cfg);
         combined.dispatchEvent(new Event('change', { bubbles: true }));
     };
-    typeRadios.forEach(r => r.addEventListener('change', sync));
-    winRadios.forEach(r  => r.addEventListener('change', sync));
-    // Initialise the radios from whatever the hidden select started
-    // with so a saved/default 'exp_multi' lights up the right buttons.
-    const cur = combined.value || 'exp_multi';
-    if (cur === 'none') {
-        typeRadios.forEach(r => r.checked = (r.value === 'none'));
-    } else {
-        const m = cur.match(/^(linear|exp)_(full|first10|multi)$/);
-        if (m) {
-            typeRadios.forEach(r => r.checked = (r.value === m[1]));
-            winRadios.forEach(r  => r.checked = (r.value === m[2]));
-        }
+
+    // Wire change listeners.
+    modelRadios.forEach(r => r.addEventListener('change', sync));
+    winRadios.forEach(r   => r.addEventListener('change', sync));
+    dirRadios.forEach(r   => r.addEventListener('change', sync));
+    if (penSel) penSel.addEventListener('change', sync);
+    if (minMv)  minMv.addEventListener('input',  sync);
+    if (minR2)  minR2.addEventListener('input',  sync);
+    if (defaultsBtn) {
+        defaultsBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            apply(_SEQ_DEFAULTS);
+            sync();
+        });
     }
+
+    // Hydrate from sessionStorage (falling back to defaults).
+    const saved = _readSeqSession();
+    apply({ ..._SEQ_DEFAULTS, ...saved });
     sync();
 })();
 
@@ -3369,11 +3448,13 @@ function renderAllDistancePlots() {
         const map = _colByTrial[trialIdx];
         return (map && peakFrame != null && map[peakFrame]) ? map[peakFrame] : fallback;
     };
-    // Sequence shading on the distance/velocity traces is gated by the
-    // "Sequences" checkbox in the overlay row.  When on, we fall back
-    // to recomputing assignments from cachedMovements (using the
-    // currently-selected distSequenceMode) if nothing is cached yet.
-    const showSequences = !!document.getElementById('overlaySequences')?.checked;
+    // Sequence shading on the distance/velocity traces follows the
+    // top-bar Sequence Segmentation controls.  "Model = None" turns
+    // shading off entirely; any other model triggers a recompute
+    // (cached after the first call until the controls change).
+    const _seqCfg = (typeof getSeqConfig === 'function') ? getSeqConfig() : null;
+    const showSequences = _seqCfg && _seqCfg.model !== 'none'
+        && _seqCfg.window === 'multi';
     let seqAssignments = null;
     if (showSequences && cachedMovements && cachedMovements.movements) {
         if (!cachedSequenceAssignments) {
@@ -3381,8 +3462,20 @@ function renderAllDistancePlots() {
         }
         seqAssignments = cachedSequenceAssignments;
     }
+    // Surface the segmentation-quality badge ("12 sequences | R²=0.42")
+    // whenever segmentation is on; clear it otherwise.
     const _r2El = document.getElementById('overlayR2');
-    if (_r2El) _r2El.textContent = '';
+    if (_r2El) {
+        if (showSequences && seqAssignments) {
+            const n = seqAssignments.totalSeqs;
+            const r2 = seqAssignments.totalR2 || 0;
+            _r2El.textContent = n > 0
+                ? `${n} sequence${n !== 1 ? 's' : ''} | R²=${r2.toFixed(2)}`
+                : 'No sequences detected';
+        } else {
+            _r2El.textContent = '';
+        }
+    }
 
     // Group movements by trial
     const movByTrial = {};
@@ -4383,12 +4476,14 @@ function computeSequenceAssignments(data) {
         const ms = byTrial[ti];
         const amps = ms.map(m => m.amplitude).filter(a => a != null && isFinite(a));
 
-        if (amps.length < 5) {
+        const _cfg = (typeof getSeqConfig === 'function') ? getSeqConfig() : null;
+        const _minM = _cfg?.minMoves ?? 5;
+        if (amps.length < _minM) {
             result.byTrial[ti] = { sequences: [], seq_r2: 0 };
             return;
         }
 
-        const opt = optimizeSequences(amps, 5, 0.3);
+        const opt = optimizeSequences(amps);
         result.byTrial[ti] = opt;
         result.totalSeqs += opt.sequences.length;
 
@@ -4446,8 +4541,11 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
     const shapes = []; // for sequence spans
     const annotations = [];
     const isMulti = seqMode.endsWith('_multi');
-    const isExp = seqMode.startsWith('exp_');
     const isFirst10 = seqMode.endsWith('_first10');
+    const isExpFloor = seqMode.startsWith('expf_');
+    // "Exponential family" — exp or exp+floor.  Both render through
+    // the NLLS fitter; expf adds the additive floor parameter.
+    const isExp = isExpFloor || seqMode.startsWith('exp_');
 
     // Peak velocity params are timestamped at their own velocity peak,
     // not the distance peak.  Use the FRAME fields and convert to
@@ -4663,11 +4761,14 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
 
                 let baselineMag;
                 if (isExp) {
-                    // Exponential fit within sequence
-                    const fit = exponentialFit(seqX, seqY);
+                    // Exponential / exp+floor fit within sequence —
+                    // NLLS on original-scale y.  ss_reg matches the
+                    // (1 − SSE/SST) used for selection so the badge
+                    // matches the plot.
+                    const fit = _nlsExpFit(seqX, seqY, isExpFloor);
                     if (!fit) return;
                     baselineMag = fit.predict(xMin);
-                    trialSSReg += fit.r2 * _ssTot(seqY);
+                    trialSSReg += fit.ss_reg;
                     const nPts = 50;
                     const step = (xMax - xMin) / (nPts - 1);
                     const curveX = [], curveY = [];
@@ -4689,7 +4790,7 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
                     annotations.push({
                         x: midX, y: 0.98,
                         xref: axId, yref: 'paper', yanchor: 'top',
-                        text: `R\u00b2=${fit.r2.toFixed(2)}<br>Slope=${fit.b.toFixed(3)}`,
+                        text: `R\u00b2=${fit.r2.toFixed(2)}<br>b=${fit.b.toFixed(3)}` + (isExpFloor ? `<br>Floor=${fit.c.toFixed(2)}` : ''),
                         showarrow: false,
                         font: { size: 9, color },
                         bgcolor: 'rgba(255,255,255,0.8)',
@@ -4798,10 +4899,10 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
             const sign = flipSign ? -1 : 1;
 
             if (isExp) {
-                // Exponential fit
-                const fit = exponentialFit(fitX, fitY);
+                // Exponential / exp+floor fit via NLLS.
+                const fit = _nlsExpFit(fitX, fitY, isExpFloor);
                 if (!fit) return;
-                trialSSReg += fit.r2 * _ssTot(fitY);
+                trialSSReg += fit.ss_reg;
                 const nPts = 80;
                 const step = (xMax - xMin) / (nPts - 1);
                 const curveX = [], curveY = [];
@@ -4822,7 +4923,7 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
                 annotations.push({
                     x: (xMin + xMax) / 2, y: 0.98,
                     xref: axId, yref: 'paper', yanchor: 'top',
-                    text: `R\u00b2=${fit.r2.toFixed(2)}<br>Slope=${fit.b.toFixed(3)}`,
+                    text: `R\u00b2=${fit.r2.toFixed(2)}<br>b=${fit.b.toFixed(3)}` + (isExpFloor ? `<br>Floor=${fit.c.toFixed(2)}` : ''),
                     showarrow: false,
                     font: { size: 9, color },
                     bgcolor: 'rgba(255,255,255,0.8)',
@@ -4960,21 +5061,240 @@ function linearRegressionFull(x, y) {
     return { slope, intercept, r2, ss_reg: ssReg, n };
 }
 
+// ── Sequence-fit helpers ─────────────────────────────────────
+// All fits return 1 − SSE/SST on the ORIGINAL-scale y so the
+// per-window R², the `Min R²` filter, and the DP objective all
+// speak the same language regardless of model.
+//
+// `slope_sign` is the sign of the relevant slope parameter
+// (linear: slope; exp / expf: rate constant b).  Used for the
+// direction filter ("Decrement only" vs "Dec/Increment").
+
+function _r2OriginalScale(xs, ys, predict) {
+    let yMean = 0;
+    for (const v of ys) yMean += v;
+    yMean /= ys.length;
+    let sst = 0, sse = 0;
+    for (let i = 0; i < ys.length; i++) {
+        sst += (ys[i] - yMean) ** 2;
+        const r = ys[i] - predict(xs[i]);
+        sse += r * r;
+    }
+    const r2 = sst > 0 ? 1 - sse / sst : 0;
+    return { r2, sst, sse, ss_reg: Math.max(0, sst - sse) };
+}
+
+// Solve A·x = b for A square (n ≤ 3).  Returns null when singular.
+function _solveLinearSystem(A, b) {
+    const n = A.length;
+    for (let i = 0; i < n; i++) {
+        let maxAbs = Math.abs(A[i][i]);
+        let maxRow = i;
+        for (let r = i + 1; r < n; r++) {
+            if (Math.abs(A[r][i]) > maxAbs) {
+                maxAbs = Math.abs(A[r][i]);
+                maxRow = r;
+            }
+        }
+        if (maxAbs < 1e-15) return null;
+        if (maxRow !== i) {
+            [A[i], A[maxRow]] = [A[maxRow], A[i]];
+            [b[i], b[maxRow]] = [b[maxRow], b[i]];
+        }
+        for (let r = i + 1; r < n; r++) {
+            const factor = A[r][i] / A[i][i];
+            for (let c = i; c < n; c++) A[r][c] -= factor * A[i][c];
+            b[r] -= factor * b[i];
+        }
+    }
+    const x = new Array(n);
+    for (let i = n - 1; i >= 0; i--) {
+        let sum = b[i];
+        for (let c = i + 1; c < n; c++) sum -= A[i][c] * x[c];
+        x[i] = sum / A[i][i];
+    }
+    return x;
+}
+
+// Levenberg–Marquardt for y = a·exp(b·x)  (+ c when ``withFloor``).
+// Returns { a, b, c, r2, sst, sse, ss_reg, predict, b } or null.
+// Seeded from the log-linear estimate (drops non-positive y for
+// the seed); on solver failure falls back to that seed.
+function _nlsExpFit(x, y, withFloor) {
+    const pairs = [];
+    for (let i = 0; i < x.length; i++) {
+        if (Number.isFinite(x[i]) && Number.isFinite(y[i])) {
+            pairs.push([x[i], y[i]]);
+        }
+    }
+    const need = withFloor ? 4 : 3;
+    if (pairs.length < need) return null;
+    const xs = pairs.map(p => p[0]);
+    const ys = pairs.map(p => p[1]);
+
+    // Seed (a, b) from log-linear on positive-y points.
+    let a = ys[0] || 1, b = 0;
+    const pos = pairs.filter(p => p[1] > 0);
+    if (pos.length >= 2) {
+        const sx = pos.map(p => p[0]);
+        const sy = pos.map(p => Math.log(p[1]));
+        const reg = linearRegression(sx, sy);
+        a = Math.exp(reg.intercept);
+        b = reg.slope;
+    }
+    let c = 0;
+    let cBound = -Infinity;
+    if (withFloor) {
+        const yMin = Math.min(...ys);
+        c = Math.max(0, 0.5 * yMin);
+        // Upper bound on c so the floor can't swallow the whole curve.
+        cBound = Math.max(0, yMin - 1e-3 * (Math.max(...ys) - yMin));
+        // Refit (a, b) on (y − c) for a closer warm start.
+        const adj = pos.filter(p => p[1] - c > 0);
+        if (adj.length >= 2) {
+            const sx = adj.map(p => p[0]);
+            const sy = adj.map(p => Math.log(p[1] - c));
+            const reg = linearRegression(sx, sy);
+            a = Math.exp(reg.intercept);
+            b = reg.slope;
+        }
+    }
+
+    const model = (p, xv) => withFloor
+        ? p[2] + p[0] * Math.exp(p[1] * xv)
+        : p[0] * Math.exp(p[1] * xv);
+    const N = xs.length;
+    const sse = (p) => {
+        let s = 0;
+        for (let i = 0; i < N; i++) {
+            const d = ys[i] - model(p, xs[i]);
+            s += d * d;
+        }
+        return s;
+    };
+
+    let params = withFloor ? [a, b, c] : [a, b];
+    let prevSse = sse(params);
+    if (!Number.isFinite(prevSse)) return null;
+    let lambda = 1e-3;
+    const maxIter = 50;
+    const tol = 1e-6;
+
+    for (let iter = 0; iter < maxIter; iter++) {
+        const k = params.length;
+        const JTJ = Array.from({ length: k }, () => new Float64Array(k));
+        const JTr = new Float64Array(k);
+        for (let i = 0; i < N; i++) {
+            const ebx = Math.exp(params[1] * xs[i]);
+            const J0 = ebx;                       // ∂y/∂a
+            const J1 = params[0] * xs[i] * ebx;   // ∂y/∂b
+            const ri = ys[i] - model(params, xs[i]);
+            JTJ[0][0] += J0 * J0;
+            JTJ[0][1] += J0 * J1;
+            JTJ[1][0] += J1 * J0;
+            JTJ[1][1] += J1 * J1;
+            JTr[0]    += J0 * ri;
+            JTr[1]    += J1 * ri;
+            if (withFloor) {
+                JTJ[0][2] += J0;
+                JTJ[2][0] += J0;
+                JTJ[1][2] += J1;
+                JTJ[2][1] += J1;
+                JTJ[2][2] += 1;
+                JTr[2]    += ri;
+            }
+        }
+        const A = JTJ.map((row, i) => {
+            const r = Array.from(row);
+            r[i] += lambda * (r[i] || 1);
+            return r;
+        });
+        const delta = _solveLinearSystem(A, Array.from(JTr));
+        if (!delta || !delta.every(Number.isFinite)) break;
+        const trial = params.map((p, i) => p + delta[i]);
+        if (withFloor) {
+            if (trial[2] < 0) trial[2] = 0;
+            if (trial[2] > cBound) trial[2] = cBound;
+        }
+        const trialSse = sse(trial);
+        if (Number.isFinite(trialSse) && trialSse < prevSse) {
+            const improved = Math.abs(prevSse - trialSse) / Math.max(prevSse, 1e-12);
+            params = trial;
+            prevSse = trialSse;
+            lambda *= 0.5;
+            if (improved < tol) break;
+        } else {
+            lambda *= 5;
+            if (lambda > 1e10) break;
+        }
+    }
+
+    const finalA = params[0];
+    const finalB = params[1];
+    const finalC = withFloor ? params[2] : 0;
+    const predict = (xv) => finalC + finalA * Math.exp(finalB * xv);
+    const stats = _r2OriginalScale(xs, ys, predict);
+    return {
+        a: finalA, b: finalB, c: finalC,
+        r2: stats.r2, sst: stats.sst, sse: stats.sse, ss_reg: stats.ss_reg,
+        n: N, predict,
+    };
+}
+
+// Fit one (xs, ys) window with the selected model and return a
+// uniform record, or null if the fit doesn't pass the direction /
+// minR2 gates.
+function _seqFitWindow(xs, ys, cfg) {
+    if (xs.length < cfg.minMoves) return null;
+    let r2, ss_reg, slope_sign, predict;
+    if (cfg.model === 'linear') {
+        const reg = linearRegressionFull(xs, ys);
+        if (!reg) return null;
+        const pred = (xv) => reg.slope * xv + reg.intercept;
+        const stats = _r2OriginalScale(xs, ys, pred);
+        r2 = stats.r2;
+        ss_reg = stats.ss_reg;
+        slope_sign = Math.sign(reg.slope);
+        predict = pred;
+    } else if (cfg.model === 'exp' || cfg.model === 'expf') {
+        const fit = _nlsExpFit(xs, ys, cfg.model === 'expf');
+        if (!fit) return null;
+        r2 = fit.r2;
+        ss_reg = fit.ss_reg;
+        slope_sign = Math.sign(fit.b);
+        predict = fit.predict;
+    } else {
+        return null;
+    }
+    if (cfg.direction === 'dec' && slope_sign >= 0) return null;
+    if (r2 < cfg.minR2) return null;
+    return { r2, ss_reg, slope_sign, predict };
+}
+
+// k_per_window for the BIC / AIC penalty.  Two for a 2-parameter
+// linear / pure-exp fit, three for exponential + floor.
+function _seqK(model) { return model === 'expf' ? 3 : 2; }
+
 /**
- * DP-optimal non-overlapping negative-slope sequence detection.
- * Ported from bradykinesia_analysis.ipynb `optimize_sequences()`.
+ * DP-optimal non-overlapping sequence detection.  Driven by the
+ * top-bar Sequence Segmentation controls; the model used for the
+ * per-window R² + ss_reg now MATCHES the model whose fit is drawn
+ * on the plots ("Linear" / "Exponential" / "Exp+floor").  The DP
+ * objective optionally adds an AIC / BIC penalty so adding another
+ * sequence is gated on the gain in explained variance.
  *
  * @param {number[]} amplitudes - amplitude values for movements in one trial
- * @param {number} minMoves - minimum movements per sequence window (default 5)
- * @param {number} minR2 - minimum R² per window (default 0.3)
- * @returns {{ sequences: Array<{start,end,slope,r2,ss_reg}>, seq_r2: number }}
+ * @param {object} [cfgArg] - override config; otherwise uses getSeqConfig()
+ * @returns {{ sequences: Array, seq_r2: number }}
  */
-function optimizeSequences(amplitudes, minMoves = 5, minR2 = 0.3) {
+function optimizeSequences(amplitudes, cfgArg) {
+    const cfg = cfgArg
+        || (typeof getSeqConfig === 'function' ? getSeqConfig() : _SEQ_DEFAULTS);
     const n = amplitudes.length;
     const result = { sequences: [], seq_r2: 0 };
-    if (n < minMoves) return result;
+    if (cfg.model === 'none') return result;
+    if (n < cfg.minMoves) return result;
 
-    // Total SS (for computing seq_r2)
     let ampMean = 0;
     for (let i = 0; i < n; i++) ampMean += amplitudes[i];
     ampMean /= n;
@@ -4982,42 +5302,53 @@ function optimizeSequences(amplitudes, minMoves = 5, minR2 = 0.3) {
     for (let i = 0; i < n; i++) totalSS += (amplitudes[i] - ampMean) ** 2;
     if (totalSS === 0) return result;
 
-    // Enumerate all negative-slope windows of length >= minMoves
-    // Each window: [start, end, ss_reg, slope, r2]  (end is exclusive)
+    const k = _seqK(cfg.model);
+    // Noise-scale proxy used to convert the AIC/BIC penalty into
+    // ss-units (the DP works on ss_reg).  Without this the penalty
+    // would be dominated or swamped depending on the trial.
+    const noiseScale = totalSS / Math.max(1, n);
+    const penaltyTerm = (winLen) => {
+        if (cfg.penalty === 'bic') return k * Math.log(winLen) * noiseScale;
+        if (cfg.penalty === 'aic') return 2 * k * noiseScale;
+        return 0;
+    };
+
     const windows = [];
-    for (let i = 0; i <= n - minMoves; i++) {
-        for (let j = i + minMoves; j <= n; j++) {
-            // Linear regression on (index, amplitude) for window [i, j)
-            const reg = linearRegressionFull(
-                Array.from({ length: j - i }, (_, k) => k),
-                amplitudes.slice(i, j)
-            );
-            if (!reg || reg.slope >= 0) continue;
-            if (reg.r2 < minR2) continue;
-            windows.push({ start: i, end: j, ss_reg: reg.ss_reg, slope: reg.slope, r2: reg.r2 });
+    for (let i = 0; i <= n - cfg.minMoves; i++) {
+        for (let j = i + cfg.minMoves; j <= n; j++) {
+            const wxs = Array.from({ length: j - i }, (_, kk) => kk);
+            const wys = amplitudes.slice(i, j);
+            const fit = _seqFitWindow(wxs, wys, cfg);
+            if (!fit) continue;
+            const winLen = j - i;
+            const score = fit.ss_reg - penaltyTerm(winLen);
+            // A negative score means the penalty exceeds the gain
+            // — skip so the DP doesn't pick a worse-than-empty window.
+            if (score <= 0) continue;
+            windows.push({
+                start: i, end: j,
+                ss_reg: fit.ss_reg,
+                r2: fit.r2,
+                slope: fit.slope_sign,
+                score,
+            });
         }
     }
-
     if (windows.length === 0) return result;
 
-    // Sort windows by end position
     windows.sort((a, b) => a.end - b.end);
 
-    // DP: find max-SS non-overlapping set
-    const dp = new Float64Array(n + 1);    // dp[pos] = best total SS using windows ending at or before pos
-    const choice = new Array(n + 1);        // choice[pos] = list of chosen windows
+    // DP over score (gain net of penalty), backtrace the choice list.
+    const dp = new Float64Array(n + 1);
+    const choice = new Array(n + 1);
     for (let pos = 0; pos <= n; pos++) choice[pos] = [];
-
-    let wi = 0; // window index
+    let wi = 0;
     for (let pos = 1; pos <= n; pos++) {
-        // Carry forward
         dp[pos] = dp[pos - 1];
         choice[pos] = choice[pos - 1];
-
-        // Try all windows ending at this position
         while (wi < windows.length && windows[wi].end === pos) {
             const w = windows[wi];
-            const val = dp[w.start] + w.ss_reg;
+            const val = dp[w.start] + w.score;
             if (val > dp[pos]) {
                 dp[pos] = val;
                 choice[pos] = [...choice[w.start], w];
@@ -5025,9 +5356,11 @@ function optimizeSequences(amplitudes, minMoves = 5, minR2 = 0.3) {
             wi++;
         }
     }
-
     result.sequences = choice[n];
-    result.seq_r2 = dp[n] / totalSS;
+    // Report the *unpenalised* explained-variance fraction so the
+    // badge means the same thing across penalty settings.
+    const sumSsReg = choice[n].reduce((acc, w) => acc + w.ss_reg, 0);
+    result.seq_r2 = sumSsReg / totalSS;
     return result;
 }
 
@@ -5875,6 +6208,9 @@ document.querySelectorAll('#distMovementControls input[data-dparam]').forEach(cb
 });
 document.getElementById('distSequenceMode').addEventListener('change', () => {
     cachedSequenceAssignments = null;
+    // Re-render BOTH the distance traces (shading depends on the
+    // segmentation) AND the movement scatters (per-trial fit).
+    if (cachedTraces) renderAllDistancePlots();
     if (cachedMovements) renderDistMovementPlots();
 });
 
@@ -5926,7 +6262,7 @@ document.querySelectorAll('input[name="pcaMode"]').forEach(r => {
 function _syncImiRefVisibility() { /* intentionally empty */ }
 
 // Overlay controls: re-render distance/velocity plots or PCA plots
-['overlayPeakDist', 'overlayOpen', 'overlayClose', 'overlayPause', 'overlayPeakOpenVel', 'overlayPeakCloseVel', 'overlaySequences'].forEach(id => {
+['overlayPeakDist', 'overlayOpen', 'overlayClose', 'overlayPause', 'overlayPeakOpenVel', 'overlayPeakCloseVel'].forEach(id => {
     document.getElementById(id).addEventListener('change', () => {
         if (_resultsViewMode === 'pca') { if (cachedPCA) renderFingertipPCA(); }
         else if (cachedTraces) renderAllDistancePlots();
