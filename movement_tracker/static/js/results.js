@@ -2290,7 +2290,7 @@ function _redrawOneTrial(idx) {
             : null;
         const _cutH = parseFloat(document.getElementById('shapeClusterCutoff')?.value);
         const _useCut = isFinite(_cutH) ? _cutH : 0.5;
-        const _colorsOn = !!document.getElementById('shapeClusterColors')?.checked;
+        const _colorsOn = !!document.getElementById('shapeClusterOn')?.checked;
         let _movColors = null;
         if (_matNow) {
             // Distance: 1 - r for correlation, or covariance rescaled
@@ -3294,8 +3294,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     const cluCb = document.getElementById('shapeClusterOn');
     if (cluCb) cluCb.addEventListener('change', _drawShapeOverlayPlots);
-    const colCb = document.getElementById('shapeClusterColors');
-    if (colCb) colCb.addEventListener('change', _drawShapeOverlayPlots);
     const devCb = document.getElementById('shapeDeviationColors');
     if (devCb) devCb.addEventListener('change', _drawShapeOverlayPlots);
     const medCb = document.getElementById('shapeUseMedian');
@@ -3360,7 +3358,7 @@ function renderAllDistancePlots() {
     // and peak-velocity markers below can pick up the shape-overlay
     // colors when the "Colors" checkbox is on.  _shapeClusterColors
     // is already keyed by peak_frame.
-    const _colorsOn = !!document.getElementById('shapeClusterColors')?.checked;
+    const _colorsOn = !!document.getElementById('shapeClusterOn')?.checked;
     const _colByTrial = {};
     if (_colorsOn && typeof _shapeClusterColors !== 'undefined' && _shapeClusterColors) {
         for (const k in _shapeClusterColors) {
