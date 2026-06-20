@@ -68,6 +68,16 @@
                     </select>
                 </label>
                 <span id="viewModeSep" style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
+                <span id="pcaModeRow" style="display:none;align-items:center;gap:8px;font-size:12px;color:var(--text-muted);">
+                    Mode:
+                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="One PCA + FFT across the whole trial.">
+                        <input type="radio" name="pcaMode" value="whole" checked> Whole trial
+                    </label>
+                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="PCA + FFT per (open → close) window; FFT power averaged across movements.">
+                        <input type="radio" name="pcaMode" value="per_movement"> Individual movement
+                    </label>
+                    <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
+                </span>
                 <label title="Drag right to stretch the traces out (fewer seconds per screen width)."
                        style="display:flex;align-items:center;gap:6px;margin:0;">
                     X scale:
@@ -514,6 +524,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=141"></script>
+    <script src="/static/js/results.js?v=142"></script>
 </body>
 </html>

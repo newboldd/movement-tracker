@@ -1841,8 +1841,120 @@ _PCA_AUTO_ORDER = (
 )
 
 
+def _compute_pca_scores_per_movement(pos: np.ndarray, fps: float,
+                                       windows: list[tuple[int, int]]):
+    """Per-movement PCA + power-spectrum averaging.
+
+    ``windows`` is a list of (open_local, close_local) frame index
+    pairs INTO ``pos``.  For each window:
+      * Mean-center, SVD → per-window components.
+      * Project that window's rows onto its own components.
+    Between windows the per-PC trace is filled with NaN so the
+    client renders gaps (close → next open).
+
+    Power spectra are computed PER WINDOW (Hanning-windowed,
+    zero-padded to a shared ``nfft`` = next power of 2 of the
+    longest window), then mean-averaged across windows per
+    (PC, frequency-bin).  Phases are dropped, so a tap-by-tap
+    phase shift no longer destructively interferes with the
+    average — what survives is the tap-shape's spectral signature.
+
+    Returns ``(scores, ev_ratio, fft_freqs, fft_power)`` mirroring
+    the whole-trial path's shapes, or ``None`` when no window has
+    enough valid samples.
+    """
+    n = len(pos)
+    d = pos.shape[1] if pos.ndim == 2 else 1
+    # Per-PC concatenated traces aligned with ``pos``.  NaN
+    # everywhere outside a window so the client draws gaps.
+    pc_scores = np.full((n, d), np.nan)
+
+    # Drop windows too short for PCA.
+    usable = []
+    for o, c in windows:
+        o = max(0, int(o))
+        c = min(n - 1, int(c))
+        if c - o + 1 >= 10:
+            usable.append((o, c))
+    if not usable:
+        return None
+
+    nfft = 1
+    max_len = max(c - o + 1 for o, c in usable)
+    while nfft < max(64, max_len):
+        nfft *= 2
+
+    cap = min(50.0, fps / 2.0)
+    freqs = np.fft.rfftfreq(nfft, d=1.0 / fps)
+    freq_mask = freqs <= cap
+    freqs_kept = freqs[freq_mask]
+
+    # Accumulators: per-PC sum of power across windows + per-PC ev
+    # ratio sum across windows + counter.  Initialised lazily because
+    # we only know per-window n_comp once SVD runs.
+    sum_power = np.zeros((d, freqs_kept.size))
+    sum_count = np.zeros(d, dtype=int)
+    ev_sum = np.zeros(d)
+    ev_count = np.zeros(d, dtype=int)
+
+    for (o, c) in usable:
+        X = pos[o:c + 1]
+        valid = ~np.any(np.isnan(X), axis=1)
+        if np.sum(valid) < 10:
+            continue
+        X_v = X[valid]
+        mean = X_v.mean(axis=0)
+        X_c = X_v - mean
+        try:
+            _, S, Vt = np.linalg.svd(X_c, full_matrices=False)
+        except np.linalg.LinAlgError:
+            continue
+        k = Vt.shape[0]
+        ev = (S ** 2) / (S ** 2).sum() if (S ** 2).sum() > 0 else np.zeros(k)
+        ev_sum[:k] += ev
+        ev_count[:k] += 1
+
+        scores_v = (X - mean) @ Vt.T
+        # Only fill the VALID rows in the window; others stay NaN.
+        local = np.full((c - o + 1, k), np.nan)
+        local[valid] = scores_v[valid] if scores_v.shape[0] == valid.size else scores_v
+        pc_scores[o:c + 1, :k] = local
+
+        # Per-PC FFT (Hanning-windowed, zero-padded to ``nfft``).
+        for ci in range(k):
+            sig = local[:, ci]
+            sm = ~np.isnan(sig)
+            if np.sum(sm) < 10:
+                continue
+            x_idx = np.arange(len(sig), dtype=float)
+            interp = np.interp(x_idx, x_idx[sm], sig[sm])
+            interp = interp - interp.mean()
+            w = np.hanning(len(interp))
+            fft_vals = np.fft.rfft(interp * w, n=nfft)
+            power = (np.abs(fft_vals) ** 2) / max(1, len(interp))
+            sum_power[ci] += power[freq_mask]
+            sum_count[ci] += 1
+
+    # Average across contributing windows per PC.
+    ev_ratio = np.zeros(d)
+    for ci in range(d):
+        if ev_count[ci] > 0:
+            ev_ratio[ci] = ev_sum[ci] / ev_count[ci]
+
+    fft_power_list: list[list[float]] = []
+    for ci in range(d):
+        if sum_count[ci] > 0:
+            avg = sum_power[ci] / sum_count[ci]
+            fft_power_list.append([round(float(p), 6) for p in avg])
+        else:
+            fft_power_list.append([])
+    fft_freqs_list = [round(float(f), 3) for f in freqs_kept]
+    return pc_scores, ev_ratio, fft_freqs_list, fft_power_list
+
+
 @router.get("/{subject_id}/fingertip_pca")
-def get_fingertip_pca(subject_id: int, source: str = Query("auto")) -> dict:
+def get_fingertip_pca(subject_id: int, source: str = Query("auto"),
+                       mode: str = Query("whole")) -> dict:
     """Index fingertip PCA trajectories (3D if a stereo calibration
     is available, else 2D from the OS camera) per trial.
 
@@ -1852,6 +1964,14 @@ def get_fingertip_pca(subject_id: int, source: str = Query("auto")) -> dict:
     ``skeleton_v1``, ``skeleton_v2`` — and falls back to
     ``data_source: "none"`` only when NO source can produce any
     finite index-tip rows for any trial.
+
+    ``mode`` switches the analysis:
+      * ``whole`` (default) — one PCA + FFT per trial.
+      * ``per_movement`` — PCA + FFT per (open → close) window.
+        The returned ``pc_scores`` carries NaN between movements
+        so the client draws gaps; the FFT power spectra are
+        averaged across movements (phase information dropped) so
+        tap-by-tap phase shifts don't destructively interfere.
     """
     subj = _get_subject(subject_id)
     subject_name = subj["name"]
@@ -1859,7 +1979,7 @@ def get_fingertip_pca(subject_id: int, source: str = Query("auto")) -> dict:
     trials = build_trial_map(subject_name)
     if not trials:
         return {"trials": [], "subject": subject_name,
-                "data_source": "none", "is_3d": False}
+                "data_source": "none", "is_3d": False, "mode": mode}
 
     candidates = (_PCA_AUTO_ORDER if source == "auto" else (source,))
     per_trial = None
@@ -1876,7 +1996,21 @@ def get_fingertip_pca(subject_id: int, source: str = Query("auto")) -> dict:
 
     if per_trial is None:
         return {"trials": [], "subject": subject_name,
-                "data_source": "none", "is_3d": False}
+                "data_source": "none", "is_3d": False, "mode": mode}
+
+    # For per-movement mode, grab the same movement windows the
+    # Movements API uses so the PCA boundaries match what the user
+    # sees on the distance/velocity plots.
+    movements_by_trial: dict[int, list[dict]] = {}
+    if mode == "per_movement":
+        try:
+            distances, _trials2, _ds = _load_distances_and_trials(subject_name, source_used)
+            events, _ = _load_events(subject_name, distances, _trials2)
+            movements, _ = _build_movement_params(distances, events, _trials2)
+            for m in movements:
+                movements_by_trial.setdefault(m["trial_idx"], []).append(m)
+        except Exception as e:
+            logger.warning(f"per_movement: failed to load movements ({e})")
 
     result_trials = []
     for i, t in enumerate(trials):
@@ -1885,22 +2019,36 @@ def get_fingertip_pca(subject_id: int, source: str = Query("auto")) -> dict:
             continue
         fps = float(t.get("fps", 60))
 
-        pca_result = _compute_pca_scores(pos)
-        if pca_result is None:
-            continue
-        pc_scores, ev_ratio = pca_result
-        n_comp = pc_scores.shape[1]
+        if mode == "per_movement":
+            windows = []
+            for m in movements_by_trial.get(i, []):
+                o = m.get("open_frame_local")
+                c = m.get("close_frame_local")
+                if o is None or c is None:
+                    continue
+                windows.append((int(o), int(c)))
+            pm = _compute_pca_scores_per_movement(pos, fps, windows)
+            if pm is None:
+                continue
+            pc_scores, ev_ratio, fft_freqs, fft_power = pm
+            n_comp = pc_scores.shape[1]
+        else:
+            pca_result = _compute_pca_scores(pos)
+            if pca_result is None:
+                continue
+            pc_scores, ev_ratio = pca_result
+            n_comp = pc_scores.shape[1]
+            fft_freqs = []
+            fft_power = []
+            for ci in range(n_comp):
+                freqs, power = _compute_fft(pc_scores[:, ci], fps)
+                if len(freqs) and not fft_freqs:
+                    fft_freqs = [round(float(f), 3) for f in freqs]
+                fft_power.append(
+                    [round(float(p), 6) for p in power] if len(power) else []
+                )
 
         times = [round(i / fps, 4) for i in range(len(pos))]
-
-        fft_freqs: list[float] = []
-        fft_power: list[list[float]] = []
-        for ci in range(n_comp):
-            freqs, power = _compute_fft(pc_scores[:, ci], fps)
-            if len(freqs) and not fft_freqs:
-                fft_freqs = [round(float(f), 3) for f in freqs]
-            fft_power.append([round(float(p), 6) for p in power] if len(power) else [])
-
         pc_scores_out = []
         for ci in range(n_comp):
             col = pc_scores[:, ci]
@@ -1922,6 +2070,7 @@ def get_fingertip_pca(subject_id: int, source: str = Query("auto")) -> dict:
         "subject": subject_name,
         "data_source": source_used,
         "is_3d": is_3d,
+        "mode": mode,
     }
 
 

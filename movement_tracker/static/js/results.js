@@ -825,6 +825,8 @@ function _syncViewMode() {
     if (pcaPlots)  pcaPlots.style.display  = mode === 'pca' ? '' : 'none';
     const pcaCompCtl = document.getElementById('pcaCompControls');
     if (pcaCompCtl) pcaCompCtl.style.display = mode === 'pca' ? 'inline-flex' : 'none';
+    const pcaModeRow = document.getElementById('pcaModeRow');
+    if (pcaModeRow) pcaModeRow.style.display = mode === 'pca' ? 'inline-flex' : 'none';
 
     // IMI row only relevant for distances
     const imiRefRow = document.getElementById('imiRefRow');
@@ -889,8 +891,9 @@ async function loadFingertipPCA(subjectId) {
     if (!container) return;
     container.innerHTML = '<div class="results-no-data">Loading PCA…</div>';
     const src = document.getElementById('resultsSourceSelect')?.value || 'auto';
+    const mode = document.querySelector('input[name="pcaMode"]:checked')?.value || 'whole';
     try {
-        const data = await API.get(`/api/results/${subjectId}/fingertip_pca?source=${src}`);
+        const data = await API.get(`/api/results/${subjectId}/fingertip_pca?source=${src}&mode=${mode}`);
         cachedPCA = data;
         renderFingertipPCA();
     } catch (e) {
@@ -5891,6 +5894,17 @@ document.querySelectorAll('input[name="imiRef"]').forEach(r => {
 document.querySelectorAll('#pcaCompControls input[data-pc]').forEach(cb => {
     cb.addEventListener('change', () => {
         if (_resultsViewMode === 'pca' && cachedPCA) renderFingertipPCA();
+    });
+});
+
+// PCA mode radios (Whole trial / Individual movement): re-fetch — the
+// per-movement path computes different scores + averaged FFT power
+// server-side, so the cache needs to drop.
+document.querySelectorAll('input[name="pcaMode"]').forEach(r => {
+    r.addEventListener('change', () => {
+        if (_resultsViewMode !== 'pca') return;
+        cachedPCA = null;
+        if (currentSubjectId) loadFingertipPCA(currentSubjectId);
     });
 });
 
