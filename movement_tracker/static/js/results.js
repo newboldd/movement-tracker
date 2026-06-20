@@ -1604,8 +1604,11 @@ function renderDistMovementPlots() {
 
     // Total time spanned by all trials concatenated (matches the way
     // the movement plot lays out per-trial subplots side-by-side).
+    // cachedMovements doesn't carry trace data, so read totalSec from
+    // cachedTraces -- otherwise the slider's secPerWidth had no
+    // denominator to scale against and plotW pinned to containerW.
     let totalSec = 0;
-    (data.trials || []).forEach(t => {
+    (cachedTraces?.trials || []).forEach(t => {
         const fps = t.fps || 60;
         const n = (t.distances && t.distances.length) || 0;
         totalSec += n / fps;

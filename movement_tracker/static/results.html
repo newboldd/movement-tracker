@@ -71,7 +71,7 @@
                 <label title="Drag right to stretch the traces out (fewer seconds per screen width)."
                        style="display:flex;align-items:center;gap:6px;margin:0;">
                     X scale:
-                    <input type="range" id="xScaleSlider" min="5" max="60" step="1" value="50" style="width:120px;">
+                    <input type="range" id="xScaleSlider" min="5" max="60" step="1" value="44" style="width:120px;">
                 </label>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
                 <label style="display:flex;align-items:center;gap:6px;margin:0;">Source:
@@ -108,11 +108,14 @@
                 <div style="flex-basis:100%;height:0;margin:0;padding:0;"></div>
                 <span id="imiRefRow" style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);">
                     Interval:
+                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Hide every interval plot">
+                        <input type="radio" name="imiRef" value="off" checked> off
+                    </label>
                     <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Open to Open">
                         <input type="radio" name="imiRef" value="oo"> O-O
                     </label>
                     <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Peak to Peak">
-                        <input type="radio" name="imiRef" value="pp" checked> P-P
+                        <input type="radio" name="imiRef" value="pp"> P-P
                     </label>
                     <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Close to Close">
                         <input type="radio" name="imiRef" value="cc"> C-C
@@ -128,9 +131,6 @@
                     </label>
                     <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Peak to Close within the same movement (closing-phase duration)">
                         <input type="radio" name="imiRef" value="pc"> P-C
-                    </label>
-                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Hide every interval plot">
-                        <input type="radio" name="imiRef" value="off"> off
                     </label>
                 </span>
             </div>
@@ -514,6 +514,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=137"></script>
+    <script src="/static/js/results.js?v=138"></script>
 </body>
 </html>
