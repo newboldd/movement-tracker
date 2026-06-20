@@ -1004,7 +1004,9 @@ function renderFingertipPCA() {
         ];
 
         const totalSec = times.at(-1) || (times.length / fps);
-        const plotW = Math.max(containerW, (totalSec / secPerWidth) * containerW);
+        // Match the other X-scale sliders: floor at 120 px so the
+        // plots can shrink below the viewport too, not just stretch.
+        const plotW = Math.max(120, (totalSec / secPerWidth) * containerW);
 
         // --- Block container ---
         const block = document.createElement('div');
