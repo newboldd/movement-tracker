@@ -1556,6 +1556,7 @@ function _ipLnGamma(x) {
 
 function _ipYLabel(param) {
     return ({
+        peak_dist:          'Peak Thumb-Index Distance (mm)',
         amplitude:          'Amplitude (mm)',
         relative_amplitude: 'Amplitude ratio (i / i-1)',
         peak_open_vel:      'Peak Open Vel (mm/s)',
