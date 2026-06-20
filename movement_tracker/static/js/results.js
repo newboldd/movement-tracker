@@ -784,7 +784,7 @@ function _resetYOverrides() {
 }
 
 const PARAM_LABELS = {
-    peak_dist: 'Peak Distance (mm)',
+    peak_dist: 'Peak Thumb-Index Distance (mm)',
     amplitude: 'Amplitude (mm)',
     imi: 'Inter-Movement Interval (s)',
     peak_open_vel: 'Peak Opening Velocity (mm/s)',
