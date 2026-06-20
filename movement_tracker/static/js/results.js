@@ -1614,7 +1614,10 @@ function renderDistMovementPlots() {
         totalSec += n / fps;
     });
     if (totalSec <= 0) totalSec = 1;
-    const plotW = Math.max(containerW, (totalSec / secPerWidth) * containerW);
+    // Match the first xScaleSlider: floor at a small pixel minimum
+    // (120px) instead of containerW, so the user can shrink the
+    // movement-param plots below the viewport width too.
+    const plotW = Math.max(120, (totalSec / secPerWidth) * containerW);
 
     // Header row above each plot: label on the left, copy-to-clipboard
     // button on the right.  Anchored above the scroll wrapper so neither
