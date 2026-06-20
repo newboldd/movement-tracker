@@ -3354,11 +3354,18 @@ function renderAllDistancePlots() {
         const map = _colByTrial[trialIdx];
         return (map && peakFrame != null && map[peakFrame]) ? map[peakFrame] : fallback;
     };
-    // Sequence shading on the distance/velocity traces was removed with
-    // the "Sequences" checkbox; sequence fits now live only in the
-    // Movement-plot scatters below.
-    const showSequences = false;
+    // Sequence shading on the distance/velocity traces is gated by the
+    // "Sequences" checkbox in the overlay row.  When on, we fall back
+    // to recomputing assignments from cachedMovements (using the
+    // currently-selected distSequenceMode) if nothing is cached yet.
+    const showSequences = !!document.getElementById('overlaySequences')?.checked;
     let seqAssignments = null;
+    if (showSequences && cachedMovements && cachedMovements.movements) {
+        if (!cachedSequenceAssignments) {
+            cachedSequenceAssignments = computeSequenceAssignments(cachedMovements);
+        }
+        seqAssignments = cachedSequenceAssignments;
+    }
     const _r2El = document.getElementById('overlayR2');
     if (_r2El) _r2El.textContent = '';
 
@@ -5893,7 +5900,7 @@ document.querySelectorAll('#pcaCompControls input[data-pc]').forEach(cb => {
 function _syncImiRefVisibility() { /* intentionally empty */ }
 
 // Overlay controls: re-render distance/velocity plots or PCA plots
-['overlayPeakDist', 'overlayOpen', 'overlayClose', 'overlayPause', 'overlayPeakOpenVel', 'overlayPeakCloseVel'].forEach(id => {
+['overlayPeakDist', 'overlayOpen', 'overlayClose', 'overlayPause', 'overlayPeakOpenVel', 'overlayPeakCloseVel', 'overlaySequences'].forEach(id => {
     document.getElementById(id).addEventListener('change', () => {
         if (_resultsViewMode === 'pca') { if (cachedPCA) renderFingertipPCA(); }
         else if (cachedTraces) renderAllDistancePlots();
