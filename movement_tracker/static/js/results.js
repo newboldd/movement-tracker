@@ -956,8 +956,13 @@ function renderFingertipPCA() {
         });
     }
 
+    // Match the distance-plot mapping (slider is min=5 max=60):
+    // raw 5..60 → secPerWidth 60..5.  The previous 125-raw mapping
+    // was for the OTHER slider (min=5 max=120), which clamped the
+    // PCA secPerWidth to 65..120 and pinned plotW to containerW for
+    // every realistic trial duration -- so the slider appeared inert.
     const xScaleRaw = parseFloat(document.getElementById('xScaleSlider')?.value);
-    const secPerWidth = isFinite(xScaleRaw) ? (125 - xScaleRaw) : 75;
+    const secPerWidth = isFinite(xScaleRaw) ? (65 - xScaleRaw) : 15;
     const containerW = container.clientWidth || container.parentElement?.clientWidth || 1200;
 
     data.trials.forEach((trial, idx) => {
