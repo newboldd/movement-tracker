@@ -174,32 +174,7 @@
                         <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="radio" name="seqDir" value="dec" checked> Decrement only</label>
                         <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="radio" name="seqDir" value="any"> Dec/Increment</label>
                     </span>
-                    <span style="border-left:1px solid #ccc;height:18px;margin:0 4px;"></span>
-                    <label style="display:inline-flex;align-items:center;gap:6px;" title="Information criterion penalising extra sequences in the DP. BIC = ss_reg - k·log(N); AIC = ss_reg - 2k; none = no penalty.">
-                        Penalty:
-                        <select id="seqPenalty" style="font-size:11px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:1px 4px;">
-                            <option value="none">none</option>
-                            <option value="aic">AIC</option>
-                            <option value="bic" selected>BIC</option>
-                        </select>
-                    </label>
-                    <span style="border-left:1px solid #ccc;height:18px;margin:0 4px;"></span>
-                    <label style="display:inline-flex;align-items:center;gap:6px;" title="Minimum number of movements per sequence window.">
-                        Min movements:
-                        <input type="range" id="seqMinMoves" min="2" max="20" step="1" value="5" style="width:110px;">
-                        <span id="seqMinMovesVal" style="font-size:11px;color:var(--text-muted);min-width:18px;">5</span>
-                    </label>
-                    <label style="display:inline-flex;align-items:center;gap:6px;" title="Minimum R² (computed with the selected Model) for a window to be eligible.">
-                        Min R²:
-                        <input type="range" id="seqMinR2" min="0" max="1" step="0.05" value="0.30" style="width:110px;">
-                        <span id="seqMinR2Val" style="font-size:11px;color:var(--text-muted);min-width:30px;">0.30</span>
-                    </label>
-                    <label style="display:inline-flex;align-items:center;gap:6px;" title="Minimum |slope| for a window to be eligible. Linear: |slope| in amplitude units per movement. Exponential / Exp+floor: |b| in 1/movement units. 0 disables the filter.">
-                        Min |slope|:
-                        <input type="range" id="seqMinSlope" min="0" max="1" step="0.01" value="0" style="width:110px;">
-                        <span id="seqMinSlopeVal" style="font-size:11px;color:var(--text-muted);min-width:30px;">0.00</span>
-                    </label>
-                    <a href="#" id="seqDefaultsBtn" style="font-size:11px;color:var(--blue);text-decoration:underline;cursor:pointer;" title="Reset all segmentation controls to defaults.">Defaults</a>
+                    <a href="#" id="seqDefaultsBtn" style="font-size:11px;color:var(--blue);text-decoration:underline;cursor:pointer;" title="Reset segmentation controls to defaults.">Defaults</a>
                 </span>
             </div>
             <div id="distancePlots">
@@ -582,6 +557,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=149"></script>
+    <script src="/static/js/results.js?v=150"></script>
 </body>
 </html>

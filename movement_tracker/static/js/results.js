@@ -9,14 +9,24 @@
 //
 // Defaults match the historical implementation EXCEPT for the
 // new BIC penalty, which the user opted into making default.
+// User-controlled segmentation knobs.  The previous BIC penalty,
+// minR², minMoves, and minSlope sliders were removed -- the
+// rendered model now uses ONE shared (c, a, b) across every
+// segment per plot, so the per-window quality knobs don't move the
+// needle much.  Penalty is hard-coded to BIC, the eligibility
+// constants below mirror the historical defaults.
 const _SEQ_DEFAULTS = Object.freeze({
     model:     'exp',   // 'none' | 'linear' | 'exp' | 'expf' (exp + floor)
     window:    'multi', // 'full' | 'first10' | 'multi'
     direction: 'dec',   // 'dec' | 'any'
-    penalty:   'bic',   // 'none' | 'aic' | 'bic'
-    minMoves:  5,
-    minR2:     0.30,
-    minSlope:  0,       // 0 disables; otherwise |slope| (linear) or |b| (exp / expf)
+});
+
+// Hard-coded segmentation constants (was sliders).
+const _SEQ_HARDCODED = Object.freeze({
+    penalty:  'bic',
+    minMoves: 5,
+    minR2:    0.30,
+    minSlope: 0,
 });
 const _SEQ_STORAGE_KEY = 'mt_seq_config_v1';
 
@@ -43,13 +53,11 @@ function getSeqConfig() {
         model:     checked('seqModel',  _SEQ_DEFAULTS.model),
         window:    checked('seqWindow', _SEQ_DEFAULTS.window),
         direction: checked('seqDir',    _SEQ_DEFAULTS.direction),
-        penalty:   $('seqPenalty')?.value || _SEQ_DEFAULTS.penalty,
-        minMoves:  parseInt($('seqMinMoves')?.value, 10) || _SEQ_DEFAULTS.minMoves,
-        minR2:     parseFloat($('seqMinR2')?.value)      || _SEQ_DEFAULTS.minR2,
-        minSlope:  (() => {
-            const v = parseFloat($('seqMinSlope')?.value);
-            return Number.isFinite(v) ? v : _SEQ_DEFAULTS.minSlope;
-        })(),
+        // Hard-coded since the sliders were removed.
+        penalty:   _SEQ_HARDCODED.penalty,
+        minMoves:  _SEQ_HARDCODED.minMoves,
+        minR2:     _SEQ_HARDCODED.minR2,
+        minSlope:  _SEQ_HARDCODED.minSlope,
     };
 }
 
@@ -59,13 +67,6 @@ function getSeqConfig() {
     const modelRadios = document.querySelectorAll('input[name="seqModel"]');
     const winRadios   = document.querySelectorAll('input[name="seqWindow"]');
     const dirRadios   = document.querySelectorAll('input[name="seqDir"]');
-    const penSel      = $('seqPenalty');
-    const minMv       = $('seqMinMoves');
-    const minMvVal    = $('seqMinMovesVal');
-    const minR2       = $('seqMinR2');
-    const minR2Val    = $('seqMinR2Val');
-    const minSlope    = $('seqMinSlope');
-    const minSlopeVal = $('seqMinSlopeVal');
     const defaultsBtn = $('seqDefaultsBtn');
     if (!modelRadios.length || !combined) return;
 
@@ -78,13 +79,6 @@ function getSeqConfig() {
         setRadio('seqModel',  cfg.model);
         setRadio('seqWindow', cfg.window);
         setRadio('seqDir',    cfg.direction);
-        if (penSel)   penSel.value   = cfg.penalty;
-        if (minMv)    minMv.value    = cfg.minMoves;
-        if (minR2)    minR2.value    = cfg.minR2;
-        if (minSlope) minSlope.value = cfg.minSlope;
-        if (minMvVal)    minMvVal.textContent    = String(cfg.minMoves);
-        if (minR2Val)    minR2Val.textContent    = (+cfg.minR2).toFixed(2);
-        if (minSlopeVal) minSlopeVal.textContent = (+cfg.minSlope).toFixed(2);
     };
 
     // After every change: mirror to the hidden select, persist, and
@@ -102,9 +96,6 @@ function getSeqConfig() {
         // Map (model, window) → the legacy combined string.
         combined.value = isNone ? 'none' : `${cfg.model}_${cfg.window}`;
         // Updated readouts.
-        if (minMvVal)    minMvVal.textContent    = String(cfg.minMoves);
-        if (minR2Val)    minR2Val.textContent    = (+cfg.minR2).toFixed(2);
-        if (minSlopeVal) minSlopeVal.textContent = (+cfg.minSlope).toFixed(2);
         // Drop any cached multi-seq DP result + re-render -- handled
         // by the change listener on #distSequenceMode (attached later
         // in this file).  We can't touch cachedSequenceAssignments
@@ -120,10 +111,6 @@ function getSeqConfig() {
     modelRadios.forEach(r => r.addEventListener('change', sync));
     winRadios.forEach(r   => r.addEventListener('change', sync));
     dirRadios.forEach(r   => r.addEventListener('change', sync));
-    if (penSel) penSel.addEventListener('change', sync);
-    if (minMv)    minMv.addEventListener('input',    sync);
-    if (minR2)    minR2.addEventListener('input',    sync);
-    if (minSlope) minSlope.addEventListener('input', sync);
     if (defaultsBtn) {
         defaultsBtn.addEventListener('click', (e) => {
             e.preventDefault();
@@ -4759,164 +4746,196 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
                 }
             }
 
-            // Collected per sequence so the leftover (non-sequence)
-            // movements can be modeled afterwards.
-            const seqWindows = [];   // {xMin, xMax, baselineMag}
-            const coveredIdx = new Set();
-
-            // For each sequence window (start/end are indices into the trial's amplitude array,
-            // but we need to filter for valid param values within those windows)
-            trialSeqs.sequences.forEach((seq, si) => {
-                const seqMsIndices = ampValid.slice(seq.start, seq.end);
-
-                // Get x, y for this param within the sequence window
-                // For closing velocities, negate so we fit on positive magnitudes
-                const seqX = [], seqY = [];
-                for (const mi of seqMsIndices) {
-                    if (x[mi] != null && y[mi] != null && isFinite(x[mi]) && isFinite(y[mi])) {
-                        seqX.push(x[mi]);
-                        seqY.push(flipSign ? -y[mi] : y[mi]);
-                        coveredIdx.add(mi);
-                    }
-                }
-                if (seqX.length < 2) return;
-
-                const xMin = Math.min(...seqX);
-                const xMax = Math.max(...seqX);
-
-                // Background span — use trial color so shading matches the dots
-                shapes.push({
-                    type: 'rect', xref: axId, yref: 'paper',
-                    x0: xMin, x1: xMax, y0: 0, y1: 1,
-                    fillcolor: color, opacity: 0.07,
-                    line: { width: 0 },
-                    layer: 'below',
-                });
-
-                let baselineMag;
-                if (isExp) {
-                    // Exponential / exp+floor fit within sequence —
-                    // NLLS on original-scale y.  ss_reg matches the
-                    // (1 − SSE/SST) used for selection so the badge
-                    // matches the plot.
-                    const fit = _nlsExpFit(seqX, seqY, isExpFloor);
-                    if (!fit) return;
-                    baselineMag = fit.predict(xMin);
-                    trialSSReg += fit.ss_reg;
-                    const nPts = 50;
-                    const step = (xMax - xMin) / (nPts - 1);
-                    const curveX = [], curveY = [];
-                    for (let k = 0; k < nPts; k++) {
-                        const xv = xMin + k * step;
-                        curveX.push(xv);
-                        curveY.push(sign * fit.predict(xv));
-                    }
-                    traces.push({
-                        x: curveX, y: curveY,
-                        type: 'scatter', mode: 'lines',
-                        name: `Seq ${si + 1}`,
-                        xaxis: axId, yaxis: 'y',
-                        line: { color, width: 2.5 },
-                        showlegend: false, hoverinfo: 'skip',
-                    });
-                    // R² annotation
-                    const midX = seqX[Math.floor(seqX.length / 2)];
-                    annotations.push({
-                        x: midX, y: 0.98,
-                        xref: axId, yref: 'paper', yanchor: 'top',
-                        text: `R\u00b2=${fit.r2.toFixed(2)}<br>b=${fit.b.toFixed(3)}` + (isExpFloor ? `<br>Floor=${fit.c.toFixed(2)}` : ''),
-                        showarrow: false,
-                        font: { size: 9, color },
-                        bgcolor: 'rgba(255,255,255,0.8)',
-                        bordercolor: color,
-                        borderpad: 2,
-                    });
-                } else {
-                    // Linear fit within sequence
-                    const reg = linearRegressionFull(seqX, seqY);
-                    if (!reg) return;
-                    baselineMag = reg.slope * xMin + reg.intercept;
-                    trialSSReg += reg.ss_reg;
-                    traces.push({
-                        x: [xMin, xMax],
-                        y: [sign * (reg.slope * xMin + reg.intercept), sign * (reg.slope * xMax + reg.intercept)],
-                        type: 'scatter', mode: 'lines',
-                        name: `Seq ${si + 1}`,
-                        xaxis: axId, yaxis: 'y',
-                        line: { color, width: 2.5 },
-                        showlegend: false, hoverinfo: 'skip',
-                    });
-                    // R² annotation
-                    const midX = (xMin + xMax) / 2;
-                    annotations.push({
-                        x: midX, y: 0.98,
-                        xref: axId, yref: 'paper', yanchor: 'top',
-                        text: `R\u00b2=${reg.r2.toFixed(2)}<br>Slope=${reg.slope.toFixed(3)}`,
-                        showarrow: false,
-                        font: { size: 9, color },
-                        bgcolor: 'rgba(255,255,255,0.8)',
-                        bordercolor: color,
-                        borderpad: 2,
-                    });
-                }
-                seqWindows.push({ xMin, xMax, baselineMag });
+            // ── Joint shared-parameter fit ───────────────────────
+            // Every segment shares ONE (c, a, b) -- c is the floor,
+            // c+a is the ceiling, b is the rate.  Non-segment points
+            // contribute a residual against the ceiling (their predicted
+            // value is c + a, achieved by setting their local x to zero
+            // in the NLLS fitter).
+            //
+            // Build per-movement segment membership.
+            const segOf = new Array(ms.length).fill(-1);
+            const segStartIdx = [];   // movement index where each seg begins
+            trialSeqs.sequences.forEach((seq) => {
+                const segMs = ampValid.slice(seq.start, seq.end);
+                if (segMs.length === 0) return;
+                segStartIdx.push(segMs[0]);
+                const sid = segStartIdx.length - 1;
+                segMs.forEach(mi => { segOf[mi] = sid; });
             });
 
-            // Model every movement NOT in a sequence as a constant equal
-            // to the largest sequence baseline (the fit value at a
-            // sequence start).  Drawn as a flat dotted line over the
-            // non-sequence regions so trailing low movements aren't left
-            // unmodeled / cut off the ends of the sequences.
-            if (seqWindows.length > 0) {
-                const maxBaselineMag = Math.max(...seqWindows.map(w => w.baselineMag));
-                const constY = sign * maxBaselineMag;
-
-                const allX = [], nonSeqX = [];
-                for (let i = 0; i < x.length; i++) {
-                    if (x[i] == null || !isFinite(x[i]) || y[i] == null || !isFinite(y[i])) continue;
-                    allX.push(x[i]);
-                    if (!coveredIdx.has(i)) nonSeqX.push(x[i]);
+            // Collect (x, y, segId) for every VALID movement.
+            const allX = [], allY = [], allSeg = [];
+            const segStartX = {};
+            for (let i = 0; i < x.length; i++) {
+                if (x[i] == null || y[i] == null
+                    || !isFinite(x[i]) || !isFinite(y[i])) continue;
+                allX.push(x[i]);
+                allY.push(flipSign ? -y[i] : y[i]);
+                const sid = segOf[i];
+                allSeg.push(sid);
+                if (sid >= 0) {
+                    if (!(sid in segStartX) || x[i] < segStartX[sid]) {
+                        segStartX[sid] = x[i];
+                    }
                 }
+            }
+            if (allX.length < 3) return;
 
-                if (nonSeqX.length > 0 && allX.length > 0) {
-                    const trialXmin = Math.min(...allX);
-                    const trialXmax = Math.max(...allX);
-                    // Merged sequence coverage, ascending.
-                    const cov = seqWindows
-                        .map(w => [w.xMin, w.xMax])
+            // Per-segment min/max x ranges for the curve & shading.
+            const segXRange = segStartIdx.map((_, sid) => {
+                let lo = Infinity, hi = -Infinity;
+                for (let i = 0; i < allX.length; i++) {
+                    if (allSeg[i] === sid) {
+                        if (allX[i] < lo) lo = allX[i];
+                        if (allX[i] > hi) hi = allX[i];
+                    }
+                }
+                return { lo, hi };
+            }).filter(r => isFinite(r.lo));
+
+            const trialXmin = Math.min(...allX);
+            const trialXmax = Math.max(...allX);
+
+            if (isExp) {
+                // ONE joint fit; every segment shares (c, a, b).
+                const fit = _fitJointSharedExp(
+                    allX, allY, allSeg, segStartX, isExpFloor);
+                if (!fit) return;
+
+                trialSSReg += Math.max(0, trialSSTot - fit.sse);
+
+                // Per-segment shading + exp curve (same shape, just
+                // translated horizontally to each segment's start).
+                segXRange.forEach((rng, sid) => {
+                    shapes.push({
+                        type: 'rect', xref: axId, yref: 'paper',
+                        x0: rng.lo, x1: rng.hi, y0: 0, y1: 1,
+                        fillcolor: color, opacity: 0.07,
+                        line: { width: 0 }, layer: 'below',
+                    });
+                    const s0 = segStartX[sid];
+                    const nPts = 50;
+                    const step = (rng.hi - rng.lo) / Math.max(1, nPts - 1);
+                    const cx = [], cy = [];
+                    for (let k = 0; k < nPts; k++) {
+                        const xv = rng.lo + k * step;
+                        cx.push(xv);
+                        cy.push(sign * fit.predict(xv, s0));
+                    }
+                    traces.push({
+                        x: cx, y: cy,
+                        type: 'scatter', mode: 'lines',
+                        name: `Seq ${sid + 1}`,
+                        xaxis: axId, yaxis: 'y',
+                        line: { color, width: 2.5 },
+                        showlegend: false, hoverinfo: 'skip',
+                    });
+                });
+
+                // Flat ceiling line over the non-segment x ranges.
+                const cy0 = sign * fit.ceiling;
+                const gaps = [];
+                if (segXRange.length > 0) {
+                    const cov = segXRange.map(r => [r.lo, r.hi])
                         .sort((a, b) => a[0] - b[0]);
-                    // Complement intervals within [trialXmin, trialXmax].
-                    const segs = [];
                     let cursor = trialXmin;
                     for (const [a, b] of cov) {
-                        if (a > cursor) segs.push([cursor, Math.min(a, trialXmax)]);
+                        if (a > cursor) gaps.push([cursor, Math.min(a, trialXmax)]);
                         cursor = Math.max(cursor, b);
                     }
-                    if (cursor < trialXmax) segs.push([cursor, trialXmax]);
-
-                    // Keep only gap segments that actually contain a
-                    // non-sequence movement; draw one broken polyline.
+                    if (cursor < trialXmax) gaps.push([cursor, trialXmax]);
+                } else {
+                    gaps.push([trialXmin, trialXmax]);
+                }
+                if (gaps.length > 0) {
                     const cx = [], cy = [];
-                    let firstSeg = true;
-                    for (const [a, b] of segs) {
+                    let first = true;
+                    for (const [a, b] of gaps) {
                         if (b <= a) continue;
-                        if (!nonSeqX.some(xv => xv >= a - 1e-6 && xv <= b + 1e-6)) continue;
-                        if (!firstSeg) { cx.push(null); cy.push(null); }
-                        cx.push(a, b); cy.push(constY, constY);
-                        firstSeg = false;
+                        if (!first) { cx.push(null); cy.push(null); }
+                        cx.push(a, b); cy.push(cy0, cy0);
+                        first = false;
                     }
                     if (cx.length > 0) {
                         traces.push({
                             x: cx, y: cy,
                             type: 'scatter', mode: 'lines',
-                            name: 'Baseline (non-seq)',
+                            name: 'Ceiling',
                             xaxis: axId, yaxis: 'y',
                             line: { color, width: 2, dash: 'dot' },
                             showlegend: false, hoverinfo: 'skip',
                         });
                     }
                 }
+
+                // One trial-wide annotation summarising shared params.
+                const annX = segXRange[0]
+                    ? (segXRange[0].lo + segXRange[0].hi) / 2
+                    : (trialXmin + trialXmax) / 2;
+                const floorBit = isExpFloor
+                    ? `<br>Floor=${fit.floor.toFixed(2)}` : '';
+                const r2Trial = trialSSTot > 0
+                    ? Math.max(0, Math.min(1, 1 - fit.sse / trialSSTot)) : 0;
+                annotations.push({
+                    x: annX, y: 0.98,
+                    xref: axId, yref: 'paper', yanchor: 'top',
+                    text: `R²=${r2Trial.toFixed(2)}<br>b=${fit.b.toFixed(3)}`
+                        + `<br>Ceil=${fit.ceiling.toFixed(2)}${floorBit}`,
+                    showarrow: false,
+                    font: { size: 9, color },
+                    bgcolor: 'rgba(255,255,255,0.8)',
+                    bordercolor: color, borderpad: 2,
+                });
+
+            } else {
+                // Linear model keeps the per-segment fits (the user
+                // redesign only constrained the exponential family).
+                trialSeqs.sequences.forEach((seq, si) => {
+                    const seqMsIndices = ampValid.slice(seq.start, seq.end);
+                    const seqX = [], seqY = [];
+                    for (const mi of seqMsIndices) {
+                        if (x[mi] != null && y[mi] != null
+                            && isFinite(x[mi]) && isFinite(y[mi])) {
+                            seqX.push(x[mi]);
+                            seqY.push(flipSign ? -y[mi] : y[mi]);
+                        }
+                    }
+                    if (seqX.length < 2) return;
+                    const xMin = Math.min(...seqX);
+                    const xMax = Math.max(...seqX);
+                    shapes.push({
+                        type: 'rect', xref: axId, yref: 'paper',
+                        x0: xMin, x1: xMax, y0: 0, y1: 1,
+                        fillcolor: color, opacity: 0.07,
+                        line: { width: 0 }, layer: 'below',
+                    });
+                    const reg = linearRegressionFull(seqX, seqY);
+                    if (!reg) return;
+                    trialSSReg += reg.ss_reg;
+                    traces.push({
+                        x: [xMin, xMax],
+                        y: [sign * (reg.slope * xMin + reg.intercept),
+                            sign * (reg.slope * xMax + reg.intercept)],
+                        type: 'scatter', mode: 'lines',
+                        name: `Seq ${si + 1}`,
+                        xaxis: axId, yaxis: 'y',
+                        line: { color, width: 2.5 },
+                        showlegend: false, hoverinfo: 'skip',
+                    });
+                    const midX = (xMin + xMax) / 2;
+                    annotations.push({
+                        x: midX, y: 0.98,
+                        xref: axId, yref: 'paper', yanchor: 'top',
+                        text: `R²=${reg.r2.toFixed(2)}<br>Slope=${reg.slope.toFixed(3)}`,
+                        showarrow: false,
+                        font: { size: 9, color },
+                        bgcolor: 'rgba(255,255,255,0.8)',
+                        bordercolor: color, borderpad: 2,
+                    });
+                });
             }
+
 
         } else {
             // Full or first-10 modes
@@ -5274,6 +5293,45 @@ function _nlsExpFit(x, y, withFloor) {
         n: N, predict,
     };
 }
+
+// Shared-parameter exponential fit across multiple segments.
+//
+// Treats the trial's full (x, y) sample as a single regression
+// problem with one set of (c, a, b).  Each sample's local x is its
+// distance from the START of its segment for in-segment points,
+// or zero for ceiling-region points (the value at x_local=0 is
+// c + a, which IS the ceiling line).
+//
+// segIndex: integer ≥0 = segment id, -1 = ceiling region.
+// segStartX: object mapping segId → segment's start x value.
+//
+// Reuses _nlsExpFit by stretching the input via the x_local trick.
+// Returns {c, a, b, ceiling, floor, sse, predict} or null on
+// solver failure.
+function _fitJointSharedExp(allX, allY, segIndex, segStartX, withFloor) {
+    if (allX.length < (withFloor ? 4 : 3)) return null;
+    const xLocal = [];
+    for (let i = 0; i < allX.length; i++) {
+        const k = segIndex[i];
+        xLocal.push(k < 0 ? 0 : (allX[i] - segStartX[k]));
+    }
+    const fit = _nlsExpFit(xLocal, allY, withFloor);
+    if (!fit) return null;
+    // SSE on original-scale y.
+    let sse = 0;
+    for (let i = 0; i < allX.length; i++) {
+        const pred = fit.predict(xLocal[i]);
+        sse += (allY[i] - pred) ** 2;
+    }
+    return {
+        c: fit.c, a: fit.a, b: fit.b,
+        ceiling: fit.c + fit.a, floor: fit.c,
+        sse,
+        predict: (xv, segStart) => fit.predict(xv - segStart),
+        predictCeiling: () => fit.c + fit.a,
+    };
+}
+
 
 // Fit one (xs, ys) window with the selected model and return a
 // uniform record, or null if the fit doesn't pass the direction /
