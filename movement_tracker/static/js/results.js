@@ -16,10 +16,11 @@
 // needle much.  Penalty is hard-coded to BIC, the eligibility
 // constants below mirror the historical defaults.
 const _SEQ_DEFAULTS = Object.freeze({
-    model:     'exp',   // 'none' | 'linear' | 'exp' | 'expf' (exp + floor)
-    window:    'multi', // 'full' | 'first10' | 'multi'
-    direction: 'dec',   // 'dec' | 'any'
-    maxImi:    1.0,     // seconds; reject windows with any P-P gap above this
+    model:        'exp',   // 'none' | 'linear' | 'exp' | 'expf' (exp + floor)
+    window:       'multi', // 'full' | 'first10' | 'multi'
+    direction:    'dec',   // 'dec' | 'any'
+    maxImi:       1.0,     // seconds; reject windows with any P-P gap above this
+    bicStrength:  1.0,     // multiplier on the BIC penalty (0 = off, 1 = standard)
 });
 
 // Hard-coded segmentation constants (was sliders).
@@ -58,6 +59,10 @@ function getSeqConfig() {
             const v = parseFloat($('seqMaxImi')?.value);
             return Number.isFinite(v) ? v : _SEQ_DEFAULTS.maxImi;
         })(),
+        bicStrength: (() => {
+            const v = parseFloat($('seqBicStrength')?.value);
+            return Number.isFinite(v) ? v : _SEQ_DEFAULTS.bicStrength;
+        })(),
         // Hard-coded since the sliders were removed.
         penalty:   _SEQ_HARDCODED.penalty,
         minMoves:  _SEQ_HARDCODED.minMoves,
@@ -74,6 +79,8 @@ function getSeqConfig() {
     const dirRadios   = document.querySelectorAll('input[name="seqDir"]');
     const maxImi      = $('seqMaxImi');
     const maxImiVal   = $('seqMaxImiVal');
+    const bicStrength    = $('seqBicStrength');
+    const bicStrengthVal = $('seqBicStrengthVal');
     const defaultsBtn = $('seqDefaultsBtn');
     if (!modelRadios.length || !combined) return;
 
@@ -88,6 +95,8 @@ function getSeqConfig() {
         setRadio('seqDir',    cfg.direction);
         if (maxImi)    maxImi.value    = cfg.maxImi;
         if (maxImiVal) maxImiVal.textContent = `${(+cfg.maxImi).toFixed(1)} s`;
+        if (bicStrength)    bicStrength.value    = cfg.bicStrength;
+        if (bicStrengthVal) bicStrengthVal.textContent = (+cfg.bicStrength).toFixed(2);
     };
 
     // After every change: mirror to the hidden select, persist, and
@@ -105,6 +114,7 @@ function getSeqConfig() {
         // Map (model, window) → the legacy combined string.
         combined.value = isNone ? 'none' : `${cfg.model}_${cfg.window}`;
         if (maxImiVal) maxImiVal.textContent = `${(+cfg.maxImi).toFixed(1)} s`;
+        if (bicStrengthVal) bicStrengthVal.textContent = (+cfg.bicStrength).toFixed(2);
         // Drop any cached multi-seq DP result + re-render -- handled
         // by the change listener on #distSequenceMode (attached later
         // in this file).  We can't touch cachedSequenceAssignments
@@ -120,7 +130,8 @@ function getSeqConfig() {
     modelRadios.forEach(r => r.addEventListener('change', sync));
     winRadios.forEach(r   => r.addEventListener('change', sync));
     dirRadios.forEach(r   => r.addEventListener('change', sync));
-    if (maxImi) maxImi.addEventListener('input', sync);
+    if (maxImi)       maxImi.addEventListener('input',       sync);
+    if (bicStrength)  bicStrength.addEventListener('input',  sync);
     if (defaultsBtn) {
         defaultsBtn.addEventListener('click', (e) => {
             e.preventDefault();
@@ -5563,9 +5574,10 @@ function optimizeSequences(amplitudes, cfgArg, times) {
     // ss-units (the DP works on ss_reg).  Without this the penalty
     // would be dominated or swamped depending on the trial.
     const noiseScale = totalSS / Math.max(1, n);
+    const bicMult = Number.isFinite(cfg.bicStrength) ? cfg.bicStrength : 1;
     const penaltyTerm = (winLen) => {
-        if (cfg.penalty === 'bic') return k * Math.log(winLen) * noiseScale;
-        if (cfg.penalty === 'aic') return 2 * k * noiseScale;
+        if (cfg.penalty === 'bic') return bicMult * k * Math.log(winLen) * noiseScale;
+        if (cfg.penalty === 'aic') return bicMult * 2 * k * noiseScale;
         return 0;
     };
 
