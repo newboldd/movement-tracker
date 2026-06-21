@@ -95,9 +95,13 @@ function getSeqConfig() {
         // Updated readouts.
         if (minMvVal) minMvVal.textContent = String(cfg.minMoves);
         if (minR2Val) minR2Val.textContent = (+cfg.minR2).toFixed(2);
-        // Drop any cached multi-seq DP result: the DP depends on
-        // every knob below the radios.
-        cachedSequenceAssignments = null;
+        // Drop any cached multi-seq DP result + re-render -- handled
+        // by the change listener on #distSequenceMode (attached later
+        // in this file).  We can't touch cachedSequenceAssignments
+        // here directly: this IIFE runs before the `let` for that
+        // cache initialises, so the assignment would hit the TDZ and
+        // throw at script-load time (subjects dropdown silently broke
+        // when the controls had been previously interacted with).
         _writeSeqSession(cfg);
         combined.dispatchEvent(new Event('change', { bubbles: true }));
     };
