@@ -4841,7 +4841,7 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
                     for (let k = 0; k < nPts; k++) {
                         const xv = rng.lo + k * step;
                         cx.push(xv);
-                        cy.push(sign * fit.predict(xv, s0));
+                        cy.push(sign * fit.predict(xv, s0, sid));
                     }
                     traces.push({
                         x: cx, y: cy,
@@ -4850,6 +4850,16 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
                         xaxis: axId, yaxis: 'y',
                         line: { color, width: 2.5 },
                         showlegend: false, hoverinfo: 'skip',
+                    });
+                    // Per-segment b annotation above each shaded window.
+                    annotations.push({
+                        x: (rng.lo + rng.hi) / 2, y: 0.05,
+                        xref: axId, yref: 'paper', yanchor: 'bottom',
+                        text: `b=${fit.b[sid].toFixed(3)}`,
+                        showarrow: false,
+                        font: { size: 9, color },
+                        bgcolor: 'rgba(255,255,255,0.8)',
+                        bordercolor: color, borderpad: 2,
                     });
                 });
 
@@ -4900,8 +4910,7 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
                 annotations.push({
                     x: annX, y: 0.98,
                     xref: axId, yref: 'paper', yanchor: 'top',
-                    text: `R²=${r2Trial.toFixed(2)}<br>b=${fit.b.toFixed(3)}`
-                        + `<br>Ceil=${fit.ceiling.toFixed(2)}${floorBit}`,
+                    text: `R²=${r2Trial.toFixed(2)}<br>Ceil=${fit.ceiling.toFixed(2)}${floorBit}`,
                     showarrow: false,
                     font: { size: 9, color },
                     bgcolor: 'rgba(255,255,255,0.8)',
@@ -5314,41 +5323,152 @@ function _nlsExpFit(x, y, withFloor) {
     };
 }
 
-// Shared-parameter exponential fit across multiple segments.
+// Joint exp fit: every segment shares (a, c) -- shared CEILING and
+// FLOOR -- but each segment has its own decay constant b_k.
+// Ceiling-region points contribute residuals against c + a (their
+// x_local = 0 makes the exponential factor 1 regardless of b).
 //
-// Treats the trial's full (x, y) sample as a single regression
-// problem with one set of (c, a, b).  Each sample's local x is its
-// distance from the START of its segment for in-segment points,
-// or zero for ceiling-region points (the value at x_local=0 is
-// c + a, which IS the ceiling line).
+// Parameter layout: [a, c?, b_0, b_1, ..., b_{K-1}]
+//   c only present when withFloor = true.
 //
-// segIndex: integer ≥0 = segment id, -1 = ceiling region.
-// segStartX: object mapping segId → segment's start x value.
-//
-// Reuses _nlsExpFit by stretching the input via the x_local trick.
-// Returns {c, a, b, ceiling, floor, sse, predict} or null on
-// solver failure.
+// Custom Levenberg-Marquardt because the per-segment b's give the
+// Jacobian sparse block structure that _nlsExpFit can't express.
+// Returns {a, c, b (array), ceiling, floor, sse, predict(x, segStartX, segId)}.
 function _fitJointSharedExp(allX, allY, segIndex, segStartX, withFloor) {
-    if (allX.length < (withFloor ? 4 : 3)) return null;
-    const xLocal = [];
-    for (let i = 0; i < allX.length; i++) {
+    const N = allX.length;
+    let K = 0;
+    for (let i = 0; i < N; i++) {
+        if (segIndex[i] >= 0 && segIndex[i] + 1 > K) K = segIndex[i] + 1;
+    }
+    if (N < (withFloor ? 4 : 3) || K === 0) return null;
+
+    const hasC = !!withFloor;
+    const aIdx = 0;
+    const cIdx = hasC ? 1 : -1;
+    const bIdx0 = hasC ? 2 : 1;
+    const P = (hasC ? 2 : 1) + K;
+
+    // Seed a, c, and b_k.  Use log-linear on all combined segment
+    // (x_local, y) for an a + b_0 estimate; copy b_0 to every b_k.
+    let a = 1, c = 0;
+    const segXAll = [], segYAll = [];
+    for (let i = 0; i < N; i++) {
         const k = segIndex[i];
-        xLocal.push(k < 0 ? 0 : (allX[i] - segStartX[k]));
+        if (k < 0 || !(allY[i] > 0)) continue;
+        segXAll.push(allX[i] - segStartX[k]);
+        segYAll.push(allY[i]);
     }
-    const fit = _nlsExpFit(xLocal, allY, withFloor);
-    if (!fit) return null;
-    // SSE on original-scale y.
-    let sse = 0;
-    for (let i = 0; i < allX.length; i++) {
-        const pred = fit.predict(xLocal[i]);
-        sse += (allY[i] - pred) ** 2;
+    let bSeed = -0.1;
+    if (segXAll.length >= 2) {
+        const sy = segYAll.map(v => Math.log(v));
+        const reg = linearRegression(segXAll, sy);
+        a = Math.exp(reg.intercept);
+        bSeed = reg.slope;
     }
+    if (hasC) {
+        const finiteY = allY.filter(v => Number.isFinite(v));
+        if (finiteY.length > 0) {
+            c = Math.max(0, 0.5 * Math.min(...finiteY));
+        }
+    }
+
+    const params = new Array(P).fill(0);
+    params[aIdx] = a;
+    if (hasC) params[cIdx] = c;
+    for (let k = 0; k < K; k++) params[bIdx0 + k] = bSeed;
+
+    const model = (p, i) => {
+        const k = segIndex[i];
+        const ai = p[aIdx];
+        const ci = hasC ? p[cIdx] : 0;
+        if (k < 0) return ci + ai;
+        const bk = p[bIdx0 + k];
+        const xl = allX[i] - segStartX[k];
+        return ci + ai * Math.exp(bk * xl);
+    };
+    const sseOf = (p) => {
+        let s = 0;
+        for (let i = 0; i < N; i++) {
+            const d = allY[i] - model(p, i);
+            s += d * d;
+        }
+        return s;
+    };
+
+    let prevSse = sseOf(params);
+    if (!Number.isFinite(prevSse)) return null;
+    let lambda = 1e-3;
+    const maxIter = 60;
+    const tol = 1e-6;
+
+    for (let iter = 0; iter < maxIter; iter++) {
+        const JTJ = Array.from({ length: P }, () => new Float64Array(P));
+        const JTr = new Float64Array(P);
+        for (let i = 0; i < N; i++) {
+            const k = segIndex[i];
+            const ai = params[aIdx];
+            const bk = (k >= 0) ? params[bIdx0 + k] : 0;
+            const xl = (k >= 0) ? (allX[i] - segStartX[k]) : 0;
+            const ebx = (k >= 0) ? Math.exp(bk * xl) : 1;
+            const Ja = ebx;
+            const Jbk = (k >= 0) ? (ai * xl * ebx) : 0;
+            const ri = allY[i] - model(params, i);
+            // (a, a), (a, c), (a, b_k)
+            JTJ[aIdx][aIdx] += Ja * Ja;
+            if (hasC) JTJ[aIdx][cIdx] += Ja;
+            if (k >= 0) JTJ[aIdx][bIdx0 + k] += Ja * Jbk;
+            JTr[aIdx] += Ja * ri;
+            // (c, *)
+            if (hasC) {
+                JTJ[cIdx][aIdx] += Ja;
+                JTJ[cIdx][cIdx] += 1;
+                if (k >= 0) JTJ[cIdx][bIdx0 + k] += Jbk;
+                JTr[cIdx] += ri;
+            }
+            // (b_k, *)
+            if (k >= 0) {
+                JTJ[bIdx0 + k][aIdx]        += Jbk * Ja;
+                if (hasC) JTJ[bIdx0 + k][cIdx] += Jbk;
+                JTJ[bIdx0 + k][bIdx0 + k]   += Jbk * Jbk;
+                JTr[bIdx0 + k]              += Jbk * ri;
+            }
+        }
+        const A = JTJ.map((row, ii) => {
+            const r = Array.from(row);
+            r[ii] += lambda * (r[ii] || 1);
+            return r;
+        });
+        const delta = _solveLinearSystem(A, Array.from(JTr));
+        if (!delta || !delta.every(Number.isFinite)) break;
+        const trial = params.map((p, ii) => p + delta[ii]);
+        if (hasC && trial[cIdx] < 0) trial[cIdx] = 0;
+        const trialSse = sseOf(trial);
+        if (Number.isFinite(trialSse) && trialSse < prevSse) {
+            const improved = Math.abs(prevSse - trialSse) / Math.max(prevSse, 1e-12);
+            for (let p = 0; p < P; p++) params[p] = trial[p];
+            prevSse = trialSse;
+            lambda *= 0.5;
+            if (improved < tol) break;
+        } else {
+            lambda *= 5;
+            if (lambda > 1e10) break;
+        }
+    }
+
+    const aFin = params[aIdx];
+    const cFin = hasC ? params[cIdx] : 0;
+    const bFin = new Array(K);
+    for (let k = 0; k < K; k++) bFin[k] = params[bIdx0 + k];
+
     return {
-        c: fit.c, a: fit.a, b: fit.b,
-        ceiling: fit.c + fit.a, floor: fit.c,
-        sse,
-        predict: (xv, segStart) => fit.predict(xv - segStart),
-        predictCeiling: () => fit.c + fit.a,
+        a: aFin, c: cFin, b: bFin,
+        ceiling: cFin + aFin, floor: cFin,
+        sse: prevSse,
+        predict: (xv, segStart, segId) => {
+            const bk = (segId >= 0 && segId < K) ? bFin[segId] : 0;
+            return cFin + aFin * Math.exp(bk * (xv - segStart));
+        },
+        predictCeiling: () => cFin + aFin,
     };
 }
 
