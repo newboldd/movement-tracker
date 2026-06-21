@@ -3439,9 +3439,12 @@ function renderAllDistancePlots() {
 
     // Per-trial peak_frame → cluster color lookup so the peak-distance
     // and peak-velocity markers below can pick up the shape-overlay
-    // colors when the "Colors" checkbox is on.  _shapeClusterColors
-    // is already keyed by peak_frame.
-    const _colorsOn = !!document.getElementById('shapeClusterOn')?.checked;
+    // colors.  Driven by the "Color by shape cluster" checkbox in the
+    // overlay row (decoupled from the Movement Shapes section's
+    // Cluster toggle so the two views can be controlled
+    // independently).  _shapeClusterColors is already keyed by
+    // peak_frame.
+    const _colorsOn = !!document.getElementById('peakColorCluster')?.checked;
     const _colByTrial = {};
     if (_colorsOn && typeof _shapeClusterColors !== 'undefined' && _shapeClusterColors) {
         for (const k in _shapeClusterColors) {
@@ -3665,7 +3668,7 @@ function renderAllDistancePlots() {
                     const localFrame = m.peak_frame - trialStart;
                     peakTimes.push(+(localFrame / fps).toFixed(3));
                     peakVals.push(m.peak_dist);
-                    peakColors.push(_peakColor(idx, m.peak_frame, '#FF9800'));
+                    peakColors.push(_peakColor(idx, m.peak_frame, '#FFD700'));
                 }
             });
             if (peakTimes.length > 0) {
@@ -6272,6 +6275,27 @@ function _syncImiRefVisibility() { /* intentionally empty */ }
         else if (cachedTraces) renderAllDistancePlots();
     });
 });
+
+// "Color by shape cluster" sub-toggle: visible only when Peak is on,
+// re-renders the distance plots on change so the Peak markers swap
+// between yellow (off) and the per-cluster colors (on).
+(() => {
+    const peakCb = document.getElementById('overlayPeakDist');
+    const subCb  = document.getElementById('peakColorCluster');
+    const subLbl = document.getElementById('peakColorClusterLabel');
+    if (!peakCb || !subCb || !subLbl) return;
+    const syncVisibility = () => {
+        subLbl.style.display = peakCb.checked ? '' : 'none';
+        // When Peak is off, the cluster-color sub-checkbox has no
+        // effect; leave its checked state alone so toggling Peak back
+        // on restores the user's choice.
+    };
+    peakCb.addEventListener('change', syncVisibility);
+    subCb.addEventListener('change', () => {
+        if (cachedTraces) renderAllDistancePlots();
+    });
+    syncVisibility();
+})();
 
 // X-scale slider: seconds of trace shown per screen width, applied to
 // every distance/velocity plot.
