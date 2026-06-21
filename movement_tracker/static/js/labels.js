@@ -8119,11 +8119,17 @@ const manoViewer = (() => {
             }
             const disp = rowVisible ? '' : 'none';
             for (const c of cells) c.style.display = disp;
-        } else {
-            // Fallback for rows whose structure doesn't match (e.g.
-            // hidden master inputs): just toggle the input directly.
-            el.style.display = rowVisible ? '' : 'none';
         }
+        // Intentionally no display fallback for elements without a
+        // named-SPAN sibling: the only callers that hit this branch
+        // are the hidden Skeleton-v3 MASTER checkboxes (id
+        // showSkelV2_2D / _3D), which carry an inline
+        // style="display:none" because they're data-only sinks for
+        // JS — never grid items.  Clobbering that with '' makes them
+        // visible cells in the Models grid and shifts every row
+        // below Skeleton v3 by 2 columns.  Disabled state on line
+        // 8109 still tracks ``available``; that's all these masters
+        // need.
     }
 
     // Hide / collapse a multi-stage model's parent toggle (e.g.
