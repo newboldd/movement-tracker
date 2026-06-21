@@ -5518,8 +5518,39 @@ function _fitJointSharedExp(allX, allY, segIndex, segStartX, withFloor) {
 // Fit one (xs, ys) window with the selected model and return a
 // uniform record, or null if the fit doesn't pass the direction /
 // minR2 gates.
+// Reject windows where a single adjacent-pair step accounts for
+// more than this fraction of the window's total range.  Catches
+// the "one big movement followed by N small same-sized movements"
+// pattern (max step = total range, ratio = 1.0) without throwing
+// out legitimately steep but smooth decays (steepest realistic
+// exponential is ~64% at b = -1, so 0.75 leaves headroom).
+const _SEQ_MAX_STEP_SHARE = 0.75;
+
 function _seqFitWindow(xs, ys, cfg) {
     if (xs.length < cfg.minMoves) return null;
+
+    // Outlier-driven sequence guard: compute the total y-range AND
+    // the largest |Δy| between adjacent points; reject if a single
+    // step accounts for >_SEQ_MAX_STEP_SHARE of the range.  A real
+    // decrement spreads the decay across multiple movements; the
+    // pathological case has the first big drop swallow everything.
+    if (ys.length >= 3) {
+        let yMin = ys[0], yMax = ys[0];
+        for (const v of ys) {
+            if (v < yMin) yMin = v;
+            if (v > yMax) yMax = v;
+        }
+        const totalRange = yMax - yMin;
+        if (totalRange > 0) {
+            let maxStep = 0;
+            for (let i = 1; i < ys.length; i++) {
+                const d = Math.abs(ys[i] - ys[i - 1]);
+                if (d > maxStep) maxStep = d;
+            }
+            if (maxStep / totalRange > _SEQ_MAX_STEP_SHARE) return null;
+        }
+    }
+
     let r2, ss_reg, slope_sign, slope_mag, predict;
     if (cfg.model === 'linear') {
         const reg = linearRegressionFull(xs, ys);
