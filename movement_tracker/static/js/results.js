@@ -3742,23 +3742,37 @@ function renderAllDistancePlots() {
             }
         }
 
-        // Sequence shading
+        // Sequence shading — span from the OPENING of the first
+        // movement in the sequence to the CLOSING of the last
+        // movement.  seq.start / seq.end index into the trial's
+        // NaN-filtered amplitude array (see computeSequenceAssignments),
+        // so remap through ampValidIdx to get the matching trialMovs
+        // entries.  seq.end is exclusive → -1 for the last seq move.
         if (showSequences && seqAssignments && seqAssignments.byTrial[idx]) {
             const seqs = seqAssignments.byTrial[idx].sequences || [];
-            seqs.forEach((seq, si) => {
-                // seq has start/end indices within the trial's movement list
-                const startMov = trialMovs[seq.start];
-                const endMov = trialMovs[seq.end];
-                if (startMov && endMov && startMov.peak_frame != null && endMov.peak_frame != null) {
-                    const x0 = (startMov.peak_frame - trialStart) / fps;
-                    const x1 = (endMov.peak_frame - trialStart) / fps;
-                    distShapes.push({
-                        type: 'rect', xref: 'x', yref: 'paper',
-                        x0, x1, y0: 0, y1: 1,
-                        fillcolor: 'rgba(156, 39, 176, 0.08)',
-                        line: { color: 'rgba(156, 39, 176, 0.3)', width: 1 },
-                    });
-                }
+            const ampValidIdx = [];
+            for (let i = 0; i < trialMovs.length; i++) {
+                const a = trialMovs[i].amplitude;
+                if (a != null && isFinite(a)) ampValidIdx.push(i);
+            }
+            seqs.forEach((seq) => {
+                const s = ampValidIdx[seq.start];
+                const e = ampValidIdx[seq.end - 1];
+                if (s == null || e == null) return;
+                const startMov = trialMovs[s];
+                const endMov   = trialMovs[e];
+                if (!startMov || !endMov) return;
+                const openF  = startMov.open_frame;
+                const closeF = endMov.close_frame;
+                if (openF == null || closeF == null) return;
+                const x0 = (openF  - trialStart) / fps;
+                const x1 = (closeF - trialStart) / fps;
+                distShapes.push({
+                    type: 'rect', xref: 'x', yref: 'paper',
+                    x0, x1, y0: 0, y1: 1,
+                    fillcolor: 'rgba(156, 39, 176, 0.08)',
+                    line: { color: 'rgba(156, 39, 176, 0.3)', width: 1 },
+                });
             });
         }
 
