@@ -16,6 +16,7 @@ const _SEQ_DEFAULTS = Object.freeze({
     penalty:   'bic',   // 'none' | 'aic' | 'bic'
     minMoves:  5,
     minR2:     0.30,
+    minSlope:  0,       // 0 disables; otherwise |slope| (linear) or |b| (exp / expf)
 });
 const _SEQ_STORAGE_KEY = 'mt_seq_config_v1';
 
@@ -45,6 +46,10 @@ function getSeqConfig() {
         penalty:   $('seqPenalty')?.value || _SEQ_DEFAULTS.penalty,
         minMoves:  parseInt($('seqMinMoves')?.value, 10) || _SEQ_DEFAULTS.minMoves,
         minR2:     parseFloat($('seqMinR2')?.value)      || _SEQ_DEFAULTS.minR2,
+        minSlope:  (() => {
+            const v = parseFloat($('seqMinSlope')?.value);
+            return Number.isFinite(v) ? v : _SEQ_DEFAULTS.minSlope;
+        })(),
     };
 }
 
@@ -59,6 +64,8 @@ function getSeqConfig() {
     const minMvVal    = $('seqMinMovesVal');
     const minR2       = $('seqMinR2');
     const minR2Val    = $('seqMinR2Val');
+    const minSlope    = $('seqMinSlope');
+    const minSlopeVal = $('seqMinSlopeVal');
     const defaultsBtn = $('seqDefaultsBtn');
     if (!modelRadios.length || !combined) return;
 
@@ -74,8 +81,10 @@ function getSeqConfig() {
         if (penSel)   penSel.value   = cfg.penalty;
         if (minMv)    minMv.value    = cfg.minMoves;
         if (minR2)    minR2.value    = cfg.minR2;
-        if (minMvVal) minMvVal.textContent = String(cfg.minMoves);
-        if (minR2Val) minR2Val.textContent = (+cfg.minR2).toFixed(2);
+        if (minSlope) minSlope.value = cfg.minSlope;
+        if (minMvVal)    minMvVal.textContent    = String(cfg.minMoves);
+        if (minR2Val)    minR2Val.textContent    = (+cfg.minR2).toFixed(2);
+        if (minSlopeVal) minSlopeVal.textContent = (+cfg.minSlope).toFixed(2);
     };
 
     // After every change: mirror to the hidden select, persist, and
@@ -93,8 +102,9 @@ function getSeqConfig() {
         // Map (model, window) → the legacy combined string.
         combined.value = isNone ? 'none' : `${cfg.model}_${cfg.window}`;
         // Updated readouts.
-        if (minMvVal) minMvVal.textContent = String(cfg.minMoves);
-        if (minR2Val) minR2Val.textContent = (+cfg.minR2).toFixed(2);
+        if (minMvVal)    minMvVal.textContent    = String(cfg.minMoves);
+        if (minR2Val)    minR2Val.textContent    = (+cfg.minR2).toFixed(2);
+        if (minSlopeVal) minSlopeVal.textContent = (+cfg.minSlope).toFixed(2);
         // Drop any cached multi-seq DP result + re-render -- handled
         // by the change listener on #distSequenceMode (attached later
         // in this file).  We can't touch cachedSequenceAssignments
@@ -111,8 +121,9 @@ function getSeqConfig() {
     winRadios.forEach(r   => r.addEventListener('change', sync));
     dirRadios.forEach(r   => r.addEventListener('change', sync));
     if (penSel) penSel.addEventListener('change', sync);
-    if (minMv)  minMv.addEventListener('input',  sync);
-    if (minR2)  minR2.addEventListener('input',  sync);
+    if (minMv)    minMv.addEventListener('input',    sync);
+    if (minR2)    minR2.addEventListener('input',    sync);
+    if (minSlope) minSlope.addEventListener('input', sync);
     if (defaultsBtn) {
         defaultsBtn.addEventListener('click', (e) => {
             e.preventDefault();
@@ -5269,7 +5280,7 @@ function _nlsExpFit(x, y, withFloor) {
 // minR2 gates.
 function _seqFitWindow(xs, ys, cfg) {
     if (xs.length < cfg.minMoves) return null;
-    let r2, ss_reg, slope_sign, predict;
+    let r2, ss_reg, slope_sign, slope_mag, predict;
     if (cfg.model === 'linear') {
         const reg = linearRegressionFull(xs, ys);
         if (!reg) return null;
@@ -5278,6 +5289,7 @@ function _seqFitWindow(xs, ys, cfg) {
         r2 = stats.r2;
         ss_reg = stats.ss_reg;
         slope_sign = Math.sign(reg.slope);
+        slope_mag = Math.abs(reg.slope);
         predict = pred;
     } else if (cfg.model === 'exp' || cfg.model === 'expf') {
         const fit = _nlsExpFit(xs, ys, cfg.model === 'expf');
@@ -5285,12 +5297,16 @@ function _seqFitWindow(xs, ys, cfg) {
         r2 = fit.r2;
         ss_reg = fit.ss_reg;
         slope_sign = Math.sign(fit.b);
+        slope_mag = Math.abs(fit.b);
         predict = fit.predict;
     } else {
         return null;
     }
     if (cfg.direction === 'dec' && slope_sign >= 0) return null;
     if (r2 < cfg.minR2) return null;
+    // Min |slope| filter: linear uses |slope| (amplitude / movement),
+    // exp / expf uses |b| (1 / movement).  0 disables.
+    if (cfg.minSlope > 0 && slope_mag < cfg.minSlope) return null;
     return { r2, ss_reg, slope_sign, predict };
 }
 

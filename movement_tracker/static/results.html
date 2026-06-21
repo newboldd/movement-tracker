@@ -194,6 +194,11 @@
                         <input type="range" id="seqMinR2" min="0" max="1" step="0.05" value="0.30" style="width:110px;">
                         <span id="seqMinR2Val" style="font-size:11px;color:var(--text-muted);min-width:30px;">0.30</span>
                     </label>
+                    <label style="display:inline-flex;align-items:center;gap:6px;" title="Minimum |slope| for a window to be eligible. Linear: |slope| in amplitude units per movement. Exponential / Exp+floor: |b| in 1/movement units. 0 disables the filter.">
+                        Min |slope|:
+                        <input type="range" id="seqMinSlope" min="0" max="1" step="0.01" value="0" style="width:110px;">
+                        <span id="seqMinSlopeVal" style="font-size:11px;color:var(--text-muted);min-width:30px;">0.00</span>
+                    </label>
                     <a href="#" id="seqDefaultsBtn" style="font-size:11px;color:var(--blue);text-decoration:underline;cursor:pointer;" title="Reset all segmentation controls to defaults.">Defaults</a>
                 </span>
             </div>
@@ -577,6 +582,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=148"></script>
+    <script src="/static/js/results.js?v=149"></script>
 </body>
 </html>
