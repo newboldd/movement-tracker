@@ -4668,6 +4668,10 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
         t.axKey = i === 0 ? 'xaxis' : 'xaxis' + (i + 1);
     });
 
+    // Global data min/max for the "Y min = 0" override.  Updated
+    // inside the per-trial loop below as we walk each trial's y[].
+    let _globalYMin = Infinity, _globalYMax = -Infinity;
+
     trialInfo.forEach(({ ti, ms, rawX, axId, domain }) => {
         // Trial-local time (frame-from-trial-start / fps), same values
         // as the distance/velocity plots.
@@ -4731,6 +4735,16 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
             return v.reduce((a, b) => a + (b - m) ** 2, 0);
         };
         const trialSSTot = _ssTot(y);
+        // Update the trial's contribution to the global Y range used by
+        // the "Y min = 0" override.  Closing-velocity params flip sign
+        // during fitting, but the rendered marker positions stay in
+        // the raw param sign — keep the global tracker in raw units.
+        for (const v of y) {
+            if (v != null && isFinite(v)) {
+                if (v < _globalYMin) _globalYMin = v;
+                if (v > _globalYMax) _globalYMax = v;
+            }
+        }
         const _finishTrialR2 = () => {
             if (seqMode !== 'none' && trialSSTot > 0 && trialSSReg > 0) {
                 const r2 = Math.min(1, trialSSReg / trialSSTot);
@@ -5063,6 +5077,22 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
     // comparison.
     const reverseY = (param === 'peak_close_vel' || param === 'mean_close_vel');
 
+    // "Y min = 0" override: when the user-toggled checkbox is on AND
+    // every plotted value sits on the same side of zero, pin that
+    // side of the axis to 0.  Mixed-sign data is left auto-ranged so
+    // we never crush the visible range to one half.
+    const _yZeroOn = !!document.getElementById('movYZero')?.checked;
+    let _yPinRange = null;
+    if (_yZeroOn && isFinite(_globalYMin) && isFinite(_globalYMax)) {
+        const span = _globalYMax - _globalYMin || 1;
+        if (_globalYMin >= 0) {
+            _yPinRange = [0, _globalYMax + span * 0.05];
+        } else if (_globalYMax <= 0) {
+            _yPinRange = [_globalYMin - span * 0.05, 0];
+        }
+        // Crosses zero — leave autorange.
+    }
+
     const layout = {
         // Title rendered as an external HTML header (left-aligned and
         // anchored during horizontal scroll), so none here.
@@ -5071,8 +5101,9 @@ function renderMovementScatter(divId, data, param, seqMode, widthPx) {
         yaxis: {
             title: { text: PARAM_YLABELS[param] || '', font: { size: 11 } },
             color: '#666', gridcolor: '#f0f0f0',
-            autorange: reverseY ? 'reversed' : true,
+            autorange: _yPinRange ? false : (reverseY ? 'reversed' : true),
             anchor: 'x',
+            ...(_yPinRange ? { range: _yPinRange } : {}),
         },
         plot_bgcolor: '#fff',
         paper_bgcolor: '#fff',
@@ -6468,6 +6499,12 @@ document.querySelectorAll('#movementControls input[data-param]').forEach(cb => {
 });
 document.getElementById('sequenceMode').addEventListener('change', () => {
     if (cachedMovements) renderMovementPlots();
+});
+
+// "Y min = 0" toggle: re-render movement-parameter plots so the
+// override gets re-applied with the latest data range.
+document.getElementById('movYZero')?.addEventListener('change', () => {
+    if (cachedMovements) renderDistMovementPlots();
 });
 
 // Distance tab movement controls: re-render on checkbox or fit mode change
