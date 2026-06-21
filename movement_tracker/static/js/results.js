@@ -19,6 +19,7 @@ const _SEQ_DEFAULTS = Object.freeze({
     model:     'exp',   // 'none' | 'linear' | 'exp' | 'expf' (exp + floor)
     window:    'multi', // 'full' | 'first10' | 'multi'
     direction: 'dec',   // 'dec' | 'any'
+    maxImi:    1.0,     // seconds; reject windows with any P-P gap above this
 });
 
 // Hard-coded segmentation constants (was sliders).
@@ -53,6 +54,10 @@ function getSeqConfig() {
         model:     checked('seqModel',  _SEQ_DEFAULTS.model),
         window:    checked('seqWindow', _SEQ_DEFAULTS.window),
         direction: checked('seqDir',    _SEQ_DEFAULTS.direction),
+        maxImi:    (() => {
+            const v = parseFloat($('seqMaxImi')?.value);
+            return Number.isFinite(v) ? v : _SEQ_DEFAULTS.maxImi;
+        })(),
         // Hard-coded since the sliders were removed.
         penalty:   _SEQ_HARDCODED.penalty,
         minMoves:  _SEQ_HARDCODED.minMoves,
@@ -67,6 +72,8 @@ function getSeqConfig() {
     const modelRadios = document.querySelectorAll('input[name="seqModel"]');
     const winRadios   = document.querySelectorAll('input[name="seqWindow"]');
     const dirRadios   = document.querySelectorAll('input[name="seqDir"]');
+    const maxImi      = $('seqMaxImi');
+    const maxImiVal   = $('seqMaxImiVal');
     const defaultsBtn = $('seqDefaultsBtn');
     if (!modelRadios.length || !combined) return;
 
@@ -79,6 +86,8 @@ function getSeqConfig() {
         setRadio('seqModel',  cfg.model);
         setRadio('seqWindow', cfg.window);
         setRadio('seqDir',    cfg.direction);
+        if (maxImi)    maxImi.value    = cfg.maxImi;
+        if (maxImiVal) maxImiVal.textContent = `${(+cfg.maxImi).toFixed(1)} s`;
     };
 
     // After every change: mirror to the hidden select, persist, and
@@ -95,7 +104,7 @@ function getSeqConfig() {
         });
         // Map (model, window) → the legacy combined string.
         combined.value = isNone ? 'none' : `${cfg.model}_${cfg.window}`;
-        // Updated readouts.
+        if (maxImiVal) maxImiVal.textContent = `${(+cfg.maxImi).toFixed(1)} s`;
         // Drop any cached multi-seq DP result + re-render -- handled
         // by the change listener on #distSequenceMode (attached later
         // in this file).  We can't touch cachedSequenceAssignments
@@ -111,6 +120,7 @@ function getSeqConfig() {
     modelRadios.forEach(r => r.addEventListener('change', sync));
     winRadios.forEach(r   => r.addEventListener('change', sync));
     dirRadios.forEach(r   => r.addEventListener('change', sync));
+    if (maxImi) maxImi.addEventListener('input', sync);
     if (defaultsBtn) {
         defaultsBtn.addEventListener('click', (e) => {
             e.preventDefault();
@@ -4493,9 +4503,19 @@ function computeSequenceAssignments(data) {
     globalAmpMean /= allAmps.length || 1;
     for (const a of allAmps) totalSS += (a - globalAmpMean) ** 2;
 
+    // Per-trial fps for converting peak_frame → time (so the Max IMI
+    // filter inside optimizeSequences can reject windows whose
+    // sequential P-P gaps exceed cfg.maxImi seconds).
+    const frameMeta = (typeof _trialFrameMeta === 'function') ? _trialFrameMeta() : {};
+
     Object.keys(byTrial).sort((a, b) => +a - +b).forEach(ti => {
         const ms = byTrial[ti];
-        const amps = ms.map(m => m.amplitude).filter(a => a != null && isFinite(a));
+        const validMs = ms.filter(m => m.amplitude != null && isFinite(m.amplitude));
+        const amps  = validMs.map(m => m.amplitude);
+        const fps   = (frameMeta[ti]?.fps) || ms[0]?.fps || 60;
+        const times = validMs.map(m =>
+            (m.peak_frame != null && isFinite(m.peak_frame))
+                ? m.peak_frame / fps : NaN);
 
         const _cfg = (typeof getSeqConfig === 'function') ? getSeqConfig() : null;
         const _minM = _cfg?.minMoves ?? 5;
@@ -4504,7 +4524,7 @@ function computeSequenceAssignments(data) {
             return;
         }
 
-        const opt = optimizeSequences(amps);
+        const opt = optimizeSequences(amps, undefined, times);
         result.byTrial[ti] = opt;
         result.totalSeqs += opt.sequences.length;
 
@@ -5384,13 +5404,32 @@ function _seqK(model) { return model === 'expf' ? 3 : 2; }
  * @param {object} [cfgArg] - override config; otherwise uses getSeqConfig()
  * @returns {{ sequences: Array, seq_r2: number }}
  */
-function optimizeSequences(amplitudes, cfgArg) {
+function optimizeSequences(amplitudes, cfgArg, times) {
     const cfg = cfgArg
         || (typeof getSeqConfig === 'function' ? getSeqConfig() : _SEQ_DEFAULTS);
     const n = amplitudes.length;
     const result = { sequences: [], seq_r2: 0 };
     if (cfg.model === 'none') return result;
     if (n < cfg.minMoves) return result;
+
+    // Max IMI gate: if any consecutive (P-P) gap in a candidate
+    // window exceeds cfg.maxImi seconds, reject the window entirely.
+    // Pre-computes per-index IMIs once.
+    const maxImi = cfg.maxImi;
+    const imis = new Array(n).fill(0);
+    if (Array.isArray(times) && times.length === n) {
+        for (let i = 1; i < n; i++) {
+            const dt = times[i] - times[i - 1];
+            imis[i] = Number.isFinite(dt) ? dt : Infinity;
+        }
+    }
+    const windowExceedsMaxImi = (lo, hi) => {
+        if (!(maxImi > 0) || !Array.isArray(times)) return false;
+        for (let k = lo + 1; k < hi; k++) {
+            if (imis[k] > maxImi) return true;
+        }
+        return false;
+    };
 
     let ampMean = 0;
     for (let i = 0; i < n; i++) ampMean += amplitudes[i];
@@ -5413,6 +5452,9 @@ function optimizeSequences(amplitudes, cfgArg) {
     const windows = [];
     for (let i = 0; i <= n - cfg.minMoves; i++) {
         for (let j = i + cfg.minMoves; j <= n; j++) {
+            // Max IMI veto: any consecutive P-P gap > maxImi
+            // disqualifies the window before we bother fitting.
+            if (windowExceedsMaxImi(i, j)) continue;
             const wxs = Array.from({ length: j - i }, (_, kk) => kk);
             const wys = amplitudes.slice(i, j);
             const fit = _seqFitWindow(wxs, wys, cfg);

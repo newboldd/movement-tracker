@@ -174,6 +174,12 @@
                         <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="radio" name="seqDir" value="dec" checked> Decrement only</label>
                         <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="radio" name="seqDir" value="any"> Dec/Increment</label>
                     </span>
+                    <span style="border-left:1px solid #ccc;height:18px;margin:0 4px;"></span>
+                    <label style="display:inline-flex;align-items:center;gap:6px;" title="Maximum allowed peak-to-peak inter-movement interval (s) between consecutive movements within a sequence. Sequences with any gap longer than this are rejected.">
+                        Max IMI:
+                        <input type="range" id="seqMaxImi" min="0.2" max="5" step="0.1" value="1" style="width:110px;">
+                        <span id="seqMaxImiVal" style="font-size:11px;color:var(--text-muted);min-width:32px;">1.0 s</span>
+                    </label>
                     <a href="#" id="seqDefaultsBtn" style="font-size:11px;color:var(--blue);text-decoration:underline;cursor:pointer;" title="Reset segmentation controls to defaults.">Defaults</a>
                 </span>
             </div>
@@ -557,6 +563,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=150"></script>
+    <script src="/static/js/results.js?v=151"></script>
 </body>
 </html>
