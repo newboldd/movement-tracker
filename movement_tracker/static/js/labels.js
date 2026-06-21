@@ -7872,7 +7872,11 @@ const manoViewer = (() => {
                                   || hasV2 || hasSkelLegacy || hasHrnet);
         const _modelsGrid = $('modelsGrid');
         const _modelsNone = $('modelsNone');
-        if (_modelsGrid) _modelsGrid.style.display = _hasAnyModel ? '' : 'none';
+        // Critical: set 'grid' explicitly, NOT ''.  The inline style on
+        // #modelsGrid declares `display:grid`; assigning '' removes the
+        // inline display property entirely (falling back to default
+        // block), which collapses the whole Models list to inline flow.
+        if (_modelsGrid) _modelsGrid.style.display = _hasAnyModel ? 'grid' : 'none';
         if (_modelsNone) _modelsNone.style.display = _hasAnyModel ? 'none' : '';
         document.body.classList.toggle('no-models-loaded', !_hasAnyModel);
 
