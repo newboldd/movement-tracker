@@ -158,8 +158,8 @@
                     <span style="display:inline-flex;align-items:center;gap:6px;" title="Functional form used to fit each candidate sequence (and to drive shading on the distance trace).">
                         <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="radio" name="seqModel" value="none"> None</label>
                         <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="radio" name="seqModel" value="linear"> Linear</label>
-                        <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="radio" name="seqModel" value="exp" checked> Exponential</label>
-                        <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="radio" name="seqModel" value="expf"> Exp+floor</label>
+                        <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="radio" name="seqModel" value="exp"> Exponential</label>
+                        <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="radio" name="seqModel" value="expf" checked> Exp+floor</label>
                     </span>
                     <span style="border-left:1px solid #ccc;height:18px;margin:0 4px;"></span>
                     Window:
@@ -182,8 +182,8 @@
                     </label>
                     <label style="display:inline-flex;align-items:center;gap:6px;" title="Multiplier on the BIC penalty per segment. Higher = stronger penalty = fewer segments. 1.0 is standard BIC; 0 disables the penalty.">
                         BIC strength:
-                        <input type="range" id="seqBicStrength" min="0" max="3" step="0.05" value="1" style="width:110px;">
-                        <span id="seqBicStrengthVal" style="font-size:11px;color:var(--text-muted);min-width:30px;">1.00</span>
+                        <input type="range" id="seqBicStrength" min="0" max="3" step="0.05" value="0.5" style="width:110px;">
+                        <span id="seqBicStrengthVal" style="font-size:11px;color:var(--text-muted);min-width:30px;">0.50</span>
                     </label>
                     <a href="#" id="seqDefaultsBtn" style="font-size:11px;color:var(--blue);text-decoration:underline;cursor:pointer;" title="Reset segmentation controls to defaults.">Defaults</a>
                 </span>
@@ -572,6 +572,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=156"></script>
+    <script src="/static/js/results.js?v=157"></script>
 </body>
 </html>

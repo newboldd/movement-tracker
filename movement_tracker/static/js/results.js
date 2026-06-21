@@ -16,11 +16,11 @@
 // needle much.  Penalty is hard-coded to BIC, the eligibility
 // constants below mirror the historical defaults.
 const _SEQ_DEFAULTS = Object.freeze({
-    model:        'exp',   // 'none' | 'linear' | 'exp' | 'expf' (exp + floor)
+    model:        'expf',  // 'none' | 'linear' | 'exp' | 'expf' (exp + floor)
     window:       'multi', // 'full' | 'first10' | 'multi'
     direction:    'dec',   // 'dec' | 'any'
     maxImi:       1.0,     // seconds; reject windows with any P-P gap above this
-    bicStrength:  1.0,     // multiplier on the BIC penalty (0 = off, 1 = standard)
+    bicStrength:  0.5,     // multiplier on the BIC penalty (0 = off, 1 = standard)
 });
 
 // Hard-coded segmentation constants (was sliders).
