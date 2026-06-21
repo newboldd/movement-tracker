@@ -3778,8 +3778,8 @@ function renderAllDistancePlots() {
                 distShapes.push({
                     type: 'rect', xref: 'x', yref: 'paper',
                     x0, x1, y0: 0, y1: 1,
-                    fillcolor: 'rgba(156, 39, 176, 0.08)',
-                    line: { color: 'rgba(156, 39, 176, 0.3)', width: 1 },
+                    fillcolor: MOVEMENT_DOT_COLOR, opacity: 0.07,
+                    line: { width: 0 }, layer: 'below',
                 });
             });
         }
