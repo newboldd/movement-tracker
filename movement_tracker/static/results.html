@@ -547,9 +547,36 @@
         </style>
     </div>
 
+    <!-- Hand-crop preview popup: shown when the user clicks a
+         distance/velocity plot.  Anchored to the click X (the same
+         vertical line the highlight code draws).  Movable by dragging
+         the header bar; closed via the × or Escape key. -->
+    <div id="handPreviewPopup" style="display:none;position:absolute;z-index:5000;background:#1f1f1f;color:#eee;border:1px solid #444;border-radius:6px;box-shadow:0 6px 24px rgba(0,0,0,0.4);width:260px;font-size:11px;user-select:none;">
+        <div id="handPreviewHeader" style="display:flex;align-items:center;justify-content:space-between;padding:4px 8px;background:#2a2a2a;border-radius:6px 6px 0 0;cursor:move;">
+            <span id="handPreviewTitle">Frame —</span>
+            <button id="handPreviewClose" type="button" style="background:transparent;border:none;color:#aaa;font-size:14px;cursor:pointer;padding:0 4px;">×</button>
+        </div>
+        <div style="padding:6px;">
+            <img id="handPreviewImg" alt="" style="display:block;width:240px;height:240px;background:#000;border-radius:4px;">
+            <div style="display:flex;align-items:center;gap:4px;margin-top:6px;font-family:ui-monospace,monospace;">
+                <button id="handPreviewPrev" type="button" title="Previous frame (Left arrow)"
+                        style="flex:0 0 32px;padding:4px 6px;background:#333;color:#eee;border:1px solid #555;border-radius:3px;cursor:pointer;">&larr;</button>
+                <button id="handPreviewPlay" type="button" title="Play / pause (Space)"
+                        style="flex:1;padding:4px 6px;background:#333;color:#eee;border:1px solid #555;border-radius:3px;cursor:pointer;">&#9654; Play</button>
+                <button id="handPreviewNext" type="button" title="Next frame (Right arrow)"
+                        style="flex:0 0 32px;padding:4px 6px;background:#333;color:#eee;border:1px solid #555;border-radius:3px;cursor:pointer;">&rarr;</button>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:10px;color:#aaa;">
+                Side:
+                <label style="cursor:pointer;"><input type="radio" name="handPreviewSide" value="OS" checked> OS</label>
+                <label style="cursor:pointer;"><input type="radio" name="handPreviewSide" value="OD"> OD</label>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=146"></script>
+    <script src="/static/js/results.js?v=147"></script>
 </body>
 </html>

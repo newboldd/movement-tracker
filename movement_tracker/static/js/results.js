@@ -333,6 +333,8 @@ function _applyHighlightAll() {
     // line and others stay clean.
     document.querySelectorAll('[id^="movPlot_"], [id^="distMovPlot_"]')
         .forEach(d => _rebuildShapes(d.id));
+    // Pop / refresh the hand-crop preview on the clicked trial.
+    if (typeof _showHandPreview === 'function') _showHandPreview();
 }
 
 // Back-compat aliases — interval handlers and older call sites
@@ -6534,3 +6536,192 @@ loadSubjects().then(() => {
         switchTab('group');
     }
 });
+
+
+// ── Hand-crop preview popup ───────────────────────────────────────
+// Click any distance / velocity / IMI plot → a small popup pops up
+// near the highlight line showing a hand-cropped frame from the
+// trial's video.  Play / pause + frame-step controls scrub forward
+// in real time; Left / Right arrows advance frames when the popup
+// is focused.
+//
+// State lives entirely in this module — the only outside contract
+// is _clickHL (the same {trialIdx, time} the existing highlight
+// code reads) and `cachedTraces` for the per-trial fps.
+(() => {
+    const popup     = document.getElementById('handPreviewPopup');
+    const img       = document.getElementById('handPreviewImg');
+    const title     = document.getElementById('handPreviewTitle');
+    const playBtn   = document.getElementById('handPreviewPlay');
+    const prevBtn   = document.getElementById('handPreviewPrev');
+    const nextBtn   = document.getElementById('handPreviewNext');
+    const closeBtn  = document.getElementById('handPreviewClose');
+    const header    = document.getElementById('handPreviewHeader');
+    if (!popup || !img) return;
+
+    let _state = {
+        trialIdx: -1,
+        startFrame: 0,    // global frame at trial[0]
+        nFrames: 0,
+        fps: 60,
+        frame: 0,         // global frame currently displayed
+        side: 'OS',
+        playing: false,
+        playT: null,
+        userMoved: false, // header-drag suppresses auto-reposition
+    };
+
+    // Reposition the popup above the highlight line on the latest
+    // distance-plot div we know about for this trial.  Skipped once
+    // the user has dragged the popup themselves.
+    function _positionAtHighlight() {
+        if (_state.userMoved) return;
+        const divId = `distPlot_${_state.trialIdx}`;
+        const div = document.getElementById(divId);
+        if (!div || !div._fullLayout) return;
+        const ax = div._fullLayout.xaxis;
+        if (!ax || typeof ax.c2p !== 'function') return;
+        const localTime = (_state.frame - _state.startFrame) / Math.max(1, _state.fps);
+        const px = ax.c2p(localTime);
+        if (!isFinite(px)) return;
+        const rect = div.getBoundingClientRect();
+        const docX = window.scrollX + rect.left + ax._offset + px;
+        const docY = window.scrollY + rect.top;
+        const popW = popup.offsetWidth || 260;
+        const popH = popup.offsetHeight || 320;
+        // Default: right of the line, above the plot.  Flip left if
+        // it would overflow the viewport.
+        let left = docX + 8;
+        if (left + popW > window.scrollX + window.innerWidth - 8) {
+            left = docX - 8 - popW;
+        }
+        let top = docY - popH - 8;
+        if (top < window.scrollY + 8) top = docY + rect.height + 8;
+        popup.style.left = `${Math.max(8, left)}px`;
+        popup.style.top  = `${Math.max(8, top)}px`;
+    }
+
+    function _trialMeta(trialIdx) {
+        const t = cachedTraces?.trials?.[trialIdx];
+        if (!t) return null;
+        const fps = t.fps || 60;
+        const n = (t.distances && t.distances.length) || 0;
+        let startFrame = 0;
+        for (let i = 0; i < trialIdx; i++) {
+            const tp = cachedTraces.trials[i];
+            startFrame += (tp?.distances?.length || 0);
+        }
+        // Subject-global start frame (used by /traces overlays); if the
+        // trial carries it use that, otherwise the concatenated index.
+        if (typeof t.start_frame === 'number') startFrame = t.start_frame;
+        return { fps, n, startFrame };
+    }
+
+    function _setFrame(globalFrame, opts = {}) {
+        const lo = _state.startFrame;
+        const hi = _state.startFrame + _state.nFrames - 1;
+        const fr = Math.max(lo, Math.min(hi, Math.round(globalFrame)));
+        _state.frame = fr;
+        const localFrame = fr - lo;
+        title.textContent = `Frame ${localFrame}  ·  ${(localFrame / _state.fps).toFixed(2)}s`;
+        const url = `/api/results/${currentSubjectId}/hand_crop_frame?`
+            + `trial_idx=${_state.trialIdx}&frame_num=${fr}&side=${_state.side}&size=240`;
+        img.src = url;
+        // Sync the highlight line on the plot so the popup tracks the
+        // current frame visually.
+        if (opts.syncHL !== false) {
+            _clickHL = { trialIdx: _state.trialIdx, time: localFrame / _state.fps };
+            // Cheap repaint: dist / vel / IMI for this trial only.
+            ['distPlot_', 'velPlot_', 'imiPlot_'].forEach(prefix => {
+                const id = `${prefix}${_state.trialIdx}`;
+                const d = document.getElementById(id);
+                if (d) _rebuildShapes(id);
+            });
+            _positionAtHighlight();
+        }
+    }
+
+    function _setPlaying(on) {
+        _state.playing = !!on;
+        playBtn.innerHTML = on ? '&#10074;&#10074; Pause' : '&#9654; Play';
+        if (_state.playT) { clearTimeout(_state.playT); _state.playT = null; }
+        if (!on) return;
+        const tick = () => {
+            if (!_state.playing) return;
+            const nextFrame = _state.frame + 1;
+            if (nextFrame >= _state.startFrame + _state.nFrames) {
+                _setPlaying(false);
+                return;
+            }
+            _setFrame(nextFrame);
+            _state.playT = setTimeout(tick, 1000 / Math.max(1, _state.fps));
+        };
+        _state.playT = setTimeout(tick, 1000 / Math.max(1, _state.fps));
+    }
+
+    function _close() {
+        _setPlaying(false);
+        popup.style.display = 'none';
+    }
+
+    // Public entry point — called from _applyHighlightAll().
+    window._showHandPreview = function _showHandPreview() {
+        if (!_clickHL) return;
+        if (!currentSubjectId) return;
+        const { trialIdx, time } = _clickHL;
+        const meta = _trialMeta(trialIdx);
+        if (!meta) return;
+        // Reset userMoved only when switching trial / first open so
+        // the popup snaps to the new line.
+        const isNewTrial = (_state.trialIdx !== trialIdx) || popup.style.display === 'none';
+        if (isNewTrial) _state.userMoved = false;
+        _state.trialIdx   = trialIdx;
+        _state.fps        = meta.fps;
+        _state.nFrames    = meta.n;
+        _state.startFrame = meta.startFrame;
+        popup.style.display = 'block';
+        _setFrame(meta.startFrame + Math.round(time * meta.fps), { syncHL: false });
+        _positionAtHighlight();
+    };
+
+    // ── Controls ─────────────────────────────────────────────────
+    closeBtn.addEventListener('click', _close);
+    prevBtn .addEventListener('click', () => { _setPlaying(false); _setFrame(_state.frame - 1); });
+    nextBtn .addEventListener('click', () => { _setPlaying(false); _setFrame(_state.frame + 1); });
+    playBtn .addEventListener('click', () => _setPlaying(!_state.playing));
+    document.querySelectorAll('input[name="handPreviewSide"]').forEach(r =>
+        r.addEventListener('change', () => {
+            _state.side = r.checked ? r.value : _state.side;
+            _setFrame(_state.frame, { syncHL: false });
+        }));
+
+    // ── Drag the popup by its header ─────────────────────────────
+    let drag = null;
+    header.addEventListener('mousedown', (e) => {
+        if (e.target.closest('button')) return;
+        drag = {
+            mx: e.clientX, my: e.clientY,
+            startLeft: parseFloat(popup.style.left) || 0,
+            startTop:  parseFloat(popup.style.top)  || 0,
+        };
+        e.preventDefault();
+    });
+    document.addEventListener('mousemove', (e) => {
+        if (!drag) return;
+        popup.style.left = `${drag.startLeft + (e.clientX - drag.mx)}px`;
+        popup.style.top  = `${drag.startTop  + (e.clientY - drag.my)}px`;
+        _state.userMoved = true;
+    });
+    document.addEventListener('mouseup', () => { drag = null; });
+
+    // ── Keyboard: arrows scrub, Space plays, Esc closes ──────────
+    document.addEventListener('keydown', (e) => {
+        if (popup.style.display === 'none') return;
+        const tag = (e.target.tagName || '').toLowerCase();
+        if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
+        if (e.key === 'ArrowLeft')  { _setPlaying(false); _setFrame(_state.frame - 1); e.preventDefault(); }
+        else if (e.key === 'ArrowRight') { _setPlaying(false); _setFrame(_state.frame + 1); e.preventDefault(); }
+        else if (e.key === ' ')      { _setPlaying(!_state.playing); e.preventDefault(); }
+        else if (e.key === 'Escape') { _close(); e.preventDefault(); }
+    });
+})();

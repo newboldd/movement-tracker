@@ -2074,6 +2074,102 @@ def get_fingertip_pca(subject_id: int, source: str = Query("auto"),
     }
 
 
+@router.get("/{subject_id}/hand_crop_frame")
+def get_hand_crop_frame(subject_id: int,
+                         trial_idx: int = Query(...),
+                         frame_num: int = Query(...),
+                         side: str = Query("OS"),
+                         size: int = Query(240, ge=64, le=640),
+                         pad: int = Query(30, ge=0, le=200)):
+    """Return a JPEG-cropped frame centered on the MediaPipe hand bbox.
+
+    Used by the Individual Results page's click-to-preview popup so
+    the user can scrub the video at any point on the distance trace
+    without leaving the page.  Falls back to the half-frame center
+    when no MP landmarks are available for that frame.
+    """
+    import cv2
+    from fastapi.responses import Response
+
+    subj = _get_subject(subject_id)
+    subject_name = subj["name"]
+    camera_mode = subj.get("camera_mode") or "stereo"
+    trials = build_trial_map(subject_name, camera_mode=camera_mode)
+    if trial_idx < 0 or trial_idx >= len(trials):
+        raise HTTPException(400, "trial_idx out of range")
+    trial = trials[trial_idx]
+    start_frame = int(trial.get("start_frame", 0))
+    n_local = int(trial.get("frame_count", 0))
+    local_frame = frame_num - start_frame
+    if local_frame < 0 or local_frame >= n_local:
+        raise HTTPException(400, "frame_num outside trial range")
+
+    # MP landmarks for bbox — global subject-indexed array.
+    bbox = None
+    try:
+        mp = get_mediapipe_for_session(subject_name)
+        if mp is not None:
+            key = "OS_landmarks" if side == "OS" else "OD_landmarks"
+            lms = mp.get(key)
+            if lms is not None and frame_num < len(lms):
+                pts = lms[frame_num]
+                valid = ~np.isnan(pts[:, 0])
+                if np.any(valid):
+                    xs = pts[valid, 0]
+                    ys = pts[valid, 1]
+                    bbox = (float(xs.min()), float(ys.min()),
+                            float(xs.max()), float(ys.max()))
+    except Exception as e:
+        logger.warning(f"hand_crop_frame: MP lookup failed ({e})")
+
+    cap = cv2.VideoCapture(trial["video_path"])
+    if not cap.isOpened():
+        cap.release()
+        raise HTTPException(404, "video not openable")
+    cap.set(cv2.CAP_PROP_POS_FRAMES, local_frame)
+    ret, frame = cap.read()
+    cap.release()
+    if not ret or frame is None:
+        raise HTTPException(404, "frame read failed")
+
+    h, w = frame.shape[:2]
+    is_stereo = (w / h) > 1.7
+    if is_stereo:
+        half_w = w // 2
+        if side == "OS":
+            frame = frame[:, :half_w]
+        else:
+            frame = frame[:, half_w:]
+        h, w = frame.shape[:2]
+
+    # Bbox → square crop with padding.  Fallback: half-frame center.
+    if bbox is None:
+        cx, cy = w / 2.0, h / 2.0
+        half = min(w, h) / 4.0
+    else:
+        x0, y0, x1, y1 = bbox
+        cx = (x0 + x1) / 2.0
+        cy = (y0 + y1) / 2.0
+        half = max(x1 - x0, y1 - y0) / 2.0 + pad
+        half = max(half, 40)
+    cx_i = max(half, min(w - half, cx))
+    cy_i = max(half, min(h - half, cy))
+    x_lo = int(max(0, round(cx_i - half)))
+    x_hi = int(min(w, round(cx_i + half)))
+    y_lo = int(max(0, round(cy_i - half)))
+    y_hi = int(min(h, round(cy_i + half)))
+    if x_hi <= x_lo or y_hi <= y_lo:
+        raise HTTPException(500, "degenerate crop")
+    crop = frame[y_lo:y_hi, x_lo:x_hi]
+    if crop.shape[0] != size or crop.shape[1] != size:
+        crop = cv2.resize(crop, (size, size), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+    if not ok:
+        raise HTTPException(500, "JPEG encode failed")
+    return Response(content=buf.tobytes(), media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=60"})
+
+
 @router.post("/group/regenerate")
 def regenerate_group_cache(include_auto: bool = Query(False),
                              source: str = Query("auto"),
