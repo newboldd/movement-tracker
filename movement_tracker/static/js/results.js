@@ -252,6 +252,36 @@ const _INTERVAL_PLOT_PREFIXES = ['distPlot_', 'imiPlot_', 'velPlot_'];
 // Pause overlay on per-trial distance plots.
 let _savedEvents = null;
 const _baseShapeCount = {};     // divId → shapes.length right after newPlot
+
+// Interval-plot registry.  The drag-to-measure tools originally only
+// ran on the distance/velocity/IMI plots (matched by prefix).  To
+// share them with the component views (Fingertip PCA + Index MCP
+// angle time-series), the machinery is now registry-driven:
+//   _intervalDivs[key]    → Set of every plot divId that shows the
+//                           trial's interval bands (dragging any one
+//                           marks/edits the shared interval).
+//   _intervalAnchors[key] → { wrapperId, anchorDivId } used to place
+//                           the hover action button (March / ✕ / stats).
+// key is the numeric trial index for dist/imi/vel and the string
+// 'c<pos>' for the component views (namespaced so the two never
+// collide).  _trialIdxOfDiv resolves a divId → key.
+const _intervalDivs = {};
+const _intervalAnchors = {};
+function _registerIntervalDiv(divId) {
+    const key = _trialIdxOfDiv(divId);
+    if (key == null) return key;
+    (_intervalDivs[key] || (_intervalDivs[key] = new Set())).add(divId);
+    return key;
+}
+function _ivWrapper(key) {
+    const a = _intervalAnchors[key];
+    return document.getElementById(a ? a.wrapperId : `trialWrap_${key}`);
+}
+function _ivAnchorPlot(key) {
+    const a = _intervalAnchors[key];
+    return document.getElementById(a ? a.anchorDivId : `distPlot_${key}`);
+}
+
 function _registerClickPlot(divId) {
     const div = document.getElementById(divId);
     if (!div || div._clickHLBound) return;
@@ -265,11 +295,39 @@ function _registerClickPlot(divId) {
     div.addEventListener('click', e => _handleNativeClick(divId, e));
     // On dist/imi/vel plots, install the drag-to-mark gesture and
     // hover detection for the per-interval action button.
-    if (_isIntervalPlot(divId)) _wireIntervalDrag(divId);
+    if (_isIntervalPlot(divId)) {
+        const key = _registerIntervalDiv(divId);
+        // Anchor the hover action button to this trial's wrapper /
+        // distance plot (only needs setting once per key).
+        if (key != null && !_intervalAnchors[key]) {
+            _intervalAnchors[key] = {
+                wrapperId: `trialWrap_${key}`,
+                anchorDivId: `distPlot_${key}`,
+            };
+        }
+        _wireIntervalDrag(divId);
+    }
     // Lock in how many shapes the plot started with so the highlight
     // append/strip cycle doesn't accumulate.
     _baseShapeCount[divId] = (div.layout?.shapes || []).length;
     // Re-apply existing intervals + click highlight on a fresh plot.
+    _rebuildShapes(divId);
+}
+
+// Interval-only registration for the component-view time-series plots.
+// Unlike _registerClickPlot it does NOT wire the click-to-highlight /
+// hand-preview gesture (those depend on distance-plot geometry); it
+// only installs the drag-to-measure + hover tools.  `anchor` names the
+// wrapper element (positioned) + the plot the action button aligns to.
+function _registerIntervalOnlyPlot(divId, key, anchor) {
+    const div = document.getElementById(divId);
+    if (!div) return;
+    if (key != null && anchor && !_intervalAnchors[key]) {
+        _intervalAnchors[key] = anchor;
+    }
+    _registerIntervalDiv(divId);
+    _baseShapeCount[divId] = (div.layout?.shapes || []).length;
+    if (!div._intervalDragBound) _wireIntervalDrag(divId);
     _rebuildShapes(divId);
 }
 
@@ -411,12 +469,18 @@ function _rebuildShapes(divId) {
 }
 
 function _isIntervalPlot(divId) {
-    return _INTERVAL_PLOT_PREFIXES.some(p => divId.startsWith(p));
+    return _INTERVAL_PLOT_PREFIXES.some(p => divId.startsWith(p))
+        || divId.startsWith('pcaTime_');
 }
 function _trialIdxOfDiv(divId) {
     for (const p of _INTERVAL_PLOT_PREFIXES) {
         if (divId.startsWith(p)) return parseInt(divId.slice(p.length));
     }
+    // Component time-series divs are `pcaTime_<trialPos>_<compIdx>`;
+    // namespace their key as 'c<trialPos>' so it never collides with
+    // the numeric distance-view keys.
+    const m = divId.match(/^pcaTime_(\d+)_\d+$/);
+    if (m) return 'c' + m[1];
     return null;
 }
 function _bandShape(x0, x1, fill) {
@@ -677,16 +741,24 @@ function _hitTestIntervalInside(trialIdx, ax, px) {
 }
 
 function _hideHoverButton(trialIdx) {
-    const wrapper = document.getElementById(`trialWrap_${trialIdx}`);
+    const wrapper = _ivWrapper(trialIdx);
     const btn = wrapper && wrapper.querySelector(':scope > .interval-actions');
     if (btn) btn.style.display = 'none';
 }
 
+// Resolve the plot divIds that carry a trial-key's interval bands.
+// Prefers the registry; falls back to the legacy prefix+idx ids for
+// any distance plot registered before the registry existed.
+function _intervalDivIds(key) {
+    const set = _intervalDivs[key];
+    if (set && set.size) return [...set];
+    return _INTERVAL_PLOT_PREFIXES.map(p => p + key);
+}
 function _previewInterval(trialIdx, x0, x1) {
-    _INTERVAL_PLOT_PREFIXES.forEach(prefix => {
-        const div = document.getElementById(prefix + trialIdx);
+    _intervalDivIds(trialIdx).forEach(divId => {
+        const div = document.getElementById(divId);
         if (!div || !div.layout) return;
-        const base = _baseShapeCount[prefix + trialIdx] || 0;
+        const base = _baseShapeCount[divId] || 0;
         const list = _intervals[trialIdx] || [];
         const shapes = (div.layout.shapes || []).slice(0, base);
         list.forEach(iv => {
@@ -696,7 +768,7 @@ function _previewInterval(trialIdx, x0, x1) {
             shapes.push(_edgeLine(iv.x1));
         });
         shapes.push(_bandShape(x0, x1, 'rgba(33,150,243,0.30)'));
-        try { Plotly.relayout(prefix + trialIdx, { shapes }); } catch (_) {}
+        try { Plotly.relayout(divId, { shapes }); } catch (_) {}
     });
 }
 function _clearPreview(trialIdx) {
@@ -704,7 +776,7 @@ function _clearPreview(trialIdx) {
     _rebuildShapesForTrial(trialIdx);
 }
 function _rebuildShapesForTrial(trialIdx) {
-    _INTERVAL_PLOT_PREFIXES.forEach(p => _rebuildShapes(p + trialIdx));
+    _intervalDivIds(trialIdx).forEach(divId => _rebuildShapes(divId));
 }
 
 // ── Per-interval hover button (✕ delete + March across) ──────────
@@ -728,7 +800,7 @@ function _onIntervalHover(divId, e) {
 }
 
 function _ensureHoverButton(trialIdx) {
-    const wrapper = document.getElementById(`trialWrap_${trialIdx}`);
+    const wrapper = _ivWrapper(trialIdx);
     if (!wrapper) return null;
     let btn = wrapper.querySelector(':scope > .interval-actions');
     if (btn) return btn;
@@ -794,7 +866,7 @@ let _hoverHideT = null;
 function _scheduleHoverHide(trialIdx) {
     if (_hoverHideT) clearTimeout(_hoverHideT);
     _hoverHideT = setTimeout(() => {
-        const wrapper = document.getElementById(`trialWrap_${trialIdx}`);
+        const wrapper = _ivWrapper(trialIdx);
         const btn = wrapper && wrapper.querySelector(':scope > .interval-actions');
         if (btn) btn.style.display = 'none';
     }, 180);
@@ -805,7 +877,7 @@ function _scheduleHoverHide(trialIdx) {
 // drag so the numbers tick live without re-running the positioning
 // math every frame.
 function _updateHoverButtonContent(trialIdx, intervalIdx) {
-    const wrapper = document.getElementById(`trialWrap_${trialIdx}`);
+    const wrapper = _ivWrapper(trialIdx);
     const btn = wrapper && wrapper.querySelector(':scope > .interval-actions');
     if (!btn) return;
     const list = _intervals[trialIdx] || [];
@@ -839,8 +911,8 @@ function _showHoverButton(trialIdx, intervalIdx) {
     // The wrapper is the offset parent; the distance plot now sits
     // inside an inner flex row with a sticky y-axis column to its
     // left, so add the dist plot's offsetLeft within the wrapper.
-    const dist = document.getElementById(`distPlot_${trialIdx}`);
-    const wrapper = document.getElementById(`trialWrap_${trialIdx}`);
+    const dist = _ivAnchorPlot(trialIdx);
+    const wrapper = _ivWrapper(trialIdx);
     if (!dist || !wrapper || !dist._fullLayout || !dist._fullLayout.xaxis) return;
     const ax = dist._fullLayout.xaxis;
     if (ax._offset == null) return;
@@ -857,7 +929,7 @@ function _showHoverButton(trialIdx, intervalIdx) {
 }
 function _updateHoverButtonForTrial(trialIdx) {
     // Refresh the button's stored idx after list mutation.
-    const wrapper = document.getElementById(`trialWrap_${trialIdx}`);
+    const wrapper = _ivWrapper(trialIdx);
     const btn = wrapper && wrapper.querySelector(':scope > .interval-actions');
     if (btn && btn.style.display !== 'none') btn.style.display = 'none';
 }
@@ -1174,6 +1246,11 @@ function renderFingertipPCA() {
         // --- Block container ---
         const block = document.createElement('div');
         block.style.marginBottom = '24px';
+        // Positioned wrapper so the interval hover action button (March
+        // / ✕ / duration) can be absolutely placed over the time series,
+        // mirroring the distance view's trialWrap element.
+        block.style.position = 'relative';
+        block.id = `pcaTrialWrap_${idx}`;
 
         const header = document.createElement('div');
         header.style.cssText = 'padding:2px 8px 6px;';
@@ -1235,6 +1312,14 @@ function renderFingertipPCA() {
         container.appendChild(block);
 
         // --- Render PC time-series ---
+        // First visible row anchors the interval hover action button.
+        let firstVisibleCi = -1;
+        for (let ci = 0; ci < nShow; ci++) { if (_pcOn(ci)) { firstVisibleCi = ci; break; } }
+        const _ivKey = 'c' + idx;
+        const _ivAnchor = firstVisibleCi >= 0 ? {
+            wrapperId: `pcaTrialWrap_${idx}`,
+            anchorDivId: timeDivIds[firstVisibleCi],
+        } : null;
         for (let ci = 0; ci < nShow; ci++) {
             if (!_pcOn(ci)) continue;
             const isLast = ci === lastVisibleCi;
@@ -1247,6 +1332,10 @@ function renderFingertipPCA() {
                 hovertemplate: `%{x:.3f}s<br>${shortName(ci)}: %{y:.2f}<extra></extra>`,
             }], {
                 margin: { t: ci === 0 ? 8 : 0, r: 20, b: isLast ? 30 : 2, l: 60 },
+                // Disable Plotly's drag-zoom so the custom interval
+                // drag-to-measure gesture owns the pointer (matches the
+                // distance/velocity plots).
+                dragmode: false,
                 plot_bgcolor: '#fff', paper_bgcolor: '#fff',
                 showlegend: false,
                 shapes: eventShapes,
@@ -1260,7 +1349,10 @@ function renderFingertipPCA() {
                     showgrid: true, gridcolor: '#eee',
                     zeroline: true, zerolinecolor: '#ccc',
                 },
-            }, { responsive: false, displayModeBar: false });
+            }, { responsive: false, displayModeBar: false })
+                // Enable the shared interval drag-to-measure tools on
+                // every visible component row for this trial.
+                .then(() => _registerIntervalOnlyPlot(timeDivIds[ci], _ivKey, _ivAnchor));
         }
 
         // Sync x-axis zoom across PC time plots within this trial
@@ -6537,6 +6629,10 @@ document.getElementById('subjectSelect').addEventListener('change', (e) => {
     // Drag-marked intervals are per-subject too.  Clear the click
     // highlight too so it doesn't reappear on a stale trial idx.
     _intervals = {};
+    // Drop the interval plot registry so stale trial keys from the
+    // previous subject don't accumulate.
+    Object.keys(_intervalDivs).forEach(k => delete _intervalDivs[k]);
+    Object.keys(_intervalAnchors).forEach(k => delete _intervalAnchors[k]);
     _clickHL = null;
 
     sessionStorage.setItem('dlc_lastSubjectId', String(currentSubjectId));
