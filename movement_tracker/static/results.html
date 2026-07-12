@@ -65,6 +65,7 @@
                     <select id="resultsViewMode" style="min-width:145px;">
                         <option value="distances" selected>Distances / Velocity</option>
                         <option value="pca">Fingertip PCA</option>
+                        <option value="index_mcp">Index MCP angles</option>
                     </select>
                 </label>
                 <span id="viewModeSep" style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
@@ -193,20 +194,20 @@
             </div>
             <div id="pcaCompControls" style="display:none;align-items:center;gap:10px;font-size:12px;color:var(--text-muted);padding:4px 0 6px;">
                 Components:
-                <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;">
+                <label id="showPC1Label" style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;">
                     <input type="checkbox" id="showPC1" data-pc="0" checked>
                     <span style="display:inline-block;width:10px;height:10px;background:#2196F3;border-radius:2px;"></span>
-                    PC1
+                    <span class="pc-cb-text">PC1</span>
                 </label>
-                <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;">
+                <label id="showPC2Label" style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;">
                     <input type="checkbox" id="showPC2" data-pc="1" checked>
                     <span style="display:inline-block;width:10px;height:10px;background:#FF5722;border-radius:2px;"></span>
-                    PC2
+                    <span class="pc-cb-text">PC2</span>
                 </label>
-                <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;">
+                <label id="showPC3Label" style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;">
                     <input type="checkbox" id="showPC3" data-pc="2" checked>
                     <span style="display:inline-block;width:10px;height:10px;background:#4CAF50;border-radius:2px;"></span>
-                    PC3
+                    <span class="pc-cb-text">PC3</span>
                 </label>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
                 <label style="display:inline-flex;align-items:center;gap:6px;" title="Box-car smoothing window applied to each power spectrum before plotting.">
@@ -572,6 +573,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=158"></script>
+    <script src="/static/js/results.js?v=159"></script>
 </body>
 </html>

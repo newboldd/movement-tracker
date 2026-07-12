@@ -2074,6 +2074,284 @@ def get_fingertip_pca(subject_id: int, source: str = Query("auto"),
     }
 
 
+# ── Index MCP angle view ────────────────────────────────────────────
+# Mirrors the Fingertip PCA view but plots the index-finger MCP
+# flexion/extension and abduction/adduction angles (degrees) instead
+# of principal components.  Requires 3D joints, so the auto order
+# drops "corrections" (DLC has no palm joints to reconstruct 3D from).
+_MCP_ANGLE_AUTO_ORDER = (
+    "skeleton_v1", "mp_combined", "mp_forward", "skeleton_v2", "skeleton_v3",
+)
+# Channel keys produced by services.skeleton_data._compute_angles for
+# the index MCP joint (triplet wrist→I_MCP→I_PIP).
+_MCP_FLEX_KEY = "Flex: Index MCP"
+_MCP_ABD_KEY  = "Abd: Index MCP"
+_MCP_LABELS   = ["Flex/Ext: Index MCP (°)", "Abd/Add: Index MCP (°)"]
+
+
+def _joints_3d_per_trial(subject_name: str, source: str, trials: list[dict]):
+    """Per-trial (n_frames, 21, 3) joint arrays for angle computation.
+
+    Skeleton sources read ``joints_3d`` straight from the npz.  MP
+    sources triangulate all 21 landmarks (requires a stereo
+    calibration).  Returns (per_trial, any_data) or (None, False)
+    when the source can't yield 3D joints.
+    """
+    if source in ("skeleton_v1", "skeleton_v2", "skeleton_v3"):
+        from ..services.skeleton_data import _skeleton_dir
+        root = _skeleton_dir(subject_name)
+        per_trial = []
+        any_data = False
+        for t in trials:
+            n = int(t.get("frame_count", 0))
+            arr = np.full((n, 21, 3), np.nan)
+            path = root / t["trial_name"] / f"{source}.npz"
+            if path.exists():
+                try:
+                    data = np.load(str(path), allow_pickle=True)
+                    j3d = data.get("joints_3d")
+                    if j3d is not None and j3d.shape[1] >= 21:
+                        m = min(len(j3d), n)
+                        arr[:m] = j3d[:m, :21, :]
+                        if np.any(~np.isnan(arr)):
+                            any_data = True
+                except Exception:
+                    pass
+            per_trial.append(arr)
+        return per_trial, any_data
+
+    if source in ("mp_combined", "mp_forward", "mediapipe", "auto"):
+        prefer_combined = source in ("mp_combined", "auto")
+        mp = get_mediapipe_for_session(subject_name, prefer_combined=prefer_combined)
+        if mp is None:
+            return None, False
+        os_lm = mp.get("OS_landmarks")
+        od_lm = mp.get("OD_landmarks")
+        if os_lm is None or od_lm is None:
+            return None, False
+        try:
+            from ..services.calibration import (
+                get_calibration_for_subject, triangulate_points,
+            )
+            calib = get_calibration_for_subject(subject_name)
+        except Exception:
+            calib = None
+        if calib is None:
+            return None, False
+        os_lm = np.asarray(os_lm, dtype=float)
+        od_lm = np.asarray(od_lm, dtype=float)
+        if os_lm.ndim != 3 or os_lm.shape[1] < 21:
+            return None, False
+        n_tot = min(len(os_lm), len(od_lm))
+        j3d_full = np.full((n_tot, 21, 3), np.nan)
+        for j in range(21):
+            j3d_full[:, j, :] = triangulate_points(
+                os_lm[:n_tot, j, :], od_lm[:n_tot, j, :], calib)
+        per_trial = []
+        any_data = False
+        for t in trials:
+            s = int(t["start_frame"])
+            n = int(t.get("frame_count", 0))
+            arr = np.full((n, 21, 3), np.nan)
+            e = min(s + n, n_tot)
+            m = max(0, e - s)
+            if m > 0:
+                arr[:m] = j3d_full[s:s + m]
+                if np.any(~np.isnan(arr)):
+                    any_data = True
+            per_trial.append(arr)
+        return per_trial, any_data
+
+    return None, False
+
+
+def _angle_channels_from_joints(j3d: np.ndarray):
+    """Return (flex, abd) 1-D arrays (degrees, NaN where missing) for
+    the index MCP joint from a (n, 21, 3) joints array."""
+    from ..services.skeleton_data import _compute_angles
+    angles = _compute_angles(j3d)
+
+    def _to_arr(key):
+        vals = angles.get(key)
+        if vals is None:
+            return np.full(len(j3d), np.nan)
+        return np.array([v if v is not None else np.nan for v in vals], dtype=float)
+
+    return _to_arr(_MCP_FLEX_KEY), _to_arr(_MCP_ABD_KEY)
+
+
+def _angle_scores_per_movement(traces: np.ndarray, fps: float,
+                                windows: list[tuple[int, int]]):
+    """Per-movement gapping + averaged FFT for pre-computed angle
+    channels.  ``traces`` is (n_frames, n_channels).  Mirrors
+    _compute_pca_scores_per_movement but skips the SVD (the channels
+    are already the signals of interest).  Returns
+    (gapped_traces, fft_freqs, fft_power) or None."""
+    n, d = traces.shape
+    gapped = np.full((n, d), np.nan)
+
+    usable = []
+    for o, c in windows:
+        o = max(0, int(o))
+        c = min(n - 1, int(c))
+        if c - o + 1 >= 10:
+            usable.append((o, c))
+    if not usable:
+        return None
+
+    nfft = 1
+    max_len = max(c - o + 1 for o, c in usable)
+    while nfft < max(64, max_len):
+        nfft *= 2
+
+    cap = min(50.0, fps / 2.0)
+    freqs = np.fft.rfftfreq(nfft, d=1.0 / fps)
+    freq_mask = freqs <= cap
+    freqs_kept = freqs[freq_mask]
+
+    sum_power = np.zeros((d, freqs_kept.size))
+    sum_count = np.zeros(d, dtype=int)
+
+    for (o, c) in usable:
+        seg = traces[o:c + 1]
+        gapped[o:c + 1] = seg
+        for ci in range(d):
+            sig = seg[:, ci]
+            sm = ~np.isnan(sig)
+            if np.sum(sm) < 10:
+                continue
+            x_idx = np.arange(len(sig), dtype=float)
+            interp = np.interp(x_idx, x_idx[sm], sig[sm])
+            interp = interp - interp.mean()
+            w = np.hanning(len(interp))
+            fft_vals = np.fft.rfft(interp * w, n=nfft)
+            power = (np.abs(fft_vals) ** 2) / max(1, len(interp))
+            sum_power[ci] += power[freq_mask]
+            sum_count[ci] += 1
+
+    fft_power_list = []
+    for ci in range(d):
+        if sum_count[ci] > 0:
+            avg = sum_power[ci] / sum_count[ci]
+            fft_power_list.append([round(float(p), 6) for p in avg])
+        else:
+            fft_power_list.append([])
+    fft_freqs_list = [round(float(f), 3) for f in freqs_kept]
+    return gapped, fft_freqs_list, fft_power_list
+
+
+@router.get("/{subject_id}/index_mcp_angles")
+def get_index_mcp_angles(subject_id: int, source: str = Query("auto"),
+                          mode: str = Query("whole")) -> dict:
+    """Index-finger MCP flexion/extension + abduction/adduction angle
+    traces per trial, shaped like the Fingertip PCA response so the
+    frontend can reuse the same renderer.
+
+    ``pc_scores`` holds [flex_trace, abd_trace] in degrees;
+    ``component_labels`` names them.  ``mode`` mirrors the PCA view:
+    ``whole`` (one FFT per trial) or ``per_movement`` (angle trace
+    gapped between movements, FFT averaged across movements).
+    """
+    subj = _get_subject(subject_id)
+    subject_name = subj["name"]
+
+    trials = build_trial_map(subject_name)
+    empty = {"trials": [], "subject": subject_name, "data_source": "none",
+             "is_3d": True, "mode": mode, "component_labels": _MCP_LABELS,
+             "title_suffix": "Index MCP Angles"}
+    if not trials:
+        return empty
+
+    candidates = (_MCP_ANGLE_AUTO_ORDER if source == "auto" else (source,))
+    per_trial = None
+    source_used = "none"
+    for src in candidates:
+        result = _joints_3d_per_trial(subject_name, src, trials)
+        if result is None:
+            continue
+        cand_per_trial, any_data = result
+        if any_data:
+            per_trial, source_used = cand_per_trial, src
+            break
+    if per_trial is None:
+        return empty
+
+    # Per-movement windows (same source as the distance trace).
+    movements_by_trial: dict[int, list[dict]] = {}
+    if mode == "per_movement":
+        try:
+            distances, _trials2, _ds = _load_distances_and_trials(subject_name, source_used)
+            events, _ = _load_events(subject_name, distances, _trials2)
+            movements, _ = _build_movement_params(distances, events, _trials2)
+            for m in movements:
+                movements_by_trial.setdefault(m["trial_idx"], []).append(m)
+        except Exception as e:
+            logger.warning(f"index_mcp_angles per_movement: movements failed ({e})")
+
+    result_trials = []
+    for i, t in enumerate(trials):
+        j3d = per_trial[i]
+        if j3d is None or j3d.size == 0 or not np.any(~np.isnan(j3d)):
+            continue
+        fps = float(t.get("fps", 60))
+        flex, abd = _angle_channels_from_joints(j3d)
+        traces = np.stack([flex, abd], axis=1)   # (n, 2)
+        if not np.any(~np.isnan(traces)):
+            continue
+
+        if mode == "per_movement":
+            windows = []
+            for m in movements_by_trial.get(i, []):
+                o = m.get("open_frame_local")
+                c = m.get("close_frame_local")
+                if o is None or c is None:
+                    continue
+                windows.append((int(o), int(c)))
+            pm = _angle_scores_per_movement(traces, fps, windows)
+            if pm is None:
+                continue
+            gapped, fft_freqs, fft_power = pm
+            channels = [gapped[:, 0], gapped[:, 1]]
+        else:
+            channels = [flex, abd]
+            fft_freqs = []
+            fft_power = []
+            for ch in channels:
+                freqs, power = _compute_fft(ch, fps)
+                if len(freqs) and not fft_freqs:
+                    fft_freqs = [round(float(f), 3) for f in freqs]
+                fft_power.append(
+                    [round(float(p), 6) for p in power] if len(power) else []
+                )
+
+        times = [round(k / fps, 4) for k in range(len(j3d))]
+        pc_scores_out = [
+            [round(float(v), 3) if np.isfinite(v) else None for v in ch]
+            for ch in channels
+        ]
+
+        result_trials.append({
+            "name": t["trial_name"],
+            "fps": fps,
+            "n_components": 2,
+            "times": times,
+            "pc_scores": pc_scores_out,
+            "explained_variance": [],   # angles have no explained variance
+            "fft_freqs": fft_freqs,
+            "fft_power": fft_power,
+        })
+
+    return {
+        "trials": result_trials,
+        "subject": subject_name,
+        "data_source": source_used,
+        "is_3d": True,
+        "mode": mode,
+        "component_labels": _MCP_LABELS,
+        "title_suffix": "Index MCP Angles",
+    }
+
+
 @router.get("/{subject_id}/hand_crop_frame")
 def get_hand_crop_frame(subject_id: int,
                          trial_idx: int = Query(...),

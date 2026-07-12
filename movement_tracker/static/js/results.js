@@ -872,6 +872,13 @@ let cachedSequenceAssignments = null; // { byTrial: { trialIdx: {sequences, seq_
 let cachedPCA = null;
 let _resultsViewMode = 'distances';
 
+// The Fingertip PCA and Index MCP angle views share the same
+// per-component time-series + FFT renderer, containers, and controls.
+// This helper flags either of those "component" views.
+function _isComponentView(mode) {
+    return mode === 'pca' || mode === 'index_mcp';
+}
+
 // Y-range slider state for the distance/velocity trace plots.
 //   _yFull[kind]       → [min, max] data extent (slider bounds)
 //   _yLocked[kind]     → {min, max} shared range when Lock Y-axis is on
@@ -923,25 +930,26 @@ const PC_COLORS = ['#2196F3', '#FF5722', '#4CAF50'];
 
 function _syncViewMode() {
     const mode = _resultsViewMode;
+    const comp = _isComponentView(mode);   // pca OR index_mcp
     const distPlots = document.getElementById('distancePlots');
     const pcaPlots  = document.getElementById('pcaPlots');
-    if (distPlots) distPlots.style.display = mode === 'pca' ? 'none' : '';
-    if (pcaPlots)  pcaPlots.style.display  = mode === 'pca' ? '' : 'none';
+    if (distPlots) distPlots.style.display = comp ? 'none' : '';
+    if (pcaPlots)  pcaPlots.style.display  = comp ? '' : 'none';
     const pcaCompCtl = document.getElementById('pcaCompControls');
-    if (pcaCompCtl) pcaCompCtl.style.display = mode === 'pca' ? 'inline-flex' : 'none';
+    if (pcaCompCtl) pcaCompCtl.style.display = comp ? 'inline-flex' : 'none';
     const pcaModeRow = document.getElementById('pcaModeRow');
-    if (pcaModeRow) pcaModeRow.style.display = mode === 'pca' ? 'inline-flex' : 'none';
+    if (pcaModeRow) pcaModeRow.style.display = comp ? 'inline-flex' : 'none';
 
     // IMI row only relevant for distances
     const imiRefRow = document.getElementById('imiRefRow');
-    if (imiRefRow) imiRefRow.style.display = mode === 'pca' ? 'none' : '';
+    if (imiRefRow) imiRefRow.style.display = comp ? 'none' : '';
 
     // Lock Y-axis and its preceding separator only make sense for distances
     const lockYLabel = document.getElementById('lockYAxis')?.closest('label');
     if (lockYLabel) {
-        lockYLabel.style.display = mode === 'pca' ? 'none' : '';
+        lockYLabel.style.display = comp ? 'none' : '';
         const sep = lockYLabel.previousElementSibling;
-        if (sep) sep.style.display = mode === 'pca' ? 'none' : '';
+        if (sep) sep.style.display = comp ? 'none' : '';
     }
 
     // Velocity-specific overlay labels (Peak Open/Close Vel + R²)
@@ -952,17 +960,17 @@ function _syncViewMode() {
     ];
     const velSep = document.getElementById('overlayPeakOpenVel')
         ?.closest('label')?.previousElementSibling;
-    velLabels.forEach(el => { if (el) el.style.display = mode === 'pca' ? 'none' : ''; });
-    if (velSep) velSep.style.display = mode === 'pca' ? 'none' : '';
+    velLabels.forEach(el => { if (el) el.style.display = comp ? 'none' : ''; });
+    if (velSep) velSep.style.display = comp ? 'none' : '';
 
-    // Lower sections (IP scatters, movement params, shape overlay) not relevant in PCA mode
+    // Lower sections (IP scatters, movement params, shape overlay) not relevant in component modes
     const ipCtl   = document.getElementById('ipPlotControls');
     const ipPlots = document.getElementById('ipPlots');
     const movCtl  = document.getElementById('distMovementControls');
     const movPlots = document.getElementById('distMovementPlots');
     const shapeSec = document.getElementById('shapeOverlaySection');
 
-    if (mode === 'pca') {
+    if (comp) {
         if (ipCtl)   ipCtl.style.display   = 'none';
         if (ipPlots) ipPlots.innerHTML      = '';
         if (movCtl)  movCtl.style.display   = 'none';
@@ -993,15 +1001,48 @@ function _syncViewMode() {
 async function loadFingertipPCA(subjectId) {
     const container = document.getElementById('pcaPlots');
     if (!container) return;
-    container.innerHTML = '<div class="results-no-data">Loading PCA…</div>';
+    // The Index MCP angle view shares this loader/renderer; only the
+    // endpoint and loading label differ.
+    const isAngles = _resultsViewMode === 'index_mcp';
+    const endpoint = isAngles ? 'index_mcp_angles' : 'fingertip_pca';
+    const what = isAngles ? 'angles' : 'PCA';
+    container.innerHTML = `<div class="results-no-data">Loading ${what}…</div>`;
     const src = document.getElementById('resultsSourceSelect')?.value || 'auto';
     const mode = document.querySelector('input[name="pcaMode"]:checked')?.value || 'whole';
     try {
-        const data = await API.get(`/api/results/${subjectId}/fingertip_pca?source=${src}&mode=${mode}`);
+        const data = await API.get(`/api/results/${subjectId}/${endpoint}?source=${src}&mode=${mode}`);
         cachedPCA = data;
         renderFingertipPCA();
     } catch (e) {
-        container.innerHTML = `<div class="results-no-data" style="color:#d32f2f;">PCA failed: ${e.message}</div>`;
+        container.innerHTML = `<div class="results-no-data" style="color:#d32f2f;">${what} failed: ${e.message}</div>`;
+    }
+}
+
+// Relabel the component checkboxes (PC1/2/3 vs Flex/Abd) + hide any
+// unused ones based on the active dataset's component_labels.
+function _applyComponentLabels(data) {
+    const labels = data && Array.isArray(data.component_labels) ? data.component_labels : null;
+    // Short chip text derived from the full axis label, e.g.
+    // "Flex/Ext: Index MCP (°)" -> "Flex/Ext".
+    const chip = (full, i) => {
+        if (!full) return `PC${i + 1}`;
+        const m = String(full).match(/^([^:]+):/);
+        return (m ? m[1] : full).trim();
+    };
+    for (let i = 0; i < 3; i++) {
+        const lbl = document.getElementById(`showPC${i + 1}Label`);
+        const cb  = document.getElementById(`showPC${i + 1}`);
+        if (!lbl || !cb) continue;
+        if (labels) {
+            const used = i < labels.length;
+            lbl.style.display = used ? 'inline-flex' : 'none';
+            const txt = lbl.querySelector('.pc-cb-text');
+            if (txt) txt.textContent = used ? chip(labels[i], i) : `PC${i + 1}`;
+        } else {
+            lbl.style.display = 'inline-flex';
+            const txt = lbl.querySelector('.pc-cb-text');
+            if (txt) txt.textContent = `PC${i + 1}`;
+        }
     }
 }
 
@@ -1011,8 +1052,23 @@ function renderFingertipPCA() {
     if (!container) return;
     container.innerHTML = '';
 
+    // Component labels + view flavour.  For the Index MCP angle view
+    // the backend supplies `component_labels` (Flex/Ext, Abd/Add) and a
+    // title_suffix; the PCA view leaves them unset so we fall back to
+    // "PC1/2/3" and explained-variance percentages.
+    _applyComponentLabels(data);
+    const compLabels = data && Array.isArray(data.component_labels) ? data.component_labels : null;
+    const titleSuffix = (data && data.title_suffix) || null;
+    const seriesName = ci => compLabels ? (compLabels[ci] || `#${ci + 1}`) : `PC${ci + 1}`;
+    const shortName  = ci => {
+        const full = seriesName(ci);
+        const m = String(full).match(/^([^:]+):/);
+        return (m ? m[1] : full).trim();
+    };
+
     if (!data || !data.trials || data.trials.length === 0) {
-        container.innerHTML = '<div class="results-no-data">No MediaPipe data available for fingertip PCA</div>';
+        const noun = compLabels ? 'index MCP angles' : 'fingertip PCA';
+        container.innerHTML = `<div class="results-no-data">No 3D data available for ${noun}</div>`;
         return;
     }
 
@@ -1123,8 +1179,11 @@ function renderFingertipPCA() {
         header.style.cssText = 'padding:2px 8px 6px;';
         const trialPart = String(trial.name || '').split('_').pop();
         const dimLabel  = data.is_3d ? '3D' : '2D';
+        const headTitle = titleSuffix
+            ? `Trial: ${trialPart} — ${titleSuffix}`
+            : `Trial: ${trialPart} — Index Fingertip ${dimLabel} PCA`;
         header.innerHTML = `<span style="font-size:13px;font-weight:600;color:#666;">` +
-            `Trial: ${trialPart} — Index Fingertip ${dimLabel} PCA</span>`;
+            `${headTitle}</span>`;
         block.appendChild(header);
 
         // Scrollable wrapper for time-series plots
@@ -1185,7 +1244,7 @@ function renderFingertipPCA() {
                 type: 'scatter', mode: 'lines',
                 line: { color: PC_COLORS[ci], width: 1 },
                 connectgaps: false,
-                hovertemplate: `%{x:.3f}s<br>PC${ci + 1}: %{y:.2f}<extra></extra>`,
+                hovertemplate: `%{x:.3f}s<br>${shortName(ci)}: %{y:.2f}<extra></extra>`,
             }], {
                 margin: { t: ci === 0 ? 8 : 0, r: 20, b: isLast ? 30 : 2, l: 60 },
                 plot_bgcolor: '#fff', paper_bgcolor: '#fff',
@@ -1197,7 +1256,7 @@ function renderFingertipPCA() {
                     showgrid: true, gridcolor: '#eee', zeroline: false,
                 },
                 yaxis: {
-                    title: { text: `PC${ci + 1}${pct}`, font: { size: 11 } },
+                    title: { text: compLabels ? seriesName(ci) : `PC${ci + 1}${pct}`, font: { size: 11 } },
                     showgrid: true, gridcolor: '#eee',
                     zeroline: true, zerolinecolor: '#ccc',
                 },
@@ -1238,13 +1297,13 @@ function renderFingertipPCA() {
                 x: fft_freqs, y: _smoothFft(fft_power[ci]),
                 type: 'scatter', mode: 'lines',
                 line: { color: PC_COLORS[ci], width: 1.5 },
-                hovertemplate: `%{x:.1f} Hz<br>%{y:.2e}<extra>PC${ci + 1}</extra>`,
+                hovertemplate: `%{x:.1f} Hz<br>%{y:.2e}<extra>${shortName(ci)}</extra>`,
             }], {
                 margin: { t: 22, r: 10, b: 38, l: 55 },
                 height: 180,
                 plot_bgcolor: '#fff', paper_bgcolor: '#fff',
                 showlegend: false,
-                title: { text: `PC${ci + 1}${pct}`, font: { size: 12 }, x: 0.5, y: 0.97 },
+                title: { text: compLabels ? shortName(ci) : `PC${ci + 1}${pct}`, font: { size: 12 }, x: 0.5, y: 0.97 },
                 xaxis: {
                     title: { text: 'Frequency (Hz)', font: { size: 11 } },
                     showgrid: true, gridcolor: '#eee', zeroline: false,
@@ -1395,7 +1454,7 @@ async function loadDistances(subjectId) {
             return;
         }
 
-        if (_resultsViewMode !== 'pca') {
+        if (!_isComponentView(_resultsViewMode)) {
             renderAllDistancePlots();
         }
 
@@ -1403,7 +1462,7 @@ async function loadDistances(subjectId) {
         if (movData && movData.movements && movData.movements.length > 0) {
             cachedMovements = movData;
             cachedSequenceAssignments = null;
-            if (_resultsViewMode !== 'pca') {
+            if (!_isComponentView(_resultsViewMode)) {
                 if (movControls) movControls.style.display = '';
                 renderIntervalParamPlots();
                 renderDistMovementPlots();
@@ -1421,7 +1480,7 @@ async function loadDistances(subjectId) {
         }
 
         // PCA mode: load/render fingertip PCA (movements already cached above for events)
-        if (_resultsViewMode === 'pca') {
+        if (_isComponentView(_resultsViewMode)) {
             _syncViewMode();
         }
     } catch (e) {
@@ -6571,7 +6630,7 @@ document.querySelectorAll('input[name="imiRef"]').forEach(r => {
 // PC visibility checkboxes (PCA view): re-render the PCA plots.
 document.querySelectorAll('#pcaCompControls input[data-pc]').forEach(cb => {
     cb.addEventListener('change', () => {
-        if (_resultsViewMode === 'pca' && cachedPCA) renderFingertipPCA();
+        if (_isComponentView(_resultsViewMode) && cachedPCA) renderFingertipPCA();
     });
 });
 
@@ -6580,7 +6639,7 @@ document.querySelectorAll('#pcaCompControls input[data-pc]').forEach(cb => {
 // server-side, so the cache needs to drop.
 document.querySelectorAll('input[name="pcaMode"]').forEach(r => {
     r.addEventListener('change', () => {
-        if (_resultsViewMode !== 'pca') return;
+        if (!_isComponentView(_resultsViewMode)) return;
         cachedPCA = null;
         if (currentSubjectId) loadFingertipPCA(currentSubjectId);
     });
@@ -6595,7 +6654,7 @@ document.querySelectorAll('input[name="pcaMode"]').forEach(r => {
         if (readout) readout.textContent = slider.value;
     });
     slider.addEventListener('change', () => {
-        if (_resultsViewMode === 'pca' && cachedPCA) renderFingertipPCA();
+        if (_isComponentView(_resultsViewMode) && cachedPCA) renderFingertipPCA();
     });
 })();
 
@@ -6608,7 +6667,7 @@ function _syncImiRefVisibility() { /* intentionally empty */ }
 // Overlay controls: re-render distance/velocity plots or PCA plots
 ['overlayPeakDist', 'overlayOpen', 'overlayClose', 'overlayPause', 'overlayPeakOpenVel', 'overlayPeakCloseVel'].forEach(id => {
     document.getElementById(id).addEventListener('change', () => {
-        if (_resultsViewMode === 'pca') { if (cachedPCA) renderFingertipPCA(); }
+        if (_isComponentView(_resultsViewMode)) { if (cachedPCA) renderFingertipPCA(); }
         else if (cachedTraces) renderAllDistancePlots();
     });
 });
@@ -6640,7 +6699,7 @@ function _syncImiRefVisibility() { /* intentionally empty */ }
     const sl = document.getElementById('xScaleSlider');
     if (!sl) return;
     sl.addEventListener('input', () => {
-        if (_resultsViewMode === 'pca') { if (cachedPCA) renderFingertipPCA(); }
+        if (_isComponentView(_resultsViewMode)) { if (cachedPCA) renderFingertipPCA(); }
         else if (cachedTraces) renderAllDistancePlots();
     });
 })();
@@ -6817,6 +6876,10 @@ document.getElementById('resultsSourceSelect')?.addEventListener('change', () =>
 
 document.getElementById('resultsViewMode')?.addEventListener('change', e => {
     _resultsViewMode = e.target.value;
+    // PCA and Index-MCP-angles come from different endpoints, so the
+    // shared cachedPCA must be dropped when switching between them (or
+    // in from distances) to force a re-fetch.
+    cachedPCA = null;
     _syncViewMode();
 });
 
