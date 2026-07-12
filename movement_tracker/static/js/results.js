@@ -6493,6 +6493,11 @@ document.getElementById('subjectSelect').addEventListener('change', (e) => {
     cachedTraces = null;
     cachedMovements = null;
     cachedSequenceAssignments = null;
+    // Also wipe the PCA cache -- otherwise _syncViewMode('pca') sees
+    // the previous subject's cachedPCA still populated and takes the
+    // "just re-render" branch instead of loadFingertipPCA, leaving
+    // the plots showing the wrong subject's data.
+    cachedPCA = null;
     updateNavLinks();
 
     // Purge any Plotly plots from the previous subject so there's no
