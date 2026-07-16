@@ -223,6 +223,25 @@ CREATE TABLE IF NOT EXISTS remote_downloads (
 );
 CREATE INDEX IF NOT EXISTS idx_remote_downloads_job ON remote_downloads(job_id);
 CREATE INDEX IF NOT EXISTS idx_remote_downloads_subject ON remote_downloads(subject_id, job_type);
+
+-- Audit trail for raw-video intake: every time onboarding renames a
+-- raw camera file in place to {code}_NN[_stereo].mp4, one row records
+-- the original camera filename → new name mapping so the operation is
+-- reversible and auditable later.  Mirrored to a CSV manifest on disk
+-- next to the file.
+CREATE TABLE IF NOT EXISTS raw_video_intake (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_id INTEGER REFERENCES subjects(id) ON DELETE SET NULL,
+    subject_name TEXT NOT NULL,
+    original_name TEXT NOT NULL,
+    new_name TEXT NOT NULL,
+    directory TEXT NOT NULL,
+    size_bytes INTEGER,
+    head_sha256 TEXT,
+    camera_mode TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_raw_video_intake_subject ON raw_video_intake(subject_id);
 """
 
 

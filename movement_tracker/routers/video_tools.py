@@ -352,6 +352,7 @@ def process_subject(req: ProcessSubjectRequest) -> dict:
         segments=[s.model_dump() for s in req.segments],
         log_path=log_path,
         blur_faces=req.blur_faces,
+        camera_mode=req.camera_mode,
     )
 
     return {"job_id": job["id"], "status": "running", "subject_id": subj["id"]}
@@ -366,9 +367,145 @@ def _update_job_progress(job_id: int, pct: float, logfile=None, msg: str = ""):
         logfile.flush()
 
 
+import csv as _csv
+import hashlib as _hashlib
+import re as _re
+from datetime import datetime as _datetime, timezone as _timezone
+
+# Matches a raw file stem already in canonical form: {code}_NN or
+# {code}_NN_stereo (case-insensitive, NN = one or more digits).
+def _already_intake_named(stem: str, code: str) -> bool:
+    return bool(_re.match(rf'^{_re.escape(code)}_\d+(?:_stereo)?$', stem, _re.IGNORECASE))
+
+
+def _next_intake_nn(dir_path: Path, code: str) -> int:
+    """Next free NN for {code}_NN[_stereo] video files in dir_path."""
+    pat = _re.compile(rf'^{_re.escape(code)}_(\d+)(?:_stereo)?$', _re.IGNORECASE)
+    max_nn = 0
+    try:
+        for p in dir_path.iterdir():
+            if p.suffix.lower() not in (".mp4", ".avi", ".mov", ".mkv"):
+                continue
+            m = pat.match(p.stem)
+            if m:
+                max_nn = max(max_nn, int(m.group(1)))
+    except OSError:
+        pass
+    return max_nn + 1
+
+
+def _head_fingerprint(path: str, nbytes: int = 1 << 20) -> str:
+    """Cheap fingerprint: sha256 of the first ``nbytes`` bytes (16 hex).
+    Full-file hashing multi-GB videos would be too slow; the head hash
+    plus size is enough to identify which camera file this was."""
+    h = _hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            h.update(f.read(nbytes))
+    except OSError:
+        return ""
+    return h.hexdigest()[:16]
+
+
+def _record_intake(subject_id: int, subject_name: str, original_name: str,
+                    new_name: str, directory: str, size_bytes: int,
+                    head_sha: str, camera_mode: str) -> None:
+    """Persist an intake-rename audit row to the DB and append it to the
+    on-disk manifest CSV in the same directory as the renamed file."""
+    try:
+        with get_db_ctx() as db:
+            db.execute(
+                """INSERT INTO raw_video_intake
+                   (subject_id, subject_name, original_name, new_name,
+                    directory, size_bytes, head_sha256, camera_mode)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (subject_id, subject_name, original_name, new_name,
+                 directory, size_bytes, head_sha, camera_mode),
+            )
+    except Exception as e:  # never let audit failure abort the rename
+        logger.warning(f"raw_video_intake DB write failed: {e}")
+
+    # Append-only CSV manifest that travels with the data on disk.
+    try:
+        manifest = Path(directory) / "_intake_manifest.csv"
+        new_file = not manifest.exists()
+        with open(manifest, "a", newline="") as f:
+            w = _csv.writer(f)
+            if new_file:
+                w.writerow(["timestamp_utc", "subject", "original_name",
+                            "new_name", "size_bytes", "head_sha256", "camera_mode"])
+            w.writerow([
+                _datetime.now(_timezone.utc).isoformat(),
+                subject_name, original_name, new_name,
+                size_bytes, head_sha, camera_mode,
+            ])
+    except OSError as e:
+        logger.warning(f"intake manifest write failed: {e}")
+
+
+def _rename_raw_originals(segments: list[dict], subject_name: str,
+                          camera_mode: str, subject_id: int, logfile) -> None:
+    """Rename each UNIQUE raw source file (in place, in its own folder)
+    to {code}_NN[_stereo].mp4 and repoint every segment that used it.
+
+    - Files already named {code}_NN[_stereo] are left untouched (skip).
+    - NN is the next free per-subject index in that file's directory.
+    - Stereo sources get a ``_stereo`` suffix.
+    - Each rename is recorded to the audit table + CSV manifest.
+    Mutates ``segments`` in place.
+    """
+    stereo_suffix = "_stereo" if camera_mode == "stereo" else ""
+
+    # Unique source paths in first-seen order (one rename per file even
+    # when several trials are trimmed from the same recording).
+    unique_srcs: list[str] = []
+    for s in segments:
+        sp = s.get("source_path")
+        if sp and sp not in unique_srcs:
+            unique_srcs.append(sp)
+
+    remap: dict[str, str] = {}
+    for src in unique_srcs:
+        srcp = Path(src)
+        if not srcp.exists():
+            continue
+        if _already_intake_named(srcp.stem, subject_name):
+            continue   # already canonical — reuse as-is
+
+        nn = _next_intake_nn(srcp.parent, subject_name)
+        suffix = srcp.suffix.lower() or ".mp4"
+        new_path = srcp.parent / f"{subject_name}_{nn:02d}{stereo_suffix}{suffix}"
+        while new_path.exists():   # never clobber
+            nn += 1
+            new_path = srcp.parent / f"{subject_name}_{nn:02d}{stereo_suffix}{suffix}"
+
+        try:
+            size = srcp.stat().st_size
+        except OSError:
+            size = 0
+        head_sha = _head_fingerprint(str(srcp))
+        try:
+            srcp.rename(new_path)
+        except OSError as e:
+            logfile.write(f"  Rename failed for {srcp.name}: {e}\n")
+            logfile.flush()
+            continue
+
+        remap[src] = str(new_path)
+        logfile.write(f"  Renamed raw original {srcp.name} -> {new_path.name}\n")
+        logfile.flush()
+        _record_intake(subject_id, subject_name, srcp.name, new_path.name,
+                        str(srcp.parent), size, head_sha, camera_mode)
+
+    # Repoint segments to the renamed files.
+    for s in segments:
+        if s.get("source_path") in remap:
+            s["source_path"] = remap[s["source_path"]]
+
+
 def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
                          segments: list[dict], log_path: str,
-                         blur_faces: bool = True):
+                         blur_faces: bool = True, camera_mode: str = "stereo"):
     """Background thread: trim each segment, optionally blur to deidentified/ dir."""
 
     cancel_event = registry.register_cancel_event(job_id)
@@ -390,6 +527,19 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
             seg_span = 100.0 / total_segments
 
             with open(log_path, "w") as logfile:
+                # First: rename the raw source file(s) in place to
+                # {code}_NN[_stereo].mp4 and repoint the segments, so
+                # everything below (trim + persisted segments table)
+                # references the canonical names.  Failures here are
+                # logged but non-fatal — trimming still runs on the
+                # original paths.
+                try:
+                    _rename_raw_originals(segments, subject_name, camera_mode,
+                                          subject_id, logfile)
+                except Exception as e:
+                    logfile.write(f"  Raw-original rename step failed: {e}\n")
+                    logfile.flush()
+
                 for i, seg in enumerate(segments):
                     if cancel_event.is_set():
                         raise InterruptedError("Job cancelled")
