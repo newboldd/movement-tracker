@@ -7868,8 +7868,17 @@ const manoViewer = (() => {
         // show a placeholder telling the user to run MediaPipe /
         // HRnet / DeepLabCut from the Jobs page.  Any one signal
         // turns the grid back on.
+        // MP hand variants (cropped / reverse / static / combined) count as
+        // models too.  A Forward MP run with a crop box saves only the
+        // cropped pass, so a cropped-only trial has has_mp=false but is very
+        // much "has a model" -- without this it wrongly shows "no models".
+        const _hasMPVariant = !!(trialData && (trialData.has_cropped_mp
+                                  || trialData.has_reverse_mp
+                                  || trialData.has_static_mp
+                                  || trialData.has_combined_mp));
         const _hasAnyModel = !!(hasMP || hasDLC || hasVision || hasFit
-                                  || hasV2 || hasSkelLegacy || hasHrnet);
+                                  || hasV2 || hasSkelLegacy || hasHrnet
+                                  || _hasMPVariant);
         const _modelsGrid = $('modelsGrid');
         const _modelsNone = $('modelsNone');
         // Critical: set 'grid' explicitly, NOT ''.  The inline style on
