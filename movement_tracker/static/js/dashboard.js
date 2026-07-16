@@ -154,7 +154,12 @@ function renderDiagnosisGroups() {
     });
 
     filtered.forEach(s => {
-        const group = s.group_label || s.diagnosis || "Control";
+        // Diagnosis is the field the onboarding module + clinical
+        // import set.  group_label is a legacy near-duplicate that
+        // defaults to 'Other' and was making every subject land in
+        // the Ungrouped bucket — prefer diagnosis, fall back to
+        // group_label only when diagnosis is somehow blank.
+        const group = s.diagnosis || s.group_label || "Control";
         if (!grouped[group]) {
             grouped[group] = [];
         }
@@ -218,7 +223,7 @@ function renderDiagnosisGroups() {
     // groups — rendered in a separate "Ungrouped" section below the grid
     // so they're easy to find and reassign.
     const ungrouped = filtered.filter(s => {
-        const g = s.group_label || s.diagnosis || "Control";
+        const g = s.diagnosis || s.group_label || "Control";
         return !diagnosisGroups.includes(g);
     });
     if (ungrouped.length > 0) {

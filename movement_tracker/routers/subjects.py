@@ -262,9 +262,12 @@ def update_subject(subject_id: int, req: SubjectUpdate) -> dict:
             from ..services.video import _no_face_cache
             _no_face_cache.pop(row["name"], None)
         if req.diagnosis is not None:
+            # Keep group_label in lock-step with diagnosis (see the
+            # dashboard grouping note): write both so no reader can
+            # disagree.  An explicit group_label below still wins.
             db.execute(
-                "UPDATE subjects SET diagnosis = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (req.diagnosis, subject_id),
+                "UPDATE subjects SET diagnosis = ?, group_label = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (req.diagnosis, req.diagnosis, subject_id),
             )
 
         if req.group_label is not None:

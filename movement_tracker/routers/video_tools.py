@@ -292,11 +292,16 @@ def process_subject(req: ProcessSubjectRequest) -> dict:
 
         if not subj:
             dlc_dir = req.subject_name
+            # Keep group_label in lock-step with diagnosis.  The two are
+            # near-duplicate columns for the same concept; the dashboard
+            # groups by diagnosis, but other readers may still consult
+            # group_label, so write both to avoid the "Ungrouped" bug.
+            diag = req.diagnosis or 'Control'
             db.execute(
-                """INSERT INTO subjects (name, stage, dlc_dir, camera_mode, camera_name, diagnosis)
-                   VALUES (?, 'created', ?, ?, ?, ?)""",
+                """INSERT INTO subjects (name, stage, dlc_dir, camera_mode, camera_name, diagnosis, group_label)
+                   VALUES (?, 'created', ?, ?, ?, ?, ?)""",
                 (req.subject_name, dlc_dir, req.camera_mode, req.camera_name,
-                 req.diagnosis or 'Control'),
+                 diag, diag),
             )
             subj = db.execute(
                 "SELECT * FROM subjects WHERE name = ?", (req.subject_name,)
@@ -307,6 +312,8 @@ def process_subject(req: ProcessSubjectRequest) -> dict:
             params = [req.camera_mode, req.camera_name]
             if req.diagnosis is not None:
                 updates.append("diagnosis = ?")
+                updates.append("group_label = ?")
+                params.append(req.diagnosis)
                 params.append(req.diagnosis)
             params.append(subj["id"])
             db.execute(
