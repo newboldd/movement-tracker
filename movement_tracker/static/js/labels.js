@@ -7880,6 +7880,19 @@ const manoViewer = (() => {
         if (_modelsNone) _modelsNone.style.display = _hasAnyModel ? 'none' : '';
         document.body.classList.toggle('no-models-loaded', !_hasAnyModel);
 
+        // Fine-grained control gating.  Video navigation (Play, prev/next,
+        // speed, camera side, Hide Video, Export) and the timeline scrubber
+        // are NEVER gated -- a video-only subject can still be navigated.
+        //  • Track / Snap / X-scale / Events need at least one model's
+        //    tracking output to be meaningful.
+        //  • Offsets needs MP labels + HRnet heat maps + peaks.
+        //  • Fit Skeleton (v3) needs MP labels + full HRnet preprocessing.
+        const _hasHeat  = !!(trialData && trialData.has_heatmaps);
+        const _hasPeaks = !!(trialData && trialData.hrnet_peaks);
+        document.body.classList.toggle('no-track-data',   !_hasAnyModel);
+        document.body.classList.toggle('no-offsets-data', !(hasMP && _hasHeat && _hasPeaks));
+        document.body.classList.toggle('no-v3-data',      !(hasMP && _hasHeat));
+
         // Status label only -- model selection is NOT auto-picked.
         // Initial-load defaults are "all unchecked" and any user-set
         // state persists across reloads (see _saveCheckboxes /

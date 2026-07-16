@@ -109,9 +109,30 @@
         body.no-models-loaded #fitHRnetBtn,
         body.no-models-loaded #fitSkeletonBtn,
         body.no-models-loaded #fitSkeletonLegacyBtn,
-        body.no-models-loaded #mpFilterBtn,
-        body.no-models-loaded .controls-bar,
-        body.no-models-loaded #distanceCanvas {
+        body.no-models-loaded #mpFilterBtn {
+            opacity: 0.35;
+            pointer-events: none;
+        }
+        /* Fine-grained control gating.  Video navigation (Play, prev/next,
+           speed, camera side, Hide Video, Export) and the timeline scrubber
+           stay live even with no models.  Only the controls that actually
+           need tracking / preprocessing output are dimmed. */
+        /* Track, Snap, X-scale, Events: need at least one model's output. */
+        body.no-track-data #trackZoomBtn,
+        body.no-track-data #snapCamBtn,
+        body.no-track-data #xScaleLabel,
+        body.no-track-data #eventsLabel,
+        body.no-track-data #eventToggleGroup {
+            opacity: 0.35;
+            pointer-events: none;
+        }
+        /* Offsets: needs MP labels + HRnet heat maps + peaks. */
+        body.no-offsets-data #offsetsToggleBtn {
+            opacity: 0.35;
+            pointer-events: none;
+        }
+        /* Fit Skeleton (v3): needs MP labels + full HRnet preprocessing. */
+        body.no-v3-data #fitSkeletonV2Btn {
             opacity: 0.35;
             pointer-events: none;
         }
@@ -1209,7 +1230,7 @@
                 <button class="btn btn-sm" id="trackZoomBtn" title="Toggle tracking zoom (Z)" style="padding:2px 6px;">Track</button>
                 <button class="btn btn-sm" id="snapCamBtn" title="Reset 3D view to camera (C)" style="padding:2px 6px;">Snap</button>
                 <button class="btn btn-sm" id="toggleVideoBtn" title="Toggle video (V)" style="padding:2px 6px;">Hide Video</button>
-                <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text-muted);">
+                <label id="xScaleLabel" style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text-muted);">
                     X
                     <input type="range" id="xScaleSlider" min="1" max="10" step="0.1" value="1"
                            title="Timeline X scale (1 = full trial, >1 scrolls)"
@@ -1218,7 +1239,7 @@
                 <!-- Events: four side-by-side sub-buttons toggling per-type
                      marker visibility on the distance plot.  Colors match
                      the Events page.  Off by default. -->
-                <span style="color:var(--text-muted);font-size:11px;">Events:</span>
+                <span id="eventsLabel" style="color:var(--text-muted);font-size:11px;">Events:</span>
                 <span id="eventToggleGroup"
                       title="Toggle event-type markers on the distance plot"
                       style="display:inline-flex;align-items:stretch;border:1px solid var(--border);border-radius:3px;overflow:hidden;height:18px;">
@@ -1318,7 +1339,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=416" type="module"></script>
+    <script src="/static/js/labels.js?v=417" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {
