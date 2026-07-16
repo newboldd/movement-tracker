@@ -10,6 +10,10 @@ const onboard = (() => {
     let cameraNames = [];            // from setup
     let currentPath = '';
     let selectedVideoPath = null;
+    // File-browser view state (Step 1).
+    let videoSort = 'date';         // 'date' | 'name' — how video files sort
+    try { videoSort = localStorage.getItem('mt_onboard_sort') || 'date'; } catch {}
+    let lastDirData = null;         // last /api/files payload (re-rendered on sort/pin change)
     let videoMeta = null;
     let inPoint = null;
     let outPoint = null;
@@ -73,84 +77,171 @@ const onboard = (() => {
 
     // ── Step 1: File browser (opens immediately) ─────────────
 
+    // ── Saved-folder suggestions (localStorage) ──────────────
+    // User can pin the folder they're currently browsing so it shows
+    // up among the default location suggestions on the initial view.
+    function _pinnedDirs() {
+        try { return JSON.parse(localStorage.getItem('mt_onboard_pinned_dirs') || '[]'); }
+        catch { return []; }
+    }
+    function _savePinnedDirs(list) {
+        try { localStorage.setItem('mt_onboard_pinned_dirs', JSON.stringify(list)); } catch {}
+    }
+    function _dirLeafName(path) {
+        return path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path;
+    }
+    function _isPinned(path) {
+        return _pinnedDirs().some(d => d.path === path);
+    }
+    function pinCurrentDir() {
+        if (!currentPath || _isPinned(currentPath)) return;
+        const list = _pinnedDirs();
+        list.push({ name: _dirLeafName(currentPath), path: currentPath });
+        _savePinnedDirs(list);
+        renderBrowser();   // reflect the pinned state on the button
+    }
+    function unpinDir(path) {
+        _savePinnedDirs(_pinnedDirs().filter(d => d.path !== path));
+        renderBrowser();
+    }
+    function setVideoSort(mode) {
+        if (mode !== 'name' && mode !== 'date') return;
+        videoSort = mode;
+        try { localStorage.setItem('mt_onboard_sort', mode); } catch {}
+        renderBrowser();
+    }
+
     async function loadDirectory(path) {
         const browser = document.getElementById('fileBrowser');
         browser.innerHTML = '<div style="padding:12px;color:var(--text-muted)">Loading...</div>';
-
         try {
             const data = await API.get(`/api/files?path=${encodeURIComponent(path)}`);
+            lastDirData = data;
             currentPath = data.path || '';
             selectedVideoPath = null;
             document.getElementById('selectVideoBtn').disabled = true;
-
-            let html = '';
-
-            if (!currentPath && data.locations) {
-                html += '<div class="fb-locations">';
-                for (const loc of data.locations) {
-                    html += `<div class="fb-loc" onclick="onboard.browse('${escPath(loc.path)}')">
-                        <span class="icon">&#128193;</span>
-                        <span>${loc.name}</span>
-                        <span style="color:var(--text-muted);font-size:11px;margin-left:auto;">${loc.path}</span>
-                    </div>`;
-                }
-                // "Browse other…" option → derive home dir from existing locations
-                let homePath = '/';
-                if (data.locations.length > 0) {
-                    const parts = data.locations[0].path.replace(/\\\\/g, '/').split('/');
-                    // e.g. /Users/john/Desktop → /Users/john
-                    homePath = parts.length >= 3 ? parts.slice(0, 3).join('/') : parts.join('/');
-                }
-                html += `<div class="fb-loc" onclick="onboard.browse('${escPath(homePath)}')" style="border-top:1px solid var(--border);margin-top:4px;padding-top:10px;">
-                    <span class="icon">&#128269;</span>
-                    <span>Browse other location&hellip;</span>
-                    <span style="color:var(--text-muted);font-size:11px;margin-left:auto;">${homePath}</span>
-                </div>`;
-                html += '</div>';
-            }
-
-            if (data.breadcrumbs && data.breadcrumbs.length > 0) {
-                html += '<div class="fb-breadcrumbs">';
-                html += `<a onclick="onboard.browse('')">Home</a> /`;
-                for (const crumb of data.breadcrumbs) {
-                    html += ` <a onclick="onboard.browse('${escPath(crumb.path)}')">${crumb.name}</a> /`;
-                }
-                html += '</div>';
-            }
-
-            if (data.parent) {
-                html += `<div class="fb-item" onclick="onboard.browse('${escPath(data.parent)}')">
-                    <span class="icon">&#8592;</span> <span>..</span>
-                </div>`;
-            }
-
-            for (const item of data.items) {
-                if (item.type === 'dir') {
-                    html += `<div class="fb-item" onclick="onboard.browse('${escPath(item.path)}')">
-                        <span class="icon">&#128193;</span>
-                        <span>${item.name}</span>
-                    </div>`;
-                } else {
-                    const dateStr = item.created ? new Date(item.created).toLocaleDateString(undefined, {year:'numeric',month:'short',day:'numeric'}) : '';
-                    html += `<div class="fb-item" data-path="${escPath(item.path)}" data-name="${item.name}" onclick="onboard.selectFile('${escPath(item.path)}', this)" ondblclick="onboard.dblClickFile('${escPath(item.path)}')">
-                        <span class="icon">&#127909;</span>
-                        <span>${item.name}</span>
-                        <span style="color:var(--text-muted);font-size:11px;margin-left:auto;">${dateStr}</span>
-                        <span class="size" style="min-width:60px;text-align:right;">${item.size_mb} MB</span>
-                    </div>`;
-                }
-            }
-
-            if (!data.items || data.items.length === 0) {
-                if (currentPath) {
-                    html += '<div style="padding:12px;color:var(--text-muted)">No video files found</div>';
-                }
-            }
-
-            browser.innerHTML = html;
+            renderBrowser();
         } catch (e) {
             browser.innerHTML = `<div style="padding:12px;color:var(--red)">${e.message}</div>`;
         }
+    }
+
+    // Render the file browser from the last fetched payload, applying
+    // the current video-sort choice and the saved-folder suggestions.
+    // Called on directory load AND on sort/pin toggles (no re-fetch).
+    function renderBrowser() {
+        const browser = document.getElementById('fileBrowser');
+        const data = lastDirData;
+        if (!browser || !data) return;
+
+        let html = '';
+
+        if (!currentPath && data.locations) {
+            html += '<div class="fb-locations">';
+            for (const loc of data.locations) {
+                html += `<div class="fb-loc" onclick="onboard.browse('${escPath(loc.path)}')">
+                    <span class="icon">&#128193;</span>
+                    <span>${loc.name}</span>
+                    <span style="color:var(--text-muted);font-size:11px;margin-left:auto;">${loc.path}</span>
+                </div>`;
+            }
+            // Saved folders the user pinned (skip any that duplicate a
+            // built-in location path).  Each has a remove (×) control.
+            const backendPaths = new Set((data.locations || []).map(l => l.path));
+            const pinned = _pinnedDirs().filter(d => !backendPaths.has(d.path));
+            for (const d of pinned) {
+                html += `<div class="fb-loc" style="align-items:center;">
+                    <span class="icon" onclick="onboard.browse('${escPath(d.path)}')" style="cursor:pointer;">&#11088;</span>
+                    <span onclick="onboard.browse('${escPath(d.path)}')" style="cursor:pointer;">${d.name}</span>
+                    <span onclick="onboard.browse('${escPath(d.path)}')" style="color:var(--text-muted);font-size:11px;margin-left:auto;cursor:pointer;">${d.path}</span>
+                    <span onclick="onboard.unpinDir('${escPath(d.path)}')" title="Remove saved folder"
+                          style="margin-left:8px;color:var(--text-muted);cursor:pointer;font-size:14px;padding:0 4px;">&times;</span>
+                </div>`;
+            }
+            // "Browse other…" option → derive home dir from existing locations
+            let homePath = '/';
+            if (data.locations.length > 0) {
+                const parts = data.locations[0].path.replace(/\\\\/g, '/').split('/');
+                // e.g. /Users/john/Desktop → /Users/john
+                homePath = parts.length >= 3 ? parts.slice(0, 3).join('/') : parts.join('/');
+            }
+            html += `<div class="fb-loc" onclick="onboard.browse('${escPath(homePath)}')" style="border-top:1px solid var(--border);margin-top:4px;padding-top:10px;">
+                <span class="icon">&#128269;</span>
+                <span>Browse other location&hellip;</span>
+                <span style="color:var(--text-muted);font-size:11px;margin-left:auto;">${homePath}</span>
+            </div>`;
+            html += '</div>';
+        }
+
+        if (data.breadcrumbs && data.breadcrumbs.length > 0) {
+            html += '<div class="fb-breadcrumbs">';
+            html += `<a onclick="onboard.browse('')">Home</a> /`;
+            for (const crumb of data.breadcrumbs) {
+                html += ` <a onclick="onboard.browse('${escPath(crumb.path)}')">${crumb.name}</a> /`;
+            }
+            html += '</div>';
+        }
+
+        // Toolbar: sort toggle + pin-this-folder (only while inside a dir).
+        if (currentPath) {
+            const pinned = _isPinned(currentPath);
+            const sortBtn = (mode, label) => {
+                const on = videoSort === mode;
+                return `<button type="button" onclick="onboard.setVideoSort('${mode}')"
+                    style="border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;
+                    background:${on ? 'var(--blue)' : 'var(--bg)'};color:${on ? '#fff' : 'var(--text)'};">${label}</button>`;
+            };
+            html += `<div style="display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--border);font-size:12px;">
+                <span style="color:var(--text-muted);">Sort:</span>
+                ${sortBtn('name', 'Name')}
+                ${sortBtn('date', 'Date')}
+                <button type="button" onclick="onboard.pinCurrentDir()" ${pinned ? 'disabled' : ''}
+                    title="Add this folder to the default suggestions"
+                    style="margin-left:auto;border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;
+                    cursor:${pinned ? 'default' : 'pointer'};background:var(--bg);color:${pinned ? 'var(--text-muted)' : 'var(--blue)'};">
+                    ${pinned ? '★ Saved' : '☆ Pin this folder'}</button>
+            </div>`;
+        }
+
+        if (data.parent) {
+            html += `<div class="fb-item" onclick="onboard.browse('${escPath(data.parent)}')">
+                <span class="icon">&#8592;</span> <span>..</span>
+            </div>`;
+        }
+
+        // Partition items: dirs (always alphabetical, listed first) then
+        // videos sorted by the chosen key.
+        const items = data.items || [];
+        const dirs = items.filter(it => it.type === 'dir');
+        const videos = items.filter(it => it.type !== 'dir');
+        if (videoSort === 'name') {
+            videos.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+        } else {
+            videos.sort((a, b) => (b.created_ts || 0) - (a.created_ts || 0));
+        }
+
+        for (const item of dirs) {
+            html += `<div class="fb-item" onclick="onboard.browse('${escPath(item.path)}')">
+                <span class="icon">&#128193;</span>
+                <span>${item.name}</span>
+            </div>`;
+        }
+        for (const item of videos) {
+            const dateStr = item.created ? new Date(item.created).toLocaleDateString(undefined, {year:'numeric',month:'short',day:'numeric'}) : '';
+            const sel = (item.path === selectedVideoPath) ? ' selected' : '';
+            html += `<div class="fb-item${sel}" data-path="${escPath(item.path)}" data-name="${item.name}" onclick="onboard.selectFile('${escPath(item.path)}', this)" ondblclick="onboard.dblClickFile('${escPath(item.path)}')">
+                <span class="icon">&#127909;</span>
+                <span>${item.name}</span>
+                <span style="color:var(--text-muted);font-size:11px;margin-left:auto;">${dateStr}</span>
+                <span class="size" style="min-width:60px;text-align:right;">${item.size_mb} MB</span>
+            </div>`;
+        }
+
+        if (items.length === 0 && currentPath) {
+            html += '<div style="padding:12px;color:var(--text-muted)">No video files found</div>';
+        }
+
+        browser.innerHTML = html;
     }
 
     function browse(path) { loadDirectory(path); }
@@ -1628,6 +1719,9 @@ const onboard = (() => {
 
     return {
         browse,
+        setVideoSort,
+        pinCurrentDir,
+        unpinDir,
         selectFile,
         dblClickFile,
         selectVideo,
