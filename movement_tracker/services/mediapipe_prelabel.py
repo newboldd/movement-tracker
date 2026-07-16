@@ -990,25 +990,37 @@ def build_combined_mp_npz_tempfile(subject_name: str,
 def has_mediapipe_data(subject_name: str, reverse: bool = False) -> bool:
     """Return True if any trial has saved MediaPipe data on disk.
 
+    ``reverse=True`` narrows the check to the reverse pass specifically.
+    Otherwise ANY completed MediaPipe run counts -- forward, cropped
+    (bbox applied), reverse, static, or the merged combined file.  This
+    matters because a Forward MP run with a crop box applied is saved as
+    ``mediapipe_cropped.npz`` (never a plain ``mediapipe.npz``), so a
+    subject processed only with a crop would otherwise read as "no MP".
     Checks the per-trial layout
-    (``<dlc>/<subject>/<trial_stem>/mediapipe.npz``, or
-    ``mediapipe_reverse.npz`` when ``reverse``) and the legacy
-    combined file as a fallback.
+    (``<dlc>/<subject>/<trial_stem>/<file>``) and the legacy combined
+    file as a fallback.
     """
     settings = get_settings()
     subj_dir = settings.dlc_path / subject_name
     if not subj_dir.exists():
         return False
-    per_trial_name = "mediapipe_reverse.npz" if reverse else "mediapipe.npz"
+    if reverse:
+        per_trial_names = ("mediapipe_reverse.npz",)
+        legacy_names = ("mediapipe_reverse_prelabels.npz",)
+    else:
+        per_trial_names = ("mediapipe.npz", "mediapipe_cropped.npz",
+                           "mediapipe_reverse.npz", "mediapipe_static.npz",
+                           "mediapipe_combined.npz")
+        legacy_names = ("mediapipe_prelabels.npz",
+                        "mediapipe_reverse_prelabels.npz")
     try:
         for trial_dir in subj_dir.iterdir():
-            if trial_dir.is_dir() and (trial_dir / per_trial_name).exists():
+            if trial_dir.is_dir() and any(
+                    (trial_dir / n).exists() for n in per_trial_names):
                 return True
     except OSError:
         pass
-    legacy = "mediapipe_reverse_prelabels.npz" if reverse \
-        else "mediapipe_prelabels.npz"
-    return (subj_dir / legacy).exists()
+    return any((subj_dir / n).exists() for n in legacy_names)
 
 
 # Source codes used by the Combined-MP builder.  Stored per frame in

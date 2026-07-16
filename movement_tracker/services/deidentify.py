@@ -1080,6 +1080,7 @@ def render_with_blur_specs(input_path: str, output_path: str,
             from ..config import get_settings
             from .mediapipe_prelabel import (
                 _detect_frame_offset, load_mediapipe_prelabels,
+                load_mediapipe_cropped_prelabels,
             )
             settings = get_settings()
             # Use the per-trial-aware loader.  It aggregates the
@@ -1092,7 +1093,11 @@ def render_with_blur_specs(input_path: str, output_path: str,
             # renderer silently ran with no MP data and the rendered
             # video had no hand mask (preview still worked because
             # the preview endpoint already used this loader).
-            mp_dict = load_mediapipe_prelabels(subject_name)
+            # Fall back to the bbox-cropped pass (a Forward MP run with a
+            # crop box saves only mediapipe_cropped.npz) so cropped-only
+            # subjects get a hand mask in the rendered video too.
+            mp_dict = (load_mediapipe_prelabels(subject_name)
+                       or load_mediapipe_cropped_prelabels(subject_name))
             if mp_dict is not None:
                 os_lm = mp_dict.get("OS_landmarks")
                 od_lm = mp_dict.get("OD_landmarks")

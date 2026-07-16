@@ -304,8 +304,16 @@ def get_frame(
         # to the wrong frame and looked completely unrelated to the green
         # outline shown in the Masks view.
         hand_lm_data = {}
-        from ..services.mediapipe_prelabel import load_mediapipe_prelabels, load_pose_prelabels
-        _hand_npz = load_mediapipe_prelabels(subject_name) if hand_active else None
+        from ..services.mediapipe_prelabel import (
+            load_mediapipe_prelabels, load_mediapipe_cropped_prelabels,
+            load_pose_prelabels,
+        )
+        # Fall back to the bbox-cropped pass when no plain forward run
+        # exists (a Forward MP run with a crop box saves only
+        # mediapipe_cropped.npz), so cropped-only subjects still get a mask.
+        _hand_npz = (load_mediapipe_prelabels(subject_name)
+                     or load_mediapipe_cropped_prelabels(subject_name)) \
+            if hand_active else None
         if _hand_npz is not None and hand_active:
             os_lm = _hand_npz.get("OS_landmarks")
             od_lm = _hand_npz.get("OD_landmarks")
@@ -674,14 +682,17 @@ def get_camera_trajectory(subject_id: int, trial_idx: int = Query(...)) -> dict:
 def get_hand_coverage(subject_id: int, trial_idx: int = Query(...)) -> dict:
     """Return frame ranges where MediaPipe hand data exists."""
     import numpy as np
-    from ..services.mediapipe_prelabel import load_mediapipe_prelabels
+    from ..services.mediapipe_prelabel import (
+        load_mediapipe_prelabels, load_mediapipe_cropped_prelabels,
+    )
 
     with get_db_ctx() as db:
         subj = db.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
         if not subj:
             raise HTTPException(404, "Subject not found")
 
-    data = load_mediapipe_prelabels(subj["name"])
+    data = (load_mediapipe_prelabels(subj["name"])
+            or load_mediapipe_cropped_prelabels(subj["name"]))
     if data is None:
         return {"frames": []}
 
@@ -727,6 +738,7 @@ def get_hand_landmarks_bulk(subject_id: int, trial_idx: int = Query(...),
     import numpy as np
     from ..services.mediapipe_prelabel import (
         load_mediapipe_prelabels,
+        load_mediapipe_cropped_prelabels,
         load_mediapipe_reverse_prelabels,
         load_mediapipe_static_prelabels,
         load_mediapipe_combined_prelabels,
@@ -747,6 +759,7 @@ def get_hand_landmarks_bulk(subject_id: int, trial_idx: int = Query(...),
     sources: list[dict] = []
     if src == "all":
         for ld in (load_mediapipe_prelabels,
+                   load_mediapipe_cropped_prelabels,
                    load_mediapipe_reverse_prelabels,
                    load_mediapipe_static_prelabels):
             d = ld(subj["name"])
@@ -754,16 +767,21 @@ def get_hand_landmarks_bulk(subject_id: int, trial_idx: int = Query(...),
                 sources.append(d)
     elif src == "combined":
         d = load_mediapipe_combined_prelabels(subj["name"]) \
-            or load_mediapipe_prelabels(subj["name"])
+            or load_mediapipe_prelabels(subj["name"]) \
+            or load_mediapipe_cropped_prelabels(subj["name"])
         if d is not None:
             sources.append(d)
     elif src == "forward":
-        d = load_mediapipe_prelabels(subj["name"])
+        # "forward" means the un-reversed pass; a crop box routes that
+        # pass to mediapipe_cropped.npz, so fall back to it.
+        d = load_mediapipe_prelabels(subj["name"]) \
+            or load_mediapipe_cropped_prelabels(subj["name"])
         if d is not None:
             sources.append(d)
     else:  # auto
         d = load_mediapipe_combined_prelabels(subj["name"]) \
-            or load_mediapipe_prelabels(subj["name"])
+            or load_mediapipe_prelabels(subj["name"]) \
+            or load_mediapipe_cropped_prelabels(subj["name"])
         if d is not None:
             sources.append(d)
 
