@@ -5,6 +5,19 @@ let activeJobs = [];
 let appStatus = { configured: true, has_calibration: false };
 let calibrationNames = [];
 let diagnosisGroups = ["Control", "MSA", "PD", "PSP"];
+
+// Resolve a subject's study group.  The clean group can live in EITHER
+// column depending on how the subject was created: the clinical import
+// puts the study group in group_label and a detailed clinical diagnosis
+// in `diagnosis` (e.g. "MSA-P", "Healthy"); the onboarding module puts
+// the chosen group in `diagnosis`.  Pick whichever field matches a
+// configured group; only subjects matching neither fall through as a
+// best-effort label (and land in the Ungrouped bucket).
+function subjectGroup(s) {
+    if (diagnosisGroups.includes(s.group_label)) return s.group_label;
+    if (diagnosisGroups.includes(s.diagnosis)) return s.diagnosis;
+    return s.group_label || s.diagnosis || "Control";
+}
 // ── Check settings status ────────────────────────────────
 async function checkStatus() {
     try {
@@ -147,19 +160,14 @@ function renderDiagnosisGroups() {
         return;
     }
 
-    // Group by diagnosis
+    // Group by study group
     const grouped = {};
     diagnosisGroups.forEach(dg => {
         grouped[dg] = [];
     });
 
     filtered.forEach(s => {
-        // Diagnosis is the field the onboarding module + clinical
-        // import set.  group_label is a legacy near-duplicate that
-        // defaults to 'Other' and was making every subject land in
-        // the Ungrouped bucket — prefer diagnosis, fall back to
-        // group_label only when diagnosis is somehow blank.
-        const group = s.diagnosis || s.group_label || "Control";
+        const group = subjectGroup(s);
         if (!grouped[group]) {
             grouped[group] = [];
         }
@@ -222,10 +230,7 @@ function renderDiagnosisGroups() {
     // Subjects whose group_label isn't one of the configured diagnosis
     // groups — rendered in a separate "Ungrouped" section below the grid
     // so they're easy to find and reassign.
-    const ungrouped = filtered.filter(s => {
-        const g = s.diagnosis || s.group_label || "Control";
-        return !diagnosisGroups.includes(g);
-    });
+    const ungrouped = filtered.filter(s => !diagnosisGroups.includes(subjectGroup(s)));
     if (ungrouped.length > 0) {
         html += `
             <div style="margin-top:16px;background: var(--bg-card); border-radius: var(--radius); padding: 12px; border: 1px solid var(--border);">
@@ -238,7 +243,7 @@ function renderDiagnosisGroups() {
                 </div>
                 <div style="display:flex;flex-direction:column;gap:4px;">`;
         ungrouped.forEach(s => {
-            const g = s.group_label || s.diagnosis || "Control";
+            const g = subjectGroup(s);
             const stageColor = `badge-${s.stage}`;
             html += `
                 <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;background: var(--bg); border-radius: 4px; border: 1px solid var(--border);">
