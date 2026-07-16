@@ -358,6 +358,30 @@ def process_subject(req: ProcessSubjectRequest) -> dict:
     return {"job_id": job["id"], "status": "running", "subject_id": subj["id"]}
 
 
+@router.get("/intake-preview")
+def intake_preview(subject_name: str, source_path: str,
+                   camera_mode: str = "stereo") -> dict:
+    """Preview what a raw source file will be renamed to at process time,
+    without touching anything.  Used by the onboarding review screen."""
+    srcp = Path(source_path)
+    original_name = srcp.name
+    if not srcp.exists():
+        return {"original_name": original_name, "new_name": None,
+                "already_named": False, "exists": False}
+    if _already_intake_named(srcp.stem, subject_name):
+        return {"original_name": original_name, "new_name": original_name,
+                "already_named": True, "exists": True}
+    stereo_suffix = "_stereo" if camera_mode == "stereo" else ""
+    suffix = srcp.suffix.lower() or ".mp4"
+    nn = _next_intake_nn(srcp.parent, subject_name)
+    new_name = f"{subject_name}_{nn:02d}{stereo_suffix}{suffix}"
+    while (srcp.parent / new_name).exists():
+        nn += 1
+        new_name = f"{subject_name}_{nn:02d}{stereo_suffix}{suffix}"
+    return {"original_name": original_name, "new_name": new_name,
+            "already_named": False, "exists": True}
+
+
 def _update_job_progress(job_id: int, pct: float, logfile=None, msg: str = ""):
     """Helper: update job progress in DB (and optionally log)."""
     with get_db_ctx() as db:

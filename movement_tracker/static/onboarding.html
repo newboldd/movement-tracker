@@ -225,8 +225,10 @@
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
                 <label style="font-size:14px;font-weight:600;">Subject Name:</label>
                 <input type="text" id="subjectName" placeholder="e.g. MSA20, Con10, PD15"
+                    list="existingSubjects" autocomplete="off"
                     style="flex:1;min-width:140px;padding:8px 12px;background:var(--bg);border:1px solid var(--border);
                     border-radius:var(--radius);color:var(--text);font-size:14px;">
+                <datalist id="existingSubjects"></datalist>
                 <label style="font-size:14px;font-weight:600;">Group:</label>
                 <select id="subjectGroup"
                     style="padding:8px 12px;background:var(--bg);border:1px solid var(--border);
@@ -234,6 +236,7 @@
                 </select>
                 <button class="btn btn-primary" onclick="onboard.confirmName()">Confirm</button>
             </div>
+            <div id="subjectNameHint" style="font-size:12px;color:var(--text-muted);margin-top:6px;min-height:16px;"></div>
         </div>
 
         <!-- Step 3: Camera Mode & Setup -->
@@ -425,6 +428,6 @@
 
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js?v=8"></script>
-    <script src="/static/js/onboarding.js?v=7"></script>
+    <script src="/static/js/onboarding.js?v=8"></script>
 </body>
 </html>

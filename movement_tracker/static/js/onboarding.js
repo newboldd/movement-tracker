@@ -75,6 +75,70 @@ const onboard = (() => {
         subjectGroup = trimmed;
     }
 
+    // ── Existing-subject autocomplete + dup detection ────────
+    let existingSubjects = [];   // [{name, diagnosis}]
+    async function _loadExistingSubjects() {
+        try {
+            const subs = await API.get('/api/subjects');
+            existingSubjects = (subs || []).map(s => ({
+                name: s.name, diagnosis: s.diagnosis || s.group_label || 'Control',
+            }));
+        } catch { existingSubjects = []; }
+        const dl = document.getElementById('existingSubjects');
+        if (dl) {
+            dl.innerHTML = existingSubjects
+                .map(s => `<option value="${s.name}"></option>`).join('');
+        }
+    }
+
+    // Update the hint under the name field: flags whether the typed code
+    // matches an existing subject (new trials get appended) and, if so,
+    // pre-fills the group from that subject.
+    function _updateSubjectNameHint() {
+        const nameInput = document.getElementById('subjectName');
+        const hint = document.getElementById('subjectNameHint');
+        const groupSel = document.getElementById('subjectGroup');
+        if (!nameInput || !hint) return;
+        const val = nameInput.value.trim();
+        if (!val) { hint.textContent = ''; hint.style.color = 'var(--text-muted)'; return; }
+        if (!/^[A-Za-z0-9_]+$/.test(val)) {
+            hint.textContent = '⚠ Use letters, numbers, and underscores only (becomes the file name).';
+            hint.style.color = 'var(--orange)';
+            return;
+        }
+        const match = existingSubjects.find(s => s.name.toLowerCase() === val.toLowerCase());
+        if (match) {
+            hint.textContent = `Existing subject — new trials will be added to it (group: ${match.diagnosis}).`;
+            hint.style.color = 'var(--blue)';
+            if (groupSel && match.diagnosis && diagnosisGroups.includes(match.diagnosis)) {
+                groupSel.value = match.diagnosis;
+            }
+        } else {
+            hint.textContent = 'New subject.';
+            hint.style.color = 'var(--text-muted)';
+        }
+    }
+
+    // Attach the subject-name input handler ONCE (the elements exist
+    // from page load even while step 2 is hidden).  Prefix-infers the
+    // group for new codes, then flags existing-subject matches.
+    function _wireSubjectNameInput() {
+        const nameInput = document.getElementById('subjectName');
+        const groupSel = document.getElementById('subjectGroup');
+        if (!nameInput || !groupSel || nameInput._nameHintBound) return;
+        nameInput._nameHintBound = true;
+        nameInput.addEventListener('input', () => {
+            const val = nameInput.value.trim().toLowerCase();
+            for (const g of diagnosisGroups) {
+                if (val.startsWith(g.toLowerCase().slice(0, 3))) {
+                    groupSel.value = g;
+                    break;
+                }
+            }
+            _updateSubjectNameHint();
+        });
+    }
+
     // ── Step 1: File browser (opens immediately) ─────────────
 
     // ── Saved-folder suggestions (localStorage) ──────────────
@@ -292,20 +356,10 @@ const onboard = (() => {
             _preselectCameraMode('stereo');
         }
 
-        // Auto-infer group from subject name input as user types
-        const nameInput = document.getElementById('subjectName');
-        const groupSel = document.getElementById('subjectGroup');
-        if (nameInput && groupSel) {
-            nameInput.addEventListener('input', () => {
-                const val = nameInput.value.trim().toLowerCase();
-                for (const g of diagnosisGroups) {
-                    if (val.startsWith(g.toLowerCase().slice(0, 3))) {
-                        groupSel.value = g;
-                        break;
-                    }
-                }
-            });
-        }
+        // Name-input group inference + existing-subject hint are wired
+        // once at init (see _wireSubjectNameInput); refresh the hint now
+        // that this video's step 2 is showing.
+        _updateSubjectNameHint();
 
         // Scroll to step 2
         document.getElementById('step2').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1207,6 +1261,41 @@ const onboard = (() => {
 
     // ── Step 5: Review & Process ─────────────────────────────
 
+    // Show what each raw source file will be renamed to at process time
+    // (e.g. "IMG_4471.mp4 → PD18_01_stereo.mp4"), so the rename is
+    // transparent before the user commits.
+    async function _renderRenamePreview() {
+        const host = document.getElementById('renamePreview');
+        if (!host) return;
+        const uniqueSrcs = [...new Set(segments.map(s => s.source_path).filter(Boolean))];
+        if (uniqueSrcs.length === 0) { host.innerHTML = ''; return; }
+        host.innerHTML = '<div style="font-size:12px;color:var(--text-muted);">Checking raw-file renames…</div>';
+        try {
+            const rows = await Promise.all(uniqueSrcs.map(sp =>
+                API.get(`/api/video-tools/intake-preview?subject_name=${encodeURIComponent(subjectName)}`
+                    + `&source_path=${encodeURIComponent(sp)}&camera_mode=${encodeURIComponent(cameraMode)}`)
+                    .catch(() => null)));
+            const lines = rows.map(r => {
+                if (!r) return '';
+                if (r.already_named) {
+                    return `<div style="font-family:ui-monospace,monospace;font-size:12px;color:var(--text-muted);">${r.original_name} <span style="color:var(--green);">(already named)</span></div>`;
+                }
+                if (!r.new_name) {
+                    return `<div style="font-family:ui-monospace,monospace;font-size:12px;color:var(--orange);">${r.original_name} (file not found)</div>`;
+                }
+                return `<div style="font-family:ui-monospace,monospace;font-size:12px;">${r.original_name} <span style="color:var(--text-muted);">&#8594;</span> <strong style="color:var(--blue);">${r.new_name}</strong></div>`;
+            }).filter(Boolean).join('');
+            host.innerHTML = lines
+                ? `<div style="padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);">
+                       <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px;">Raw file rename</div>
+                       ${lines}
+                   </div>`
+                : '';
+        } catch {
+            host.innerHTML = '';
+        }
+    }
+
     function updateStep5Visibility() {
         const step5 = document.getElementById('step5');
         if (segments.length > 0) {
@@ -1261,10 +1350,12 @@ const onboard = (() => {
                     ${selectedCameraSetup ? `<span class="meta-badge">${selectedCameraSetup.name}</span>` : ''}
                 </p>
                 ${editNote}
+                <div id="renamePreview" style="margin-bottom:8px;"></div>
                 <p style="margin-bottom:8px;">${Object.keys(trialMap).length} trial(s) will be trimmed and saved.</p>
                 ${segHtml}
             `;
 
+            _renderRenamePreview();
             updateProcessButton();
         } else {
             step5.style.display = 'none';
@@ -1628,6 +1719,11 @@ const onboard = (() => {
             _populateGroupDropdown(groupSel);
             groupSel.addEventListener('change', () => _onGroupSelectChange(groupSel));
         }
+
+        // Load existing subject codes for autocomplete + dup detection,
+        // and wire the name-input hint once.
+        await _loadExistingSubjects();
+        _wireSubjectNameInput();
 
         const params = new URLSearchParams(window.location.search);
         const subjectId = params.get('subject');
