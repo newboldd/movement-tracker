@@ -207,6 +207,11 @@ def get_frame(
         if any(s.get("motion_compensate") for s in active_specs):
             from ..services.camera_motion import load_camera_trajectory
             trajectory = load_camera_trajectory(subject_name, trial["trial_name"])
+            if trajectory is not None:
+                # The H-stack is trial-local (0..n_frames-1). Index by the trial's
+                # current authoritative start_frame, not the offset baked in at
+                # compute time (which drifts if the subject's trial set changed).
+                trajectory["start_frame"] = int(trial.get("start_frame", 0))
 
         # Build face detection lookup
         face_by_frame = {}

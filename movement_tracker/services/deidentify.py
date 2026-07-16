@@ -906,6 +906,11 @@ def render_with_blur_specs(input_path: str, output_path: str,
             elif subject_name:
                 from .camera_motion import load_camera_trajectory
                 trajectory = load_camera_trajectory(subject_name, Path(input_path).stem)
+            if trajectory is not None:
+                # H-stack is trial-local (0..n_frames-1); index by this trial's
+                # authoritative start_frame rather than the value baked in at
+                # compute time, which drifts if the trial set changed.
+                trajectory["start_frame"] = int(start_frame)
         except Exception as _e:
             logger.warning(f"Failed to load camera trajectory: {_e}")
             trajectory = None

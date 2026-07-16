@@ -872,7 +872,14 @@ const deid = (() => {
 
     function _trajIdxForFrame(frame) {
         if (!cameraTraj) return -1;
-        const idx = frame - (cameraTraj.start_frame || 0);
+        // The H-stack is indexed in TRIAL-LOCAL frame space (0..n_frames-1). The
+        // authoritative offset is the currently-loaded trial's start_frame — the
+        // same convention the face-spot path uses. cameraTraj.start_frame is baked
+        // in at compute time and can drift if the subject's trial set changed, so
+        // prefer trialMeta.start_frame when available.
+        const offset = trialMeta ? (trialMeta.start_frame || 0)
+                                 : (cameraTraj.start_frame || 0);
+        const idx = frame - offset;
         if (idx < 0 || idx >= cameraTraj.n_frames) return -1;
         return idx;
     }
