@@ -224,21 +224,30 @@ def _ffmpeg_trim(source_path: str, start_time: float, end_time: float,
             raise RuntimeError(f"ffmpeg trim failed: {result.stderr[:500]}")
         return output_path
 
-    # Stream stdout for progress parsing
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
+    # Stream stdout for progress parsing.  IMPORTANT: ffmpeg writes its
+    # verbose logs to stderr.  If stderr is left as an un-drained PIPE
+    # while we block reading stdout, ffmpeg stalls once the stderr pipe
+    # buffer fills (~4-8 KB on Windows, ~64 KB on macOS) and the whole
+    # trim deadlocks -- this is what froze onboarding on Windows while
+    # working on macOS.  Send stderr to a temp file (which can never
+    # block) and read it back only if ffmpeg fails.
+    import tempfile as _tempfile
+    with _tempfile.TemporaryFile() as errf:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=errf, text=True,
+        )
 
-    for line in proc.stdout:
-        m = _re.match(r"out_time_us=(\d+)", line.strip())
-        if m and duration_us > 0:
-            pct = min(100.0, float(m.group(1)) / duration_us * 100)
-            progress_callback(pct)
+        for line in proc.stdout:
+            m = _re.match(r"out_time_us=(\d+)", line.strip())
+            if m and duration_us > 0:
+                pct = min(100.0, float(m.group(1)) / duration_us * 100)
+                progress_callback(pct)
 
-    proc.wait()
-    if proc.returncode != 0:
-        stderr = proc.stderr.read() if proc.stderr else ""
-        raise RuntimeError(f"ffmpeg trim failed: {stderr[:500]}")
+        proc.wait()
+        if proc.returncode != 0:
+            errf.seek(0)
+            stderr = errf.read().decode("utf-8", "replace")
+            raise RuntimeError(f"ffmpeg trim failed: {stderr[:500]}")
 
     return output_path
 
