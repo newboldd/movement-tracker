@@ -411,6 +411,12 @@
                 <h3>Review & Process</h3>
             </div>
             <div id="reviewSegments"></div>
+            <label id="trackHandsRow" style="display:flex;align-items:center;gap:8px;margin-top:14px;font-size:13px;cursor:pointer;">
+                <input type="checkbox" id="trackHandsToggle" style="margin:0;">
+                <span>Track hands and camera motion
+                    <span style="color:var(--text-muted);font-size:11px;">— also run Compute Trajectories and MediaPipe (forward, no crop) on each trial</span>
+                </span>
+            </label>
             <div style="display:flex;gap:8px;margin-top:12px;">
                 <button class="btn btn-primary" id="processBtn" onclick="onboard.startProcessing()">
                     Trim & Create Subject
@@ -428,6 +434,6 @@
 
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js?v=8"></script>
-    <script src="/static/js/onboarding.js?v=9"></script>
+    <script src="/static/js/onboarding.js?v=10"></script>
 </body>
 </html>

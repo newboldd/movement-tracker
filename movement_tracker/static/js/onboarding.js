@@ -1453,6 +1453,8 @@ const onboard = (() => {
                 camera_name: selectedCameraSetup ? selectedCameraSetup.name : null,
                 diagnosis: subjectGroup,
                 no_face_trials: noFaceTrials,
+                run_tracking: !!(document.getElementById('trackHandsToggle')
+                                 && document.getElementById('trackHandsToggle').checked),
                 segments: segments.map(s => {
                     const seg = {
                         source_path: s.source_path,

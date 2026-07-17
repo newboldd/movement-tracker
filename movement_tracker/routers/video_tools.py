@@ -45,6 +45,7 @@ class ProcessSubjectRequest(BaseModel):
     camera_name: str | None = None  # camera setup name
     no_face_trials: list[str] = []  # trial labels that have no faces
     diagnosis: str | None = None    # subject group (e.g. Control, MSA, PD)
+    run_tracking: bool = False      # also run trajectory + MediaPipe per trial
 
 
 # ── Probe ─────────────────────────────────────────────────────────────────
@@ -353,6 +354,7 @@ def process_subject(req: ProcessSubjectRequest) -> dict:
         log_path=log_path,
         blur_faces=req.blur_faces,
         camera_mode=req.camera_mode,
+        run_tracking=req.run_tracking,
     )
 
     return {"job_id": job["id"], "status": "running", "subject_id": subj["id"]}
@@ -529,8 +531,16 @@ def _rename_raw_originals(segments: list[dict], subject_name: str,
 
 def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
                          segments: list[dict], log_path: str,
-                         blur_faces: bool = True, camera_mode: str = "stereo"):
-    """Background thread: trim each segment, optionally blur to deidentified/ dir."""
+                         blur_faces: bool = True, camera_mode: str = "stereo",
+                         run_tracking: bool = False):
+    """Background thread: trim each segment, optionally blur to deidentified/ dir.
+
+    When ``run_tracking`` is set, after all trims are written the job also
+    runs Compute Trajectories then a forward, no-crop MediaPipe pass on
+    every trial -- equivalent to creating the subject and then running
+    those two steps manually (trajectory first, so its reference-frame
+    pick matches the no-MediaPipe-yet state).
+    """
 
     cancel_event = registry.register_cancel_event(job_id)
 
@@ -548,7 +558,11 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
             os.makedirs(str(output_dir), exist_ok=True)
 
             total_segments = len(segments)
-            seg_span = 100.0 / total_segments
+            # Reserve the tail of the progress bar for the optional
+            # trajectory + MediaPipe pass so trims don't jump straight to
+            # 100% and look finished while tracking is still running.
+            trim_ceiling = 40.0 if run_tracking else 100.0
+            seg_span = trim_ceiling / total_segments
 
             with open(log_path, "w") as logfile:
                 # First: rename the raw source file(s) in place to
@@ -703,6 +717,60 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
                         (subject_id, trial, seg["source_path"],
                          seg["start_time"], seg["end_time"], cam),
                     )
+
+            # Optionally run camera-trajectory + MediaPipe on every trial.
+            # Order matters for reproducibility: trajectory first (its
+            # reference-frame pick falls back to a camera-median metric
+            # while no MediaPipe data exists), then a plain forward pass
+            # (no crop) -- byte-for-byte the same as running Compute
+            # Trajectories then MediaPipe from the UI after creation.
+            if run_tracking:
+                from ..services.video import build_trial_map
+                from ..services.camera_motion import compute_camera_trajectory
+                from ..services.mediapipe_prelabel import run_mediapipe
+
+                trials = build_trial_map(subject_name, camera_mode=camera_mode)
+                n_trials = max(1, len(trials))
+                logfile.write(
+                    f"\n=== Track hands & camera motion: {len(trials)} trial(s) ===\n")
+                logfile.flush()
+
+                # Trajectory per trial: 40 -> 70% of the bar.
+                for ti in range(len(trials)):
+                    if cancel_event.is_set():
+                        raise InterruptedError("Job cancelled")
+                    tname = trials[ti].get("trial_name", f"trial {ti}")
+
+                    def _traj_progress(pct, _b=40.0 + 30.0 * ti / n_trials,
+                                       _s=30.0 / n_trials):
+                        if cancel_event.is_set():
+                            raise InterruptedError("Job cancelled")
+                        _update_job_progress(job_id, _b + (pct / 100.0) * _s)
+
+                    logfile.write(f"  Computing camera trajectory for {tname}...\n")
+                    logfile.flush()
+                    try:
+                        compute_camera_trajectory(
+                            subject_name, ti,
+                            progress_callback=_traj_progress,
+                            cancel_event=cancel_event,
+                        )
+                    except InterruptedError:
+                        raise
+                    except Exception as e:
+                        logfile.write(f"    Trajectory failed for {tname}: {e}\n")
+                        logfile.flush()
+
+                # MediaPipe forward, no crop, all trials: 70 -> 99%.
+                def _mp_progress(pct):
+                    if cancel_event.is_set():
+                        raise InterruptedError("Job cancelled")
+                    _update_job_progress(job_id, 70.0 + (pct / 100.0) * 29.0)
+
+                logfile.write("  Running MediaPipe (forward, no crop) on all trials...\n")
+                logfile.flush()
+                run_mediapipe(subject_name, progress_callback=_mp_progress,
+                              crop_boxes=None, reverse=False)
 
             # Mark complete
             with get_db_ctx() as db:
