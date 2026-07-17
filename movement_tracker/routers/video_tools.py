@@ -740,9 +740,11 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
 
                 trials = build_trial_map(subject_name, camera_mode=camera_mode)
                 n_trials = max(1, len(trials))
-                logfile.write(
-                    f"\n=== Track hands & camera motion: {len(trials)} trial(s) ===\n")
-                logfile.flush()
+                # NOTE: the trim logfile's `with` block has already closed by
+                # here, so log via the module logger, not logfile.
+                logger.info(
+                    f"{subject_name}: tracking {len(trials)} trial(s) "
+                    f"(trajectory + MediaPipe)")
 
                 # Trajectory per trial: 40 -> 70% of the bar.
                 for ti in range(len(trials)):
@@ -756,8 +758,7 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
                             raise InterruptedError("Job cancelled")
                         _update_job_progress(job_id, _b + (pct / 100.0) * _s)
 
-                    logfile.write(f"  Computing camera trajectory for {tname}...\n")
-                    logfile.flush()
+                    logger.info(f"{subject_name}: computing camera trajectory for {tname}")
                     try:
                         compute_camera_trajectory(
                             subject_name, ti,
@@ -767,8 +768,7 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
                     except InterruptedError:
                         raise
                     except Exception as e:
-                        logfile.write(f"    Trajectory failed for {tname}: {e}\n")
-                        logfile.flush()
+                        logger.warning(f"{subject_name}: trajectory failed for {tname}: {e}")
 
                 # MediaPipe forward, no crop, all trials: 70 -> 99%.
                 def _mp_progress(pct):
@@ -776,8 +776,7 @@ def _do_process_subject(job_id: int, subject_id: int, subject_name: str,
                         raise InterruptedError("Job cancelled")
                     _update_job_progress(job_id, 70.0 + (pct / 100.0) * 29.0)
 
-                logfile.write("  Running MediaPipe (forward, no crop) on all trials...\n")
-                logfile.flush()
+                logger.info(f"{subject_name}: running MediaPipe (forward, no crop) on all trials")
                 run_mediapipe(subject_name, progress_callback=_mp_progress,
                               crop_boxes=None, reverse=False)
 
