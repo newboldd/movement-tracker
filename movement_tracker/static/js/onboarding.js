@@ -1049,6 +1049,36 @@ const onboard = (() => {
         let downIn = 0, downOut = 0, downX = 0;
         const _fill = document.getElementById('trimBarFill');
 
+        // ── Scrub seeking ────────────────────────────────────────
+        // Writing video.currentTime on every pointermove piles up seeks
+        // faster than the decoder can service them, so the shown frame
+        // lags well behind the slider.  Coalesce: keep at most one seek
+        // in flight and apply only the latest requested time when it
+        // finishes.  Use fastSeek() (keyframe-accurate, cheap) while
+        // dragging when the browser supports it; a precise seek on
+        // release snaps to the exact frame.
+        let _seeking = false;
+        let _pendingTime = null;
+        let _lastTarget = null;
+        const _doSeek = (t) => {
+            _seeking = true;
+            if (typeof video.fastSeek === 'function') video.fastSeek(t);
+            else video.currentTime = t;
+        };
+        const _scrubTo = (t) => {
+            _lastTarget = t;
+            if (_seeking) { _pendingTime = t; return; }
+            _doSeek(t);
+        };
+        video.addEventListener('seeked', () => {
+            if (_pendingTime != null) {
+                const t = _pendingTime; _pendingTime = null;
+                _doSeek(t);
+            } else {
+                _seeking = false;
+            }
+        });
+
         bar.addEventListener('pointerdown', (e) => {
             const dur = video.duration || 0;
             if (!dur) return;
@@ -1083,6 +1113,14 @@ const onboard = (() => {
         const _end = (e) => {
             mode = null;
             if (_fill) _fill.classList.remove('dragging');
+            // Land on the exact frame: fastSeek() only lands on a
+            // keyframe, so re-seek precisely to the final target.
+            if (_lastTarget != null) {
+                _pendingTime = null;
+                _seeking = false;
+                video.currentTime = _lastTarget;
+                _lastTarget = null;
+            }
             try { bar.releasePointerCapture(e.pointerId); } catch (_) {}
         };
         bar.addEventListener('pointerup', _end);
@@ -1097,14 +1135,14 @@ const onboard = (() => {
                     (outPoint != null ? outPoint - 0.04 : dur),
                 );
                 inPoint = t;
-                video.currentTime = t;
+                _scrubTo(t);
             } else if (mode === 'out') {
                 const t = Math.max(
                     Math.min(dur, _pxToTime(clientX)),
                     (inPoint != null ? inPoint + 0.04 : 0),
                 );
                 outPoint = t;
-                video.currentTime = t;
+                _scrubTo(t);
             } else if (mode === 'fill') {
                 const rect = bar.getBoundingClientRect();
                 if (!rect.width) return;
@@ -1118,7 +1156,7 @@ const onboard = (() => {
                 outPoint = newOut;
                 // Spec: when dragging the highlighted region, the
                 // current frame matches the FIRST slider (in-point).
-                video.currentTime = newIn;
+                _scrubTo(newIn);
             }
             updateTrimDisplay();
         }
@@ -1172,8 +1210,16 @@ const onboard = (() => {
             segmentHasFaces.push(true);
         }
 
-        inPoint = null;
-        outPoint = null;
+        // Keep the trim bar visible and tee up the next trial: begin the
+        // next selection where this one ended (through the end of the
+        // clip).  Previously in/out were cleared to null, which hid the
+        // fill + handles so the whole bar appeared to vanish.
+        const _tv = document.getElementById('trimVideo');
+        const _dur = (_tv && _tv.duration) ? _tv.duration : outPoint;
+        const _prevOut = outPoint;
+        inPoint = (_prevOut != null && _prevOut < _dur - 0.1) ? _prevOut : 0;
+        outPoint = _dur;
+        if (_tv) _tv.currentTime = inPoint;
         updateTrimDisplay();
         renderSegments();
         autoAdvanceTrialLabel();
