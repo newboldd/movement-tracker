@@ -1606,19 +1606,29 @@ function renderIntervalParamPlots() {
         if (controls) controls.style.display = 'none';
         return;
     }
-    // The X interval is driven by the Distances/Velocity panel's
-    // Interval radio (imiRef) -- there is no separate dropdown here.
-    // 'off' means no interval is selected, so hide this whole section.
-    const xKey = (document.querySelector('input[name="imiRef"]:checked')?.value) || 'off';
-    if (xKey === 'off') {
-        if (controls) controls.style.display = 'none';
-        return;
+    // X axis mode (IMI / Peak Opening Vel. radios in this section):
+    //  - 'imi'           → an interval, driven by the Distances/Velocity
+    //                       panel's Interval radio (imiRef).  'off' there
+    //                       means no interval selected, so hide the section.
+    //  - 'peak_open_vel' → each movement's peak opening velocity (per
+    //                       movement, independent of the Interval radio).
+    const xMode = (document.querySelector('input[name="ipXMode"]:checked')?.value) || 'imi';
+    const xIsVel = (xMode === 'peak_open_vel');
+    let xKey = 'off';
+    let keys = null;
+    if (!xIsVel) {
+        xKey = (document.querySelector('input[name="imiRef"]:checked')?.value) || 'off';
+        if (xKey === 'off') {
+            if (controls) controls.style.display = 'none';
+            return;
+        }
+        keys = _imiKeys(xKey);
+        if (!keys) return;
     }
     if (controls) controls.style.display = 'flex';
 
+    const xLabel = xIsVel ? _ipYLabel('peak_open_vel') : `${xKey.toUpperCase()} (s)`;
     const yParam = document.getElementById('ipYSelect')?.value || 'amplitude';
-    const keys = _imiKeys(xKey);
-    if (!keys) return;
     const frameMeta = _trialFrameMeta();
     const trialNames = data.trial_names || [];
 
@@ -1639,23 +1649,31 @@ function renderIntervalParamPlots() {
         const meta = frameMeta[ti] || { fps: 60 };
         const xs = [], ys = [];
         ms.forEach((m, i) => {
-            // Intra-movement (O-P, P-C): same movement, every index;
-            // inter-movement: needs prev movement, skip i=0.
-            let dt;
-            if (keys.intra) {
+            // X value.  Velocity mode: per-movement peak opening velocity.
+            // Interval mode — intra (O-P, P-C): same movement, every index;
+            // inter: needs prev movement, skip i=0.
+            let xv;
+            if (xIsVel) {
+                const v = m.peak_open_vel;
+                if (v == null || !isFinite(v)) return;
+                xv = v;
+            } else if (keys.intra) {
                 const from = m[keys.from], to = m[keys.to];
                 if (from == null || to == null) return;
                 if (!isFinite(from) || !isFinite(to)) return;
-                dt = (to - from) / (meta.fps || 60);
+                const dt = (to - from) / (meta.fps || 60);
+                if (!(dt > 0)) return;
+                xv = +dt.toFixed(4);
             } else {
                 if (i === 0) return;
                 const prev = ms[i - 1][keys.from];
                 const cur = m[keys.to];
                 if (prev == null || cur == null) return;
                 if (!isFinite(prev) || !isFinite(cur)) return;
-                dt = (cur - prev) / (meta.fps || 60);
+                const dt = (cur - prev) / (meta.fps || 60);
+                if (!(dt > 0)) return;
+                xv = +dt.toFixed(4);
             }
-            if (!(dt > 0)) return;
             // Relative amplitude = m[i].amplitude / m[i-1].amplitude.
             // For every other param, just read the field directly.
             let yv;
@@ -1667,7 +1685,7 @@ function renderIntervalParamPlots() {
                 yv = m[yParam];
                 if (yv == null || !isFinite(yv)) return;
             }
-            xs.push(+dt.toFixed(4));
+            xs.push(xv);
             ys.push(yv);
         });
         return { ti, xs, ys };
@@ -1699,14 +1717,15 @@ function renderIntervalParamPlots() {
         block.appendChild(plotDiv);
         container.appendChild(block);
 
-        const xLabel = `${xKey.toUpperCase()} (s)`;
         const yLabel = _ipYLabel(yParam);
+        const _xName = xLabel.split(' (')[0];
+        const _xHov = xIsVel ? `${_xName}: %{x:.2f}` : `${_xName}: %{x:.3f}s`;
         const traces = [{
             x: xs, y: ys,
             type: 'scatter', mode: 'markers',
             marker: { color: MOVEMENT_DOT_COLOR, size: 6,
                       line: { color: '#fff', width: 0.5 } },
-            hovertemplate: `${xLabel.replace(' (s)', '')}: %{x:.3f}s<br>${yLabel.split(' (')[0]}: %{y:.2f}<extra></extra>`,
+            hovertemplate: `${_xHov}<br>${yLabel.split(' (')[0]}: %{y:.2f}<extra></extra>`,
         }];
         const annotations = [];
         // When the Slope toggle is on, append a best-fit line trace
@@ -6816,6 +6835,13 @@ function _syncImiRefVisibility() { /* intentionally empty */ }
     const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener('change', () => {
+        if (cachedMovements) renderIntervalParamPlots();
+    });
+});
+
+// X-axis mode radios (IMI vs Peak Opening Vel.) — re-render scatters.
+document.querySelectorAll('input[name="ipXMode"]').forEach(r => {
+    r.addEventListener('change', () => {
         if (cachedMovements) renderIntervalParamPlots();
     });
 });

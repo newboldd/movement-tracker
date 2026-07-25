@@ -223,8 +223,14 @@
                  Y: any per-movement parameter.  Each dot is one
                  movement.  Sequence assignments do NOT apply. -->
             <div class="results-controls" id="ipPlotControls" style="margin-top:18px;display:none;flex-wrap:wrap;">
-                <span style="font-size:12px;color:var(--text-muted);">
-                    X interval follows the <strong>Interval</strong> radio above.
+                <span style="display:inline-flex;align-items:center;gap:8px;">
+                    X:
+                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;margin:0;" title="Plot against the interval selected by the Interval radio above">
+                        <input type="radio" name="ipXMode" value="imi" checked> IMI
+                    </label>
+                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;margin:0;" title="Plot against each movement's peak opening velocity">
+                        <input type="radio" name="ipXMode" value="peak_open_vel"> Peak Opening Vel.
+                    </label>
                 </span>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
                 <label style="display:flex;align-items:center;gap:6px;margin:0;">
@@ -564,6 +570,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=161"></script>
+    <script src="/static/js/results.js?v=162"></script>
 </body>
 </html>
