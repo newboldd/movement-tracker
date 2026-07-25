@@ -1596,6 +1596,57 @@ function getDistCheckedParams() {
 // the same marker style.  The X interval follows the Interval
 // (imiRef) radio in the Distances/Velocity panel; Y is the ipYSelect
 // dropdown in the controls bar.
+// One movement's X value for a given mode.  'peak_open_vel' → that
+// movement's peak opening velocity.  Otherwise an interval (keys from
+// _imiKeys): intra = to−from on the same movement; inter = cur.to −
+// prev.from (needs a previous movement in the SAME trial, so i=0 → null).
+// Returns null when the value is missing / non-positive.
+function _ipXValue(m, i, ms, fps, mode, keys) {
+    if (mode === 'peak_open_vel') {
+        const v = m.peak_open_vel;
+        return (v == null || !isFinite(v)) ? null : v;
+    }
+    if (!keys) return null;
+    if (keys.intra) {
+        const from = m[keys.from], to = m[keys.to];
+        if (from == null || to == null || !isFinite(from) || !isFinite(to)) return null;
+        const dt = (to - from) / fps;
+        return dt > 0 ? +dt.toFixed(4) : null;
+    }
+    if (i === 0) return null;
+    const prev = ms[i - 1][keys.from];
+    const cur = m[keys.to];
+    if (prev == null || cur == null || !isFinite(prev) || !isFinite(cur)) return null;
+    const dt = (cur - prev) / fps;
+    return dt > 0 ? +dt.toFixed(4) : null;
+}
+
+function _pearson(a, b) {
+    const n = a.length;
+    if (n < 2) return null;
+    let sa = 0, sb = 0;
+    for (let i = 0; i < n; i++) { sa += a[i]; sb += b[i]; }
+    const ma = sa / n, mb = sb / n;
+    let num = 0, da = 0, db = 0;
+    for (let i = 0; i < n; i++) {
+        const xa = a[i] - ma, xb = b[i] - mb;
+        num += xa * xb; da += xa * xa; db += xb * xb;
+    }
+    if (!(da > 0) || !(db > 0)) return null;
+    return num / Math.sqrt(da * db);
+}
+
+// Partial correlation of y and x1 controlling for x2 (all aligned).
+function _partialCorr(y, x1, x2) {
+    const rY1 = _pearson(y, x1);
+    const rY2 = _pearson(y, x2);
+    const r12 = _pearson(x1, x2);
+    if (rY1 == null || rY2 == null || r12 == null) return null;
+    const denom = Math.sqrt((1 - rY2 * rY2) * (1 - r12 * r12));
+    if (!(denom > 0)) return null;
+    return (rY1 - rY2 * r12) / denom;
+}
+
 function renderIntervalParamPlots() {
     const data = cachedMovements;
     const controls = document.getElementById('ipPlotControls');
@@ -1629,6 +1680,18 @@ function renderIntervalParamPlots() {
 
     const xLabel = xIsVel ? _ipYLabel('peak_open_vel') : `${xKey.toUpperCase()} (s)`;
     const yParam = document.getElementById('ipYSelect')?.value || 'amplitude';
+
+    // Second predictor for the partial correlation: the X variable NOT on
+    // the axis.  On the IMI axis the partner is peak opening velocity; on
+    // the velocity axis it's the interval from the Interval radio (null
+    // when that radio is 'off', so no partial can be computed).
+    const _imiRefVal = (document.querySelector('input[name="imiRef"]:checked')?.value) || 'off';
+    const otherMode = xIsVel ? 'imi' : 'peak_open_vel';
+    const otherKeys = xIsVel
+        ? (_imiRefVal !== 'off' ? _imiKeys(_imiRefVal) : null)
+        : null;
+    const partialAvailable = xIsVel ? (otherKeys != null) : true;
+
     const frameMeta = _trialFrameMeta();
     const trialNames = data.trial_names || [];
 
@@ -1647,33 +1710,11 @@ function renderIntervalParamPlots() {
     const perTrial = trialKeys.map(ti => {
         const ms = byTrial[ti];
         const meta = frameMeta[ti] || { fps: 60 };
-        const xs = [], ys = [];
+        const xs = [], ys = [], xsOther = [];
         ms.forEach((m, i) => {
-            // X value.  Velocity mode: per-movement peak opening velocity.
-            // Interval mode — intra (O-P, P-C): same movement, every index;
-            // inter: needs prev movement, skip i=0.
-            let xv;
-            if (xIsVel) {
-                const v = m.peak_open_vel;
-                if (v == null || !isFinite(v)) return;
-                xv = v;
-            } else if (keys.intra) {
-                const from = m[keys.from], to = m[keys.to];
-                if (from == null || to == null) return;
-                if (!isFinite(from) || !isFinite(to)) return;
-                const dt = (to - from) / (meta.fps || 60);
-                if (!(dt > 0)) return;
-                xv = +dt.toFixed(4);
-            } else {
-                if (i === 0) return;
-                const prev = ms[i - 1][keys.from];
-                const cur = m[keys.to];
-                if (prev == null || cur == null) return;
-                if (!isFinite(prev) || !isFinite(cur)) return;
-                const dt = (cur - prev) / (meta.fps || 60);
-                if (!(dt > 0)) return;
-                xv = +dt.toFixed(4);
-            }
+            const fps = meta.fps || 60;
+            const xv = _ipXValue(m, i, ms, fps, xMode, keys);
+            if (xv == null) return;
             // Relative amplitude = m[i].amplitude / m[i-1].amplitude.
             // For every other param, just read the field directly.
             let yv;
@@ -1687,8 +1728,11 @@ function renderIntervalParamPlots() {
             }
             xs.push(xv);
             ys.push(yv);
+            // Aligned partner value for the partial correlation (may be null).
+            xsOther.push(partialAvailable
+                ? _ipXValue(m, i, ms, fps, otherMode, otherKeys) : null);
         });
-        return { ti, xs, ys };
+        return { ti, xs, ys, xsOther };
     });
     // 5 % pad on each side so points don't sit on the axis lines.
     const _pad = (lo, hi) => {
@@ -1702,7 +1746,7 @@ function renderIntervalParamPlots() {
     const xRange = allXs.length ? _pad(Math.min(...allXs), Math.max(...allXs)) : null;
     const yRange = allYs.length ? _pad(Math.min(...allYs), Math.max(...allYs)) : null;
 
-    perTrial.forEach(({ ti, xs, ys }) => {
+    perTrial.forEach(({ ti, xs, ys, xsOther }) => {
         const block = document.createElement('div');
         block.style.cssText = 'flex:0 0 auto;display:flex;flex-direction:column;';
         const head = document.createElement('div');
@@ -1746,13 +1790,31 @@ function renderIntervalParamPlots() {
                 const pStr = (stats.p < 1e-4)
                     ? stats.p.toExponential(2)
                     : stats.p.toFixed(4);
+                // Partial correlation of Y and the on-axis X, controlling
+                // for the other X (peak opening velocity ↔ IMI), computed
+                // from the points where all three are present.
+                let partialStr = 'n/a';
+                if (partialAvailable) {
+                    const y3 = [], x1 = [], x2 = [];
+                    for (let k = 0; k < xs.length; k++) {
+                        const xo = xsOther[k];
+                        if (xo != null && isFinite(xo)) {
+                            y3.push(ys[k]); x1.push(xs[k]); x2.push(xo);
+                        }
+                    }
+                    if (y3.length >= 3) {
+                        const pc = _partialCorr(y3, x1, x2);
+                        if (pc != null) partialStr = pc.toFixed(3);
+                    }
+                }
                 annotations.push({
                     xref: 'paper', yref: 'paper', x: 0.02, y: 0.98,
                     xanchor: 'left', yanchor: 'top',
                     align: 'left', showarrow: false,
                     text: `slope = ${stats.slope.toPrecision(3)}<br>`
                         + `R² = ${stats.r2.toFixed(3)}<br>`
-                        + `p = ${pStr}<br>n = ${stats.n}`,
+                        + `p = ${pStr}<br>n = ${stats.n}<br>`
+                        + `Partial: ${partialStr}`,
                     font: { size: 10, color: '#333' },
                     bgcolor: 'rgba(255,255,255,0.85)',
                     bordercolor: 'rgba(0,0,0,0.15)', borderwidth: 1,
