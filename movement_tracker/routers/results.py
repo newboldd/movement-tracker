@@ -488,17 +488,21 @@ def _build_movement_params(
         fps = frame_fps[pk] if pk < len(frame_fps) else 60
         ti = frame_trial[pk] if pk < len(frame_trial) else 0
 
-        # Find matching open: largest open frame < pk
+        # Find matching open: largest open frame < pk that lies in the
+        # SAME trial as the peak.  Without the trial guard, a trial that
+        # ends on a peak (no close after it within the trial) would
+        # borrow the next trial's first open/close, producing a spurious
+        # cross-trial O-P / P-C interval attributed to the first trial.
         open_f = None
         for o in reversed(opens):
-            if o < pk:
+            if o < pk and o < len(frame_trial) and frame_trial[o] == ti:
                 open_f = o
                 break
 
-        # Find matching close: smallest close frame > pk
+        # Find matching close: smallest close frame > pk in the same trial.
         close_f = None
         for c in closes:
-            if c > pk:
+            if c > pk and c < len(frame_trial) and frame_trial[c] == ti:
                 close_f = c
                 break
 
