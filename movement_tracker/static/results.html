@@ -223,18 +223,9 @@
                  Y: any per-movement parameter.  Each dot is one
                  movement.  Sequence assignments do NOT apply. -->
             <div class="results-controls" id="ipPlotControls" style="margin-top:18px;display:none;flex-wrap:wrap;">
-                <label style="display:flex;align-items:center;gap:6px;margin:0;">
-                    X (interval):
-                    <select id="ipXSelect">
-                        <option value="oo">O-O</option>
-                        <option value="pp" selected>P-P</option>
-                        <option value="cc">C-C</option>
-                        <option value="po">P-O</option>
-                        <option value="co">C-O</option>
-                        <option value="op">O-P</option>
-                        <option value="pc">P-C</option>
-                    </select>
-                </label>
+                <span style="font-size:12px;color:var(--text-muted);">
+                    X interval follows the <strong>Interval</strong> radio above.
+                </span>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
                 <label style="display:flex;align-items:center;gap:6px;margin:0;">
                     Y (parameter):
@@ -573,6 +564,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=160"></script>
+    <script src="/static/js/results.js?v=161"></script>
 </body>
 </html>

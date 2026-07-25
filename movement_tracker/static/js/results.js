@@ -1593,8 +1593,9 @@ function getDistCheckedParams() {
 // One scatter plot per trial: chosen interval (x) vs chosen
 // movement parameter (y).  Each dot is one movement.  Sequence
 // assignments do NOT apply here — every movement is plotted with
-// the same marker style.  Driven by the ipXSelect / ipYSelect
-// dropdowns in the controls bar.
+// the same marker style.  The X interval follows the Interval
+// (imiRef) radio in the Distances/Velocity panel; Y is the ipYSelect
+// dropdown in the controls bar.
 function renderIntervalParamPlots() {
     const data = cachedMovements;
     const controls = document.getElementById('ipPlotControls');
@@ -1605,9 +1606,16 @@ function renderIntervalParamPlots() {
         if (controls) controls.style.display = 'none';
         return;
     }
+    // The X interval is driven by the Distances/Velocity panel's
+    // Interval radio (imiRef) -- there is no separate dropdown here.
+    // 'off' means no interval is selected, so hide this whole section.
+    const xKey = (document.querySelector('input[name="imiRef"]:checked')?.value) || 'off';
+    if (xKey === 'off') {
+        if (controls) controls.style.display = 'none';
+        return;
+    }
     if (controls) controls.style.display = 'flex';
 
-    const xKey = document.getElementById('ipXSelect')?.value || 'pp';
     const yParam = document.getElementById('ipYSelect')?.value || 'amplitude';
     const keys = _imiKeys(xKey);
     if (!keys) return;
@@ -1687,7 +1695,7 @@ function renderIntervalParamPlots() {
 
         const plotDiv = document.createElement('div');
         plotDiv.id = `ipPlot_${ti}`;
-        plotDiv.style.cssText = 'height:260px;width:320px;';
+        plotDiv.style.cssText = 'height:520px;width:640px;';
         block.appendChild(plotDiv);
         container.appendChild(block);
 
@@ -1745,7 +1753,7 @@ function renderIntervalParamPlots() {
                      autorange: yRange ? false : true },
             plot_bgcolor: '#fff', paper_bgcolor: '#fff',
             showlegend: false, hovermode: 'closest', dragmode: false,
-            width: 320, height: 260, annotations,
+            width: 640, height: 520, annotations,
         }, { displayModeBar: false, responsive: false });
     });
 }
@@ -6720,6 +6728,9 @@ document.querySelectorAll('input[name="imiRef"]').forEach(r => {
         // The compressed IMI strips between dist/vel also depend
         // on the peak/open/close reference — re-render them.
         if (cachedTraces) renderAllDistancePlots();
+        // The Y-parameter-vs-interval scatters now take their X
+        // interval from this same radio — re-render them too.
+        if (cachedMovements) renderIntervalParamPlots();
     });
 });
 
@@ -6801,7 +6812,7 @@ function _syncImiRefVisibility() { /* intentionally empty */ }
 })();
 
 // Interval × Parameter scatter dropdowns — re-render on change.
-['ipXSelect', 'ipYSelect'].forEach(id => {
+['ipYSelect'].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener('change', () => {
