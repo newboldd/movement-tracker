@@ -438,6 +438,18 @@ const manoViewer = (() => {
     let heatmapMipMode = false; // when true, show MIP of all joints regardless of selection
     let _savedHeatmapJoints = null; // saved selection before MIP mode
     let heatmapThreshold = 0.1;
+    // ── Trajectory feature ────────────────────────────────────
+    // When on, joint clicks on the Labels hand pick trajectory joints
+    // (single-select; Shift+click adds a second) and their motion trail is
+    // drawn on the video across trajPre preceding + trajPost following
+    // frames.  cameraTraj holds the per-trial homographies (lazy-fetched)
+    // for the optional camera-motion correction.
+    let trajMode = false;
+    let trajJoints = new Set();
+    let trajPre = 12;
+    let trajPost = 12;
+    let trajCorrectCamera = false;
+    let cameraTraj = null;   // {available, H_to_ref_L/R (N×9), n_frames, is_stereo, _trialIdx}
     const heatmapCache = {};
     let _heatmapImageData = null; // pre-rendered ImageData for current frame
 
@@ -730,6 +742,151 @@ const manoViewer = (() => {
         if (mipBtn) {
             mipBtn.classList.toggle('active', heatmapMipMode);
             mipBtn.style.display = _trialHasHeatmaps() ? '' : 'none';
+        }
+    }
+
+    // ── Trajectory helpers ────────────────────────────────────
+    function _updateTrajHighlight() {
+        document.querySelectorAll('#handDiagramLabels .joint').forEach(el => {
+            const j = parseInt(el.dataset.joint);
+            el.classList.toggle('traj-active', trajMode && trajJoints.has(j));
+        });
+    }
+
+    // Enable/dim the "Correct for camera movement" checkbox based on whether
+    // a camera trajectory has been computed for the current trial.
+    function _updateTrajCorrectAvail() {
+        const cb = $('trajCorrectCamera');
+        const lbl = $('trajCorrectLabel');
+        const ok = !!(cameraTraj && cameraTraj.available && cameraTraj.H_to_ref_L);
+        if (cb) {
+            cb.disabled = !ok;
+            if (!ok && cb.checked) { cb.checked = false; trajCorrectCamera = false; }
+        }
+        if (lbl) {
+            lbl.style.opacity = ok ? '1' : '0.4';
+            lbl.title = ok
+                ? 'Warp past/future joint positions into the current frame using the computed camera trajectory'
+                : 'No camera trajectory for this trial — run Pre-proc → Compute trajectory to enable';
+        }
+    }
+
+    // Lazily fetch the current trial's camera trajectory (only when the
+    // Trajectory feature needs it).  Cached per trial via _trialIdx.
+    async function _ensureCameraTraj() {
+        if (subjectId == null || currentTrialIdx < 0 || !trials?.[currentTrialIdx]) {
+            _updateTrajCorrectAvail();
+            return;
+        }
+        if (cameraTraj && cameraTraj._trialIdx === currentTrialIdx) {
+            _updateTrajCorrectAvail();
+            return;
+        }
+        const ti = trials[currentTrialIdx].trial_idx;
+        try {
+            const tr = await api(`/api/deidentify/${subjectId}/camera-trajectory?trial_idx=${ti}`);
+            cameraTraj = (tr && tr.available)
+                ? Object.assign(tr, { _trialIdx: currentTrialIdx })
+                : { available: false, _trialIdx: currentTrialIdx };
+        } catch (e) {
+            cameraTraj = { available: false, _trialIdx: currentTrialIdx };
+        }
+        _updateTrajCorrectAvail();
+        if (trajMode) render();
+    }
+
+    // Pick the best per-frame 2D source array (n_frames × 21 × 2) for a
+    // side — same priority the overlay uses (Skel v3 → v1 → MP → combined
+    // → Vision).  Returns null when nothing is available.
+    function _trajSourceArray(isLeft, fn) {
+        if (!trialData) return null;
+        const S = trialData;
+        const cand = isLeft
+            ? [S.skel_v2_proj_L, S.skeleton_proj_L, mpCorrectedL || S.mp_tracked_L, S.combined_tracked_L,
+               S.cropped_tracked_L, S.reverse_tracked_L, S.static_tracked_L, S.vision_tracked_L]
+            : [S.skel_v2_proj_R, S.skeleton_proj_R, mpCorrectedR || S.mp_tracked_R, S.combined_tracked_R,
+               S.cropped_tracked_R, S.reverse_tracked_R, S.static_tracked_R, S.vision_tracked_R];
+        // Prefer the first array with a real (finite) point at the current
+        // frame — a source can exist but be all-NaN (e.g. an untracked pass).
+        const hasPtAt = (a, f) => {
+            const fr = a && a[f];
+            return !!(fr && fr.some(p => p && isFinite(p[0]) && isFinite(p[1])));
+        };
+        for (const a of cand) if (hasPtAt(a, fn)) return a;
+        for (const a of cand) if (a && a.length) return a;  // fallback
+        return null;
+    }
+
+    // Flat row-major 3×3 homography apply (with perspective divide) + invert.
+    function _applyHflat(H, x, y) {
+        const w = H[6] * x + H[7] * y + H[8];
+        if (Math.abs(w) < 1e-9) return { x, y };
+        return { x: (H[0] * x + H[1] * y + H[2]) / w, y: (H[3] * x + H[4] * y + H[5]) / w };
+    }
+    function _inv3flat(H) {
+        const a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7], i = H[8];
+        const A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g;
+        const det = a * A + b * B + c * C;
+        if (Math.abs(det) < 1e-12) return null;
+        const inv = [A, -(b * i - c * h), (b * f - c * e),
+                     B, (a * i - c * g), -(a * f - c * d),
+                     C, -(a * h - b * g), (a * e - b * d)];
+        for (let k = 0; k < 9; k++) inv[k] /= det;
+        return inv;
+    }
+
+    // Draw the motion trail(s) for the selected trajectory joint(s) across
+    // [currentFrame−trajPre, currentFrame+trajPost].  Coords are camera-half
+    // pixels → multiply by pixelScale (offsets are 0 for all 2D sources).
+    function _drawJointTrails(pixelScale, isLeft, fn) {
+        if (!trajMode || !trialData) return;
+        if (trajJoints.size === 0) return;
+        if (trajPre <= 0 && trajPost <= 0) return;
+        const N = trialData.n_frames || 0;
+        if (N <= 0) return;
+        const src = _trajSourceArray(isLeft, fn);
+        if (!src) return;
+        const lo = Math.max(0, fn - trajPre);
+        const hi = Math.min(N - 1, fn + trajPost);
+
+        // Camera-motion correction: warp each frame f's point into the
+        // current frame fn's coords (f → ref → fn).
+        const useWarp = trajCorrectCamera && cameraTraj && cameraTraj.available && cameraTraj.H_to_ref_L;
+        const Hstack = useWarp
+            ? ((isLeft || !cameraTraj.is_stereo) ? cameraTraj.H_to_ref_L : cameraTraj.H_to_ref_R)
+            : null;
+        const HfnInv = (Hstack && fn < Hstack.length) ? _inv3flat(Hstack[fn]) : null;
+        const canWarp = !!(Hstack && HfnInv);
+
+        const palette = ['#00e5ff', '#ffd54f', '#ff6ec7', '#7cff6e'];
+        let ci = 0;
+        for (const j of trajJoints) {
+            const color = palette[ci++ % palette.length];
+            const pts = [];
+            for (let f = lo; f <= hi; f++) {
+                const p = src[f] && src[f][j];
+                if (!p || !isFinite(p[0]) || !isFinite(p[1])) { pts.push(null); continue; }
+                let x = p[0], y = p[1];
+                if (canWarp && f < Hstack.length) {
+                    const ref = _applyHflat(Hstack[f], x, y);
+                    const cur = _applyHflat(HfnInv, ref.x, ref.y);
+                    x = cur.x; y = cur.y;
+                }
+                pts.push([x * pixelScale, y * pixelScale]);
+            }
+            // Polyline (break across gaps).
+            for (let k = 1; k < pts.length; k++) {
+                if (pts[k - 1] && pts[k]) {
+                    drawLine(pts[k - 1][0], pts[k - 1][1], pts[k][0], pts[k][1], color, 1.5, 0.8);
+                }
+            }
+            // Small dots at each sampled frame.
+            for (const pt of pts) if (pt) drawJoint(pt[0], pt[1], color, 1.3);
+            // Emphasise the current-frame position.
+            const cp = src[fn] && src[fn][j];
+            if (cp && isFinite(cp[0]) && isFinite(cp[1])) {
+                drawJoint(cp[0] * pixelScale, cp[1] * pixelScale, color, 3);
+            }
         }
     }
 
@@ -1503,6 +1660,12 @@ const manoViewer = (() => {
         // Update Skeleton fit status and checkbox state
         updateFitStatus();
 
+        // Trajectory feature: new trial invalidates the cached camera
+        // trajectory; re-fetch it lazily only if the mode is on.
+        cameraTraj = null;
+        _updateTrajHighlight();
+        if (trajMode) _ensureCameraTraj(); else _updateTrajCorrectAvail();
+
         // Restore fitting sliders + constraints from last fit
         _restoreV1Params();
         _restoreV2Params();
@@ -2231,6 +2394,36 @@ const manoViewer = (() => {
             $('offsetsToggleBtn').classList.toggle('active', showOffsetArrows);
             render(); update3D();
         });
+
+        // ── Trajectory controls ───────────────────────────────
+        $('trajToggleBtn')?.addEventListener('click', () => {
+            trajMode = !trajMode;
+            $('trajToggleBtn').classList.toggle('active', trajMode);
+            const opts = $('trajOptions');
+            if (opts) opts.style.display = trajMode ? '' : 'none';
+            // Turning it on selects the index fingertip (joint 8) by default.
+            if (trajMode && trajJoints.size === 0) trajJoints.add(8);
+            _updateTrajHighlight();
+            if (trajMode) _ensureCameraTraj(); else _updateTrajCorrectAvail();
+            render();
+        });
+        const _trajPreS = $('trajPreSlider');
+        if (_trajPreS) _trajPreS.addEventListener('input', e => {
+            trajPre = parseInt(e.target.value);
+            $('trajPreVal').textContent = trajPre;
+            render();
+        });
+        const _trajPostS = $('trajPostSlider');
+        if (_trajPostS) _trajPostS.addEventListener('input', e => {
+            trajPost = parseInt(e.target.value);
+            $('trajPostVal').textContent = trajPost;
+            render();
+        });
+        $('trajCorrectCamera')?.addEventListener('change', e => {
+            trajCorrectCamera = e.target.checked;
+            if (trajCorrectCamera) _ensureCameraTraj();
+            render();
+        });
         const hmThreshSlider = $('heatmapThreshSlider');
         if (hmThreshSlider) {
             hmThreshSlider.addEventListener('input', e => {
@@ -2256,9 +2449,26 @@ const manoViewer = (() => {
             });
             el.addEventListener('click', e => {
                 e.stopPropagation();
-                if (!_trialHasHeatmaps()) return;  // no data → no-op
                 const j = parseInt(el.dataset.joint);
                 if (isNaN(j)) return;
+                // Trajectory mode: hand clicks pick trajectory joints
+                // (plain = single-select, Shift+click = add/remove a second),
+                // independent of heatmap data.
+                if (trajMode) {
+                    if (e.shiftKey) {
+                        if (trajJoints.has(j)) trajJoints.delete(j);
+                        else trajJoints.add(j);
+                    } else if (trajJoints.has(j)) {
+                        trajJoints.delete(j);
+                    } else {
+                        trajJoints.clear();
+                        trajJoints.add(j);
+                    }
+                    _updateTrajHighlight();
+                    render();
+                    return;
+                }
+                if (!_trialHasHeatmaps()) return;  // no data → no-op
                 if (heatmapMipMode) {
                     // Exit MIP mode and select just this joint
                     heatmapMipMode = false;
@@ -4163,6 +4373,10 @@ const manoViewer = (() => {
         const manoXOff = 0;
         const mpXOff = 0;
         const visionXOff = 0;
+
+        // Joint motion trails (Trajectory feature) — drawn beneath the
+        // skeletons and current-frame markers.  No-op unless trajMode is on.
+        _drawJointTrails(pixelScale, isLeft, fn);
 
         // Draw skeleton lines (per-model skeleton toggle)
         if (trialData.skeleton) {

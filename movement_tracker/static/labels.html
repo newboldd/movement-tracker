@@ -443,6 +443,7 @@
                     #handDiagramLabels g[data-finger].finger-hover text { fill:#fff; }
                     #handDiagramLabels .joint.joint-hover { r:5; stroke:#fff; stroke-width:1; }
                     #handDiagramLabels .joint.heatmap-active { stroke:#ff6600; stroke-width:2; r:5; filter:drop-shadow(0 0 3px #ff6600); }
+                    #handDiagramLabels .joint.traj-active { stroke:#00e5ff; stroke-width:2; r:5; filter:drop-shadow(0 0 3px #00e5ff); }
                 </style>
                 <g data-finger="wrist"><circle class="joint" data-joint="0" cx="70" cy="120" r="4" fill="#888"/><text x="82" y="124">W</text></g>
                 <g data-finger="thumb"><line class="bone" x1="70" y1="120" x2="38" y2="100" stroke="#60c0e0"/><line class="bone" x1="38" y1="100" x2="22" y2="88" stroke="#60c0e0"/><line class="bone" x1="22" y1="88" x2="10" y2="74" stroke="#60c0e0"/><line class="bone" x1="10" y1="74" x2="4" y2="63" stroke="#60c0e0"/><circle class="joint" data-joint="1" cx="38" cy="100" r="3" fill="#60c0e0"/><circle class="joint" data-joint="2" cx="22" cy="88" r="3" fill="#60c0e0"/><circle class="joint" data-joint="3" cx="10" cy="74" r="3" fill="#60c0e0"/><circle class="joint" data-joint="4" cx="4" cy="63" r="3" fill="#60c0e0"/><text x="-2" y="57">T</text></g>
@@ -451,6 +452,31 @@
                 <g data-finger="ring"><line class="bone" x1="70" y1="120" x2="86" y2="72" stroke="#60c0e0"/><line class="bone" x1="86" y1="72" x2="89" y2="48" stroke="#60c0e0"/><line class="bone" x1="89" y1="48" x2="91" y2="26" stroke="#60c0e0"/><line class="bone" x1="91" y1="26" x2="92" y2="6" stroke="#60c0e0"/><circle class="joint" data-joint="13" cx="86" cy="72" r="3" fill="#60c0e0"/><circle class="joint" data-joint="14" cx="89" cy="48" r="3" fill="#60c0e0"/><circle class="joint" data-joint="15" cx="91" cy="26" r="3" fill="#60c0e0"/><circle class="joint" data-joint="16" cx="92" cy="6" r="3" fill="#60c0e0"/><text x="99" y="4">R</text></g>
                 <g data-finger="pinky"><line class="bone" x1="70" y1="120" x2="107" y2="76" stroke="#60c0e0"/><line class="bone" x1="107" y1="76" x2="113" y2="56" stroke="#60c0e0"/><line class="bone" x1="113" y1="56" x2="117" y2="38" stroke="#60c0e0"/><line class="bone" x1="117" y1="38" x2="120" y2="22" stroke="#60c0e0"/><circle class="joint" data-joint="17" cx="107" cy="76" r="3" fill="#60c0e0"/><circle class="joint" data-joint="18" cx="113" cy="56" r="3" fill="#60c0e0"/><circle class="joint" data-joint="19" cx="117" cy="38" r="3" fill="#60c0e0"/><circle class="joint" data-joint="20" cx="120" cy="22" r="3" fill="#60c0e0"/><text x="127" y="18">P</text></g>
             </svg>
+            </div>
+
+            <!-- Trajectory: plot selected joint(s) motion trail across nearby
+                 frames.  Button sits bottom-right of the Labels section;
+                 options (pre/post sliders + camera-motion correction) show
+                 only when the mode is on. -->
+            <div style="display:flex;justify-content:flex-end;margin-top:2px;">
+                <button id="trajToggleBtn" class="btn btn-sm" style="font-size:9px;padding:1px 8px;line-height:1.4;"
+                        title="Plot the motion trail of the selected joint(s) across nearby frames. Click a joint on the hand to choose it; Shift+click to add a second.">Trajectory</button>
+            </div>
+            <div id="trajOptions" style="display:none;font-size:11px;margin-top:6px;">
+                <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+                    <span style="color:var(--text-muted);white-space:nowrap;min-width:38px;">Before</span>
+                    <input type="range" id="trajPreSlider" min="0" max="60" step="1" value="12" style="width:80px;flex-shrink:0;height:4px;">
+                    <span id="trajPreVal" class="slider-val" style="color:var(--text-muted);font-weight:bold;min-width:20px;">12</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+                    <span style="color:var(--text-muted);white-space:nowrap;min-width:38px;">After</span>
+                    <input type="range" id="trajPostSlider" min="0" max="60" step="1" value="12" style="width:80px;flex-shrink:0;height:4px;">
+                    <span id="trajPostVal" class="slider-val" style="color:var(--text-muted);font-weight:bold;min-width:20px;">12</span>
+                </div>
+                <label id="trajCorrectLabel" style="display:flex;align-items:center;gap:6px;cursor:pointer;"
+                       title="Warp past/future joint positions into the current frame using the computed camera trajectory">
+                    <input type="checkbox" id="trajCorrectCamera"> Correct for camera movement
+                </label>
             </div>
 
             <!-- Heatmap threshold slider — dims when no joint is active and
@@ -1339,7 +1365,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=418" type="module"></script>
+    <script src="/static/js/labels.js?v=420" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {
