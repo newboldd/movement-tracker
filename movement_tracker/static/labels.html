@@ -464,14 +464,20 @@
             </div>
             <div id="trajOptions" style="display:none;font-size:11px;margin-top:6px;">
                 <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
-                    <span style="color:var(--text-muted);white-space:nowrap;min-width:38px;">Before</span>
+                    <span id="trajPreLabel" style="color:var(--text-muted);white-space:nowrap;min-width:38px;">Before</span>
                     <input type="range" id="trajPreSlider" min="0" max="60" step="1" value="60" style="width:80px;flex-shrink:0;height:4px;">
                     <span id="trajPreVal" class="slider-val" style="color:var(--text-muted);font-weight:bold;min-width:20px;">60</span>
+                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;white-space:nowrap;" title="Extend the trail back to the last Open event instead of a fixed frame count">
+                        <input type="checkbox" id="trajFromOpen"> from Open
+                    </label>
                 </div>
                 <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
-                    <span style="color:var(--text-muted);white-space:nowrap;min-width:38px;">After</span>
+                    <span id="trajPostLabel" style="color:var(--text-muted);white-space:nowrap;min-width:38px;">After</span>
                     <input type="range" id="trajPostSlider" min="0" max="60" step="1" value="0" style="width:80px;flex-shrink:0;height:4px;">
                     <span id="trajPostVal" class="slider-val" style="color:var(--text-muted);font-weight:bold;min-width:20px;">0</span>
+                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;white-space:nowrap;" title="Extend the trail forward to the next Close event instead of a fixed frame count">
+                        <input type="checkbox" id="trajToClose"> to Close
+                    </label>
                 </div>
                 <label id="trajCorrectLabel" style="display:flex;align-items:center;gap:6px;cursor:pointer;"
                        title="Warp past/future joint positions into the current frame using the computed camera trajectory">
@@ -1395,7 +1401,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=425" type="module"></script>
+    <script src="/static/js/labels.js?v=426" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

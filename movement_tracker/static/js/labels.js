@@ -449,6 +449,8 @@ const manoViewer = (() => {
     let trajJoints = new Set();
     let trajPre = 60;
     let trajPost = 0;
+    let trajFromOpen = false;   // extend trail back to the last Open event
+    let trajToClose = false;    // extend trail forward to the next Close event
     let trajCorrectCamera = false;
     let cameraTraj = null;   // {available, H_to_ref_L/R (N×9), n_frames, is_stereo, _trialIdx}
     const heatmapCache = {};
@@ -1017,21 +1019,65 @@ const manoViewer = (() => {
     // current-frame dot stands in for the marker (avoids e.g. the DLC
     // black dot sitting on top of the trail's current-frame point).
     function _markerHidden(j) {
-        return trajMode && trajJoints.has(j) && (trajPre > 0 || trajPost > 0);
+        return trajMode && trajJoints.has(j)
+            && (trajPre > 0 || trajPost > 0 || trajFromOpen || trajToClose);
+    }
+
+    // Dim/disable the Before / After slider when its "from Open" / "to
+    // Close" checkbox is on (the event drives the bound instead).
+    function _updateTrajSliderAvail() {
+        const dim = (id, off) => { const el = $(id); if (el) el.style.opacity = off ? '0.35' : '1'; };
+        const pre = $('trajPreSlider'); if (pre) pre.disabled = trajFromOpen;
+        dim('trajPreSlider', trajFromOpen); dim('trajPreVal', trajFromOpen); dim('trajPreLabel', trajFromOpen);
+        const post = $('trajPostSlider'); if (post) post.disabled = trajToClose;
+        dim('trajPostSlider', trajToClose); dim('trajPostVal', trajToClose); dim('trajPostLabel', trajToClose);
+    }
+
+    // Nearest event of `type` at/before (before=true) or at/after the given
+    // local frame, within the current trial.  Returns a LOCAL frame or null.
+    function _trajEventBound(type, localF, before) {
+        _ensureSavedEvents();
+        const tr = trials[currentTrialIdx];
+        const start = tr ? (tr.start_frame || 0) : 0;
+        const end = (tr && tr.end_frame != null)
+            ? tr.end_frame
+            : start + ((trialData && trialData.n_frames ? trialData.n_frames : 0) - 1);
+        const gf = localF + start;
+        let best = null;
+        for (const g of (savedEvents[type] || [])) {
+            if (before) {
+                if (g >= start && g <= gf && (best === null || g > best)) best = g;
+            } else {
+                if (g <= end && g >= gf && (best === null || g < best)) best = g;
+            }
+        }
+        return best === null ? null : best - start;
     }
 
     function _drawJointTrails(pixelScale, isLeft, fn) {
         if (!trajMode || !trialData) return;
         if (trajJoints.size === 0) return;
-        if (trajPre <= 0 && trajPost <= 0) return;
+        if (trajPre <= 0 && trajPost <= 0 && !trajFromOpen && !trajToClose) return;
         const N = trialData.n_frames || 0;
         if (N <= 0) return;
         // One trail per selected 2D model (× per selected joint), each in the
         // model's own marker colour.  No selected model → nothing to draw.
         const sources = _trajSelectedSources(isLeft);
         if (!sources.length) return;
-        const lo = Math.max(0, fn - trajPre);
-        const hi = Math.min(N - 1, fn + trajPost);
+        // Backward bound: last Open event ("from Open") else trajPre frames.
+        // Forward bound: next Close event ("to Close") else trajPost frames.
+        let lo = fn - trajPre;
+        if (trajFromOpen) {
+            const o = _trajEventBound('open', fn, true);
+            lo = (o != null) ? o : fn;
+        }
+        let hi = fn + trajPost;
+        if (trajToClose) {
+            const c = _trajEventBound('close', fn, false);
+            hi = (c != null) ? c : fn;
+        }
+        lo = Math.max(0, Math.min(lo, fn));
+        hi = Math.min(N - 1, Math.max(hi, fn));
 
         // Camera-motion correction: warp each frame f's point into the
         // current frame fn's coords (f → ref → fn).
@@ -2633,6 +2679,16 @@ const manoViewer = (() => {
         $('trajCorrectCamera')?.addEventListener('change', e => {
             trajCorrectCamera = e.target.checked;
             if (trajCorrectCamera) _ensureCameraTraj();
+            render();
+        });
+        $('trajFromOpen')?.addEventListener('change', e => {
+            trajFromOpen = e.target.checked;
+            _updateTrajSliderAvail();
+            render();
+        });
+        $('trajToClose')?.addEventListener('change', e => {
+            trajToClose = e.target.checked;
+            _updateTrajSliderAvail();
             render();
         });
 
