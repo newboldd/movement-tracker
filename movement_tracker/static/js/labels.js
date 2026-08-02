@@ -795,27 +795,44 @@ const manoViewer = (() => {
         if (trajMode) render();
     }
 
-    // The per-frame 2D source arrays for every 2D model currently selected
-    // in the Models section, each paired with that model's marker colour.
-    // One trajectory is drawn per selected model (× per selected joint).
+    // Every 2D model currently selected in the Models section, each as a
+    // { pt(frame, joint) → [x,y]|null, color, name } entry.  One trajectory
+    // is drawn per selected model (× per selected joint), in the model's
+    // own marker colour.
     function _trajSelectedSources(isLeft) {
         if (!trialData) return [];
         const S = trialData, L = isLeft;
         const out = [];
-        const add = (on, arr, color, name) => {
-            if (on && arr && arr.length) out.push({ arr, color, name });
+        // Standard (n_frames × 21 × 2) array-backed source.
+        const addArr = (on, arr, color, name) => {
+            if (on && arr && arr.length) {
+                out.push({ pt: (f, j) => (arr[f] ? arr[f][j] : null), color, name });
+            }
         };
-        add(showMano2D,      L ? S.skeleton_proj_L    : S.skeleton_proj_R,    'lime',    'Skeleton v1');
-        add(showSkelV2_2D,   L ? S.skel_v2_proj_L     : S.skel_v2_proj_R,     '#ffca28', 'Skeleton v3');
-        add(showLegacyV2_2D, L ? S.skel_legacy_proj_L : S.skel_legacy_proj_R, '#e040fb', 'Skeleton v2');
-        add(showMP2D,        L ? (mpCorrectedL || S.mp_tracked_L) : (mpCorrectedR || S.mp_tracked_R), '#00cccc', 'MediaPipe');
-        add(showReverse2D,   L ? S.reverse_tracked_L  : S.reverse_tracked_R,  '#c774f0', 'Reverse');
-        add(showCropped2D,   L ? S.cropped_tracked_L  : S.cropped_tracked_R,  '#7cb342', 'Cropped');
-        add(showStatic2D,    L ? S.static_tracked_L   : S.static_tracked_R,   '#26c6da', 'Static');
-        add(showCombined2D,  L ? S.combined_tracked_L : S.combined_tracked_R, '#ffa726', 'Combined');
-        add(showVision2D,    L ? S.vision_tracked_L   : S.vision_tracked_R,   '#42a5f5', 'Vision');
-        add(showFiltered2D,  L ? S.combined_tracked_L : S.combined_tracked_R, '#fff176', 'Filtered');
-        add(showStereoFill2D,L ? S.stereo_fill_tracked_L : S.stereo_fill_tracked_R, '#80deea', 'Stereo Fill');
+        addArr(showMano2D,      L ? S.skeleton_proj_L    : S.skeleton_proj_R,    'lime',    'Skeleton v1');
+        addArr(showSkelV2_2D,   L ? S.skel_v2_proj_L     : S.skel_v2_proj_R,     '#ffca28', 'Skeleton v3');
+        addArr(showLegacyV2_2D, L ? S.skel_legacy_proj_L : S.skel_legacy_proj_R, '#e040fb', 'Skeleton v2');
+        addArr(showMP2D,        L ? (mpCorrectedL || S.mp_tracked_L) : (mpCorrectedR || S.mp_tracked_R), '#00cccc', 'MediaPipe');
+        addArr(showReverse2D,   L ? S.reverse_tracked_L  : S.reverse_tracked_R,  '#c774f0', 'Reverse');
+        addArr(showCropped2D,   L ? S.cropped_tracked_L  : S.cropped_tracked_R,  '#7cb342', 'Cropped');
+        addArr(showStatic2D,    L ? S.static_tracked_L   : S.static_tracked_R,   '#26c6da', 'Static');
+        addArr(showCombined2D,  L ? S.combined_tracked_L : S.combined_tracked_R, '#ffa726', 'Combined');
+        addArr(showVision2D,    L ? S.vision_tracked_L   : S.vision_tracked_R,   '#42a5f5', 'Vision');
+        addArr(showFiltered2D,  L ? S.combined_tracked_L : S.combined_tracked_R, '#fff176', 'Filtered');
+        addArr(showStereoFill2D,L ? S.stereo_fill_tracked_L : S.stereo_fill_tracked_R, '#80deea', 'Stereo Fill');
+        // DLC only tracks the thumb (joint 4) + index (joint 8) tips, stored
+        // as separate per-frame arrays rather than a 21-joint projection.
+        if (showDLC) {
+            const thumb = L ? S.dlc_thumb_OS : S.dlc_thumb_OD;
+            const index = L ? S.dlc_index_OS : S.dlc_index_OD;
+            if ((thumb && thumb.length) || (index && index.length)) {
+                out.push({
+                    pt: (f, j) => (j === 4 ? (thumb ? thumb[f] : null)
+                                 : j === 8 ? (index ? index[f] : null) : null),
+                    color: '#ff4081', name: 'DLC',
+                });
+            }
+        }
         return out;
     }
 
@@ -862,11 +879,11 @@ const manoViewer = (() => {
         const HfnInv = (Hstack && fn < Hstack.length) ? _inv3flat(Hstack[fn]) : null;
         const canWarp = !!(Hstack && HfnInv);
 
-        for (const { arr, color } of sources) {
+        for (const { pt: getPt, color } of sources) {
             for (const j of trajJoints) {
                 const pts = [];
                 for (let f = lo; f <= hi; f++) {
-                    const p = arr[f] && arr[f][j];
+                    const p = getPt(f, j);
                     if (!p || !isFinite(p[0]) || !isFinite(p[1])) { pts.push(null); continue; }
                     let x = p[0], y = p[1];
                     if (canWarp && f < Hstack.length) {
@@ -883,9 +900,9 @@ const manoViewer = (() => {
                     }
                 }
                 // Small dots at each sampled frame.
-                for (const pt of pts) if (pt) drawJoint(pt[0], pt[1], color, 1.3);
+                for (const p of pts) if (p) drawJoint(p[0], p[1], color, 1.3);
                 // Emphasise the current-frame position.
-                const cp = arr[fn] && arr[fn][j];
+                const cp = getPt(fn, j);
                 if (cp && isFinite(cp[0]) && isFinite(cp[1])) {
                     drawJoint(cp[0] * pixelScale, cp[1] * pixelScale, color, 3);
                 }
