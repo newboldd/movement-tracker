@@ -795,26 +795,28 @@ const manoViewer = (() => {
         if (trajMode) render();
     }
 
-    // Pick the best per-frame 2D source array (n_frames × 21 × 2) for a
-    // side — same priority the overlay uses (Skel v3 → v1 → MP → combined
-    // → Vision).  Returns null when nothing is available.
-    function _trajSourceArray(isLeft, fn) {
-        if (!trialData) return null;
-        const S = trialData;
-        const cand = isLeft
-            ? [S.skel_v2_proj_L, S.skeleton_proj_L, mpCorrectedL || S.mp_tracked_L, S.combined_tracked_L,
-               S.cropped_tracked_L, S.reverse_tracked_L, S.static_tracked_L, S.vision_tracked_L]
-            : [S.skel_v2_proj_R, S.skeleton_proj_R, mpCorrectedR || S.mp_tracked_R, S.combined_tracked_R,
-               S.cropped_tracked_R, S.reverse_tracked_R, S.static_tracked_R, S.vision_tracked_R];
-        // Prefer the first array with a real (finite) point at the current
-        // frame — a source can exist but be all-NaN (e.g. an untracked pass).
-        const hasPtAt = (a, f) => {
-            const fr = a && a[f];
-            return !!(fr && fr.some(p => p && isFinite(p[0]) && isFinite(p[1])));
+    // The per-frame 2D source arrays for every 2D model currently selected
+    // in the Models section, each paired with that model's marker colour.
+    // One trajectory is drawn per selected model (× per selected joint).
+    function _trajSelectedSources(isLeft) {
+        if (!trialData) return [];
+        const S = trialData, L = isLeft;
+        const out = [];
+        const add = (on, arr, color, name) => {
+            if (on && arr && arr.length) out.push({ arr, color, name });
         };
-        for (const a of cand) if (hasPtAt(a, fn)) return a;
-        for (const a of cand) if (a && a.length) return a;  // fallback
-        return null;
+        add(showMano2D,      L ? S.skeleton_proj_L    : S.skeleton_proj_R,    'lime',    'Skeleton v1');
+        add(showSkelV2_2D,   L ? S.skel_v2_proj_L     : S.skel_v2_proj_R,     '#ffca28', 'Skeleton v3');
+        add(showLegacyV2_2D, L ? S.skel_legacy_proj_L : S.skel_legacy_proj_R, '#e040fb', 'Skeleton v2');
+        add(showMP2D,        L ? (mpCorrectedL || S.mp_tracked_L) : (mpCorrectedR || S.mp_tracked_R), '#00cccc', 'MediaPipe');
+        add(showReverse2D,   L ? S.reverse_tracked_L  : S.reverse_tracked_R,  '#c774f0', 'Reverse');
+        add(showCropped2D,   L ? S.cropped_tracked_L  : S.cropped_tracked_R,  '#7cb342', 'Cropped');
+        add(showStatic2D,    L ? S.static_tracked_L   : S.static_tracked_R,   '#26c6da', 'Static');
+        add(showCombined2D,  L ? S.combined_tracked_L : S.combined_tracked_R, '#ffa726', 'Combined');
+        add(showVision2D,    L ? S.vision_tracked_L   : S.vision_tracked_R,   '#42a5f5', 'Vision');
+        add(showFiltered2D,  L ? S.combined_tracked_L : S.combined_tracked_R, '#fff176', 'Filtered');
+        add(showStereoFill2D,L ? S.stereo_fill_tracked_L : S.stereo_fill_tracked_R, '#80deea', 'Stereo Fill');
+        return out;
     }
 
     // Flat row-major 3×3 homography apply (with perspective divide) + invert.
@@ -844,8 +846,10 @@ const manoViewer = (() => {
         if (trajPre <= 0 && trajPost <= 0) return;
         const N = trialData.n_frames || 0;
         if (N <= 0) return;
-        const src = _trajSourceArray(isLeft, fn);
-        if (!src) return;
+        // One trail per selected 2D model (× per selected joint), each in the
+        // model's own marker colour.  No selected model → nothing to draw.
+        const sources = _trajSelectedSources(isLeft);
+        if (!sources.length) return;
         const lo = Math.max(0, fn - trajPre);
         const hi = Math.min(N - 1, fn + trajPost);
 
@@ -858,34 +862,33 @@ const manoViewer = (() => {
         const HfnInv = (Hstack && fn < Hstack.length) ? _inv3flat(Hstack[fn]) : null;
         const canWarp = !!(Hstack && HfnInv);
 
-        const palette = ['#00e5ff', '#ffd54f', '#ff6ec7', '#7cff6e'];
-        let ci = 0;
-        for (const j of trajJoints) {
-            const color = palette[ci++ % palette.length];
-            const pts = [];
-            for (let f = lo; f <= hi; f++) {
-                const p = src[f] && src[f][j];
-                if (!p || !isFinite(p[0]) || !isFinite(p[1])) { pts.push(null); continue; }
-                let x = p[0], y = p[1];
-                if (canWarp && f < Hstack.length) {
-                    const ref = _applyHflat(Hstack[f], x, y);
-                    const cur = _applyHflat(HfnInv, ref.x, ref.y);
-                    x = cur.x; y = cur.y;
+        for (const { arr, color } of sources) {
+            for (const j of trajJoints) {
+                const pts = [];
+                for (let f = lo; f <= hi; f++) {
+                    const p = arr[f] && arr[f][j];
+                    if (!p || !isFinite(p[0]) || !isFinite(p[1])) { pts.push(null); continue; }
+                    let x = p[0], y = p[1];
+                    if (canWarp && f < Hstack.length) {
+                        const ref = _applyHflat(Hstack[f], x, y);
+                        const cur = _applyHflat(HfnInv, ref.x, ref.y);
+                        x = cur.x; y = cur.y;
+                    }
+                    pts.push([x * pixelScale, y * pixelScale]);
                 }
-                pts.push([x * pixelScale, y * pixelScale]);
-            }
-            // Polyline (break across gaps).
-            for (let k = 1; k < pts.length; k++) {
-                if (pts[k - 1] && pts[k]) {
-                    drawLine(pts[k - 1][0], pts[k - 1][1], pts[k][0], pts[k][1], color, 1.5, 0.8);
+                // Polyline (break across gaps).
+                for (let k = 1; k < pts.length; k++) {
+                    if (pts[k - 1] && pts[k]) {
+                        drawLine(pts[k - 1][0], pts[k - 1][1], pts[k][0], pts[k][1], color, 1.5, 0.8);
+                    }
                 }
-            }
-            // Small dots at each sampled frame.
-            for (const pt of pts) if (pt) drawJoint(pt[0], pt[1], color, 1.3);
-            // Emphasise the current-frame position.
-            const cp = src[fn] && src[fn][j];
-            if (cp && isFinite(cp[0]) && isFinite(cp[1])) {
-                drawJoint(cp[0] * pixelScale, cp[1] * pixelScale, color, 3);
+                // Small dots at each sampled frame.
+                for (const pt of pts) if (pt) drawJoint(pt[0], pt[1], color, 1.3);
+                // Emphasise the current-frame position.
+                const cp = arr[fn] && arr[fn][j];
+                if (cp && isFinite(cp[0]) && isFinite(cp[1])) {
+                    drawJoint(cp[0] * pixelScale, cp[1] * pixelScale, color, 3);
+                }
             }
         }
     }
