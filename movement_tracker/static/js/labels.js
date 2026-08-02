@@ -563,6 +563,36 @@ const manoViewer = (() => {
             if (btn) { btn.disabled = false; btn.textContent = 'Save failed'; }
         }
     }
+    // Sorted GLOBAL event frames in the current trial, across the visible
+    // event types (falling back to all types when none are toggled on so
+    // q/w still work out of the box).  Also returns the trial start offset.
+    function _trialEventFrames() {
+        _ensureSavedEvents();
+        const tr = trials[currentTrialIdx];
+        const start = tr ? (tr.start_frame || 0) : 0;
+        const end = (tr && tr.end_frame != null)
+            ? tr.end_frame
+            : start + ((trialData && trialData.n_frames ? trialData.n_frames : 0) - 1);
+        const visTypes = EVENT_TYPES.filter(t => showEvents[t]);
+        const types = visTypes.length ? visTypes : EVENT_TYPES;
+        const set = new Set();
+        for (const t of types) {
+            for (const f of (savedEvents[t] || [])) if (f >= start && f <= end) set.add(f);
+        }
+        return { frames: [...set].sort((a, b) => a - b), start };
+    }
+    function prevEvent() {
+        const { frames, start } = _trialEventFrames();
+        const gf = currentFrame + start;
+        const prev = [...frames].reverse().find(f => f < gf);
+        if (prev !== undefined) goToFrame(prev - start);
+    }
+    function nextEvent() {
+        const { frames, start } = _trialEventFrames();
+        const gf = currentFrame + start;
+        const next = frames.find(f => f > gf);
+        if (next !== undefined) goToFrame(next - start);
+    }
     // Whether every plotted series is shown as its raw value
     // ('position') or as a per-frame finite-difference velocity
     // ('velocity') scaled by the current trial's fps.  Applied
@@ -3221,6 +3251,8 @@ const manoViewer = (() => {
                 case '3': placeEvent('close'); handled = true; break;
                 case '4': placeEvent('pause'); handled = true; break;
                 case 'x': case 'X': deleteNearestEvent(); handled = true; break;
+                case 'q': case 'Q': prevEvent(); handled = true; break;
+                case 'w': case 'W': nextEvent(); handled = true; break;
             }
             if (handled) {
                 e.preventDefault();

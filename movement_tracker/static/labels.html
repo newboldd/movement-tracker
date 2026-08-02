@@ -504,7 +504,7 @@
                 <button class="btn btn-sm" id="evtDeleteBtn" style="flex:1;" title="Delete the event nearest the current frame (X)">Delete (x)</button>
             </div>
             <button class="btn btn-sm btn-success" id="saveEventsBtn" style="width:100%;">Save Events</button>
-            <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">Keys 1-4 place, X deletes at the current frame.</div>
+            <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">Keys 1-4 place, X deletes; Q/W jump to prev/next event.</div>
 
             <!-- 2D Pose Detection -->
             <div class="sidebar-section" style="margin-top:12px;">2D Pose Detection</div>
@@ -1382,7 +1382,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=423" type="module"></script>
+    <script src="/static/js/labels.js?v=424" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {
