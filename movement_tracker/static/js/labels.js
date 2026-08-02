@@ -64,7 +64,8 @@ const manoViewer = (() => {
     let playTimer = null;
     let playbackRate = 1;
     let _seekGeneration = 0; // incremented on each seek/play to invalidate stale seeked callbacks
-    const SPEED_PRESETS = [0.1, 0.25, 0.5, 1, 2, 4, 8, 16, 30, 60, 120];
+    // Matches the Events page presets (adds slow-motion 0.01–0.05 options).
+    const SPEED_PRESETS = [0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1, 2, 4, 16, 60];
 
     // Layer visibility
     let showVideo = true;
@@ -446,8 +447,8 @@ const manoViewer = (() => {
     // for the optional camera-motion correction.
     let trajMode = false;
     let trajJoints = new Set();
-    let trajPre = 12;
-    let trajPost = 12;
+    let trajPre = 60;
+    let trajPost = 0;
     let trajCorrectCamera = false;
     let cameraTraj = null;   // {available, H_to_ref_L/R (N×9), n_frames, is_stereo, _trialIdx}
     const heatmapCache = {};
@@ -558,10 +559,48 @@ const manoViewer = (() => {
             });
             _eventsDirty = false;
             if (btn) { btn.textContent = 'Saved ✓'; setTimeout(() => { btn.disabled = false; btn.textContent = 'Save Events'; }, 1200); }
+            return true;
         } catch (e) {
             console.error('Save events failed:', e);
             if (btn) { btn.disabled = false; btn.textContent = 'Save failed'; }
+            return false;
         }
+    }
+    // Modal-based confirm for leaving with unsaved events.  Resolves to
+    // 'save' | 'discard' | 'cancel'.
+    function _confirmUnsavedEvents() {
+        return new Promise(resolve => {
+            const modal = $('unsavedEventsModal');
+            const saveB = $('unsavedSaveBtn'), discB = $('unsavedDiscardBtn'), cancB = $('unsavedCancelBtn');
+            if (!modal || !saveB || !discB || !cancB) { resolve('discard'); return; }
+            modal.style.display = 'flex';
+            const done = (choice) => {
+                modal.style.display = 'none';
+                saveB.removeEventListener('click', onSave);
+                discB.removeEventListener('click', onDisc);
+                cancB.removeEventListener('click', onCanc);
+                resolve(choice);
+            };
+            const onSave = () => done('save');
+            const onDisc = () => done('discard');
+            const onCanc = () => done('cancel');
+            saveB.addEventListener('click', onSave);
+            discB.addEventListener('click', onDisc);
+            cancB.addEventListener('click', onCanc);
+        });
+    }
+    // Run `proceed` after resolving unsaved events (returns false if the
+    // user cancelled or a requested save failed).
+    async function _guardUnsavedEvents() {
+        if (!_eventsDirty) return true;
+        const choice = await _confirmUnsavedEvents();
+        if (choice === 'cancel') return false;
+        if (choice === 'save') {
+            const ok = await saveTrialEvents();
+            if (!ok) return false;
+        }
+        _eventsDirty = false;
+        return true;
     }
     // Sorted GLOBAL event frames in the current trial, across the visible
     // event types (falling back to all types when none are toggled on so
@@ -973,6 +1012,14 @@ const manoViewer = (() => {
     // Draw the motion trail(s) for the selected trajectory joint(s) across
     // [currentFrame−trajPre, currentFrame+trajPost].  Coords are camera-half
     // pixels → multiply by pixelScale (offsets are 0 for all 2D sources).
+    // True when a joint's normal per-frame marker should be suppressed
+    // because its trajectory is being plotted — the trajectory's
+    // current-frame dot stands in for the marker (avoids e.g. the DLC
+    // black dot sitting on top of the trail's current-frame point).
+    function _markerHidden(j) {
+        return trajMode && trajJoints.has(j) && (trajPre > 0 || trajPost > 0);
+    }
+
     function _drawJointTrails(pixelScale, isLeft, fn) {
         if (!trajMode || !trialData) return;
         if (trajJoints.size === 0) return;
@@ -1632,6 +1679,15 @@ const manoViewer = (() => {
     }
 
     async function loadSubject(sid) {
+        // Switching subjects discards unsaved event edits — warn first.
+        if (subjectId != null && sid !== subjectId && _eventsDirty) {
+            const ok = await _guardUnsavedEvents();
+            if (!ok) {
+                const sel = $('subjectSelect');
+                if (sel) sel.value = String(subjectId);  // revert dropdown
+                return;
+            }
+        }
         // Close any SSE connections from the previous subject's jobs
         for (const es of _activeEventSources) {
             try { es.close(); } catch {}
@@ -2018,7 +2074,7 @@ const manoViewer = (() => {
 
         // Speed slider
         const speedSlider = $('speedSlider');
-        speedSlider.value = 3;
+        speedSlider.value = SPEED_PRESETS.indexOf(1);  // default 1x
         speedSlider.addEventListener('input', () => {
             playbackRate = SPEED_PRESETS[parseInt(speedSlider.value)];
             $('speedDisplay').textContent = playbackRate + 'x';
@@ -2587,6 +2643,23 @@ const manoViewer = (() => {
         $('evtPauseBtn')?.addEventListener('click',  () => placeEvent('pause'));
         $('evtDeleteBtn')?.addEventListener('click', () => deleteNearestEvent());
         $('saveEventsBtn')?.addEventListener('click', () => saveTrialEvents());
+
+        // Warn before leaving the page with unsaved events.  Intercept the
+        // in-app nav links (offer Save / Discard / Cancel); the native
+        // beforeunload dialog is a backstop for refresh / tab close.
+        document.querySelectorAll('nav a[href], h1 a[href]').forEach(a => {
+            a.addEventListener('click', async (e) => {
+                if (!_eventsDirty) return;
+                const href = a.getAttribute('href');
+                if (!href || href.startsWith('#')) return;
+                e.preventDefault();
+                const ok = await _guardUnsavedEvents();
+                if (ok) window.location.href = href;
+            });
+        });
+        window.addEventListener('beforeunload', (e) => {
+            if (_eventsDirty) { e.preventDefault(); e.returnValue = ''; }
+        });
         const hmThreshSlider = $('heatmapThreshSlider');
         if (hmThreshSlider) {
             hmThreshSlider.addEventListener('input', e => {
@@ -4687,7 +4760,7 @@ const manoViewer = (() => {
         // Skeleton v1 joints (lime circles)
         if (showMano2D && manoProj[fn]) {
             for (let j = 0; j < 21; j++) {
-                if (!isJointVisible(j) || !manoProj[fn][j]) continue;
+                if (_markerHidden(j) || !isJointVisible(j) || !manoProj[fn][j]) continue;
                 const x = (manoProj[fn][j][0] + manoXOff) * pixelScale;
                 const y = manoProj[fn][j][1] * pixelScale;
                 drawJoint(x, y, 'lime', 4);
@@ -4704,7 +4777,7 @@ const manoViewer = (() => {
                 if (!s.proj?.[fn]) continue;
                 const errFrame = s.errors ? s.errors[fn] : null;
                 for (let j = 0; j < 21; j++) {
-                    if (!isJointVisible(j) || !s.proj[fn][j]) continue;
+                    if (_markerHidden(j) || !isJointVisible(j) || !s.proj[fn][j]) continue;
                     const x = s.proj[fn][j][0] * pixelScale;
                     const y = s.proj[fn][j][1] * pixelScale;
                     let color = s.color;
@@ -4735,7 +4808,7 @@ const manoViewer = (() => {
         // Skeleton v2 legacy joints (magenta circles)
         if (showLegacyV2_2D && legacyProj?.[fn]) {
             for (let j = 0; j < 21; j++) {
-                if (!isJointVisible(j) || !legacyProj[fn][j]) continue;
+                if (_markerHidden(j) || !isJointVisible(j) || !legacyProj[fn][j]) continue;
                 const x = legacyProj[fn][j][0] * pixelScale;
                 const y = legacyProj[fn][j][1] * pixelScale;
                 drawJoint(x, y, '#e040fb', 4);
@@ -4758,7 +4831,7 @@ const manoViewer = (() => {
                 ctx.setLineDash([3, 3]);
                 const rPx = _occPx * pixelScale;
                 for (let j = 0; j < 21; j++) {
-                    if (!isJointVisible(j) || !mpKp[fn][j]) continue;
+                    if (_markerHidden(j) || !isJointVisible(j) || !mpKp[fn][j]) continue;
                     const x = (mpKp[fn][j][0] + mpXOff) * pixelScale;
                     const y = mpKp[fn][j][1] * pixelScale;
                     ctx.beginPath();
@@ -4774,7 +4847,7 @@ const manoViewer = (() => {
         // Skeleton layer via the stage-picker buttons instead)
         if (showMP2D && mpKp[fn]) {
             for (let j = 0; j < 21; j++) {
-                if (!isJointVisible(j) || !mpKp[fn][j]) continue;
+                if (_markerHidden(j) || !isJointVisible(j) || !mpKp[fn][j]) continue;
                 const x = (mpKp[fn][j][0] + mpXOff) * pixelScale;
                 const y = mpKp[fn][j][1] * pixelScale;
                 drawCross(x, y, '#00cccc', 4);
@@ -4811,7 +4884,7 @@ const manoViewer = (() => {
         // mediapipe_reverse_prelabels.npz.
         if (showReverse2D && reverseKp && reverseKp[fn]) {
             for (let j = 0; j < 21; j++) {
-                if (!isJointVisible(j) || !reverseKp[fn][j]) continue;
+                if (_markerHidden(j) || !isJointVisible(j) || !reverseKp[fn][j]) continue;
                 const x = reverseKp[fn][j][0] * pixelScale;
                 const y = reverseKp[fn][j][1] * pixelScale;
                 drawCross(x, y, '#e040fb', 4);
@@ -4821,7 +4894,7 @@ const manoViewer = (() => {
         // Cropped-forward joint markers (green).
         if (showCropped2D && croppedKp && croppedKp[fn]) {
             for (let j = 0; j < 21; j++) {
-                if (!isJointVisible(j) || !croppedKp[fn][j]) continue;
+                if (_markerHidden(j) || !isJointVisible(j) || !croppedKp[fn][j]) continue;
                 const x = croppedKp[fn][j][0] * pixelScale;
                 const y = croppedKp[fn][j][1] * pixelScale;
                 drawCross(x, y, '#7cb342', 4);
@@ -4831,7 +4904,7 @@ const manoViewer = (() => {
         // Static-mode MediaPipe joint markers (cyan).
         if (showStatic2D && staticKp && staticKp[fn]) {
             for (let j = 0; j < 21; j++) {
-                if (!isJointVisible(j) || !staticKp[fn][j]) continue;
+                if (_markerHidden(j) || !isJointVisible(j) || !staticKp[fn][j]) continue;
                 const x = staticKp[fn][j][0] * pixelScale;
                 const y = staticKp[fn][j][1] * pixelScale;
                 drawCross(x, y, '#26c6da', 4);
@@ -4842,7 +4915,7 @@ const manoViewer = (() => {
         // as Reverse: bones in the loop above, per-joint dots here.
         if (showCombined2D && combinedKp && combinedKp[fn]) {
             for (let j = 0; j < 21; j++) {
-                if (!isJointVisible(j) || !combinedKp[fn][j]) continue;
+                if (_markerHidden(j) || !isJointVisible(j) || !combinedKp[fn][j]) continue;
                 const x = combinedKp[fn][j][0] * pixelScale;
                 const y = combinedKp[fn][j][1] * pixelScale;
                 drawCross(x, y, '#ffa726', 4);
@@ -4855,7 +4928,7 @@ const manoViewer = (() => {
         // applied server-side so we just draw whatever's there.
         if (showStereoFill2D && stereoFillKp && stereoFillKp[fn]) {
             for (let j = 0; j < 21; j++) {
-                if (!isJointVisible(j) || !stereoFillKp[fn][j]) continue;
+                if (_markerHidden(j) || !isJointVisible(j) || !stereoFillKp[fn][j]) continue;
                 const x = stereoFillKp[fn][j][0] * pixelScale;
                 const y = stereoFillKp[fn][j][1] * pixelScale;
                 drawCross(x, y, '#80deea', 4);
@@ -4870,7 +4943,7 @@ const manoViewer = (() => {
             const camIdx = isLeft ? 0 : 1;
             const camRow = _mpFilterCamMask ? _mpFilterCamMask[fn] : null;
             for (let j = 0; j < 21; j++) {
-                if (!isJointVisible(j) || !combinedKp[fn][j]) continue;
+                if (_markerHidden(j) || !isJointVisible(j) || !combinedKp[fn][j]) continue;
                 if (camRow && camRow[j] && camRow[j][camIdx]) continue;
                 const x = combinedKp[fn][j][0] * pixelScale;
                 const y = combinedKp[fn][j][1] * pixelScale;
@@ -5034,7 +5107,7 @@ const manoViewer = (() => {
         // Vision joints (blue)
         if (showVision2D && visionKp?.[fn]) {
             for (let j = 0; j < 21; j++) {
-                if (!isJointVisible(j) || !visionKp[fn][j]) continue;
+                if (_markerHidden(j) || !isJointVisible(j) || !visionKp[fn][j]) continue;
                 const x = (visionKp[fn][j][0] + visionXOff) * pixelScale;
                 const y = visionKp[fn][j][1] * pixelScale;
                 drawJoint(x, y, '#2196f3', 3.5);
@@ -5053,11 +5126,11 @@ const manoViewer = (() => {
         if (showDLC) {
             const thumbKey = isLeft ? 'dlc_thumb_OS' : 'dlc_thumb_OD';
             const indexKey = isLeft ? 'dlc_index_OS' : 'dlc_index_OD';
-            if (isJointVisible(4) && trialData[thumbKey][fn]) {
+            if (!_markerHidden(4) && isJointVisible(4) && trialData[thumbKey][fn]) {
                 const pt = trialData[thumbKey][fn];
                 drawJoint((pt[0] + mpXOff) * pixelScale, pt[1] * pixelScale, '#ff4444', 5);
             }
-            if (isJointVisible(8) && trialData[indexKey][fn]) {
+            if (!_markerHidden(8) && isJointVisible(8) && trialData[indexKey][fn]) {
                 const pt = trialData[indexKey][fn];
                 drawJoint((pt[0] + mpXOff) * pixelScale, pt[1] * pixelScale, '#222', 5);
             }
