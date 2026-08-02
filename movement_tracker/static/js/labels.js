@@ -477,6 +477,92 @@ const manoViewer = (() => {
         close: '#ff4444',
         pause: '#cc66ff',
     };
+    const EVENT_TYPES = ['open', 'peak', 'close', 'pause'];
+    let _eventsDirty = false;
+
+    // ── Event editing (mirrors the Events page: 1/2/3/4/x + buttons) ──
+    function _ensureSavedEvents() {
+        if (!savedEvents || typeof savedEvents !== 'object') savedEvents = {};
+        for (const t of EVENT_TYPES) if (!Array.isArray(savedEvents[t])) savedEvents[t] = [];
+        return savedEvents;
+    }
+    // savedEvents frames are GLOBAL; currentFrame is trial-local.
+    function _curGlobalFrame() {
+        const tr = trials[currentTrialIdx];
+        return currentFrame + (tr ? (tr.start_frame || 0) : 0);
+    }
+    // Repaint the controls-bar "Events:" visibility buttons from showEvents.
+    function _refreshEventToggleButtons() {
+        const _tint = (hex, a) => {
+            const h = (hex || '#888888').replace('#', '');
+            const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+            return `rgba(${r},${g},${b},${a})`;
+        };
+        document.querySelectorAll('.event-toggle-btn').forEach(btn => {
+            const t = btn.dataset.evt, on = !!showEvents[t];
+            btn.style.background = on ? _tint(EVENT_COLORS[t], 0.25) : 'transparent';
+            btn.style.fontWeight = on ? '700' : '400';
+        });
+    }
+    function _markEventsDirty() {
+        _eventsDirty = true;
+        const btn = $('saveEventsBtn');
+        if (btn && !btn.disabled) btn.textContent = 'Save Events *';
+    }
+    function placeEvent(type) {
+        if (subjectId == null || currentTrialIdx < 0) return;
+        _ensureSavedEvents();
+        const gf = _curGlobalFrame();
+        if (!savedEvents[type].includes(gf)) {
+            savedEvents[type].push(gf);
+            savedEvents[type].sort((a, b) => a - b);
+        }
+        // Make the type visible so the just-placed marker is seen.
+        if (!showEvents[type]) { showEvents[type] = true; _refreshEventToggleButtons(); }
+        _markEventsDirty();
+        renderDistanceTrace();
+        render();  // trajectory points may now align with an event
+    }
+    // Delete the event nearest the current frame (within a few frames),
+    // across all types.  The Events page deletes exactly at the frame; a
+    // small tolerance is friendlier here since this page has no
+    // prev/next-event navigation.
+    function deleteNearestEvent() {
+        _ensureSavedEvents();
+        const gf = _curGlobalFrame();
+        let best = null;  // { type, idx, dist }
+        for (const t of EVENT_TYPES) {
+            for (let i = 0; i < savedEvents[t].length; i++) {
+                const d = Math.abs(savedEvents[t][i] - gf);
+                if (d <= 5 && (!best || d < best.dist)) best = { type: t, idx: i, dist: d };
+            }
+        }
+        if (!best) return;
+        savedEvents[best.type].splice(best.idx, 1);
+        _markEventsDirty();
+        renderDistanceTrace();
+        render();
+    }
+    async function saveTrialEvents() {
+        if (subjectId == null) return;
+        _ensureSavedEvents();
+        const btn = $('saveEventsBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+        try {
+            const body = {};
+            for (const t of EVENT_TYPES) body[t] = savedEvents[t] || [];
+            await api(`/api/skeleton/${subjectId}/events`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            _eventsDirty = false;
+            if (btn) { btn.textContent = 'Saved ✓'; setTimeout(() => { btn.disabled = false; btn.textContent = 'Save Events'; }, 1200); }
+        } catch (e) {
+            console.error('Save events failed:', e);
+            if (btn) { btn.disabled = false; btn.textContent = 'Save failed'; }
+        }
+    }
     // Whether every plotted series is shown as its raw value
     // ('position') or as a per-frame finite-difference velocity
     // ('velocity') scaled by the current trial's fps.  Applied
@@ -879,6 +965,17 @@ const manoViewer = (() => {
         const HfnInv = (Hstack && fn < Hstack.length) ? _inv3flat(Hstack[fn]) : null;
         const canWarp = !!(Hstack && HfnInv);
 
+        // Event alignment: a trail point whose (global) frame matches a saved
+        // event is drawn larger and in that event's colour.
+        const startFrame = (trials[currentTrialIdx] && trials[currentTrialIdx].start_frame) || 0;
+        const evSets = {};
+        for (const t of EVENT_TYPES) evSets[t] = new Set((savedEvents && savedEvents[t]) || []);
+        const _evTypeAtLocal = (localF) => {
+            const gf = localF + startFrame;
+            for (const t of EVENT_TYPES) if (evSets[t].has(gf)) return t;
+            return null;
+        };
+
         for (const { pt: getPt, color } of sources) {
             for (const j of trajJoints) {
                 const pts = [];
@@ -891,7 +988,7 @@ const manoViewer = (() => {
                         const cur = _applyHflat(HfnInv, ref.x, ref.y);
                         x = cur.x; y = cur.y;
                     }
-                    pts.push([x * pixelScale, y * pixelScale]);
+                    pts.push([x * pixelScale, y * pixelScale, f]);
                 }
                 // Polyline (break across gaps).
                 for (let k = 1; k < pts.length; k++) {
@@ -899,12 +996,20 @@ const manoViewer = (() => {
                         drawLine(pts[k - 1][0], pts[k - 1][1], pts[k][0], pts[k][1], color, 1.5, 0.8);
                     }
                 }
-                // Small dots at each sampled frame.
-                for (const p of pts) if (p) drawJoint(p[0], p[1], color, 1.3);
+                // Dots at each sampled frame — event-aligned points are
+                // larger and coloured by the event type they fall on.
+                for (const p of pts) {
+                    if (!p) continue;
+                    const et = _evTypeAtLocal(p[2]);
+                    if (et) drawJoint(p[0], p[1], EVENT_COLORS[et], 3.4);
+                    else drawJoint(p[0], p[1], color, 1.3);
+                }
                 // Emphasise the current-frame position.
                 const cp = getPt(fn, j);
                 if (cp && isFinite(cp[0]) && isFinite(cp[1])) {
-                    drawJoint(cp[0] * pixelScale, cp[1] * pixelScale, color, 3);
+                    const et = _evTypeAtLocal(fn);
+                    drawJoint(cp[0] * pixelScale, cp[1] * pixelScale,
+                              et ? EVENT_COLORS[et] : color, et ? 4.2 : 3);
                 }
             }
         }
@@ -2444,6 +2549,14 @@ const manoViewer = (() => {
             if (trajCorrectCamera) _ensureCameraTraj();
             render();
         });
+
+        // ── Events editing controls ───────────────────────────
+        $('evtOpenBtn')?.addEventListener('click',   () => placeEvent('open'));
+        $('evtPeakBtn')?.addEventListener('click',   () => placeEvent('peak'));
+        $('evtCloseBtn')?.addEventListener('click',  () => placeEvent('close'));
+        $('evtPauseBtn')?.addEventListener('click',  () => placeEvent('pause'));
+        $('evtDeleteBtn')?.addEventListener('click', () => deleteNearestEvent());
+        $('saveEventsBtn')?.addEventListener('click', () => saveTrialEvents());
         const hmThreshSlider = $('heatmapThreshSlider');
         if (hmThreshSlider) {
             hmThreshSlider.addEventListener('input', e => {
@@ -3102,6 +3215,12 @@ const manoViewer = (() => {
                 case 'z': toggleTrackingZoom(); handled = true; break;
                 case 'c': snapToCamera(); handled = true; break;
                 case 'v': toggleVideo(); handled = true; break;
+                // Event editing (mirrors the Events page shortcuts).
+                case '1': placeEvent('open');  handled = true; break;
+                case '2': placeEvent('peak');  handled = true; break;
+                case '3': placeEvent('close'); handled = true; break;
+                case '4': placeEvent('pause'); handled = true; break;
+                case 'x': case 'X': deleteNearestEvent(); handled = true; break;
             }
             if (handled) {
                 e.preventDefault();

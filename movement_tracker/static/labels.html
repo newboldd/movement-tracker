@@ -489,6 +489,23 @@
                 </div>
             </div>
 
+            <!-- Events: place / delete tapping events at the current frame
+                 (mirrors the Events page).  Markers show on the distance
+                 plot; toggle their visibility with the "Events:" buttons in
+                 the transport bar. -->
+            <div class="sidebar-section" style="margin-top:16px;">Events</div>
+            <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px;">
+                <button class="btn btn-sm" id="evtOpenBtn"  style="flex:1;min-width:60px;border-left:4px solid #00cc44;" title="Place an Open event at the current frame (1)">Open (1)</button>
+                <button class="btn btn-sm" id="evtPeakBtn"  style="flex:1;min-width:60px;border-left:4px solid #ffcc00;" title="Place a Peak event at the current frame (2)">Peak (2)</button>
+                <button class="btn btn-sm" id="evtCloseBtn" style="flex:1;min-width:60px;border-left:4px solid #ff4444;" title="Place a Close event at the current frame (3)">Close (3)</button>
+                <button class="btn btn-sm" id="evtPauseBtn" style="flex:1;min-width:60px;border-left:4px solid #cc66ff;" title="Place a Pause event at the current frame (4)">Pause (4)</button>
+            </div>
+            <div style="display:flex;gap:4px;margin-bottom:4px;">
+                <button class="btn btn-sm" id="evtDeleteBtn" style="flex:1;" title="Delete the event nearest the current frame (X)">Delete (x)</button>
+            </div>
+            <button class="btn btn-sm btn-success" id="saveEventsBtn" style="width:100%;">Save Events</button>
+            <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">Keys 1-4 place, X deletes at the current frame.</div>
+
             <!-- 2D Pose Detection -->
             <div class="sidebar-section" style="margin-top:12px;">2D Pose Detection</div>
             <div id="detectModelList" style="display:flex;flex-direction:column;gap:3px;margin-bottom:4px;">
@@ -1365,7 +1382,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=422" type="module"></script>
+    <script src="/static/js/labels.js?v=423" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

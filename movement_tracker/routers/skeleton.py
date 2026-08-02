@@ -5,7 +5,7 @@ import json
 import threading
 
 import numpy as np
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
@@ -66,6 +66,54 @@ def get_subject_events(subject_id: int) -> dict:
     from .labeling import _read_events_csv
     name = _subject_name(subject_id)
     return _read_events_csv(name)
+
+
+@router.put("/{subject_id}/events")
+def save_subject_events(subject_id: int, body: dict = Body(...)) -> dict:
+    """Write tapping events to the subject's events.csv — subject-keyed
+    analog of PUT /api/labeling/sessions/{id}/events, so the Hand Tracking
+    page can save without an events session.
+
+    Overwrites only the event types present in ``body`` (frontend sends
+    the ones it edited); other types already in the CSV are preserved.
+    Frames are GLOBAL (span the concatenated trials).  Advances the
+    subject's stage on open/peak/close completeness, mirroring the session
+    PUT so the dashboard Events indicator stays in sync.
+    """
+    from .labeling import (
+        _read_events_csv, _write_events_csv, AUTO_DETECT_TYPES, STAGE_INDEX,
+    )
+    name = _subject_name(subject_id)
+    existing = _read_events_csv(name)
+    for et in body:
+        if isinstance(body[et], list):
+            existing[et] = [int(f) for f in body[et]]
+    count = _write_events_csv(name, existing)
+
+    types_with_data = [et for et in AUTO_DETECT_TYPES if len(existing.get(et, [])) > 0]
+    if types_with_data:
+        if len(types_with_data) < len(AUTO_DETECT_TYPES):
+            new_stage = "events_partial"
+        else:
+            all_covered = True
+            for trial in build_trial_map(name):
+                s, e = trial["start_frame"], trial["end_frame"]
+                for et in AUTO_DETECT_TYPES:
+                    if not any(s <= f <= e for f in existing.get(et, [])):
+                        all_covered = False
+                        break
+                if not all_covered:
+                    break
+            new_stage = "events_complete" if all_covered else "events_partial"
+        with get_db_ctx() as db:
+            current = db.execute(
+                "SELECT stage FROM subjects WHERE id = ?", (subject_id,)).fetchone()
+            cur_idx = STAGE_INDEX.get(current["stage"] if current else "created", 0)
+            if STAGE_INDEX.get(new_stage, 0) >= cur_idx:
+                db.execute(
+                    "UPDATE subjects SET stage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (new_stage, subject_id))
+    return {"saved": count}
 
 
 @router.get("/{subject_id}/trial/{trial_idx}/data")
