@@ -1092,6 +1092,32 @@ const manoViewer = (() => {
         return best === null ? null : best - start;
     }
 
+    // Shift a colour toward blue while preserving its perceived brightness,
+    // so the closing half of a trajectory reads as a distinct (bluer) hue at
+    // the same intensity as the opening half.
+    const _TRAJ_NAMED_RGB = { lime: [0, 255, 0] };
+    function _cssToRgb(css) {
+        if (!css) return [255, 255, 255];
+        if (_TRAJ_NAMED_RGB[css]) return _TRAJ_NAMED_RGB[css].slice();
+        let h = String(css).trim();
+        if (h[0] === '#') h = h.slice(1);
+        if (h.length === 3) h = h.split('').map(c => c + c).join('');
+        const n = parseInt(h, 16);
+        return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    }
+    function _blueShiftColor(css, amount) {
+        const [r, g, b] = _cssToRgb(css);
+        const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        const B = [40, 120, 255]; // blue target
+        const mr = r * (1 - amount) + B[0] * amount;
+        const mg = g * (1 - amount) + B[1] * amount;
+        const mb = b * (1 - amount) + B[2] * amount;
+        const nl = 0.299 * mr + 0.587 * mg + 0.114 * mb;
+        const s = nl > 1 ? Math.max(0.4, Math.min(2.4, lum / nl)) : 1; // renormalise intensity
+        const cl = v => Math.max(0, Math.min(255, Math.round(v * s)));
+        return `rgb(${cl(mr)},${cl(mg)},${cl(mb)})`;
+    }
+
     function _drawJointTrails(pixelScale, isLeft, fn) {
         _trajHitPoints = [];  // rebuilt below; cleared so click-to-seek is fresh
         if (!trajMode || !trialData) return;
@@ -1144,6 +1170,22 @@ const manoViewer = (() => {
         };
 
         for (const { pt: getPt, color } of sources) {
+            // Closing half of the movement (thumb-index aperture decreasing)
+            // is drawn in a bluer shade of the model colour to distinguish it
+            // from the opening half; same intensity, so both read equally.
+            const closeColor = _blueShiftColor(color, 0.6);
+            const _aperture = (f) => {
+                const a = getPt(f, 4), b = getPt(f, 8);
+                if (!a || !b || !isFinite(a[0]) || !isFinite(b[0])) return null;
+                return Math.hypot(a[0] - b[0], a[1] - b[1]);
+            };
+            const _isClosing = (f) => {
+                let p = _aperture(f - 1), n = _aperture(f + 1);
+                if (p == null) p = _aperture(f);
+                if (n == null) n = _aperture(f);
+                if (p == null || n == null) return false;
+                return n < p; // aperture shrinking ⇒ closing
+            };
             for (const j of trajJoints) {
                 const pts = [];
                 for (let f = lo; f <= hi; f++) {
@@ -1157,10 +1199,12 @@ const manoViewer = (() => {
                     }
                     pts.push([x * pixelScale, y * pixelScale, f]);
                 }
-                // Polyline (break across gaps).
+                // Polyline (break across gaps).  Colour each segment by the
+                // movement direction at its later endpoint.
                 for (let k = 1; k < pts.length; k++) {
                     if (pts[k - 1] && pts[k]) {
-                        drawLine(pts[k - 1][0], pts[k - 1][1], pts[k][0], pts[k][1], color, 1.5, 0.8);
+                        const segCol = _isClosing(pts[k][2]) ? closeColor : color;
+                        drawLine(pts[k - 1][0], pts[k - 1][1], pts[k][0], pts[k][1], segCol, 1.5, 0.8);
                     }
                 }
                 // Dots at each sampled frame — event-aligned points are
@@ -1169,7 +1213,7 @@ const manoViewer = (() => {
                     if (!p) continue;
                     const et = _evTypeAtLocal(p[2]);
                     if (et) drawJoint(p[0], p[1], EVENT_COLORS[et], 3.4);
-                    else drawJoint(p[0], p[1], color, 1.3);
+                    else drawJoint(p[0], p[1], _isClosing(p[2]) ? closeColor : color, 1.3);
                     // Record for click-to-seek (x/y already in ctx-logical px).
                     _trajHitPoints.push({ x: p[0], y: p[1], f: p[2] });
                 }
@@ -1178,7 +1222,7 @@ const manoViewer = (() => {
                 if (cp && isFinite(cp[0]) && isFinite(cp[1])) {
                     const et = _evTypeAtLocal(fn);
                     drawJoint(cp[0] * pixelScale, cp[1] * pixelScale,
-                              et ? EVENT_COLORS[et] : color, et ? 4.2 : 3);
+                              et ? EVENT_COLORS[et] : (_isClosing(fn) ? closeColor : color), et ? 4.2 : 3);
                 }
             }
         }
