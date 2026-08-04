@@ -453,6 +453,9 @@ const manoViewer = (() => {
     let trajToClose = false;    // extend trail forward to the next Close event
     let trajCorrectCamera = false;
     let cameraTraj = null;   // {available, H_to_ref_L/R (N×9), n_frames, is_stereo, _trialIdx}
+    // Drawn trajectory points for click-to-seek: {x, y, f} in ctx-logical
+    // canvas coords (same space as the video canvas click handler's mx/my).
+    let _trajHitPoints = [];
     const heatmapCache = {};
     let _heatmapImageData = null; // pre-rendered ImageData for current frame
 
@@ -1055,6 +1058,7 @@ const manoViewer = (() => {
     }
 
     function _drawJointTrails(pixelScale, isLeft, fn) {
+        _trajHitPoints = [];  // rebuilt below; cleared so click-to-seek is fresh
         if (!trajMode || !trialData) return;
         if (trajJoints.size === 0) return;
         if (trajPre <= 0 && trajPost <= 0 && !trajFromOpen && !trajToClose) return;
@@ -1091,11 +1095,14 @@ const manoViewer = (() => {
         // Event alignment: a trail point whose (global) frame matches a saved
         // event is drawn larger and in that event's colour.
         const startFrame = (trials[currentTrialIdx] && trials[currentTrialIdx].start_frame) || 0;
+        // Only event types currently toggled on for the plot mark points.
         const evSets = {};
-        for (const t of EVENT_TYPES) evSets[t] = new Set((savedEvents && savedEvents[t]) || []);
+        for (const t of EVENT_TYPES) {
+            evSets[t] = showEvents[t] ? new Set((savedEvents && savedEvents[t]) || []) : null;
+        }
         const _evTypeAtLocal = (localF) => {
             const gf = localF + startFrame;
-            for (const t of EVENT_TYPES) if (evSets[t].has(gf)) return t;
+            for (const t of EVENT_TYPES) if (evSets[t] && evSets[t].has(gf)) return t;
             return null;
         };
 
@@ -1126,6 +1133,8 @@ const manoViewer = (() => {
                     const et = _evTypeAtLocal(p[2]);
                     if (et) drawJoint(p[0], p[1], EVENT_COLORS[et], 3.4);
                     else drawJoint(p[0], p[1], color, 1.3);
+                    // Record for click-to-seek (x/y already in ctx-logical px).
+                    _trajHitPoints.push({ x: p[0], y: p[1], f: p[2] });
                 }
                 // Emphasise the current-frame position.
                 const cp = getPt(fn, j);
@@ -4047,6 +4056,18 @@ const manoViewer = (() => {
             // Mouse position in image-pixel coords
             const mx = (e.clientX - rect.left - offsetX) / scale;
             const my = (e.clientY - rect.top  - offsetY) / scale;
+
+            // Click on a plotted trajectory point → jump to that point's frame.
+            if (trajMode && _trajHitPoints.length) {
+                let bp = null;
+                for (const hp of _trajHitPoints) {
+                    const d2 = (hp.x - mx) ** 2 + (hp.y - my) ** 2;
+                    if (!bp || d2 < bp.d2) bp = { f: hp.f, d2 };
+                }
+                const hitR = 14 / scale;  // ~14 screen px
+                if (bp && bp.d2 <= hitR * hitR) { goToFrame(bp.f); return; }
+            }
+
             const pixelScale = canvas.width / (cameraMode === 'stereo'
                 ? (currentSide === cameraNames[0] ? midline : vidW - midline) : vidW);
 
