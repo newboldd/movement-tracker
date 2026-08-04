@@ -3959,6 +3959,7 @@ const manoViewer = (() => {
                 update3D();
                 if (trackingZoom) applySnapProjection();
                 renderDistanceTrace();
+                _scrollDistToFrame(currentFrame, false);
             }
         } catch (e) {
             console.error('playLoop error:', e);
@@ -4319,13 +4320,22 @@ const manoViewer = (() => {
         const left = wrap.scrollLeft;
         const right = left + wrap.clientWidth;
         const MARGIN = 32;
+        const maxScroll = distCanvas.width - wrap.clientWidth;
         if (force) {
             wrap.scrollLeft = Math.max(0, x - wrap.clientWidth / 2);
+        } else if (playing) {
+            // Playback jump-scroll: once the playhead passes 90% of the
+            // visible width, snap the view so the current frame sits at the
+            // left edge (clamped near the trial end so we don't overscroll).
+            if (x >= left + 0.9 * wrap.clientWidth) {
+                wrap.scrollLeft = Math.min(x, maxScroll);
+            } else if (x < left) {
+                wrap.scrollLeft = Math.max(0, x);
+            }
         } else if (x < left + MARGIN) {
             wrap.scrollLeft = Math.max(0, x - MARGIN);
         } else if (x > right - MARGIN) {
-            wrap.scrollLeft = Math.min(distCanvas.width - wrap.clientWidth,
-                                        x - wrap.clientWidth + MARGIN);
+            wrap.scrollLeft = Math.min(maxScroll, x - wrap.clientWidth + MARGIN);
         }
     }
 
