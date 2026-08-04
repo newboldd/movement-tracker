@@ -1319,7 +1319,7 @@
                         style="position:absolute;left:0;bottom:-18px;font-size:9px;padding:1px 5px;cursor:pointer;background:var(--surface2);border:1px solid var(--border);color:var(--text-muted);border-radius:3px;line-height:1.4;z-index:3;"
                 ><span style="color:var(--text);font-weight:bold;">Pos</span><span style="opacity:0.35;margin:0 3px;">|</span><span>Vel</span></button>
                 <div id="distYAxisWrap" style="display:flex;align-items:center;flex-shrink:0;">
-                    <span id="yAxisLabel" style="writing-mode:vertical-rl;transform:rotate(180deg);font-size:10px;color:var(--text-muted);white-space:nowrap;padding:0 2px;">Distance (mm)</span>
+                    <span id="yAxisLabel" title="Click to toggle position / velocity" onclick="manoViewer.toggleSeriesMode()" style="writing-mode:vertical-rl;transform:rotate(180deg);font-size:10px;color:var(--text-muted);white-space:nowrap;padding:0 2px;cursor:pointer;user-select:none;">Distance (mm)</span>
                 </div>
                 <div id="distYRangeWrap" class="y-range-wrap" style="height:100%;margin-top:auto;">
                     <div class="y-track"></div>
@@ -1341,7 +1341,7 @@
                            orient="vertical" style="writing-mode:vertical-lr;direction:rtl;height:100%;">
                 </div>
                 <div id="angleYAxisWrap" style="visibility:hidden;display:flex;align-items:center;flex-shrink:0;">
-                    <span id="yAxisLabelAngle" style="writing-mode:vertical-rl;font-size:10px;color:var(--text-muted);white-space:nowrap;padding:0 2px;">Angle (°)</span>
+                    <span id="yAxisLabelAngle" title="Click to toggle position / velocity" onclick="manoViewer.toggleSeriesMode()" style="writing-mode:vertical-rl;font-size:10px;color:var(--text-muted);white-space:nowrap;padding:0 2px;cursor:pointer;user-select:none;">Angle (°)</span>
                 </div>
             </div>
         </div>
