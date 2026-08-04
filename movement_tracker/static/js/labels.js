@@ -6814,35 +6814,67 @@ const manoViewer = (() => {
             distCtx.stroke();
         }
 
-        // Saved-event markers — vertical lines colored by event type,
-        // gated on the four-segment Events toggle.  ``savedEvents``
-        // holds GLOBAL frame numbers; subtract trial.start_frame to
-        // get the local index that maps through ``toX``.
+        // Saved-event markers — diamonds sitting on the plotted curve,
+        // coloured by event type (same style as the Events page), gated on
+        // the Events toggle.  ``savedEvents`` holds GLOBAL frame numbers;
+        // subtract trial.start_frame for the local index used by ``toX``.
         if (savedEvents && currentTrialIdx >= 0 && trials[currentTrialIdx]) {
             const trial = trials[currentTrialIdx];
             const sf = trial.start_frame;
             const ef = trial.end_frame;
-            const padT_marker = 0;
-            const plotBottom = plotH;
+            // Anchor diamonds to the first plotted distance curve (else any
+            // plotted metric, else mid-plot).
+            let anchor = null, anchorAny = null;
+            for (const m in _plotMetricData) {
+                const info = _plotMetricData[m];
+                if (!anchorAny) anchorAny = info;
+                const ang = m.startsWith('Flex:') || m.startsWith('Abd:')
+                    || m.startsWith('Spread ') || m.startsWith('Knuckle:')
+                    || m.startsWith('MCP: Index-Pinky ');
+                if (!ang) { anchor = info; break; }
+            }
+            anchor = anchor || anchorAny;
+            const R = 5;
+            distCtx.globalAlpha = 1.0;
+            distCtx.setLineDash([]);
             for (const t of ['open', 'peak', 'close', 'pause']) {
                 if (!showEvents[t]) continue;
                 const frames = savedEvents[t];
                 if (!Array.isArray(frames) || !frames.length) continue;
-                distCtx.strokeStyle = EVENT_COLORS[t];
-                distCtx.lineWidth = 1;
-                distCtx.globalAlpha = 0.8;
-                distCtx.setLineDash([]);
+                const color = EVENT_COLORS[t];
                 for (const gf of frames) {
                     if (gf < sf || gf > ef) continue;
                     const lf = gf - sf;
                     const x = toX(lf);
+                    const dv = anchor && anchor.data ? anchor.data[lf] : null;
+                    const y = (dv != null && isFinite(dv))
+                        ? Math.max(R, Math.min(plotH - R, anchor.toY(dv)))
+                        : plotH * 0.5;
                     distCtx.beginPath();
-                    distCtx.moveTo(x, padT_marker);
-                    distCtx.lineTo(x, plotBottom);
+                    distCtx.moveTo(x, y - R);
+                    distCtx.lineTo(x + R, y);
+                    distCtx.lineTo(x, y + R);
+                    distCtx.lineTo(x - R, y);
+                    distCtx.closePath();
+                    distCtx.fillStyle = color;
+                    distCtx.fill();
+                    distCtx.strokeStyle = 'rgba(255,255,255,0.6)';
+                    distCtx.lineWidth = 1;
                     distCtx.stroke();
+                    // Highlight the current frame's marker.
+                    if (lf === currentFrame) {
+                        distCtx.beginPath();
+                        distCtx.moveTo(x, y - R - 3);
+                        distCtx.lineTo(x + R + 3, y);
+                        distCtx.lineTo(x, y + R + 3);
+                        distCtx.lineTo(x - R - 3, y);
+                        distCtx.closePath();
+                        distCtx.strokeStyle = 'white';
+                        distCtx.lineWidth = 1.5;
+                        distCtx.stroke();
+                    }
                 }
             }
-            distCtx.globalAlpha = 1.0;
         }
 
         _updatePlotValues();
