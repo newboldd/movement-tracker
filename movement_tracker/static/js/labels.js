@@ -6636,11 +6636,31 @@ const manoViewer = (() => {
                                           '#ff66cc', 'solid', toY, [4, 3]);
             }
 
-            // Store primary data for click hit-testing
-            const primary = (showSkelV2_2D || showSkelV2_3D) ? rawV2
-                          : (showLegacyV2_2D || showLegacyV2_3D) ? rawLegacy
-                          : (showMano2D || showMano3D) ? rawMano
-                          : (showMP2D || showMP3D) ? rawMp : rawVis;
+            // Store primary data for click hit-testing + event-marker
+            // anchoring.  Must match whichever distance curve is actually
+            // drawn so event diamonds sit on the visible line.  DLC /
+            // combined / cropped / reverse / static were previously
+            // excluded, which detached the markers whenever only one of
+            // those sources was shown.  Use the SAME masked arrays passed
+            // to drawSeries above so the anchor reproduces the exact pixel.
+            const _anchorCandidates = [
+                [showSkelV2_2D || showSkelV2_3D,     rawV2],
+                [showMP2D || showMP3D,               _applyMask(rawMp, mpMask)],
+                [showCombined2D || showCombined3D,   _applyMask(rawCombined, cmbMask)],
+                [showFiltered2D || showFiltered3D,   _applyMask(rawCombined, filMask)],
+                [showCropped2D || showCropped3D,     _applyMask(rawCropped, crpMask)],
+                [showReverse2D || showReverse3D,     _applyMask(rawReverse, revMask)],
+                [showStatic2D || showStatic3D,       _applyMask(rawStatic, sttMask)],
+                [showDLC || showDLC3D,               rawDlc],
+                [showLegacyV2_2D || showLegacyV2_3D, rawLegacy],
+                [showMano2D || showMano3D,           _applyMask(rawMano, manoMask)],
+                [showVision2D || showVision3D,       _applyMask(rawVis, visMask)],
+            ];
+            let primary = null;
+            for (const [shown, data] of _anchorCandidates) {
+                if (shown && data) { primary = data; break; }
+            }
+            if (!primary) primary = rawVis;
             if (primary) _plotMetricData[metric] = { data: primary, toY };
         }
 
