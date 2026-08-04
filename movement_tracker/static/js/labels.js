@@ -831,7 +831,7 @@ const manoViewer = (() => {
 
     // Three.js
     let scene, camera3d, renderer;
-    let manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, filteredGroup, stereoFillGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup;
+    let manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, filteredGroup, stereoFillGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup, trajGroup;
     let camera3dInit = false;
 
     // Scene-space orbit: rotate content around hand center while camera stays fixed
@@ -996,6 +996,33 @@ const manoViewer = (() => {
                     color: '#ff4081', name: 'DLC',
                 });
             }
+        }
+        return out;
+    }
+
+    // 3D counterpart of _trajSelectedSources: every model currently shown in
+    // 3D, each as its (n_frames × 21 × 3) joints array + isMano flag + colour.
+    // DLC is special (only thumb=4 / index=8 tips, stored as separate arrays).
+    function _trajSelectedSources3D() {
+        if (!trialData) return [];
+        const S = trialData;
+        const out = [];
+        const add = (on, arr, isMano, color, name) => {
+            if (on && arr && arr.length) out.push({ arr, isMano, color, name, dlc: false });
+        };
+        add(showMano3D,       S.skeleton_joints_3d,    true,  'lime',    'Skeleton v1');
+        add(showSkelV2_3D,    S.skel_v2_joints_3d,     true,  '#ffca28', 'Skeleton v3');
+        add(showLegacyV2_3D,  S.skel_legacy_joints_3d, true,  '#e040fb', 'Skeleton v2');
+        add(showMP3D,         S.mp_joints_3d,          false, '#00cccc', 'MediaPipe');
+        add(showReverse3D,    S.reverse_joints_3d,     false, '#c774f0', 'Reverse');
+        add(showCropped3D,    S.cropped_joints_3d,     false, '#7cb342', 'Cropped');
+        add(showStatic3D,     S.static_joints_3d,      false, '#26c6da', 'Static');
+        add(showCombined3D,   S.combined_joints_3d,    false, '#ffa726', 'Combined');
+        add(showVision3D,     S.vision_joints_3d,      false, '#42a5f5', 'Vision');
+        add(showFiltered3D,   S.combined_joints_3d,    false, '#fff176', 'Filtered');
+        add(showStereoFill3D, S.stereo_fill_joints_3d, false, '#80deea', 'Stereo Fill');
+        if (showDLC3D && (S.dlc_3d_thumb?.length || S.dlc_3d_index?.length)) {
+            out.push({ dlc: true, color: '#ff4081', name: 'DLC' });
         }
         return out;
     }
@@ -2677,6 +2704,9 @@ const manoViewer = (() => {
         });
 
         // ── Trajectory controls ───────────────────────────────
+        // Refresh both the 2D canvas and the 3D scene (the trail is drawn in
+        // both when a model is shown in the corresponding view).
+        const _refreshTraj = () => { render(); update3D(); };
         $('trajToggleBtn')?.addEventListener('click', () => {
             trajMode = !trajMode;
             $('trajToggleBtn').classList.toggle('active', trajMode);
@@ -2686,34 +2716,34 @@ const manoViewer = (() => {
             if (trajMode && trajJoints.size === 0) trajJoints.add(8);
             _updateTrajHighlight();
             if (trajMode) _ensureCameraTraj(); else _updateTrajCorrectAvail();
-            render();
+            _refreshTraj();
         });
         const _trajPreS = $('trajPreSlider');
         if (_trajPreS) _trajPreS.addEventListener('input', e => {
             trajPre = parseInt(e.target.value);
             $('trajPreVal').textContent = trajPre;
-            render();
+            _refreshTraj();
         });
         const _trajPostS = $('trajPostSlider');
         if (_trajPostS) _trajPostS.addEventListener('input', e => {
             trajPost = parseInt(e.target.value);
             $('trajPostVal').textContent = trajPost;
-            render();
+            _refreshTraj();
         });
         $('trajCorrectCamera')?.addEventListener('change', e => {
             trajCorrectCamera = e.target.checked;
             if (trajCorrectCamera) _ensureCameraTraj();
-            render();
+            _refreshTraj();
         });
         $('trajFromOpen')?.addEventListener('change', e => {
             trajFromOpen = e.target.checked;
             _updateTrajSliderAvail();
-            render();
+            _refreshTraj();
         });
         $('trajToClose')?.addEventListener('change', e => {
             trajToClose = e.target.checked;
             _updateTrajSliderAvail();
-            render();
+            _refreshTraj();
         });
 
         // ── Events editing controls ───────────────────────────
@@ -2782,6 +2812,7 @@ const manoViewer = (() => {
                     }
                     _updateTrajHighlight();
                     render();
+                    update3D();
                     return;
                 }
                 if (!_trialHasHeatmaps()) return;  // no data → no-op
@@ -7075,7 +7106,8 @@ const manoViewer = (() => {
         poseGroup = new THREE.Group();
         heatmapGroup = new THREE.Group();
         angleArcGroup = new THREE.Group();
-        scene.add(manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, filteredGroup, stereoFillGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup);
+        trajGroup = new THREE.Group();
+        scene.add(manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, filteredGroup, stereoFillGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup, trajGroup);
 
         renderer.render(scene, camera3d);
 
@@ -7375,7 +7407,7 @@ const manoViewer = (() => {
         let arcSrcKey = null;
 
         // Clear groups
-        [manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, filteredGroup, stereoFillGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup].forEach(g => {
+        [manoGroup, skelV2Group, legacyGroup, mpGroup, croppedGroup, reverseGroup, staticGroup, combinedGroup, filteredGroup, stereoFillGroup, visionGroup, dlcGroup, poseGroup, heatmapGroup, angleArcGroup, trajGroup].forEach(g => {
             while (g.children.length) {
                 const child = g.children[0];
                 g.remove(child);
@@ -7411,7 +7443,7 @@ const manoViewer = (() => {
         const R_cam = trialData?.calib?.R;
         const T_cam = trialData?.calib?.T;
 
-        const getScenePos = (pts3d, j, isMano, override2dFrame) => {
+        const getScenePos = (pts3d, j, isMano, override2dFrame, anchorFrame) => {
             // For Skeleton joints, use raw 3D positions (they have their own fitting),
             // UNLESS an explicit per-stage 2D anchor is provided — then snap the
             // sphere to that 2D pixel using the same depth-from-3D math we use
@@ -7420,8 +7452,10 @@ const manoViewer = (() => {
             const anchor = override2dFrame?.[j];
             if (isMano && !anchor) return toScene(pts3d[j]);
 
-            // 2D pixel + triangulated depth → 3D scene position
-            const u_v = anchor || mp2d_cam?.[fn]?.[j];
+            // 2D pixel + triangulated depth → 3D scene position.  anchorFrame
+            // lets callers (e.g. the 3D trajectory) request a frame other than
+            // the current one; defaults to fn.
+            const u_v = anchor || mp2d_cam?.[anchorFrame ?? fn]?.[j];
             if (K_cam && u_v && pts3d[j]) {
                 const cfx = K_cam[0][0], cfy = K_cam[1][1];
                 const ccx = K_cam[0][2], ccy = K_cam[1][2];
@@ -8386,6 +8420,112 @@ const manoViewer = (() => {
         stereoFillGroup.visible = showStereoFill3D;
         visionGroup.visible = showVision3D;
         dlcGroup.visible = showDLC3D;
+
+        // ── 3D joint-motion trajectory ───────────────────────────────────
+        // Mirror the 2D trail (_drawJointTrails): for every model shown in 3D,
+        // draw the selected joint(s) motion path across [lo..hi] as a polyline
+        // + dots, with event-aligned points enlarged/coloured.  Uses the same
+        // scene-position transform (getScenePos/orbitPt) as the model spheres
+        // so the trail sits on the joints.  (Camera-motion correction is a 2D
+        // homography and doesn't apply here.)
+        if (trajMode && trajGroup && trajJoints.size &&
+            (trajPre > 0 || trajPost > 0 || trajFromOpen || trajToClose)) {
+            const Nf = trialData.n_frames || 0;
+            const sources3d = _trajSelectedSources3D();
+            if (Nf > 0 && sources3d.length) {
+                // Frame range — identical rule to the 2D trail.
+                let lo = fn - trajPre;
+                if (trajFromOpen) { const b = _trajEventBound(['open', 'close'], fn, true); lo = (b != null) ? b : 0; }
+                let hi = fn + trajPost;
+                if (trajToClose) { const c = _trajEventBound('close', fn, false); hi = (c != null) ? c : (Nf - 1); }
+                lo = Math.max(0, Math.min(lo, fn));
+                hi = Math.min(Nf - 1, Math.max(hi, fn));
+
+                // Event alignment (only types toggled on for the plot).
+                const startFrame = (trials[currentTrialIdx] && trials[currentTrialIdx].start_frame) || 0;
+                const evSets = {};
+                for (const t of EVENT_TYPES) evSets[t] = showEvents[t] ? new Set((savedEvents && savedEvents[t]) || []) : null;
+                const _evTypeAtLocal = (localF) => {
+                    const gf = localF + startFrame;
+                    for (const t of EVENT_TYPES) if (evSets[t] && evSets[t].has(gf)) return t;
+                    return null;
+                };
+
+                // DLC per-frame unproject (2D pixel + triangulated depth), same
+                // math as the DLC model block above.
+                const dlcT = isLeftCam ? 'dlc_thumb_OS' : 'dlc_thumb_OD';
+                const dlcI = isLeftCam ? 'dlc_index_OS' : 'dlc_index_OD';
+                const _dlcPos = (pt2d, pt3d) => {
+                    if (!pt3d) return null;
+                    if (!pt2d || !K_cam) return toScene(pt3d);
+                    const cfx = K_cam[0][0], cfy = K_cam[1][1], ccx = K_cam[0][2], ccy = K_cam[1][2];
+                    let X = pt3d[0], Y = pt3d[1], Z = pt3d[2], camZ;
+                    if (!isLeftCam && R_cam && T_cam) camZ = R_cam[2][0]*X + R_cam[2][1]*Y + R_cam[2][2]*Z + T_cam[2];
+                    else camZ = Z;
+                    if (camZ <= 0) return toScene(pt3d);
+                    const camX = (pt2d[0] - ccx) * camZ / cfx, camY = (pt2d[1] - ccy) * camZ / cfy;
+                    if (!isLeftCam && R_cam && T_cam) {
+                        const dx = camX - T_cam[0], dy = camY - T_cam[1], dz = camZ - T_cam[2];
+                        return new THREE.Vector3(
+                            R_cam[0][0]*dx + R_cam[1][0]*dy + R_cam[2][0]*dz,
+                            -(R_cam[0][1]*dx + R_cam[1][1]*dy + R_cam[2][1]*dz),
+                            -(R_cam[0][2]*dx + R_cam[1][2]*dy + R_cam[2][2]*dz));
+                    }
+                    return new THREE.Vector3(camX, -camY, -camZ);
+                };
+                const _srcPos = (src, f, j) => {
+                    if (src.dlc) {
+                        if (j === 4) { const p = _dlcPos(trialData[dlcT]?.[f], trialData.dlc_3d_thumb?.[f]); return p ? orbitPt(p) : null; }
+                        if (j === 8) { const p = _dlcPos(trialData[dlcI]?.[f], trialData.dlc_3d_index?.[f]); return p ? orbitPt(p) : null; }
+                        return null;
+                    }
+                    const fr = src.arr?.[f];
+                    if (!fr || !fr[j]) return null;
+                    return orbitPt(getScenePos(fr, j, src.isMano, null, f));
+                };
+
+                const dotGeom = new THREE.SphereGeometry(1.6, 8, 6);
+                const evGeom  = new THREE.SphereGeometry(3.0, 10, 8);
+                const curGeom = new THREE.SphereGeometry(3.6, 12, 8);
+                for (const src of sources3d) {
+                    const col = new THREE.Color(src.color);
+                    const lineMat = new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.85 });
+                    for (const j of trajJoints) {
+                        if (src.dlc && j !== 4 && j !== 8) continue;
+                        const seq = [];
+                        for (let f = lo; f <= hi; f++) {
+                            const p = _srcPos(src, f, j);
+                            seq.push(p ? { p, f } : null);
+                        }
+                        // Polyline (break across gaps).
+                        for (let k = 1; k < seq.length; k++) {
+                            if (seq[k - 1] && seq[k]) {
+                                const g = new THREE.BufferGeometry().setFromPoints([seq[k - 1].p, seq[k].p]);
+                                trajGroup.add(new THREE.Line(g, lineMat));
+                            }
+                        }
+                        // Dots — event-aligned points larger + event-coloured.
+                        for (const e of seq) {
+                            if (!e) continue;
+                            const et = _evTypeAtLocal(e.f);
+                            const mat = new THREE.MeshBasicMaterial({ color: et ? new THREE.Color(EVENT_COLORS[et]) : col });
+                            const s = new THREE.Mesh(et ? evGeom : dotGeom, mat);
+                            s.position.copy(e.p);
+                            trajGroup.add(s);
+                        }
+                        // Current-frame emphasis.
+                        const cp = _srcPos(src, fn, j);
+                        if (cp) {
+                            const et = _evTypeAtLocal(fn);
+                            const mat = new THREE.MeshBasicMaterial({ color: et ? new THREE.Color(EVENT_COLORS[et]) : col });
+                            const s = new THREE.Mesh(curGeom, mat);
+                            s.position.copy(cp);
+                            trajGroup.add(s);
+                        }
+                    }
+                }
+            }
+        }
 
         // Apply per-model translations
         manoGroup.position.copy(modelTranslations.skeleton);
