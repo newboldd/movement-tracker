@@ -62,7 +62,11 @@ const manoViewer = (() => {
     let cameraMode = 'stereo'; // 'single', 'stereo', or 'multicam'
     let playing = false;
     let playTimer = null;
+    let _manualPlayTimer = null;  // setInterval id for sub-native-rate playback
     let playbackRate = 1;
+    // Browsers won't play a <video> below ~0.0625×; slower presets are
+    // driven by a manual frame-stepping timer instead (like the Events page).
+    const NATIVE_MIN_RATE = 0.0625;
     let _seekGeneration = 0; // incremented on each seek/play to invalidate stale seeked callbacks
     // Matches the Events page presets (adds slow-motion 0.01–0.05 options).
     const SPEED_PRESETS = [0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1, 2, 4, 16, 60];
@@ -2139,8 +2143,13 @@ const manoViewer = (() => {
         speedSlider.addEventListener('input', () => {
             playbackRate = SPEED_PRESETS[parseInt(speedSlider.value)];
             $('speedDisplay').textContent = playbackRate + 'x';
-            // Always update the video element rate (works during playback)
-            videoEl.playbackRate = Math.min(playbackRate, 16);
+            if (playing) {
+                // Re-select the engine (native vs manual stepper) and pick up
+                // the new interval/rate immediately.
+                _beginPlayback();
+            } else {
+                videoEl.playbackRate = Math.min(playbackRate, 16);
+            }
         });
         speedSlider.addEventListener('change', () => {
             speedSlider.blur();
@@ -3877,6 +3886,7 @@ const manoViewer = (() => {
                      && 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
 
     function _cancelPlayTimer() {
+        if (_manualPlayTimer) { clearInterval(_manualPlayTimer); _manualPlayTimer = null; }
         if (!playTimer) return;
         if (_hasRVFC && videoEl) {
             try { videoEl.cancelVideoFrameCallback(playTimer); } catch {}
@@ -3912,13 +3922,52 @@ const manoViewer = (() => {
             playing = true;
             _seekGeneration++;
             $('playBtn').innerHTML = '&#9646;&#9646;';
-            // Ensure video position matches currentFrame before playing
-            const fps = trialData?.fps || 30;
-            videoEl.currentTime = (currentFrame + 0.5) / fps;
+            _beginPlayback();
+        }
+    }
+
+    // Start (or restart) the playback engine for the current playbackRate.
+    // Fast enough → native <video> playback driven by rVFC/rAF.  Below the
+    // browser's minimum playable rate → a manual setInterval frame-stepper.
+    function _beginPlayback() {
+        if (!playing || !videoEl) return;
+        _cancelPlayTimer();
+        const fps = trialData?.fps || 30;
+        videoEl.currentTime = (currentFrame + 0.5) / fps;
+        if (playbackRate < NATIVE_MIN_RATE) {
+            videoEl.pause();
+            const interval = Math.max(16, 1000 / (fps * playbackRate));
+            _manualPlayTimer = setInterval(_manualStep, interval);
+        } else {
             videoEl.playbackRate = Math.min(playbackRate, 16);
             videoEl.play().catch(() => { playing = false; $('playBtn').innerHTML = '&#9654;'; });
             _schedulePlayLoop();
         }
+    }
+
+    // One tick of the manual (sub-native-rate) stepper: advance a single
+    // frame, seek the video, and redraw once the seek lands.
+    function _manualStep() {
+        if (!playing) return;
+        const nFrames = trialData?.n_frames || 1;
+        const next = currentFrame + 1;
+        if (next >= nFrames) { togglePlay(); return; }
+        currentFrame = next;
+        $('frameDisplay').textContent = currentFrame;
+        if (trackingZoom) _applyTrackingZoom(currentFrame);
+        const fps = trialData?.fps || 30;
+        _seekGeneration++;
+        const gen = _seekGeneration;
+        if (videoEl && fps) {
+            videoEl.currentTime = (currentFrame + 0.5) / fps;
+            videoEl.addEventListener('seeked', () => {
+                if (gen !== _seekGeneration || !playing) return;
+                render(); update3D();
+                if (trackingZoom) applySnapProjection();
+            }, { once: true });
+        }
+        renderDistanceTrace();
+        _scrollDistToFrame(currentFrame, false);
     }
 
     function _schedulePlayLoop() {
@@ -6009,6 +6058,11 @@ const manoViewer = (() => {
         // Compute Y range across all selected metrics and enabled sources
         let distDataMin = Infinity, distDataMax = -Infinity;
         let angDataMin = Infinity, angDataMax = -Infinity;
+        // In velocity mode the min/max is dominated by rare single-frame
+        // tracking spikes, so also collect the values to derive a robust
+        // (percentile) axis range below.
+        const _collectVel = seriesMode === 'velocity';
+        const distVals = [], angVals = [];
         for (const [metric] of selectedMetrics) {
             const isAng = metric.startsWith('Flex:') || metric.startsWith('Abd:') || metric.startsWith('Spread ') || metric.startsWith('Knuckle:') || metric.startsWith('MCP: Index-Pinky ');
             const skeleton = _getMetricData('skeleton', metric);
@@ -6026,8 +6080,8 @@ const manoViewer = (() => {
                 if (!arr) return;
                 for (const v of arr) {
                     if (v == null) continue;
-                    if (isA) { angDataMin = Math.min(angDataMin, v); angDataMax = Math.max(angDataMax, v); }
-                    else     { distDataMin = Math.min(distDataMin, v); distDataMax = Math.max(distDataMax, v); }
+                    if (isA) { angDataMin = Math.min(angDataMin, v); angDataMax = Math.max(angDataMax, v); if (_collectVel && isFinite(v)) angVals.push(v); }
+                    else     { distDataMin = Math.min(distDataMin, v); distDataMax = Math.max(distDataMax, v); if (_collectVel && isFinite(v)) distVals.push(v); }
                 }
             };
             if (showMano2D || showMano3D) chk(skeleton, isAng);
@@ -6048,8 +6102,10 @@ const manoViewer = (() => {
             if (showStereoHun2D || showStereoHun3D) chk(_getMetricData('hrnet_hungarian', metric), isAng);
         }
 
-        // Auto-fit Y ranges only when the plotted metrics change
-        const autoFitKey = [...selectedMetrics.keys()].sort().join('|');
+        // Auto-fit Y ranges when the plotted metrics change OR the series
+        // mode flips (position ↔ velocity), since velocity spans a totally
+        // different range (and goes negative) than distance/angle.
+        const autoFitKey = seriesMode + '::' + [...selectedMetrics.keys()].sort().join('|');
         const dMinSl = $('distYMinSlider'), dMaxSl = $('distYMaxSlider');
         const aMinSl = $('angleYMinSlider'), aMaxSl = $('angleYMaxSlider');
 
@@ -6060,12 +6116,55 @@ const manoViewer = (() => {
                 const pad = Math.max((dMax - dMin) * 0.1, 5);
                 return [Math.floor(dMin - pad), Math.ceil(dMax + pad)];
             }
-            const [adMin, adMax] = _autoRange(distDataMin, distDataMax, 0, 200);
-            const [aaMin, aaMax] = _autoRange(angDataMin, angDataMax, -150, 50);
-            if (dMinSl) dMinSl.value = adMin;
-            if (dMaxSl) dMaxSl.value = adMax;
-            if (aMinSl) aMinSl.value = aaMin;
-            if (aMaxSl) aMaxSl.value = aaMax;
+            const isVel = seriesMode === 'velocity';
+            if (isVel) {
+                // Velocity spans a totally different (and signed) range than
+                // distance/angle, and the static 0–200 HTML slider bounds
+                // would clamp it.  Widen the min/max slider PAIR to a
+                // data-driven range with head-room to drag past, then set
+                // the auto-fit values (now unclamped).
+                const _fitVel = (loSl, hiSl, lo, hi) => {
+                    const span = Math.max(hi - lo, 1);
+                    const bLo = Math.floor(lo - span * 0.5);
+                    const bHi = Math.ceil(hi + span * 0.5);
+                    for (const sl of [loSl, hiSl]) {
+                        if (!sl) continue;
+                        sl.min = String(bLo);
+                        sl.max = String(bHi);
+                    }
+                    if (loSl) loSl.value = lo;
+                    if (hiSl) hiSl.value = hi;
+                };
+                // Robust symmetric range: 98th-percentile of |velocity|,
+                // so the axis frames the real signal and clips rare spikes.
+                const _velRange = (vals, fb) => {
+                    if (!vals.length) return [-fb, fb];
+                    const abs = vals.map(Math.abs).sort((a, b) => a - b);
+                    const p = abs[Math.min(abs.length - 1, Math.floor(abs.length * 0.98))];
+                    const M = Math.max(Math.ceil(p * 1.15), 5);
+                    return [-M, M];
+                };
+                const [adMin, adMax] = _velRange(distVals, 50);
+                const [aaMin, aaMax] = _velRange(angVals, 50);
+                _fitVel(dMinSl, dMaxSl, adMin, adMax);
+                _fitVel(aMinSl, aMaxSl, aaMin, aaMax);
+            } else {
+                // Position/angle mode: keep the original behaviour that the
+                // user relies on — the static 0–200 (dist) / ±200 (angle)
+                // slider bounds intentionally clamp MediaPipe outlier spikes,
+                // giving a clean fixed window.  Restore those bounds (velocity
+                // mode may have widened them) and set the clamped values.
+                if (dMinSl) { dMinSl.min = '0';    dMinSl.max = '200'; }
+                if (dMaxSl) { dMaxSl.min = '-200'; dMaxSl.max = '200'; }
+                if (aMinSl) { aMinSl.min = '-200'; aMinSl.max = '200'; }
+                if (aMaxSl) { aMaxSl.min = '-200'; aMaxSl.max = '200'; }
+                const [adMin, adMax] = _autoRange(distDataMin, distDataMax, 0, 200);
+                const [aaMin, aaMax] = _autoRange(angDataMin, angDataMax, -150, 50);
+                if (dMinSl) dMinSl.value = adMin;
+                if (dMaxSl) dMaxSl.value = adMax;
+                if (aMinSl) aMinSl.value = aaMin;
+                if (aMaxSl) aMaxSl.value = aaMax;
+            }
         }
 
         const distYMin = parseInt(dMinSl?.value ?? '-200');
@@ -6803,28 +6902,34 @@ const manoViewer = (() => {
         // Update Y-axis sidebar labels — distance label left, angle label right
         const yLabel = $('yAxisLabel');
         if (yLabel) yLabel.textContent = (seriesMode === 'velocity')
-            ? 'Distance (mm/s)' : 'Distance (mm)';
+            ? 'Velocity (mm/s)' : 'Distance (mm)';
         const yLabelA = $('yAxisLabelAngle');
         if (yLabelA) yLabelA.textContent = (seriesMode === 'velocity')
-            ? 'Angle (°/s)' : 'Angle (°)';
+            ? 'Angular Velocity (°/s)' : 'Angle (°)';
         const distYAxisWrap = $('distYAxisWrap');
         if (distYAxisWrap) distYAxisWrap.style.visibility = hasDist ? 'visible' : 'hidden';
 
-        // X-axis tick labels (seconds)
+        // X-axis tick labels (seconds).  Tick density follows the current
+        // horizontal zoom: pick the smallest interval whose on-screen
+        // spacing stays above ~55px, so zooming in reveals finer ticks
+        // (down to 0.1s) and zooming out coarsens them.
         const fps = trialData.fps || 30;
         const totalSec = N / fps;
-        // Choose tick interval: 1s, 2s, 5s, 10s, 30s, 60s...
-        const intervals = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];
-        let tickStep = 1;
+        const pxPerSec = totalSec > 0 ? w / totalSec : 0;
+        const minTickPx = 55;
+        const intervals = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];
+        let tickStep = intervals[intervals.length - 1];
         for (const iv of intervals) {
-            if (totalSec / iv <= 10) { tickStep = iv; break; }
+            if (iv * pxPerSec >= minTickPx) { tickStep = iv; break; }
         }
+        const tickDec = tickStep < 1 ? 1 : 0;
         distCtx.fillStyle = '#666';
         distCtx.font = '9px monospace';
         distCtx.textAlign = 'center';
-        for (let t = 0; t <= totalSec; t += tickStep) {
+        for (let k = 0; k * tickStep <= totalSec + 1e-9; k++) {
+            const t = k * tickStep;
             const x = toX(Math.round(t * fps));
-            distCtx.fillText(t % 1 === 0 ? t.toFixed(0) + 's' : t.toFixed(1) + 's', x, plotH + 12);
+            distCtx.fillText((t % 1 === 0 ? t.toFixed(0) : t.toFixed(tickDec)) + 's', x, plotH + 12);
             // Small tick mark
             distCtx.strokeStyle = '#444';
             distCtx.lineWidth = 1;
