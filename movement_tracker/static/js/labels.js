@@ -1036,9 +1036,10 @@ const manoViewer = (() => {
         dim('trajPostSlider', trajToClose); dim('trajPostVal', trajToClose); dim('trajPostLabel', trajToClose);
     }
 
-    // Nearest event of `type` at/before (before=true) or at/after the given
-    // local frame, within the current trial.  Returns a LOCAL frame or null.
-    function _trajEventBound(type, localF, before) {
+    // Nearest event of `types` (string or array) at/before (before=true) or
+    // at/after the given local frame, within the current trial.  Returns a
+    // LOCAL frame or null.
+    function _trajEventBound(types, localF, before) {
         _ensureSavedEvents();
         const tr = trials[currentTrialIdx];
         const start = tr ? (tr.start_frame || 0) : 0;
@@ -1046,12 +1047,15 @@ const manoViewer = (() => {
             ? tr.end_frame
             : start + ((trialData && trialData.n_frames ? trialData.n_frames : 0) - 1);
         const gf = localF + start;
+        const list = Array.isArray(types) ? types : [types];
         let best = null;
-        for (const g of (savedEvents[type] || [])) {
-            if (before) {
-                if (g >= start && g <= gf && (best === null || g > best)) best = g;
-            } else {
-                if (g <= end && g >= gf && (best === null || g < best)) best = g;
+        for (const type of list) {
+            for (const g of (savedEvents[type] || [])) {
+                if (before) {
+                    if (g >= start && g <= gf && (best === null || g > best)) best = g;
+                } else {
+                    if (g <= end && g >= gf && (best === null || g < best)) best = g;
+                }
             }
         }
         return best === null ? null : best - start;
@@ -1068,17 +1072,19 @@ const manoViewer = (() => {
         // model's own marker colour.  No selected model → nothing to draw.
         const sources = _trajSelectedSources(isLeft);
         if (!sources.length) return;
-        // Backward bound: last Open event ("from Open") else trajPre frames.
-        // Forward bound: next Close event ("to Close") else trajPost frames.
+        // Backward bound ("from Open"): the most recent movement boundary —
+        // last Open OR Close at/before the current frame (so we don't plot
+        // back into the previous movement) — else the trial start.
+        // Forward bound ("to Close"): next Close at/after — else the trial end.
         let lo = fn - trajPre;
         if (trajFromOpen) {
-            const o = _trajEventBound('open', fn, true);
-            lo = (o != null) ? o : fn;
+            const b = _trajEventBound(['open', 'close'], fn, true);
+            lo = (b != null) ? b : 0;
         }
         let hi = fn + trajPost;
         if (trajToClose) {
             const c = _trajEventBound('close', fn, false);
-            hi = (c != null) ? c : fn;
+            hi = (c != null) ? c : (N - 1);
         }
         lo = Math.max(0, Math.min(lo, fn));
         hi = Math.min(N - 1, Math.max(hi, fn));
