@@ -430,12 +430,136 @@ def _compute_velocity(dist: list, fps: float, half_win: int = 2) -> list:
     return vel
 
 
+def _tortuosity(points: list) -> float | None:
+    """Tortuosity of a sampled path: total path length / net displacement.
+
+    ``points`` is an ordered sequence of scalars (1-D distance trace) or
+    coordinates ([x, y] / [x, y, z]).  ``None`` / NaN entries (missing
+    frames) are skipped, bridging the gap with a straight segment so the
+    path never shrinks below the displacement.  Returns None when fewer
+    than 3 valid samples remain or the endpoints (nearly) coincide — a
+    ~zero displacement would blow the ratio up toward infinity.
+    """
+    pts = []
+    for p in points:
+        if p is None:
+            continue
+        arr = np.atleast_1d(np.asarray(p, dtype=float))
+        if np.any(np.isnan(arr)):
+            continue
+        pts.append(arr)
+    if len(pts) < 3:
+        return None
+    path = 0.0
+    for a, b in zip(pts, pts[1:]):
+        path += float(np.linalg.norm(b - a))
+    disp = float(np.linalg.norm(pts[-1] - pts[0]))
+    if disp < 1e-9:
+        return None
+    return round(path / disp, 4)
+
+
+def _load_index_tip_data(subject_name: str, source: str,
+                         trials: list[dict], n_frames: int):
+    """Per-frame index-fingertip trajectories for the tortuosity metrics.
+
+    Returns (tip2d_cams, tip3d):
+      tip2d_cams: per-camera lists of [x, y] | None across all frames
+        (camera-half pixel space) — empty when the source has no
+        per-camera 2-D data (skeleton fits).
+      tip3d: [x, y, z] | None across all frames, or None — triangulated
+        from the two cameras (or read straight from skeleton joints_3d).
+
+    Matches the distance source so all three tortuosity bases describe
+    the same underlying model.
+    """
+    try:
+        data = None
+        if source == "corrections":
+            from ..services.dlc_predictions import get_dlc_predictions_for_stage
+            data = get_dlc_predictions_for_stage(subject_name, "corrections")
+        elif source == "dlc":
+            data = get_dlc_predictions_for_session(subject_name)
+        elif source == "mp_combined":
+            data = get_mediapipe_for_session(subject_name, prefer_combined=True)
+        elif source in ("mediapipe", "mp_forward"):
+            data = get_mediapipe_for_session(subject_name)
+        elif source in ("skeleton_v1", "skeleton_v2", "skeleton_v3"):
+            # 3-D straight from the fitted skeleton; no per-camera 2-D.
+            _NPZ_MAP = {"skeleton_v1": "skeleton_v1.npz",
+                        "skeleton_v2": "skeleton_v2.npz",
+                        "skeleton_v3": "skeleton_v3.npz"}
+            from ..services.skeleton_data import _skeleton_dir
+            skeleton_root = _skeleton_dir(subject_name)
+            tip = [None] * n_frames
+            found = False
+            for t in trials:
+                npz_path = skeleton_root / t["trial_name"] / _NPZ_MAP[source]
+                if not npz_path.exists():
+                    continue
+                d = np.load(str(npz_path), allow_pickle=True)
+                j3d = d.get("joints_3d")
+                if j3d is None:
+                    continue
+                for i in range(j3d.shape[0]):
+                    gi = t["start_frame"] + i
+                    if gi < n_frames and not np.any(np.isnan(j3d[i, 8])):
+                        tip[gi] = [float(v) for v in j3d[i, 8]]
+                        found = True
+            return [], (tip if found else None)
+
+        if not data:
+            return [], None
+        settings = get_settings()
+        cam_arrays = []
+        for cam in settings.camera_names:
+            idx = (data.get(cam) or {}).get("index")
+            if idx and any(p is not None for p in idx):
+                arr = list(idx[:n_frames]) + [None] * max(0, n_frames - len(idx))
+                cam_arrays.append(arr)
+            else:
+                cam_arrays.append(None)
+        tip2d_cams = [a for a in cam_arrays if a is not None]
+
+        # 3-D: triangulate the two cameras' tips when calibration exists.
+        tip3d = None
+        if len(cam_arrays) >= 2 and cam_arrays[0] and cam_arrays[1]:
+            from ..services.calibration import (get_calibration_for_subject,
+                                                 triangulate_points)
+            calib = get_calibration_for_subject(subject_name)
+            if calib is not None:
+                def _np2(a):
+                    out = np.full((n_frames, 2), np.nan)
+                    for i, p in enumerate(a):
+                        if p is not None:
+                            out[i] = p
+                    return out
+                p3 = triangulate_points(_np2(cam_arrays[0]),
+                                        _np2(cam_arrays[1]), calib)
+                tip3d = [([float(v) for v in p3[i]]
+                          if not np.any(np.isnan(p3[i])) else None)
+                         for i in range(n_frames)]
+                if not any(p is not None for p in tip3d):
+                    tip3d = None
+        return tip2d_cams, tip3d
+    except Exception:
+        logger.exception("index-tip trajectory load failed for %s/%s",
+                         subject_name, source)
+        return [], None
+
+
 def _build_movement_params(
     distances: list,
     events: dict,
     trials: list[dict],
+    tip_data: dict | None = None,
 ) -> tuple[list[dict], list[str]]:
     """Compute per-movement parameters from events + distance trace.
+
+    ``tip_data`` (optional): {"tip2d": [per-camera tip lists], "tip3d":
+    tip list} from _load_index_tip_data — enables the trajectory-based
+    tortuosity metrics.  The distance-trace tortuosity needs only
+    ``distances`` and is always computed.
 
     Returns (movements_list, trial_names).
     """
@@ -619,6 +743,35 @@ def _build_movement_params(
         if peak_open_vel is not None and amplitude is not None:
             power = round(peak_open_vel * amplitude, 2)
 
+        # Tortuosity (path length / net displacement) per phase and per
+        # calculation basis: the 1-D thumb–index distance trace, the 2-D
+        # index-tip trajectory (tortuosity per camera, then mean across
+        # cameras), and the triangulated 3-D index-tip trajectory.
+        # Phases: opening = open→peak, closing = peak→close, avg = mean
+        # of the two phase values (needs both).
+        tip2d_cams = (tip_data or {}).get("tip2d") or []
+        tip3d = (tip_data or {}).get("tip3d")
+
+        def _phase_tort(seq, lo, hi):
+            if seq is None or lo is None or hi is None or hi <= lo:
+                return None
+            return _tortuosity(seq[lo:hi + 1])
+
+        def _cams_tort(lo, hi):
+            vals = [t for t in (_phase_tort(c, lo, hi) for c in tip2d_cams)
+                    if t is not None]
+            return round(sum(vals) / len(vals), 4) if vals else None
+
+        def _phase_avg(a, b):
+            return round((a + b) / 2, 4) if a is not None and b is not None else None
+
+        tort_dist_open  = _phase_tort(distances, open_f, pk)
+        tort_dist_close = _phase_tort(distances, pk, close_f)
+        tort_2d_open  = _cams_tort(open_f, pk)
+        tort_2d_close = _cams_tort(pk, close_f)
+        tort_3d_open  = _phase_tort(tip3d, open_f, pk)
+        tort_3d_close = _phase_tort(tip3d, pk, close_f)
+
         # Per-trial-local frames for the opening and closing event, so
         # the client can slice each trial's distance trace directly
         # without re-computing the global → local offset.
@@ -654,6 +807,15 @@ def _build_movement_params(
             "mean_open_vel": mean_open_vel,
             "mean_close_vel": mean_close_vel,
             "power": power,
+            "tort_dist_open": tort_dist_open,
+            "tort_dist_close": tort_dist_close,
+            "tort_dist_avg": _phase_avg(tort_dist_open, tort_dist_close),
+            "tort_2d_open": tort_2d_open,
+            "tort_2d_close": tort_2d_close,
+            "tort_2d_avg": _phase_avg(tort_2d_open, tort_2d_close),
+            "tort_3d_open": tort_3d_open,
+            "tort_3d_close": tort_3d_close,
+            "tort_3d_avg": _phase_avg(tort_3d_open, tort_3d_close),
             "trial_idx": ti,
         })
 
@@ -1492,7 +1654,14 @@ def get_movements(subject_id: int, source: str = Query("auto")) -> dict:
     distances, trials, data_source = _load_distances_and_trials(subject_name, source)
     events, event_source = _load_events(subject_name, distances, trials)
 
-    movements, trial_names = _build_movement_params(distances, events, trials)
+    # Index-tip trajectories (same source as the distance trace) for the
+    # 2-D / 3-D tortuosity metrics.
+    tip2d, tip3d = (_load_index_tip_data(subject_name, data_source, trials,
+                                          len(distances))
+                    if distances else ([], None))
+    movements, trial_names = _build_movement_params(
+        distances, events, trials,
+        tip_data={"tip2d": tip2d, "tip3d": tip3d})
 
     return {
         "movements": movements,

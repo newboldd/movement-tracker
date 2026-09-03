@@ -976,6 +976,15 @@ const PARAM_LABELS = {
     power: 'Power (mm\u00b2/s)',
     mean_open_vel: 'Mean Opening Velocity (mm/s)',
     mean_close_vel: 'Mean Closing Velocity (mm/s)',
+    tort_dist_open:  'Tortuosity \u2014 Distance Trace, Opening',
+    tort_dist_close: 'Tortuosity \u2014 Distance Trace, Closing',
+    tort_dist_avg:   'Tortuosity \u2014 Distance Trace, Averaged',
+    tort_2d_open:  'Tortuosity \u2014 2D Index Tip, Opening',
+    tort_2d_close: 'Tortuosity \u2014 2D Index Tip, Closing',
+    tort_2d_avg:   'Tortuosity \u2014 2D Index Tip, Averaged',
+    tort_3d_open:  'Tortuosity \u2014 3D Index Tip, Opening',
+    tort_3d_close: 'Tortuosity \u2014 3D Index Tip, Closing',
+    tort_3d_avg:   'Tortuosity \u2014 3D Index Tip, Averaged',
 };
 
 // Short Y-axis labels for the movement scatter plots.
@@ -989,6 +998,15 @@ const PARAM_YLABELS = {
     power: 'Power (mm\u00b2/s)',
     mean_open_vel: 'Velocity (mm/s)',
     mean_close_vel: 'Velocity (mm/s)',
+    tort_dist_open:  'Tortuosity',
+    tort_dist_close: 'Tortuosity',
+    tort_dist_avg:   'Tortuosity',
+    tort_2d_open:  'Tortuosity',
+    tort_2d_close: 'Tortuosity',
+    tort_2d_avg:   'Tortuosity',
+    tort_3d_open:  'Tortuosity',
+    tort_3d_close: 'Tortuosity',
+    tort_3d_avg:   'Tortuosity',
 };
 
 // Single shared color for all trials on the movement scatters.
