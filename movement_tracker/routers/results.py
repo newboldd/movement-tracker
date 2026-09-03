@@ -2696,6 +2696,8 @@ def get_group_comparison(include_auto: bool = Query(False),
             # lacks these, so we treat it as stale and recompute.
             if subjs and "seq_linear_full_amplitude" not in subjs[0]:
                 raise RuntimeError("cache pre-dates per-mode seq fields")
+            if subjs and "mean_tort_dist_open" not in subjs[0]:
+                raise RuntimeError("cache pre-dates tortuosity fields")
             # Newer-but-still-derivable additions can stay in the
             # hot path:
             if subjs and "variance_amplitude" not in subjs[0]:
@@ -2726,6 +2728,9 @@ def get_group_comparison(include_auto: bool = Query(False),
         "amplitude", "rel_amplitude", "power",
         "peak_open_vel", "peak_close_vel",
         "mean_open_vel", "mean_close_vel",
+        "tort_dist_open", "tort_dist_close", "tort_dist_avg",
+        "tort_2d_open", "tort_2d_close", "tort_2d_avg",
+        "tort_3d_open", "tort_3d_close", "tort_3d_avg",
     ]
 
     results = []
@@ -2754,7 +2759,14 @@ def get_group_comparison(include_auto: bool = Query(False),
                 else:
                     events = saved_events
                     event_source = "saved" if has_saved else "none"
-                all_movements, _ = _build_movement_params(distances, events, trials)
+                # Index-tip trajectories for the 2-D / 3-D tortuosity
+                # aggregates (same source as the distance trace).
+                tip2d, tip3d = (_load_index_tip_data(subject_name, _src, trials,
+                                                      len(distances))
+                                if distances else ([], None))
+                all_movements, _ = _build_movement_params(
+                    distances, events, trials,
+                    tip_data={"tip2d": tip2d, "tip3d": tip3d})
                 # Per-trial movement-similarity (4 alignments).  Computed
                 # once per (subject, source, include_auto); aggregation
                 # over hand+trial selection happens below.
@@ -2873,7 +2885,19 @@ def get_group_comparison(include_auto: bool = Query(False),
     # Collect unique groups
     groups = sorted(set(r["diagnosis"] for r in results))
 
-    return {"subjects": results, "groups": groups}
+    data = {"subjects": results, "groups": groups}
+    # Persist the fresh aggregation so the next visit takes the cache
+    # fast path — without this, a stale/missing cache (e.g. after a
+    # schema addition like the tortuosity fields) re-paid the full
+    # multi-second recompute on EVERY page load until the user manually
+    # hit /group/regenerate.
+    if cache is not None:
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(_json.dumps(data))
+        except OSError:
+            pass
+    return data
 
 
 # Numeric clinical variables exposed by the explore tool.

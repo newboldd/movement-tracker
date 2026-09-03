@@ -6273,7 +6273,25 @@ const GROUP_METRICS = [
         cv: { key: 'cv_mean_close_vel', unit: '' },
         seq: { key: 'seq_mean_close_vel', unit: '' },
     },
+    {
+        // Keys are rewritten each render from the calc/phase selectors
+        // (_groupTortCalc / _groupTortPhase) — see renderGroupPlots.
+        name: 'Tortuosity', id: 'tortuosity', defaultOn: false,
+        mean: { key: 'mean_tort_dist_open', unit: '' },
+        cv: { key: 'cv_tort_dist_open', unit: '' },
+        seq: { key: 'seq_tort_dist_open', unit: '' },
+    },
 ];
+
+// Tortuosity variant selection for the Group Comparison column —
+// mirrors the individual-page radios (calculation basis + phase).
+let _groupTortCalc = 'dist';
+let _groupTortPhase = 'open';
+window._setGroupTort = function (kind, val) {
+    if (kind === 'calc') _groupTortCalc = val;
+    else _groupTortPhase = val;
+    renderGroupPlots();
+};
 
 // Backward compat: flat list for any code that still references GROUP_PARAMS
 const GROUP_PARAMS = GROUP_METRICS.flatMap(m => {
@@ -6312,6 +6330,19 @@ function renderGroupPlots() {
         GROUP_METRICS.forEach(m => { _groupMetricVisible[m.id] = m.defaultOn; });
     }
 
+    // Tortuosity column: rewrite its keys + title from the current
+    // calc/phase selection before anything reads them.
+    const _tortM = GROUP_METRICS.find(m => m.id === 'tortuosity');
+    if (_tortM) {
+        const v = `tort_${_groupTortCalc}_${_groupTortPhase}`;
+        _tortM.mean.key = `mean_${v}`;
+        _tortM.cv.key = `cv_${v}`;
+        _tortM.seq.key = `seq_${v}`;
+        const CALC = { dist: 'Dist', '2d': '2D', '3d': '3D' };
+        const PH = { open: 'Open', close: 'Close', avg: 'Avg' };
+        _tortM.title = `Tortuosity (${CALC[_groupTortCalc]}, ${PH[_groupTortPhase]})`;
+    }
+
     const visibleMetrics = GROUP_METRICS.filter(m => _groupMetricVisible[m.id]);
 
     // Build checkbox bar
@@ -6323,6 +6354,21 @@ function renderGroupPlots() {
             <input type="checkbox" ${checked} onchange="_toggleGroupMetric('${m.id}', this.checked)">
             ${m.name}
         </label>`;
+        // Tortuosity variant selectors, shown while its column is on.
+        if (m.id === 'tortuosity' && _groupMetricVisible[m.id]) {
+            const opt = (v, label, cur) =>
+                `<option value="${v}" ${v === cur ? 'selected' : ''}>${label}</option>`;
+            html += `<select onchange="_setGroupTort('calc', this.value)" style="font-size:11px;">
+                ${opt('dist', 'Distance', _groupTortCalc)}
+                ${opt('2d', '2D position', _groupTortCalc)}
+                ${opt('3d', '3D position', _groupTortCalc)}
+            </select>`;
+            html += `<select onchange="_setGroupTort('phase', this.value)" style="font-size:11px;">
+                ${opt('open', 'Open', _groupTortPhase)}
+                ${opt('close', 'Close', _groupTortPhase)}
+                ${opt('avg', 'Average', _groupTortPhase)}
+            </select>`;
+        }
     });
     html += '</div>';
 
@@ -6348,7 +6394,8 @@ function renderGroupPlots() {
     // Row labels now live on each plot's Y axis (see renderGroupBar's
     // yLabel arg) — no left label column needed.
     const _columnTitle = (m, kind) => {
-        const titleText = m.name + (m.mean && m.mean.unit ? ' (' + m.mean.unit + ')' : '');
+        const titleText = m.title
+            || (m.name + (m.mean && m.mean.unit ? ' (' + m.mean.unit + ')' : ''));
         return `<div style="display:flex;align-items:center;justify-content:center;gap:6px;padding:4px 0 0;">
             <span style="font-size:13px;font-weight:700;">${titleText}</span>
             <button class="btn btn-sm" title="Copy to clipboard"
