@@ -1856,6 +1856,94 @@ def _refit_center_fixed_r(Q: np.ndarray, cx: float, cy: float, R: float):
     return c
 
 
+def _fit_ellipse_2d(Q: np.ndarray):
+    """Direct least-squares ellipse fit (Halir & Flusser).
+
+    Q: (n, 2) in-plane points.  Returns dict(cx, cy, a, b, theta) with
+    a >= b (semi-axes) and theta the major-axis direction, or None.
+    """
+    # Scale normalization for conditioning (Q is already ~centred).
+    sc = float(np.mean(np.linalg.norm(Q, axis=1))) or 1.0
+    X = Q / sc
+    x, y = X[:, 0], X[:, 1]
+    D1 = np.column_stack([x * x, x * y, y * y])
+    D2 = np.column_stack([x, y, np.ones(len(x))])
+    S1, S2, S3 = D1.T @ D1, D1.T @ D2, D2.T @ D2
+    try:
+        T = -np.linalg.solve(S3, S2.T)
+    except np.linalg.LinAlgError:
+        return None
+    M = S1 + S2 @ T
+    M = np.array([M[2] / 2.0, -M[1], M[0] / 2.0])
+    try:
+        _, v = np.linalg.eig(M)
+    except np.linalg.LinAlgError:
+        return None
+    a1 = None
+    for i in range(3):
+        vv = np.real(v[:, i])
+        if 4 * vv[0] * vv[2] - vv[1] ** 2 > 0:
+            a1 = vv
+            break
+    if a1 is None:
+        return None
+    A, B, C = a1
+    D_, E, F = T @ a1
+    den = 4 * A * C - B * B
+    if den <= 0:
+        return None
+    cx = (B * E - 2 * C * D_) / den
+    cy = (B * D_ - 2 * A * E) / den
+    Fc = A * cx * cx + B * cx * cy + C * cy * cy + D_ * cx + E * cy + F
+    th = 0.5 * math.atan2(B, A - C)
+    ct, st = math.cos(th), math.sin(th)
+    qu = A * ct * ct + B * ct * st + C * st * st
+    qv = A * st * st - B * ct * st + C * ct * ct
+    ru2, rv2 = -Fc / qu, -Fc / qv
+    if not (ru2 > 0 and rv2 > 0):
+        return None
+    ru, rv = math.sqrt(ru2) * sc, math.sqrt(rv2) * sc
+    if ru >= rv:
+        a_, b_, theta = ru, rv, th
+    else:
+        a_, b_, theta = rv, ru, th + math.pi / 2
+    return {"cx": float(cx * sc), "cy": float(cy * sc),
+            "a": float(a_), "b": float(b_), "theta": float(theta)}
+
+
+def _refit_pose_fixed_ellipse(Q: np.ndarray, a: float, b: float,
+                              cx: float, cy: float, theta: float):
+    """Gauss-Newton over (cx, cy, theta) with the semi-axes FIXED — the
+    trial-constant-shape constraint.  Residual = ||axis-scaled point|| − 1
+    (the standard reduced ellipse residual); numeric Jacobian."""
+    p = np.array([cx, cy, theta], dtype=float)
+
+    def resid(par):
+        c, th = par[:2], par[2]
+        ct, st = np.cos(th), np.sin(th)
+        d = Q - c
+        qx = d[:, 0] * ct + d[:, 1] * st
+        qy = -d[:, 0] * st + d[:, 1] * ct
+        return np.hypot(qx / a, qy / b) - 1.0
+
+    for _ in range(25):
+        f0 = resid(p)
+        J = np.empty((len(Q), 3))
+        eps = 1e-6
+        for k in range(3):
+            dp = p.copy()
+            dp[k] += eps
+            J[:, k] = (resid(dp) - f0) / eps
+        try:
+            step = np.linalg.solve(J.T @ J + 1e-9 * np.eye(3), -(J.T @ f0))
+        except np.linalg.LinAlgError:
+            break
+        p = p + step
+        if np.linalg.norm(step) < 1e-8:
+            break
+    return float(p[0]), float(p[1]), float(p[2])
+
+
 @router.get("/{subject_id}/arc-fits")
 def get_arc_fits(subject_id: int, source: str = Query("auto")) -> dict:
     """Trial-constant-radius 3D arcs for the Hand Tracking overlay.
@@ -1904,6 +1992,14 @@ def get_arc_fits(subject_id: int, source: str = Query("auto")) -> dict:
                                     np.asarray(dist, dtype=np.float64))
         return proj.reshape(-1, 2)
 
+    def _project_phase(pts3: np.ndarray) -> dict:
+        cams = {}
+        for ci, cn in enumerate(cam_names[:2]):
+            p2 = _project(pts3, ci)
+            cams[cn] = [[round(float(x), 1), round(float(y), 1)]
+                        for x, y in p2]
+        return cams
+
     out_trials: dict = {}
     for ti, t in enumerate(trials):
         t_start = t["start_frame"]
@@ -1915,40 +2011,120 @@ def get_arc_fits(subject_id: int, source: str = Query("auto")) -> dict:
             o, pk, c = m["open_frame"], m["peak_frame"], m["close_frame"]
             spans.append((o, pk))
             spans.append((pk, c))
-        # Free fits (arc-length-uniform samples) → per-phase radius.
+        # Free fits (arc-length-uniform samples): plane + circle base and
+        # a free in-plane ellipse per phase.
         fits = []
-        for (a, b) in spans:
-            pts = [tip3d[f] for f in range(a, b + 1)
+        for (fa, fb) in spans:
+            pts = [tip3d[f] for f in range(fa, fb + 1)
                    if f < len(tip3d) and tip3d[f] is not None]
             if len(pts) < 5:
                 fits.append(None)
                 continue
             P = _resample_by_arclen(np.asarray(pts, dtype=float), 50)
-            fits.append(_fit_circle_3d(P))
+            base = _fit_circle_3d(P)
+            if base is not None:
+                base["ellipse"] = _fit_ellipse_2d(base["Q"])
+            fits.append(base)
+
+        phases = []
+        ells = [f["ellipse"] for f in fits if f is not None and f.get("ellipse")]
+        if ells:
+            # Trial-constant SHAPE: lock the semi-axes to the robust
+            # medians; per phase only the POSE stays free (plane, centre,
+            # in-plane rotation).  The ellipse absorbs the finger's
+            # natural curvature change through the sweep — tighter at
+            # the curled end, a regular length fluctuation per tap —
+            # while medial/lateral jumps remain as deviation from the
+            # posed template.
+            a_star = float(np.median([e["a"] for e in ells]))
+            b_star = float(np.median([e["b"] for e in ells]))
+            # Joint shape refinement: per-phase free ellipse fits on
+            # short arcs are unstable, so their medians are only a seed.
+            # Alternate (poses given shape) ↔ (shape given poses): the
+            # shape update pools EVERY phase's points and solves the
+            # linear LS  α·qx² + β·qy² ≈ 1  for (α, β) = (1/a², 1/b²) —
+            # a closed-form trial-shape estimate from all data at once.
+            poses: dict[int, tuple] = {}
+            for _ in range(3):
+                pooled = []
+                for idx, fit in enumerate(fits):
+                    if fit is None:
+                        continue
+                    e0 = fit.get("ellipse")
+                    if idx in poses:
+                        cx0, cy0, th0 = poses[idx]
+                    elif e0 is not None:
+                        cx0, cy0, th0 = e0["cx"], e0["cy"], e0["theta"]
+                    else:
+                        cx0, cy0, th0 = fit["cx"], fit["cy"], 0.0
+                    cx, cy, th = _refit_pose_fixed_ellipse(
+                        fit["Q"], a_star, b_star, cx0, cy0, th0)
+                    poses[idx] = (cx, cy, th)
+                    ct, st = math.cos(th), math.sin(th)
+                    d = fit["Q"] - [cx, cy]
+                    qx = d[:, 0] * ct + d[:, 1] * st
+                    qy = -d[:, 0] * st + d[:, 1] * ct
+                    pooled.append(np.column_stack([qx * qx, qy * qy]))
+                if not pooled:
+                    break
+                Mp = np.vstack(pooled)
+                try:
+                    ab, *_ = np.linalg.lstsq(Mp, np.ones(len(Mp)), rcond=None)
+                except np.linalg.LinAlgError:
+                    break
+                # (a, b) track the pose frame's x/y axes — no reordering,
+                # or the per-phase rotations would lose correspondence.
+                if ab[0] > 0 and ab[1] > 0:
+                    a_star = 1.0 / math.sqrt(float(ab[0]))
+                    b_star = 1.0 / math.sqrt(float(ab[1]))
+            for idx, ((fa, fb), fit) in enumerate(zip(spans, fits)):
+                if fit is None:
+                    continue
+                e0 = fit.get("ellipse")
+                if idx in poses:
+                    cx0, cy0, th0 = poses[idx]
+                elif e0 is not None:
+                    cx0, cy0, th0 = e0["cx"], e0["cy"], e0["theta"]
+                else:
+                    cx0, cy0, th0 = fit["cx"], fit["cy"], 0.0
+                cx, cy, th = _refit_pose_fixed_ellipse(
+                    fit["Q"], a_star, b_star, cx0, cy0, th0)
+                ct, st = math.cos(th), math.sin(th)
+                d = fit["Q"] - [cx, cy]
+                qx = d[:, 0] * ct + d[:, 1] * st
+                qy = -d[:, 0] * st + d[:, 1] * ct
+                # Parametric span of the data along the posed ellipse.
+                phi = np.unwrap(np.arctan2(qy / b_star, qx / a_star))
+                phis = np.linspace(float(phi[0]), float(phi[-1]), 40)
+                ex = cx + a_star * np.cos(phis) * ct - b_star * np.sin(phis) * st
+                ey = cy + a_star * np.cos(phis) * st + b_star * np.sin(phis) * ct
+                pts3 = (fit["c0"][None, :]
+                        + np.outer(ex, fit["e1"]) + np.outer(ey, fit["e2"]))
+                phases.append({"lo": int(fa - t_start), "hi": int(fb - t_start),
+                               "cams": _project_phase(pts3)})
+            if phases:
+                out_trials[t["trial_name"]] = {"a": round(a_star, 2),
+                                                "b": round(b_star, 2),
+                                                "phases": phases}
+            continue
+
+        # Circle fallback — no phase in this trial produced an ellipse.
         radii = [f["R"] for f in fits if f is not None and np.isfinite(f["R"])]
         if not radii:
             continue
         r_star = float(np.median(radii))
-        phases = []
-        for (a, b), fit in zip(spans, fits):
+        for (fa, fb), fit in zip(spans, fits):
             if fit is None:
                 continue
             c = _refit_center_fixed_r(fit["Q"], fit["cx"], fit["cy"], r_star)
-            # Net swept angle of the (resampled) path about the centre.
             d = fit["Q"] - c
             ang = np.unwrap(np.arctan2(d[:, 1], d[:, 0]))
-            th0, th1 = float(ang[0]), float(ang[-1])
-            ths = np.linspace(th0, th1, 40)
+            ths = np.linspace(float(ang[0]), float(ang[-1]), 40)
             pts3 = (fit["c0"][None, :]
                     + np.outer(c[0] + r_star * np.cos(ths), fit["e1"])
                     + np.outer(c[1] + r_star * np.sin(ths), fit["e2"]))
-            cams = {}
-            for ci, cn in enumerate(cam_names[:2]):
-                p2 = _project(pts3, ci)
-                cams[cn] = [[round(float(x), 1), round(float(y), 1)]
-                            for x, y in p2]
-            phases.append({"lo": int(a - t_start), "hi": int(b - t_start),
-                           "cams": cams})
+            phases.append({"lo": int(fa - t_start), "hi": int(fb - t_start),
+                           "cams": _project_phase(pts3)})
         if phases:
             out_trials[t["trial_name"]] = {"R": round(r_star, 2),
                                             "phases": phases}
