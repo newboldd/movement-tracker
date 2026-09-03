@@ -599,6 +599,19 @@ def _build_movement_params(
 
     first_peak = peaks[0]
 
+    # Merged open/peak/close event stream (pauses etc. excluded) for the
+    # movement-validity check: a valid movement's three events must be
+    # CONSECUTIVE in this stream.  When a movement's own opening event is
+    # missing, the matcher borrows the PRIOR movement's open, so the
+    # "opening phase" spans a whole extra movement — falsely elevating
+    # tortuosity, durations, and velocities.  An intervening peak/close
+    # between the matched open and the peak (or open/peak between the
+    # peak and the matched close) is exactly that signature.
+    _ev_all = sorted(opens + peaks + closes)
+
+    def _events_between(a: int, b: int) -> bool:
+        return any(a < f < b for f in _ev_all)
+
     # Track previous amplitude per trial for relative amplitude
     prev_amp_by_trial: dict[int, float | None] = {}
     # Per-trial previous-movement frame trackers — used to compute
@@ -631,6 +644,24 @@ def _build_movement_params(
             if c > pk and c < len(frame_trial) and frame_trial[c] == ti:
                 close_f = c
                 break
+
+        # ── Movement validity ────────────────────────────────────────
+        # Metrics are only meaningful when (1) the movement has a full
+        # open → peak → close triplet with no other open/peak/close
+        # event in between (see _events_between above), and (2) the
+        # peak distance exceeds both the opening and closing distances.
+        # An invalid movement keeps its structural fields (frames /
+        # times / trial) but every metric below is emitted as None.
+        valid = open_f is not None and close_f is not None
+        if valid:
+            o_d = distances[open_f] if open_f < len(distances) else None
+            p_d = distances[pk] if pk < len(distances) else None
+            c_d = distances[close_f] if close_f < len(distances) else None
+            valid = (o_d is not None and p_d is not None and c_d is not None
+                     and p_d > o_d and p_d > c_d)
+        if valid:
+            valid = (not _events_between(open_f, pk)
+                     and not _events_between(pk, close_f))
 
         # Peak time relative to first peak (seconds)
         peak_time = round((pk - first_peak) / fps, 4)
@@ -679,9 +710,12 @@ def _build_movement_params(
         pk_dist = distances[pk] if pk < len(distances) else None
         amplitude = round(pk_dist - global_min, 2) if pk_dist is not None else None
 
-        # Relative amplitude (ratio to previous movement's amplitude)
+        # Relative amplitude (ratio to previous movement's amplitude).
+        # Invalid movements don't feed the chain — their amplitude is
+        # suppressed below, so the next movement ratios against the
+        # last VALID one instead.
         rel_amplitude = None
-        if amplitude is not None:
+        if amplitude is not None and valid:
             prev_amp = prev_amp_by_trial.get(ti)
             if prev_amp is not None and prev_amp > 0:
                 rel_amplitude = round(amplitude / prev_amp, 4)
@@ -786,7 +820,7 @@ def _build_movement_params(
         close_frame_local = (close_f - trial_start) if close_f is not None else None
         peak_frame_local = pk - trial_start
 
-        movements.append({
+        mov = {
             "peak_frame": pk,
             "peak_dist": round(pk_dist, 2) if pk_dist is not None else None,
             "peak_time": peak_time,
@@ -795,6 +829,7 @@ def _build_movement_params(
             "open_frame_local": open_frame_local,
             "close_frame_local": close_frame_local,
             "peak_frame_local": peak_frame_local,
+            "valid": valid,
             "imi": imi,
             "imi_oo": imi_oo,
             "imi_cc": imi_cc,
@@ -823,7 +858,18 @@ def _build_movement_params(
             "tort_3d_close": tort_3d_close,
             "tort_3d_avg": _phase_avg(tort_3d_open, tort_3d_close),
             "trial_idx": ti,
-        })
+        }
+        if not valid:
+            # Suppress EVERY metric; keep the structural fields (frames,
+            # times, trial) so plots can still place/skip the movement.
+            _STRUCTURAL = {"peak_frame", "peak_time", "open_frame",
+                           "close_frame", "open_frame_local",
+                           "close_frame_local", "peak_frame_local",
+                           "valid", "trial_idx"}
+            for k in mov:
+                if k not in _STRUCTURAL:
+                    mov[k] = None
+        movements.append(mov)
 
     return movements, trial_names
 
@@ -2711,6 +2757,11 @@ def get_group_comparison(include_auto: bool = Query(False),
             # gap-bridged — caches without the marker hold old values.
             if not data.get("tort_gap_nan"):
                 raise RuntimeError("cache pre-dates gap-strict tortuosity")
+            # Value-semantics change: movements failing the validity
+            # rules (consecutive open→peak→close triplet, peak above
+            # both endpoints) now have ALL metrics nulled.
+            if not data.get("strict_movement_validity"):
+                raise RuntimeError("cache pre-dates movement-validity rules")
             # Newer-but-still-derivable additions can stay in the
             # hot path:
             if subjs and "variance_amplitude" not in subjs[0]:
@@ -2902,9 +2953,10 @@ def get_group_comparison(include_auto: bool = Query(False),
     # Collect unique groups
     groups = sorted(set(r["diagnosis"] for r in results))
 
-    # ``tort_gap_nan`` marks the gap-strict tortuosity semantics so the
-    # cache-staleness check can spot pre-change caches.
-    data = {"subjects": results, "groups": groups, "tort_gap_nan": True}
+    # Semantics markers so the cache-staleness check can spot caches
+    # written before each value-affecting change.
+    data = {"subjects": results, "groups": groups,
+            "tort_gap_nan": True, "strict_movement_validity": True}
     # Persist the fresh aggregation so the next visit takes the cache
     # fast path — without this, a stale/missing cache (e.g. after a
     # schema addition like the tortuosity fields) re-paid the full
