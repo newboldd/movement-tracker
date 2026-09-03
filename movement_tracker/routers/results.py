@@ -1911,24 +1911,81 @@ def _fit_ellipse_2d(Q: np.ndarray):
             "a": float(a_), "b": float(b_), "theta": float(theta)}
 
 
-def _refit_pose_fixed_ellipse(Q: np.ndarray, a: float, b: float,
-                              cx: float, cy: float, theta: float):
-    """Gauss-Newton over (cx, cy, theta) with the semi-axes FIXED — the
-    trial-constant-shape constraint.  Residual = ||axis-scaled point|| − 1
-    (the standard reduced ellipse residual); numeric Jacobian."""
-    p = np.array([cx, cy, theta], dtype=float)
+def _ellipse_resid(Q: np.ndarray, a: float, b: float, theta: float,
+                   cx: float, cy: float) -> np.ndarray:
+    """Reduced ellipse residual ||axis-scaled point|| − 1."""
+    ct, st = np.cos(theta), np.sin(theta)
+    d = Q - [cx, cy]
+    qx = d[:, 0] * ct + d[:, 1] * st
+    qy = -d[:, 0] * st + d[:, 1] * ct
+    return np.hypot(qx / a, qy / b) - 1.0
+
+
+def _refit_center_fixed_shape(Q: np.ndarray, a: float, b: float,
+                              theta: float, cx: float, cy: float):
+    """Gauss-Newton over the CENTRE only — shape AND orientation are
+    trial constants, so per phase the template may translate but not
+    rotate.  Keeps the curved end of the arc pointing the same way for
+    every movement of the trial."""
+    p = np.array([cx, cy], dtype=float)
+    for _ in range(25):
+        f0 = _ellipse_resid(Q, a, b, theta, p[0], p[1])
+        J = np.empty((len(Q), 2))
+        eps = 1e-6
+        for k in range(2):
+            dp = p.copy()
+            dp[k] += eps
+            J[:, k] = (_ellipse_resid(Q, a, b, theta, dp[0], dp[1]) - f0) / eps
+        try:
+            step = np.linalg.solve(J.T @ J + 1e-9 * np.eye(2), -(J.T @ f0))
+        except np.linalg.LinAlgError:
+            break
+        p = p + step
+        if np.linalg.norm(step) < 1e-8:
+            break
+    return float(p[0]), float(p[1])
+
+
+def _fit_center_multistart(Q: np.ndarray, a: float, b: float, theta: float,
+                           extra_inits: tuple = ()):
+    """Centre fit with multiple initialisations.  The centre-only GN has
+    local minima (the data arc can latch onto the wrong side of the
+    template); seed it from centres that make the template pass through
+    the data midpoint at 8 parametric angles — plus any callers' seeds —
+    and keep the lowest-RMS result."""
+    mid = Q[len(Q) // 2]
+    ct, st = math.cos(theta), math.sin(theta)
+    cands = list(extra_inits)
+    for k in range(8):
+        phic = 2 * math.pi * k / 8
+        ox = a * math.cos(phic) * ct - b * math.sin(phic) * st
+        oy = a * math.cos(phic) * st + b * math.sin(phic) * ct
+        cands.append((float(mid[0] - ox), float(mid[1] - oy)))
+    best, best_r = None, None
+    for cx0, cy0 in cands:
+        cx, cy = _refit_center_fixed_shape(Q, a, b, theta, cx0, cy0)
+        r = float(np.sqrt(np.mean(
+            _ellipse_resid(Q, a, b, theta, cx, cy) ** 2)))
+        if best_r is None or r < best_r:
+            best_r, best = r, (cx, cy)
+    return best
+
+
+def _refit_shape_shared(phase_data: list, a: float, b: float, theta: float):
+    """Gauss-Newton over the SHARED (a, b, theta) given every phase's
+    centre — the trial-constant shape/orientation estimated from all
+    phases' points at once."""
+    p = np.array([a, b, theta], dtype=float)
 
     def resid(par):
-        c, th = par[:2], par[2]
-        ct, st = np.cos(th), np.sin(th)
-        d = Q - c
-        qx = d[:, 0] * ct + d[:, 1] * st
-        qy = -d[:, 0] * st + d[:, 1] * ct
-        return np.hypot(qx / a, qy / b) - 1.0
+        a_, b_, th = max(par[0], 1e-3), max(par[1], 1e-3), par[2]
+        return np.concatenate([
+            _ellipse_resid(Q, a_, b_, th, cx, cy)
+            for Q, cx, cy in phase_data])
 
-    for _ in range(25):
+    for _ in range(15):
         f0 = resid(p)
-        J = np.empty((len(Q), 3))
+        J = np.empty((len(f0), 3))
         eps = 1e-6
         for k in range(3):
             dp = p.copy()
@@ -1941,7 +1998,7 @@ def _refit_pose_fixed_ellipse(Q: np.ndarray, a: float, b: float,
         p = p + step
         if np.linalg.norm(step) < 1e-8:
             break
-    return float(p[0]), float(p[1]), float(p[2])
+    return float(max(p[0], 1e-3)), float(max(p[1], 1e-3)), float(p[2])
 
 
 @router.get("/{subject_id}/arc-fits")
@@ -2011,104 +2068,128 @@ def get_arc_fits(subject_id: int, source: str = Query("auto")) -> dict:
             o, pk, c = m["open_frame"], m["peak_frame"], m["close_frame"]
             spans.append((o, pk))
             spans.append((pk, c))
-        # Free fits (arc-length-uniform samples): plane + circle base and
-        # a free in-plane ellipse per phase.
-        fits = []
+        # Resample each phase's 3D path uniformly by arc length.
+        phase_P = []
         for (fa, fb) in spans:
             pts = [tip3d[f] for f in range(fa, fb + 1)
                    if f < len(tip3d) and tip3d[f] is not None]
-            if len(pts) < 5:
-                fits.append(None)
-                continue
-            P = _resample_by_arclen(np.asarray(pts, dtype=float), 50)
-            base = _fit_circle_3d(P)
-            if base is not None:
-                base["ellipse"] = _fit_ellipse_2d(base["Q"])
-            fits.append(base)
+            phase_P.append(_resample_by_arclen(np.asarray(pts, dtype=float), 50)
+                           if len(pts) >= 5 else None)
 
         phases = []
-        ells = [f["ellipse"] for f in fits if f is not None and f.get("ellipse")]
-        if ells:
-            # Trial-constant SHAPE: lock the semi-axes to the robust
-            # medians; per phase only the POSE stays free (plane, centre,
-            # in-plane rotation).  The ellipse absorbs the finger's
-            # natural curvature change through the sweep — tighter at
-            # the curled end, a regular length fluctuation per tap —
-            # while medial/lateral jumps remain as deviation from the
-            # posed template.
-            a_star = float(np.median([e["a"] for e in ells]))
-            b_star = float(np.median([e["b"] for e in ells]))
-            # Joint shape refinement: per-phase free ellipse fits on
-            # short arcs are unstable, so their medians are only a seed.
-            # Alternate (poses given shape) ↔ (shape given poses): the
-            # shape update pools EVERY phase's points and solves the
-            # linear LS  α·qx² + β·qy² ≈ 1  for (α, β) = (1/a², 1/b²) —
-            # a closed-form trial-shape estimate from all data at once.
-            poses: dict[int, tuple] = {}
-            for _ in range(3):
-                pooled = []
-                for idx, fit in enumerate(fits):
-                    if fit is None:
-                        continue
-                    e0 = fit.get("ellipse")
-                    if idx in poses:
-                        cx0, cy0, th0 = poses[idx]
-                    elif e0 is not None:
-                        cx0, cy0, th0 = e0["cx"], e0["cy"], e0["theta"]
-                    else:
-                        cx0, cy0, th0 = fit["cx"], fit["cy"], 0.0
-                    cx, cy, th = _refit_pose_fixed_ellipse(
-                        fit["Q"], a_star, b_star, cx0, cy0, th0)
-                    poses[idx] = (cx, cy, th)
-                    ct, st = math.cos(th), math.sin(th)
-                    d = fit["Q"] - [cx, cy]
+        vidx = [i for i, P in enumerate(phase_P) if P is not None]
+        ell_ok = False
+        if vidx:
+            # ── Trial-constant ellipse: shape AND orientation shared ──
+            # Everything but per-phase translation is a trial constant:
+            # one plane (fit to all phases pooled), one (a, b) and one
+            # in-plane rotation θ.  Per phase only the CENTRE moves.
+            # This keeps the curved end of the template pointing the
+            # same way for every movement — a free per-phase rotation
+            # let the sharp end wander (sometimes to the bottom, or
+            # into the middle of the span).  The ellipse still absorbs
+            # the finger's natural curvature change along the sweep;
+            # medial/lateral jumps remain as deviation.
+            allP = np.vstack([phase_P[i] for i in vidx])
+            c0 = allP.mean(axis=0)
+            _, _, Vt = np.linalg.svd(allP - c0, full_matrices=False)
+            e1, e2, pn = Vt[0], Vt[1], Vt[2]
+            Qs, Zs = {}, {}
+            for i in vidx:
+                d = phase_P[i] - c0
+                Qs[i] = np.column_stack([d @ e1, d @ e2])
+                Zs[i] = float(np.mean(d @ pn))
+            # Seed: free ellipse per phase in the COMMON plane; medians
+            # for (a, b), circular mean (mod π) for θ.
+            frees = {i: _fit_ellipse_2d(Qs[i]) for i in vidx}
+            good = [f for f in frees.values() if f]
+            if good:
+                a_star = float(np.median([f["a"] for f in good]))
+                b_star = float(np.median([f["b"] for f in good]))
+                s2 = sum(math.sin(2 * f["theta"]) for f in good)
+                c2 = sum(math.cos(2 * f["theta"]) for f in good)
+                th_star = 0.5 * math.atan2(s2, c2)
+                # Alternate: per-phase centres given the shared template,
+                # then the shared (a, b, θ) given every phase's centre.
+                # Pass 1: multi-start centres (basins unknown yet), then
+                # a first shared-shape update.
+                centers: dict[int, tuple] = {}
+                rms: dict[int, float] = {}
+                for i in vidx:
+                    extra = ((frees[i]["cx"], frees[i]["cy"]),) \
+                        if frees[i] else ()
+                    centers[i] = _fit_center_multistart(
+                        Qs[i], a_star, b_star, th_star, extra)
+                    rms[i] = float(np.sqrt(np.mean(_ellipse_resid(
+                        Qs[i], a_star, b_star, th_star, *centers[i]) ** 2)))
+                a_star, b_star, th_star = _refit_shape_shared(
+                    [(Qs[i], *centers[i]) for i in vidx],
+                    a_star, b_star, th_star)
+
+                # Parametric angle of a phase's PEAK-end sample: opening
+                # phases (even index — spans alternate open→peak /
+                # peak→close) END at the peak; closing phases START there.
+                def _phi_peak(i, cx, cy):
+                    p = Qs[i][-1] if i % 2 == 0 else Qs[i][0]
+                    ct_, st_ = math.cos(th_star), math.sin(th_star)
+                    dx, dy = p[0] - cx, p[1] - cy
+                    return math.atan2((-st_ * dx + ct_ * dy) / b_star,
+                                      (ct_ * dx + st_ * dy) / a_star)
+
+                # Passes 2-3: ANCHOR every phase's placement so its peak
+                # end sits at the trial-consensus parametric angle — the
+                # curved end of the template covers the same part of the
+                # movement (the top) in every phase, instead of some
+                # phases latching onto the template's flat side.
+                for _ in range(2):
+                    order = sorted(vidx, key=lambda i: rms.get(i, 1e9))
+                    ref = order[:max(3, len(order) // 2)]
+                    sph = sum(math.sin(_phi_peak(i, *centers[i])) for i in ref)
+                    cph = sum(math.cos(_phi_peak(i, *centers[i])) for i in ref)
+                    phi_bar = math.atan2(sph, cph)
+                    ct_, st_ = math.cos(th_star), math.sin(th_star)
+                    ox = (a_star * math.cos(phi_bar) * ct_
+                          - b_star * math.sin(phi_bar) * st_)
+                    oy = (a_star * math.cos(phi_bar) * st_
+                          + b_star * math.sin(phi_bar) * ct_)
+                    for i in vidx:
+                        pk_pt = Qs[i][-1] if i % 2 == 0 else Qs[i][0]
+                        centers[i] = _refit_center_fixed_shape(
+                            Qs[i], a_star, b_star, th_star,
+                            float(pk_pt[0] - ox), float(pk_pt[1] - oy))
+                        rms[i] = float(np.sqrt(np.mean(_ellipse_resid(
+                            Qs[i], a_star, b_star, th_star,
+                            *centers[i]) ** 2)))
+                    a_star, b_star, th_star = _refit_shape_shared(
+                        [(Qs[i], *centers[i]) for i in vidx],
+                        a_star, b_star, th_star)
+                ct, st = math.cos(th_star), math.sin(th_star)
+                for i in vidx:
+                    fa, fb = spans[i]
+                    cx, cy = centers[i]
+                    d = Qs[i] - [cx, cy]
                     qx = d[:, 0] * ct + d[:, 1] * st
                     qy = -d[:, 0] * st + d[:, 1] * ct
-                    pooled.append(np.column_stack([qx * qx, qy * qy]))
-                if not pooled:
-                    break
-                Mp = np.vstack(pooled)
-                try:
-                    ab, *_ = np.linalg.lstsq(Mp, np.ones(len(Mp)), rcond=None)
-                except np.linalg.LinAlgError:
-                    break
-                # (a, b) track the pose frame's x/y axes — no reordering,
-                # or the per-phase rotations would lose correspondence.
-                if ab[0] > 0 and ab[1] > 0:
-                    a_star = 1.0 / math.sqrt(float(ab[0]))
-                    b_star = 1.0 / math.sqrt(float(ab[1]))
-            for idx, ((fa, fb), fit) in enumerate(zip(spans, fits)):
-                if fit is None:
-                    continue
-                e0 = fit.get("ellipse")
-                if idx in poses:
-                    cx0, cy0, th0 = poses[idx]
-                elif e0 is not None:
-                    cx0, cy0, th0 = e0["cx"], e0["cy"], e0["theta"]
-                else:
-                    cx0, cy0, th0 = fit["cx"], fit["cy"], 0.0
-                cx, cy, th = _refit_pose_fixed_ellipse(
-                    fit["Q"], a_star, b_star, cx0, cy0, th0)
-                ct, st = math.cos(th), math.sin(th)
-                d = fit["Q"] - [cx, cy]
-                qx = d[:, 0] * ct + d[:, 1] * st
-                qy = -d[:, 0] * st + d[:, 1] * ct
-                # Parametric span of the data along the posed ellipse.
-                phi = np.unwrap(np.arctan2(qy / b_star, qx / a_star))
-                phis = np.linspace(float(phi[0]), float(phi[-1]), 40)
-                ex = cx + a_star * np.cos(phis) * ct - b_star * np.sin(phis) * st
-                ey = cy + a_star * np.cos(phis) * st + b_star * np.sin(phis) * ct
-                pts3 = (fit["c0"][None, :]
-                        + np.outer(ex, fit["e1"]) + np.outer(ey, fit["e2"]))
-                phases.append({"lo": int(fa - t_start), "hi": int(fb - t_start),
-                               "cams": _project_phase(pts3)})
-            if phases:
-                out_trials[t["trial_name"]] = {"a": round(a_star, 2),
-                                                "b": round(b_star, 2),
-                                                "phases": phases}
+                    phi = np.unwrap(np.arctan2(qy / b_star, qx / a_star))
+                    phis = np.linspace(float(phi[0]), float(phi[-1]), 40)
+                    ex = cx + a_star * np.cos(phis) * ct - b_star * np.sin(phis) * st
+                    ey = cy + a_star * np.cos(phis) * st + b_star * np.sin(phis) * ct
+                    pts3 = (c0[None, :] + np.outer(ex, e1) + np.outer(ey, e2)
+                            + Zs[i] * pn[None, :])
+                    phases.append({"lo": int(fa - t_start),
+                                   "hi": int(fb - t_start),
+                                   "cams": _project_phase(pts3)})
+                if phases:
+                    out_trials[t["trial_name"]] = {
+                        "a": round(a_star, 2), "b": round(b_star, 2),
+                        "theta": round(th_star, 3), "phases": phases}
+                    ell_ok = True
+        if ell_ok:
             continue
 
         # Circle fallback — no phase in this trial produced an ellipse.
+        fits = [(_fit_circle_3d(P) if P is not None else None)
+                for P in phase_P]
         radii = [f["R"] for f in fits if f is not None and np.isfinite(f["R"])]
         if not radii:
             continue
