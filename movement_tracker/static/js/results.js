@@ -6461,10 +6461,11 @@ function renderGroupPlots() {
         row.field === 'mean' && (m.id === 'peak_close_vel' || m.id === 'mean_close_vel');
 
     // Tortuosity has a hard floor of 1 (path length ≥ displacement) —
-    // anchor its Mean row there so bars show the excess over a straight
-    // path.  Other rows (CV, seq R²/slope) are on their own scales.
+    // anchor its Mean row just below that (0.8) so points sitting at
+    // exactly 1 stay clearly visible above the plot edge.  Other rows
+    // (CV, seq R²/slope) are on their own scales.
     const _yMinFor = (m, row) =>
-        (m.id === 'tortuosity' && row.field === 'mean') ? 1 : null;
+        (m.id === 'tortuosity' && row.field === 'mean') ? 0.8 : null;
 
     // Sequence-Effect rows read R² (seq_<mode>_*) or slope
     // (seqslope_<mode>_*) from each subject's cached fields.  ``row``
@@ -6595,13 +6596,17 @@ function renderDoseScatter(divId, data, paramKey, reverseY, yLabel, yMin) {
         paper_bgcolor: '#fff',
         shapes,
     };
-    // Hard Y floor (e.g. tortuosity ≥ 1), matching renderGroupBar.
+    // Hard Y floor (e.g. tortuosity ≥ 1), matching renderGroupBar —
+    // including the explicit x-axis line (the y=0 zeroline is off-range).
     if (yMin != null) {
         const allY = traces.flatMap(t => t.y || []).filter(v => v != null && isFinite(v));
         const hi = Math.max(yMin, ...allY);
         const pad = Math.max((hi - yMin) * 0.05, 0.01);
         layout.yaxis.autorange = false;
         layout.yaxis.range = [yMin, hi + pad];
+        layout.xaxis.showline = true;
+        layout.xaxis.linecolor = '#666';
+        layout.xaxis.linewidth = 1;
     }
 
     Plotly.newPlot(divId, traces, layout, {
@@ -6748,6 +6753,8 @@ function renderGroupBar(divId, data, paramKey, reverseY, yLabel, yMin) {
     };
     // Hard Y floor (e.g. tortuosity ≥ 1): pin the bottom at yMin and
     // auto-derive the top from bars (+SEM) and dots with 5% headroom.
+    // The y=0 zeroline (which normally doubles as the x-axis line) is
+    // out of range with a pinned floor, so draw an explicit axis line.
     if (yMin != null) {
         const hi = Math.max(
             yMin,
@@ -6756,6 +6763,9 @@ function renderGroupBar(divId, data, paramKey, reverseY, yLabel, yMin) {
         const pad = Math.max((hi - yMin) * 0.05, 0.01);
         layout.yaxis.autorange = false;
         layout.yaxis.range = [yMin, hi + pad];
+        layout.xaxis.showline = true;
+        layout.xaxis.linecolor = '#666';
+        layout.xaxis.linewidth = 1;
     }
 
     Plotly.newPlot(divId, [barTrace, dotTrace], layout, {
