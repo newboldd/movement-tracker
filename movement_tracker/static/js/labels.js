@@ -457,12 +457,6 @@ const manoViewer = (() => {
     let trajToClose = true;     // extend trail forward to the next Close event
     let trajCorrectCamera = false;
     let trajShowArc = false;    // overlay the fitted arc per phase
-    // Server-side trial-constant-radius 3D arc fits (/arc-fits), cached
-    // per subject.  When available these are drawn instead of the local
-    // per-segment ellipse fit — one rigid circle per trial, posed per
-    // phase, projected through the stereo calibration.
-    let _arcFits = null;
-    let _arcFitsSid = null;
     let cameraTraj = null;   // {available, H_to_ref_L/R (N×9), n_frames, is_stereo, _trialIdx}
     // Drawn trajectory points for click-to-seek: {x, y, f} in ctx-logical
     // canvas coords (same space as the video canvas click handler's mx/my).
@@ -1129,33 +1123,6 @@ const manoViewer = (() => {
     // Yellow so it stands apart from the red/blue trail points.
     const TRAJ_ARC_COLOR = '#ffd400';
 
-    async function _ensureArcFits() {
-        if (subjectId == null || _arcFitsSid === subjectId) return;
-        _arcFitsSid = subjectId;
-        _arcFits = null;
-        try {
-            _arcFits = await api(`/api/results/${subjectId}/arc-fits?source=auto`);
-        } catch (_) {
-            _arcFits = null;
-        }
-        render();
-    }
-
-    function _drawDashedPoly(poly, pixelScale) {
-        ctx.save();
-        ctx.globalAlpha = 0.95;
-        ctx.strokeStyle = TRAJ_ARC_COLOR;
-        ctx.lineWidth = (2 * LABEL_SCALE) / scale;
-        ctx.setLineDash([(6 * LABEL_SCALE) / scale, (4 * LABEL_SCALE) / scale]);
-        ctx.beginPath();
-        for (let i = 0; i < poly.length; i++) {
-            const x = poly[i][0] * pixelScale, y = poly[i][1] * pixelScale;
-            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-        }
-        ctx.stroke();
-        ctx.restore();
-    }
-
     // Resample a polyline to n points spaced uniformly along its LENGTH,
     // so fits weight the whole path evenly instead of over-weighting the
     // slow turnarounds where frames cluster.
@@ -1432,36 +1399,24 @@ const manoViewer = (() => {
             return null;
         };
 
-        // "Show fitted arc": prefer the server's trial-constant-radius
-        // 3D arcs (one rigid circle per trial, posed per phase and
-        // projected through the calibration).  While those load — or
-        // when 3D/calibration is unavailable — fall back to local
-        // per-phase ellipse fits, splitting the plotted span at every
-        // open/peak/close event inside it.
+        // "Show fitted arc": one free ellipse fit per movement PHASE —
+        // split the plotted span at every open/peak/close event inside
+        // it; no events in the span → one arc across the whole trail.
         let arcSegs = null;
-        let serverArcs = null;
         if (trajShowArc) {
-            if (_arcFitsSid !== subjectId) _ensureArcFits();
-            const stem = trials[currentTrialIdx]?.trial_stem;
-            const td = (_arcFits && _arcFits.available && _arcFits.trials)
-                ? _arcFits.trials[stem] : null;
-            if (td && td.phases) {
-                serverArcs = td.phases;
-            } else {
-                _ensureSavedEvents();
-                const marks = [];
-                for (const t of ['open', 'peak', 'close']) {
-                    for (const g of (savedEvents?.[t] || [])) {
-                        const f = g - startFrame;
-                        if (f > lo && f < hi) marks.push(f);
-                    }
+            _ensureSavedEvents();
+            const marks = [];
+            for (const t of ['open', 'peak', 'close']) {
+                for (const g of (savedEvents?.[t] || [])) {
+                    const f = g - startFrame;
+                    if (f > lo && f < hi) marks.push(f);
                 }
-                marks.sort((a, b) => a - b);
-                const bounds = [lo, ...marks, hi];
-                arcSegs = [];
-                for (let k = 1; k < bounds.length; k++) {
-                    if (bounds[k] > bounds[k - 1]) arcSegs.push([bounds[k - 1], bounds[k]]);
-                }
+            }
+            marks.sort((a, b) => a - b);
+            const bounds = [lo, ...marks, hi];
+            arcSegs = [];
+            for (let k = 1; k < bounds.length; k++) {
+                if (bounds[k] > bounds[k - 1]) arcSegs.push([bounds[k - 1], bounds[k]]);
             }
         }
 
@@ -1529,17 +1484,6 @@ const manoViewer = (() => {
                         _drawFittedArc(seg);
                     }
                 }
-            }
-        }
-        // Server-fitted rigid arcs: drawn once (they're a property of
-        // the trial's index tip, not of any one selected model) for
-        // every phase overlapping the plotted span, in this camera.
-        if (serverArcs) {
-            const camName = isLeft ? cameraNames[0] : cameraNames[1];
-            for (const ph of serverArcs) {
-                if (ph.hi < lo || ph.lo > hi) continue;
-                const poly = ph.cams && ph.cams[camName];
-                if (poly && poly.length > 1) _drawDashedPoly(poly, pixelScale);
             }
         }
     }
@@ -3107,7 +3051,6 @@ const manoViewer = (() => {
         });
         $('trajShowArc')?.addEventListener('change', e => {
             trajShowArc = e.target.checked;
-            if (trajShowArc) _ensureArcFits();
             _refreshTraj();
         });
         // Trajectory plotting defaults ON (index tip, event-bounded trail
