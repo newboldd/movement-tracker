@@ -6460,6 +6460,12 @@ function renderGroupPlots() {
     const _reverseY = (m, row) =>
         row.field === 'mean' && (m.id === 'peak_close_vel' || m.id === 'mean_close_vel');
 
+    // Tortuosity has a hard floor of 1 (path length ≥ displacement) —
+    // anchor its Mean row there so bars show the excess over a straight
+    // path.  Other rows (CV, seq R²/slope) are on their own scales.
+    const _yMinFor = (m, row) =>
+        (m.id === 'tortuosity' && row.field === 'mean') ? 1 : null;
+
     // Sequence-Effect rows read R² (seq_<mode>_*) or slope
     // (seqslope_<mode>_*) from each subject's cached fields.  ``row``
     // carries the seqMetric ('r2' or 'slope') so two seq rows can
@@ -6489,7 +6495,8 @@ function renderGroupPlots() {
             // to plot, so paint an empty placeholder and move on.
             if (k == null) return;
             const divId = `grpPlot_${m.id}_${_rowSuffix(row)}`;
-            renderGroupBar(divId, data, k, _reverseY(m, row), _yLabelFor(row));
+            renderGroupBar(divId, data, k, _reverseY(m, row), _yLabelFor(row),
+                           _yMinFor(m, row));
         });
     });
 
@@ -6502,12 +6509,13 @@ function renderGroupPlots() {
             const k = _key(spec, row);
             if (k == null) return;
             const divId = `grpPlotDose_${m.id}_${_rowSuffix(row)}`;
-            renderDoseScatter(divId, data, k, _reverseY(m, row), _yLabelFor(row));
+            renderDoseScatter(divId, data, k, _reverseY(m, row), _yLabelFor(row),
+                              _yMinFor(m, row));
         });
     });
 }
 
-function renderDoseScatter(divId, data, paramKey, reverseY, yLabel) {
+function renderDoseScatter(divId, data, paramKey, reverseY, yLabel, yMin) {
     // Levodopa plots include PD subjects only.
     const color = GROUP_COLORS['PD'] || '#2196F3';
     const pd = _activeGroupSubjects().filter(s =>
@@ -6587,6 +6595,14 @@ function renderDoseScatter(divId, data, paramKey, reverseY, yLabel) {
         paper_bgcolor: '#fff',
         shapes,
     };
+    // Hard Y floor (e.g. tortuosity ≥ 1), matching renderGroupBar.
+    if (yMin != null) {
+        const allY = traces.flatMap(t => t.y || []).filter(v => v != null && isFinite(v));
+        const hi = Math.max(yMin, ...allY);
+        const pad = Math.max((hi - yMin) * 0.05, 0.01);
+        layout.yaxis.autorange = false;
+        layout.yaxis.range = [yMin, hi + pad];
+    }
 
     Plotly.newPlot(divId, traces, layout, {
         responsive: true,
@@ -6612,7 +6628,7 @@ function _toggleGroupMetric(id, checked) {
 // Expose for inline onclick
 window._toggleGroupMetric = _toggleGroupMetric;
 
-function renderGroupBar(divId, data, paramKey, reverseY, yLabel) {
+function renderGroupBar(divId, data, paramKey, reverseY, yLabel, yMin) {
     const groups = data.groups;
     // Filter to the subjects whose checkbox is currently on.  This
     // is what makes unchecking a noisy subject immediately drop it
@@ -6730,6 +6746,17 @@ function renderGroupBar(divId, data, paramKey, reverseY, yLabel) {
         paper_bgcolor: '#fff',
         bargap: 0.5,
     };
+    // Hard Y floor (e.g. tortuosity ≥ 1): pin the bottom at yMin and
+    // auto-derive the top from bars (+SEM) and dots with 5% headroom.
+    if (yMin != null) {
+        const hi = Math.max(
+            yMin,
+            ...groupMeans.map((v, i) => v + (groupSems[i] || 0)),
+            ...dotY.filter(v => isFinite(v)));
+        const pad = Math.max((hi - yMin) * 0.05, 0.01);
+        layout.yaxis.autorange = false;
+        layout.yaxis.range = [yMin, hi + pad];
+    }
 
     Plotly.newPlot(divId, [barTrace, dotTrace], layout, {
         responsive: true,
