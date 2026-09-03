@@ -1119,13 +1119,174 @@ const manoViewer = (() => {
         return `rgb(${cl(mr)},${cl(mg)},${cl(mb)})`;
     }
 
-    // Least-squares (Kasa) circle fit through 2D points + dashed-arc
-    // overlay — the same construction the results page uses for the
-    // arc-referenced tortuosity, drawn here so the fit can be verified
-    // against the plotted trail.  ``P`` is [[x, y], ...] in canvas
+    // ── Fitted-arc overlay for the 2D trajectory ─────────────────────
+    // Yellow so it stands apart from the red/blue trail points.
+    const TRAJ_ARC_COLOR = '#ffd400';
+
+    function _dashedCurve(fnT, t0, t1) {
+        ctx.save();
+        ctx.globalAlpha = 0.95;
+        ctx.strokeStyle = TRAJ_ARC_COLOR;
+        ctx.lineWidth = (2 * LABEL_SCALE) / scale;
+        ctx.setLineDash([(6 * LABEL_SCALE) / scale, (4 * LABEL_SCALE) / scale]);
+        ctx.beginPath();
+        const STEPS = 60;
+        for (let i = 0; i <= STEPS; i++) {
+            const [x, y] = fnT(t0 + (t1 - t0) * (i / STEPS));
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    // Real roots of ax³+bx²+cx+d (Cardano / trigonometric).
+    function _cubicRoots(a, b, c, d) {
+        b /= a; c /= a; d /= a;
+        const p = c - b * b / 3, q = 2 * b * b * b / 27 - b * c / 3 + d;
+        const off = -b / 3;
+        const disc = q * q / 4 + p * p * p / 27;
+        if (disc > 1e-14) {
+            const s = Math.sqrt(disc);
+            return [Math.cbrt(-q / 2 + s) + Math.cbrt(-q / 2 - s) + off];
+        }
+        if (Math.abs(p) < 1e-14) return [off + Math.cbrt(-q)];
+        const r = Math.sqrt(-p * p * p / 27);
+        const phi = Math.acos(Math.max(-1, Math.min(1, -q / (2 * r))));
+        const m = 2 * Math.sqrt(-p / 3);
+        return [0, 1, 2].map(k => m * Math.cos((phi + 2 * Math.PI * k) / 3) + off);
+    }
+
+    // Direct least-squares ellipse fit (Halir & Flusser's numerically
+    // stable variant of Fitzgibbon).  Returns {cx, cy, ru, rv, theta}
+    // (centre, semi-axes along/perpendicular to theta) or null.  An
+    // ellipse — unlike the circle — lets the reference bend more
+    // sharply at one end of the movement than the other.
+    function _fitEllipse(P) {
+        const n = P.length;
+        if (n < 6) return null;
+        // Centre + scale normalization for conditioning.
+        let mx = 0, my = 0;
+        for (const p of P) { mx += p[0]; my += p[1]; }
+        mx /= n; my /= n;
+        let sc = 0;
+        for (const p of P) sc += Math.hypot(p[0] - mx, p[1] - my);
+        sc = (sc / n) || 1;
+        const X = P.map(p => [(p[0] - mx) / sc, (p[1] - my) / sc]);
+        const Z = () => [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+        const S1 = Z(), S2 = Z(), S3 = Z();
+        for (const [x, y] of X) {
+            const d1 = [x * x, x * y, y * y], d2 = [x, y, 1];
+            for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
+                S1[i][j] += d1[i] * d1[j];
+                S2[i][j] += d1[i] * d2[j];
+                S3[i][j] += d2[i] * d2[j];
+            }
+        }
+        const det3 = (m) =>
+            m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+          - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+          + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+        const inv3 = (m) => {
+            const D = det3(m);
+            if (!isFinite(D) || Math.abs(D) < 1e-12) return null;
+            const A = [
+                [m[1][1]*m[2][2]-m[1][2]*m[2][1], m[0][2]*m[2][1]-m[0][1]*m[2][2], m[0][1]*m[1][2]-m[0][2]*m[1][1]],
+                [m[1][2]*m[2][0]-m[1][0]*m[2][2], m[0][0]*m[2][2]-m[0][2]*m[2][0], m[0][2]*m[1][0]-m[0][0]*m[1][2]],
+                [m[1][0]*m[2][1]-m[1][1]*m[2][0], m[0][1]*m[2][0]-m[0][0]*m[2][1], m[0][0]*m[1][1]-m[0][1]*m[1][0]],
+            ];
+            return A.map(r => r.map(v => v / D));
+        };
+        const mul = (A, B) => A.map((r, i) =>
+            B[0].map((_, j) => r.reduce((s, v, k) => s + v * B[k][j], 0)));
+        const S3i = inv3(S3);
+        if (!S3i) return null;
+        const S2t = [0, 1, 2].map(i => [0, 1, 2].map(j => S2[j][i]));
+        const T = mul(S3i, S2t).map(r => r.map(v => -v));
+        const Mfull = mul(S2, T).map((r, i) => r.map((v, j) => v + S1[i][j]));
+        // Premultiply C1⁻¹ (C1 = [[0,0,2],[0,-1,0],[2,0,0]]).
+        const M = [Mfull[2].map(v => v / 2), Mfull[1].map(v => -v), Mfull[0].map(v => v / 2)];
+        // Eigenvector of M satisfying the ellipse constraint 4ac−b² > 0.
+        const tr = M[0][0] + M[1][1] + M[2][2];
+        const minors = (M[1][1]*M[2][2]-M[1][2]*M[2][1])
+                     + (M[0][0]*M[2][2]-M[0][2]*M[2][0])
+                     + (M[0][0]*M[1][1]-M[0][1]*M[1][0]);
+        const cross = (u, v) => [u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0]];
+        const nrm = (v) => Math.hypot(v[0], v[1], v[2]);
+        let a1 = null;
+        for (const lam of _cubicRoots(1, -tr, minors, -det3(M))) {
+            const A = [[M[0][0]-lam, M[0][1], M[0][2]],
+                       [M[1][0], M[1][1]-lam, M[1][2]],
+                       [M[2][0], M[2][1], M[2][2]-lam]];
+            const cands = [cross(A[0], A[1]), cross(A[0], A[2]), cross(A[1], A[2])];
+            const v = cands.reduce((b, c) => (nrm(c) > nrm(b) ? c : b));
+            if (nrm(v) < 1e-12) continue;
+            if (4 * v[0] * v[2] - v[1] * v[1] > 0) { a1 = v; break; }
+        }
+        if (!a1) return null;
+        const a2 = T.map(r => r[0]*a1[0] + r[1]*a1[1] + r[2]*a1[2]);
+        const [A_, B_, C_] = a1, [D_, E_, F_] = a2;
+        // Conic → geometric parameters (in normalized space).
+        const den = 4 * A_ * C_ - B_ * B_;
+        if (den <= 0) return null;
+        const cx0 = (B_ * E_ - 2 * C_ * D_) / den;
+        const cy0 = (B_ * D_ - 2 * A_ * E_) / den;
+        const Fc = A_*cx0*cx0 + B_*cx0*cy0 + C_*cy0*cy0 + D_*cx0 + E_*cy0 + F_;
+        const theta = 0.5 * Math.atan2(B_, A_ - C_);
+        const ct = Math.cos(theta), st = Math.sin(theta);
+        const qu = A_*ct*ct + B_*ct*st + C_*st*st;      // form along theta
+        const qv = A_*st*st - B_*ct*st + C_*ct*ct;      // perpendicular
+        const ru2 = -Fc / qu, rv2 = -Fc / qv;
+        if (!(ru2 > 0) || !(rv2 > 0)) return null;
+        return { cx: cx0 * sc + mx, cy: cy0 * sc + my,
+                 ru: Math.sqrt(ru2) * sc, rv: Math.sqrt(rv2) * sc, theta };
+    }
+
+    // Dashed fitted-arc overlay for one trail segment — the smooth
+    // reference the arc-tortuosity concept divides by, drawn so the fit
+    // can be verified against the plotted trail.  Prefers a direct
+    // least-squares ELLIPSE (curvature may differ between the two ends
+    // of the movement); falls back to the Kasa circle when the ellipse
+    // fit fails or degenerates.  ``P`` is [[x, y], ...] in canvas
     // coords (already pixel-scaled / warp-corrected).
-    function _drawFittedArc(P, color) {
+    function _drawFittedArc(P) {
         if (P.length < 5) return;
+        // Data extent, for degeneracy caps.
+        let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
+        for (const p of P) {
+            if (p[0] < xmin) xmin = p[0];
+            if (p[0] > xmax) xmax = p[0];
+            if (p[1] < ymin) ymin = p[1];
+            if (p[1] > ymax) ymax = p[1];
+        }
+        const span = Math.max(xmax - xmin, ymax - ymin, 1e-6);
+
+        const ell = _fitEllipse(P);
+        if (ell && isFinite(ell.ru) && isFinite(ell.rv)
+            && Math.max(ell.ru, ell.rv) < 25 * span
+            && Math.max(ell.ru, ell.rv) / Math.min(ell.ru, ell.rv) < 25) {
+            const { cx, cy, ru, rv, theta } = ell;
+            const ct = Math.cos(theta), st = Math.sin(theta);
+            // Parametric angle of each data point, unwrapped → net sweep.
+            const phiOf = (p) => {
+                const dx = p[0] - cx, dy = p[1] - cy;
+                return Math.atan2((-st * dx + ct * dy) / rv, (ct * dx + st * dy) / ru);
+            };
+            let prev = phiOf(P[0]), last = prev;
+            const phi0 = prev;
+            for (let i = 1; i < P.length; i++) {
+                let t = phiOf(P[i]);
+                while (t - prev > Math.PI) t -= 2 * Math.PI;
+                while (t - prev < -Math.PI) t += 2 * Math.PI;
+                prev = t; last = t;
+            }
+            _dashedCurve((phi) => [
+                cx + ru * Math.cos(phi) * ct - rv * Math.sin(phi) * st,
+                cy + ru * Math.cos(phi) * st + rv * Math.sin(phi) * ct,
+            ], phi0, last);
+            return;
+        }
+
+        // Fallback: Kasa least-squares circle.
         let Sx = 0, Sy = 0, Sxx = 0, Sxy = 0, Syy = 0, Sz = 0, Sxz = 0, Syz = 0;
         for (const p of P) {
             const x = p[0], y = p[1], z = x * x + y * y;
@@ -1133,7 +1294,6 @@ const manoViewer = (() => {
             Sz += z; Sxz += x * z; Syz += y * z;
         }
         const n = P.length;
-        // Solve [[Sxx,Sxy,Sx],[Sxy,Syy,Sy],[Sx,Sy,n]]·[a,b,c]ᵀ = [Sxz,Syz,Sz]
         const det3 = (m) =>
             m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
           - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
@@ -1146,34 +1306,20 @@ const manoViewer = (() => {
         const a = det3(col(0, b)) / D;
         const bb = det3(col(1, b)) / D;
         const c = det3(col(2, b)) / D;
-        const cx = a / 2, cy = bb / 2;
-        const r2 = c + cx * cx + cy * cy;
+        const ccx = a / 2, ccy = bb / 2;
+        const r2 = c + ccx * ccx + ccy * ccy;
         if (!isFinite(r2) || r2 <= 0) return;
         const R = Math.sqrt(r2);
-        // Unwrapped angle sequence → net swept angle between endpoints.
-        let prev = Math.atan2(P[0][1] - cy, P[0][0] - cx);
+        let prev = Math.atan2(P[0][1] - ccy, P[0][0] - ccx);
+        const a0 = prev;
         let ang = prev;
         for (let i = 1; i < P.length; i++) {
-            let t = Math.atan2(P[i][1] - cy, P[i][0] - cx);
+            let t = Math.atan2(P[i][1] - ccy, P[i][0] - ccx);
             while (t - prev > Math.PI) t -= 2 * Math.PI;
             while (t - prev < -Math.PI) t += 2 * Math.PI;
             prev = t; ang = t;
         }
-        const a0 = Math.atan2(P[0][1] - cy, P[0][0] - cx);
-        ctx.save();
-        ctx.globalAlpha = 0.95;
-        ctx.strokeStyle = color;
-        ctx.lineWidth = (2 * LABEL_SCALE) / scale;
-        ctx.setLineDash([(6 * LABEL_SCALE) / scale, (4 * LABEL_SCALE) / scale]);
-        ctx.beginPath();
-        const STEPS = 48;
-        for (let i = 0; i <= STEPS; i++) {
-            const t = a0 + (ang - a0) * (i / STEPS);
-            const x = cx + R * Math.cos(t), y = cy + R * Math.sin(t);
-            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-        }
-        ctx.stroke();
-        ctx.restore();
+        _dashedCurve((t) => [ccx + R * Math.cos(t), ccy + R * Math.sin(t)], a0, ang);
     }
 
     function _drawJointTrails(pixelScale, isLeft, fn) {
@@ -1310,7 +1456,7 @@ const manoViewer = (() => {
                 if (arcSegs) {
                     for (const [sA, sB] of arcSegs) {
                         const seg = pts.slice(sA - lo, sB - lo + 1).filter(Boolean);
-                        _drawFittedArc(seg, color);
+                        _drawFittedArc(seg);
                     }
                 }
             }

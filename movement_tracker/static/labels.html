@@ -484,7 +484,7 @@
                     <input type="checkbox" id="trajCorrectCamera"> Correct for camera movement
                 </label>
                 <label id="trajShowArcLabel" style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:4px;"
-                       title="Overlay the least-squares circular arc fitted to each movement phase of the trail (dashed) — the arc-referenced tortuosity divides path length by this arc's length">
+                       title="Overlay a least-squares elliptical arc fitted to each movement phase of the trail (dashed yellow; circle fallback) — the smooth reference the arc tortuosity divides by. An ellipse lets the reference bend more at one end than the other.">
                     <input type="checkbox" id="trajShowArc"> Show fitted arc
                 </label>
             </div>
@@ -1405,7 +1405,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=439" type="module"></script>
+    <script src="/static/js/labels.js?v=440" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {
