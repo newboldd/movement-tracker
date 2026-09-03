@@ -260,6 +260,7 @@
                     <input type="range" id="movXScaleSlider" min="5" max="120" step="1" value="82" style="width:110px;">
                 </label>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
+                <label title="Path length / displacement of the movement — controls below pick the calculation basis and phase"><input type="checkbox" id="tortEnabled"> Tortuosity</label>
                 <label><input type="checkbox" data-dparam="peak_dist" checked> Peak Thumb-Index Distance</label>
                 <label><input type="checkbox" data-dparam="amplitude" checked> Amplitude</label>
                 <label><input type="checkbox" data-dparam="peak_open_vel" checked> Peak Opening Vel.</label>
@@ -300,27 +301,20 @@
                 <label><input type="checkbox" data-dparam="rel_amplitude"> Relative Amplitude</label>
                 <label><input type="checkbox" data-dparam="mean_open_vel"> Mean Opening Vel.</label>
                 <label><input type="checkbox" data-dparam="mean_close_vel"> Mean Closing Vel.</label>
-                <!-- Third row: tortuosity (path length / displacement) —
-                     3 calculation bases × 3 movement phases. -->
+                <!-- Tortuosity sub-controls (shown while the Tortuosity
+                     checkbox above is on): calculation basis + phase. -->
                 <div style="flex-basis:100%;height:0;"></div>
-                <label aria-hidden="true"
-                       style="display:flex;align-items:center;gap:6px;margin:0;visibility:hidden;">
-                    X scale:
-                    <input type="range" min="1" max="4" step="0.25" value="1" style="width:110px;" tabindex="-1">
-                </label>
-                <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;visibility:hidden;"></span>
-                <span style="font-size:12px;color:#666;align-self:center;">Tortuosity:</span>
-                <label title="Path length / displacement of the thumb-index distance trace, open→peak"><input type="checkbox" data-dparam="tort_dist_open"> Dist Open</label>
-                <label title="Path length / displacement of the thumb-index distance trace, peak→close"><input type="checkbox" data-dparam="tort_dist_close"> Dist Close</label>
-                <label title="Mean of the distance-trace opening and closing tortuosities"><input type="checkbox" data-dparam="tort_dist_avg"> Dist Avg</label>
-                <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
-                <label title="2D index-tip path length / displacement, open→peak, averaged across cameras"><input type="checkbox" data-dparam="tort_2d_open"> 2D Open</label>
-                <label title="2D index-tip path length / displacement, peak→close, averaged across cameras"><input type="checkbox" data-dparam="tort_2d_close"> 2D Close</label>
-                <label title="Mean of the 2D opening and closing tortuosities"><input type="checkbox" data-dparam="tort_2d_avg"> 2D Avg</label>
-                <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
-                <label title="Triangulated 3D index-tip path length / displacement, open→peak"><input type="checkbox" data-dparam="tort_3d_open"> 3D Open</label>
-                <label title="Triangulated 3D index-tip path length / displacement, peak→close"><input type="checkbox" data-dparam="tort_3d_close"> 3D Close</label>
-                <label title="Mean of the 3D opening and closing tortuosities"><input type="checkbox" data-dparam="tort_3d_avg"> 3D Avg</label>
+                <div id="tortControls" style="display:none;flex-wrap:wrap;gap:12px;align-items:center;padding-left:24px;">
+                    <span style="font-size:12px;color:#666;">Calculation:</span>
+                    <label title="Path length / displacement of the 1D thumb-index distance trace"><input type="radio" name="tortCalc" value="dist" checked> Distance</label>
+                    <label title="Index-tip trajectory in each camera's 2D pixel space, averaged across cameras"><input type="radio" name="tortCalc" value="2d"> 2D position</label>
+                    <label title="Triangulated 3D index-tip trajectory"><input type="radio" name="tortCalc" value="3d"> 3D position</label>
+                    <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
+                    <span style="font-size:12px;color:#666;">Movement phase:</span>
+                    <label title="Opening phase: open → peak"><input type="radio" name="tortPhase" value="open" checked> Open</label>
+                    <label title="Closing phase: peak → close"><input type="radio" name="tortPhase" value="close"> Close</label>
+                    <label title="Mean of the opening and closing tortuosities"><input type="radio" name="tortPhase" value="avg"> Average</label>
+                </div>
             </div>
             <div id="distMovementPlots" class="results-plot-grid"></div>
 
@@ -591,6 +585,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=164"></script>
+    <script src="/static/js/results.js?v=165"></script>
 </body>
 </html>

@@ -1601,6 +1601,14 @@ async function loadDistances(subjectId) {
 function getDistCheckedParams() {
     const checks = document.querySelectorAll('#distMovementControls input[data-dparam]');
     const params = [];
+    // Tortuosity: a single toggle whose calculation-basis + phase radios
+    // select one of the 9 tort_{dist|2d|3d}_{open|close|avg} fields.
+    // First in the list — its checkbox leads the control row.
+    if (document.getElementById('tortEnabled')?.checked) {
+        const calc = document.querySelector('input[name="tortCalc"]:checked')?.value || 'dist';
+        const phase = document.querySelector('input[name="tortPhase"]:checked')?.value || 'open';
+        params.push(`tort_${calc}_${phase}`);
+    }
     checks.forEach(cb => { if (cb.checked) params.push(cb.dataset.dparam); });
     // Top-bar IMI ref = 'off' globally hides every IMI plot.
     const imiRef = document.querySelector('input[name="imiRef"]:checked')?.value;
@@ -6809,6 +6817,19 @@ document.getElementById('movYZero')?.addEventListener('change', () => {
 document.querySelectorAll('#distMovementControls input[data-dparam]').forEach(cb => {
     cb.addEventListener('change', () => {
         if (cb.dataset.dparam === 'imi') _syncImiRefVisibility();
+        if (cachedMovements) renderDistMovementPlots();
+    });
+});
+
+// Tortuosity toggle: show/hide its calculation/phase radios and
+// re-render; the radios re-render with the newly selected variant.
+document.getElementById('tortEnabled')?.addEventListener('change', (e) => {
+    const ctl = document.getElementById('tortControls');
+    if (ctl) ctl.style.display = e.target.checked ? 'flex' : 'none';
+    if (cachedMovements) renderDistMovementPlots();
+});
+document.querySelectorAll('input[name="tortCalc"], input[name="tortPhase"]').forEach(r => {
+    r.addEventListener('change', () => {
         if (cachedMovements) renderDistMovementPlots();
     });
 });
