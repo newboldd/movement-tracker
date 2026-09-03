@@ -453,9 +453,10 @@ const manoViewer = (() => {
     let trajJoints = new Set();
     let trajPre = 60;
     let trajPost = 0;
-    let trajFromOpen = false;   // extend trail back to the last Open event
-    let trajToClose = false;    // extend trail forward to the next Close event
+    let trajFromOpen = true;    // extend trail back to the last Open event
+    let trajToClose = true;     // extend trail forward to the next Close event
     let trajCorrectCamera = false;
+    let trajShowArc = false;    // overlay the fitted circular arc per phase
     let cameraTraj = null;   // {available, H_to_ref_L/R (N×9), n_frames, is_stereo, _trialIdx}
     // Drawn trajectory points for click-to-seek: {x, y, f} in ctx-logical
     // canvas coords (same space as the video canvas click handler's mx/my).
@@ -1118,6 +1119,63 @@ const manoViewer = (() => {
         return `rgb(${cl(mr)},${cl(mg)},${cl(mb)})`;
     }
 
+    // Least-squares (Kasa) circle fit through 2D points + dashed-arc
+    // overlay — the same construction the results page uses for the
+    // arc-referenced tortuosity, drawn here so the fit can be verified
+    // against the plotted trail.  ``P`` is [[x, y], ...] in canvas
+    // coords (already pixel-scaled / warp-corrected).
+    function _drawFittedArc(P, color) {
+        if (P.length < 5) return;
+        let Sx = 0, Sy = 0, Sxx = 0, Sxy = 0, Syy = 0, Sz = 0, Sxz = 0, Syz = 0;
+        for (const p of P) {
+            const x = p[0], y = p[1], z = x * x + y * y;
+            Sx += x; Sy += y; Sxx += x * x; Sxy += x * y; Syy += y * y;
+            Sz += z; Sxz += x * z; Syz += y * z;
+        }
+        const n = P.length;
+        // Solve [[Sxx,Sxy,Sx],[Sxy,Syy,Sy],[Sx,Sy,n]]·[a,b,c]ᵀ = [Sxz,Syz,Sz]
+        const det3 = (m) =>
+            m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+          - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+          + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+        const M = [[Sxx, Sxy, Sx], [Sxy, Syy, Sy], [Sx, Sy, n]];
+        const D = det3(M);
+        if (!isFinite(D) || Math.abs(D) < 1e-9) return;
+        const col = (i, v) => M.map((r, ri) => r.map((c, ci) => ci === i ? v[ri] : c));
+        const b = [Sxz, Syz, Sz];
+        const a = det3(col(0, b)) / D;
+        const bb = det3(col(1, b)) / D;
+        const c = det3(col(2, b)) / D;
+        const cx = a / 2, cy = bb / 2;
+        const r2 = c + cx * cx + cy * cy;
+        if (!isFinite(r2) || r2 <= 0) return;
+        const R = Math.sqrt(r2);
+        // Unwrapped angle sequence → net swept angle between endpoints.
+        let prev = Math.atan2(P[0][1] - cy, P[0][0] - cx);
+        let ang = prev;
+        for (let i = 1; i < P.length; i++) {
+            let t = Math.atan2(P[i][1] - cy, P[i][0] - cx);
+            while (t - prev > Math.PI) t -= 2 * Math.PI;
+            while (t - prev < -Math.PI) t += 2 * Math.PI;
+            prev = t; ang = t;
+        }
+        const a0 = Math.atan2(P[0][1] - cy, P[0][0] - cx);
+        ctx.save();
+        ctx.globalAlpha = 0.95;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = (2 * LABEL_SCALE) / scale;
+        ctx.setLineDash([(6 * LABEL_SCALE) / scale, (4 * LABEL_SCALE) / scale]);
+        ctx.beginPath();
+        const STEPS = 48;
+        for (let i = 0; i <= STEPS; i++) {
+            const t = a0 + (ang - a0) * (i / STEPS);
+            const x = cx + R * Math.cos(t), y = cy + R * Math.sin(t);
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        ctx.restore();
+    }
+
     function _drawJointTrails(pixelScale, isLeft, fn) {
         _trajHitPoints = [];  // rebuilt below; cleared so click-to-seek is fresh
         if (!trajMode || !trialData) return;
@@ -1168,6 +1226,28 @@ const manoViewer = (() => {
             for (const t of EVENT_TYPES) if (evSets[t] && evSets[t].has(gf)) return t;
             return null;
         };
+
+        // "Show fitted arc": one arc per movement PHASE — split the
+        // plotted span at every open/peak/close event inside it, the
+        // same segments the arc-referenced tortuosity fits.  No events
+        // in the span → one arc across the whole trail.
+        let arcSegs = null;
+        if (trajShowArc) {
+            _ensureSavedEvents();
+            const marks = [];
+            for (const t of ['open', 'peak', 'close']) {
+                for (const g of (savedEvents?.[t] || [])) {
+                    const f = g - startFrame;
+                    if (f > lo && f < hi) marks.push(f);
+                }
+            }
+            marks.sort((a, b) => a - b);
+            const bounds = [lo, ...marks, hi];
+            arcSegs = [];
+            for (let k = 1; k < bounds.length; k++) {
+                if (bounds[k] > bounds[k - 1]) arcSegs.push([bounds[k - 1], bounds[k]]);
+            }
+        }
 
         for (const { pt: getPt, color } of sources) {
             // Closing half of the movement (thumb-index aperture decreasing)
@@ -1223,6 +1303,15 @@ const manoViewer = (() => {
                     const et = _evTypeAtLocal(fn);
                     drawJoint(cp[0] * pixelScale, cp[1] * pixelScale,
                               et ? EVENT_COLORS[et] : (_isClosing(fn) ? closeColor : color), et ? 4.2 : 3);
+                }
+                // Dashed fitted arc(s) over the trail — one per phase
+                // segment, fitted to the same (warped, scaled) points
+                // that were just drawn.
+                if (arcSegs) {
+                    for (const [sA, sB] of arcSegs) {
+                        const seg = pts.slice(sA - lo, sB - lo + 1).filter(Boolean);
+                        _drawFittedArc(seg, color);
+                    }
                 }
             }
         }
@@ -2789,6 +2878,15 @@ const manoViewer = (() => {
             _updateTrajSliderAvail();
             _refreshTraj();
         });
+        $('trajShowArc')?.addEventListener('change', e => {
+            trajShowArc = e.target.checked;
+            _refreshTraj();
+        });
+        // Trajectory plotting defaults ON (index tip, event-bounded trail
+        // — the from-Open / to-Close boxes ship checked in the HTML, and
+        // the sliders start dimmed accordingly).
+        _updateTrajSliderAvail();
+        $('trajToggleBtn')?.click();
 
         // ── Events editing controls ───────────────────────────
         $('evtOpenBtn')?.addEventListener('click',   () => placeEvent('open'));
