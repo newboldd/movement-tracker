@@ -1787,6 +1787,176 @@ def get_traces(subject_id: int, source: str = Query("auto")) -> dict:
     return {"trials": result_trials, "subject": subject_name, "y_range": y_range, "data_source": data_source, "available_sources": available_sources}
 
 
+def _resample_by_arclen(P: np.ndarray, n: int = 50) -> np.ndarray:
+    """Resample a polyline to n points spaced uniformly along its LENGTH.
+
+    Fits weight every sample equally, so without this the slow ends of a
+    movement (where frames cluster at the turnarounds) dominate the fit;
+    resampling by cumulative arc length weights the fit evenly across
+    the path instead of across time.
+    """
+    d = np.linalg.norm(np.diff(P, axis=0), axis=1)
+    s = np.concatenate([[0.0], np.cumsum(d)])
+    total = s[-1]
+    if total < 1e-9:
+        return P
+    t = np.linspace(0.0, total, n)
+    out = np.empty((n, P.shape[1]))
+    for k in range(P.shape[1]):
+        out[:, k] = np.interp(t, s, P[:, k])
+    return out
+
+
+def _fit_circle_3d(P: np.ndarray):
+    """Free 3D circle fit: PCA plane + in-plane Kasa least squares.
+
+    Returns dict(c0, e1, e2, Q, cx, cy, R, resid) or None.  ``Q`` is the
+    points in plane coords; (cx, cy) the in-plane centre.
+    """
+    c0 = P.mean(axis=0)
+    _, _, Vt = np.linalg.svd(P - c0, full_matrices=False)
+    e1, e2 = Vt[0], Vt[1]
+    Q = np.column_stack([(P - c0) @ e1, (P - c0) @ e2])
+    A = np.column_stack([Q[:, 0], Q[:, 1], np.ones(len(Q))])
+    try:
+        sol, *_ = np.linalg.lstsq(A, (Q ** 2).sum(axis=1), rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+    cx, cy = sol[0] / 2.0, sol[1] / 2.0
+    r2 = sol[2] + cx * cx + cy * cy
+    if not np.isfinite(r2) or r2 <= 0:
+        return None
+    R = float(np.sqrt(r2))
+    r = np.linalg.norm(Q - [cx, cy], axis=1)
+    resid = float(np.sqrt(np.mean((r - R) ** 2)))
+    return {"c0": c0, "e1": e1, "e2": e2, "Q": Q,
+            "cx": float(cx), "cy": float(cy), "R": R, "resid": resid}
+
+
+def _refit_center_fixed_r(Q: np.ndarray, cx: float, cy: float, R: float):
+    """Gauss-Newton refit of the in-plane circle CENTRE with the radius
+    held fixed — the trial-constant-arc constraint.  Far better
+    conditioned than the free fit on short arcs (the radius is exactly
+    the ill-posed parameter, and it's pinned)."""
+    c = np.array([cx, cy], dtype=float)
+    for _ in range(20):
+        d = Q - c
+        r = np.linalg.norm(d, axis=1)
+        r = np.where(r < 1e-9, 1e-9, r)
+        J = -d / r[:, None]
+        f = r - R
+        H = J.T @ J
+        try:
+            dc = np.linalg.solve(H, -(J.T @ f))
+        except np.linalg.LinAlgError:
+            break
+        c = c + dc
+        if np.linalg.norm(dc) < 1e-8:
+            break
+    return c
+
+
+@router.get("/{subject_id}/arc-fits")
+def get_arc_fits(subject_id: int, source: str = Query("auto")) -> dict:
+    """Trial-constant-radius 3D arcs for the Hand Tracking overlay.
+
+    Per trial: free-fit a 3D circle to every valid movement phase's
+    triangulated index-tip path (arc-length-resampled so the fit weights
+    the path evenly rather than clustering at the slow turnarounds),
+    lock the radius to the trial's robust median, refit only each
+    phase's pose (plane + centre), then project each fixed-R arc through
+    the stereo calibration into both cameras.  The client draws the
+    returned 2D polylines — a rigid circle seen at an angle, so any
+    ellipticity on screen is earned by geometry rather than fit freedom.
+    """
+    subj = _get_subject(subject_id)
+    subject_name = subj["name"]
+
+    distances, trials, data_source = _load_distances_and_trials(subject_name, source)
+    if not distances:
+        return {"available": False, "reason": "no distance data"}
+    events, _ = _load_events(subject_name, distances, trials)
+    movements, _ = _build_movement_params(distances, events, trials)
+    _, tip3d = _load_index_tip_data(subject_name, data_source, trials, len(distances))
+    if tip3d is None:
+        return {"available": False, "reason": "no 3D tip data (calibration?)"}
+    from ..services.calibration import get_calibration_for_subject
+    calib = get_calibration_for_subject(subject_name)
+    if calib is None:
+        return {"available": False, "reason": "no calibration"}
+
+    import cv2
+    settings = get_settings()
+    cam_names = settings.camera_names
+
+    def _project(pts3d: np.ndarray, cam: int) -> np.ndarray:
+        if cam == 0:
+            rvec = np.zeros(3)
+            tvec = np.zeros(3)
+            K, dist = calib["K1"], calib["dist1"]
+        else:
+            rvec, _ = cv2.Rodrigues(np.asarray(calib["R"], dtype=np.float64))
+            tvec = np.asarray(calib["T"], dtype=np.float64).reshape(3)
+            K, dist = calib["K2"], calib["dist2"]
+        proj, _ = cv2.projectPoints(pts3d.reshape(-1, 1, 3).astype(np.float64),
+                                    rvec, tvec,
+                                    np.asarray(K, dtype=np.float64),
+                                    np.asarray(dist, dtype=np.float64))
+        return proj.reshape(-1, 2)
+
+    out_trials: dict = {}
+    for ti, t in enumerate(trials):
+        t_start = t["start_frame"]
+        # Phase spans (global frames) from this trial's VALID movements.
+        spans = []
+        for m in movements:
+            if m.get("trial_idx") != ti or not m.get("valid"):
+                continue
+            o, pk, c = m["open_frame"], m["peak_frame"], m["close_frame"]
+            spans.append((o, pk))
+            spans.append((pk, c))
+        # Free fits (arc-length-uniform samples) → per-phase radius.
+        fits = []
+        for (a, b) in spans:
+            pts = [tip3d[f] for f in range(a, b + 1)
+                   if f < len(tip3d) and tip3d[f] is not None]
+            if len(pts) < 5:
+                fits.append(None)
+                continue
+            P = _resample_by_arclen(np.asarray(pts, dtype=float), 50)
+            fits.append(_fit_circle_3d(P))
+        radii = [f["R"] for f in fits if f is not None and np.isfinite(f["R"])]
+        if not radii:
+            continue
+        r_star = float(np.median(radii))
+        phases = []
+        for (a, b), fit in zip(spans, fits):
+            if fit is None:
+                continue
+            c = _refit_center_fixed_r(fit["Q"], fit["cx"], fit["cy"], r_star)
+            # Net swept angle of the (resampled) path about the centre.
+            d = fit["Q"] - c
+            ang = np.unwrap(np.arctan2(d[:, 1], d[:, 0]))
+            th0, th1 = float(ang[0]), float(ang[-1])
+            ths = np.linspace(th0, th1, 40)
+            pts3 = (fit["c0"][None, :]
+                    + np.outer(c[0] + r_star * np.cos(ths), fit["e1"])
+                    + np.outer(c[1] + r_star * np.sin(ths), fit["e2"]))
+            cams = {}
+            for ci, cn in enumerate(cam_names[:2]):
+                p2 = _project(pts3, ci)
+                cams[cn] = [[round(float(x), 1), round(float(y), 1)]
+                            for x, y in p2]
+            phases.append({"lo": int(a - t_start), "hi": int(b - t_start),
+                           "cams": cams})
+        if phases:
+            out_trials[t["trial_name"]] = {"R": round(r_star, 2),
+                                            "phases": phases}
+
+    return {"available": bool(out_trials), "source": data_source,
+            "trials": out_trials}
+
+
 @router.get("/{subject_id}/movements")
 def get_movements(subject_id: int, source: str = Query("auto")) -> dict:
     """Per-movement parameters for the Movements tab."""
