@@ -434,19 +434,21 @@ def _tortuosity(points: list) -> float | None:
     """Tortuosity of a sampled path: total path length / net displacement.
 
     ``points`` is an ordered sequence of scalars (1-D distance trace) or
-    coordinates ([x, y] / [x, y, z]).  ``None`` / NaN entries (missing
-    frames) are skipped, bridging the gap with a straight segment so the
-    path never shrinks below the displacement.  Returns None when fewer
-    than 3 valid samples remain or the endpoints (nearly) coincide — a
-    ~zero displacement would blow the ratio up toward infinity.
+    coordinates ([x, y] / [x, y, z]).  Any missing entry (None / NaN —
+    e.g. the joint went out of frame mid-movement) makes the result
+    None: bridging a gap with a straight segment would understate the
+    true path length, so incomplete movements are excluded rather than
+    approximated.  Also None for fewer than 3 samples or (nearly)
+    coincident endpoints — a ~zero displacement would blow the ratio up
+    toward infinity.
     """
     pts = []
     for p in points:
         if p is None:
-            continue
+            return None
         arr = np.atleast_1d(np.asarray(p, dtype=float))
         if np.any(np.isnan(arr)):
-            continue
+            return None
         pts.append(arr)
     if len(pts) < 3:
         return None
@@ -758,9 +760,13 @@ def _build_movement_params(
             return _tortuosity(seq[lo:hi + 1])
 
         def _cams_tort(lo, hi):
-            vals = [t for t in (_phase_tort(c, lo, hi) for c in tip2d_cams)
-                    if t is not None]
-            return round(sum(vals) / len(vals), 4) if vals else None
+            # "Averaged across both cameras" — every camera with data
+            # must cover the full phase; a gap in either camera means
+            # part of the movement is out of frame → None.
+            vals = [_phase_tort(c, lo, hi) for c in tip2d_cams]
+            if not vals or any(v is None for v in vals):
+                return None
+            return round(sum(vals) / len(vals), 4)
 
         def _phase_avg(a, b):
             return round((a + b) / 2, 4) if a is not None and b is not None else None
@@ -2700,6 +2706,11 @@ def get_group_comparison(include_auto: bool = Query(False),
                 raise RuntimeError("cache pre-dates tortuosity fields")
             if subjs and "median_amplitude" not in subjs[0]:
                 raise RuntimeError("cache pre-dates median/p75 fields")
+            # Value-semantics change: tortuosity of movements with
+            # missing (out-of-frame) frames became None instead of
+            # gap-bridged — caches without the marker hold old values.
+            if not data.get("tort_gap_nan"):
+                raise RuntimeError("cache pre-dates gap-strict tortuosity")
             # Newer-but-still-derivable additions can stay in the
             # hot path:
             if subjs and "variance_amplitude" not in subjs[0]:
@@ -2891,7 +2902,9 @@ def get_group_comparison(include_auto: bool = Query(False),
     # Collect unique groups
     groups = sorted(set(r["diagnosis"] for r in results))
 
-    data = {"subjects": results, "groups": groups}
+    # ``tort_gap_nan`` marks the gap-strict tortuosity semantics so the
+    # cache-staleness check can spot pre-change caches.
+    data = {"subjects": results, "groups": groups, "tort_gap_nan": True}
     # Persist the fresh aggregation so the next visit takes the cache
     # fast path — without this, a stale/missing cache (e.g. after a
     # schema addition like the tortuosity fields) re-paid the full
