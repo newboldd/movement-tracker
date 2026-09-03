@@ -314,6 +314,10 @@
                     <label title="Opening phase: open → peak"><input type="radio" name="tortPhase" value="open" checked> Open</label>
                     <label title="Closing phase: peak → close"><input type="radio" name="tortPhase" value="close"> Close</label>
                     <label title="Mean of the opening and closing tortuosities"><input type="radio" name="tortPhase" value="avg"> Average</label>
+                    <span style="border-left:1px solid #ccc;height:20px;margin:0 4px;"></span>
+                    <span style="font-size:12px;color:#666;">Reference:</span>
+                    <label title="Divide path length by the straight-line displacement — includes the movement's natural arc curvature"><input type="radio" name="tortRef" value="chord" checked> Chord</label>
+                    <label id="tortRefArcLabel" title="Divide path length by a least-squares circular arc fitted to the path — a smooth sweep scores ~1 regardless of bend (2D/3D positions only)"><input type="radio" name="tortRef" value="arc"> Fitted arc</label>
                 </div>
             </div>
             <div id="distMovementPlots" class="results-plot-grid"></div>
@@ -585,6 +589,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=169"></script>
+    <script src="/static/js/results.js?v=170"></script>
 </body>
 </html>

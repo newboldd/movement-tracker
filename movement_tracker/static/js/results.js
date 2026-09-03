@@ -985,6 +985,12 @@ const PARAM_LABELS = {
     tort_3d_open:  'Tortuosity \u2014 3D Index Tip, Opening',
     tort_3d_close: 'Tortuosity \u2014 3D Index Tip, Closing',
     tort_3d_avg:   'Tortuosity \u2014 3D Index Tip, Averaged',
+    tort_2d_arc_open:  'Tortuosity \u2014 2D Index Tip (Arc Ref), Opening',
+    tort_2d_arc_close: 'Tortuosity \u2014 2D Index Tip (Arc Ref), Closing',
+    tort_2d_arc_avg:   'Tortuosity \u2014 2D Index Tip (Arc Ref), Averaged',
+    tort_3d_arc_open:  'Tortuosity \u2014 3D Index Tip (Arc Ref), Opening',
+    tort_3d_arc_close: 'Tortuosity \u2014 3D Index Tip (Arc Ref), Closing',
+    tort_3d_arc_avg:   'Tortuosity \u2014 3D Index Tip (Arc Ref), Averaged',
 };
 
 // Short Y-axis labels for the movement scatter plots.
@@ -1007,6 +1013,12 @@ const PARAM_YLABELS = {
     tort_3d_open:  'Tortuosity',
     tort_3d_close: 'Tortuosity',
     tort_3d_avg:   'Tortuosity',
+    tort_2d_arc_open:  'Tortuosity (arc ref)',
+    tort_2d_arc_close: 'Tortuosity (arc ref)',
+    tort_2d_arc_avg:   'Tortuosity (arc ref)',
+    tort_3d_arc_open:  'Tortuosity (arc ref)',
+    tort_3d_arc_close: 'Tortuosity (arc ref)',
+    tort_3d_arc_avg:   'Tortuosity (arc ref)',
 };
 
 // Single shared color for all trials on the movement scatters.
@@ -1607,7 +1619,11 @@ function getDistCheckedParams() {
     if (document.getElementById('tortEnabled')?.checked) {
         const calc = document.querySelector('input[name="tortCalc"]:checked')?.value || 'dist';
         const phase = document.querySelector('input[name="tortPhase"]:checked')?.value || 'open';
-        params.push(`tort_${calc}_${phase}`);
+        const ref = document.querySelector('input[name="tortRef"]:checked')?.value || 'chord';
+        // Arc reference only exists for the spatial (2D/3D) bases —
+        // the 1D distance trace has no arc to fit.
+        const arc = (ref === 'arc' && calc !== 'dist') ? '_arc' : '';
+        params.push(`tort_${calc}${arc}_${phase}`);
     }
     checks.forEach(cb => { if (cb.checked) params.push(cb.dataset.dparam); });
     // Top-bar IMI ref = 'off' globally hides every IMI plot.
@@ -6308,11 +6324,14 @@ GROUP_METRICS.forEach(m => {
 });
 
 // Tortuosity variant selection for the Group Comparison column —
-// mirrors the individual-page radios (calculation basis + phase).
+// mirrors the individual-page radios (calculation basis + phase +
+// chord/fitted-arc reference).
 let _groupTortCalc = 'dist';
 let _groupTortPhase = 'open';
+let _groupTortRef = 'chord';
 window._setGroupTort = function (kind, val) {
     if (kind === 'calc') _groupTortCalc = val;
+    else if (kind === 'ref') _groupTortRef = val;
     else _groupTortPhase = val;
     renderGroupPlots();
 };
@@ -6366,7 +6385,9 @@ function renderGroupPlots() {
     // calc/phase selection before anything reads them.
     const _tortM = GROUP_METRICS.find(m => m.id === 'tortuosity');
     if (_tortM) {
-        const v = `tort_${_groupTortCalc}_${_groupTortPhase}`;
+        // Arc reference only exists for the spatial (2D/3D) bases.
+        const arc = (_groupTortRef === 'arc' && _groupTortCalc !== 'dist') ? '_arc' : '';
+        const v = `tort_${_groupTortCalc}${arc}_${_groupTortPhase}`;
         _tortM.mean.key = `mean_${v}`;
         _tortM.cv.key = `cv_${v}`;
         _tortM.seq.key = `seq_${v}`;
@@ -6374,7 +6395,7 @@ function renderGroupPlots() {
         if (_tortM.p75) _tortM.p75.key = `p75_${v}`;
         const CALC = { dist: 'Dist', '2d': '2D', '3d': '3D' };
         const PH = { open: 'Open', close: 'Close', avg: 'Avg' };
-        _tortM.title = `Tortuosity (${CALC[_groupTortCalc]}, ${PH[_groupTortPhase]})`;
+        _tortM.title = `Tortuosity (${CALC[_groupTortCalc]}${arc ? ' Arc' : ''}, ${PH[_groupTortPhase]})`;
     }
 
     const visibleMetrics = GROUP_METRICS.filter(m => _groupMetricVisible[m.id]);
@@ -6401,6 +6422,12 @@ function renderGroupPlots() {
                 ${opt('open', 'Open', _groupTortPhase)}
                 ${opt('close', 'Close', _groupTortPhase)}
                 ${opt('avg', 'Average', _groupTortPhase)}
+            </select>`;
+            html += `<select onchange="_setGroupTort('ref', this.value)" style="font-size:11px;"
+                title="Chord: path / straight-line displacement (includes natural arc curvature). Fitted arc: path / least-squares circular arc (smooth sweep ≈ 1; 2D/3D only)">
+                ${opt('chord', 'Chord ref', _groupTortRef)}
+                <option value="arc" ${_groupTortRef === 'arc' ? 'selected' : ''}
+                    ${_groupTortCalc === 'dist' ? 'disabled' : ''}>Fitted arc ref</option>
             </select>`;
         }
     });
@@ -6961,8 +6988,21 @@ document.getElementById('tortEnabled')?.addEventListener('change', (e) => {
     if (ctl) ctl.style.display = e.target.checked ? 'flex' : 'none';
     if (cachedMovements) renderDistMovementPlots();
 });
-document.querySelectorAll('input[name="tortCalc"], input[name="tortPhase"]').forEach(r => {
+// The arc reference only applies to the spatial bases — dim it while
+// the Distance basis is selected (the key falls back to chord anyway).
+function _syncTortRefAvail() {
+    const calc = document.querySelector('input[name="tortCalc"]:checked')?.value || 'dist';
+    const arcLabel = document.getElementById('tortRefArcLabel');
+    if (!arcLabel) return;
+    const off = calc === 'dist';
+    arcLabel.style.opacity = off ? '0.35' : '1';
+    const inp = arcLabel.querySelector('input');
+    if (inp) inp.disabled = off;
+}
+_syncTortRefAvail();
+document.querySelectorAll('input[name="tortCalc"], input[name="tortPhase"], input[name="tortRef"]').forEach(r => {
     r.addEventListener('change', () => {
+        _syncTortRefAvail();
         if (cachedMovements) renderDistMovementPlots();
     });
 });

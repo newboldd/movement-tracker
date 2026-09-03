@@ -461,6 +461,71 @@ def _tortuosity(points: list) -> float | None:
     return round(path / disp, 4)
 
 
+def _tortuosity_arc(points: list) -> float | None:
+    """Arc-referenced tortuosity: path length / length of a least-squares
+    circular arc fitted to the phase's own points.
+
+    The fingertip rotates approximately about a joint centre, so even a
+    perfectly smooth tap follows a strongly bent arc — the plain
+    path/chord ratio reads that natural curvature as tortuosity.  With
+    the fitted arc as reference, a clean sweep scores ~1.0 regardless of
+    how much it bends; only deviation AROUND the arc (jitter,
+    hesitation) raises the value.
+
+    2-D points are fitted directly; 3-D points are first projected onto
+    their best-fit (PCA) plane, since joint rotation is planar.  The
+    swept angle uses the unwrapped endpoint difference, so angular
+    back-and-forth inflates the path but not the reference.  Falls back
+    to the chord when the fit is degenerate (a near-straight path has
+    R → ∞ and the arc converges to the chord anyway).  Same missing-
+    data rules as _tortuosity: any None/NaN sample → None; needs ≥5
+    samples for a meaningful fit.
+    """
+    pts = []
+    for p in points:
+        if p is None:
+            return None
+        arr = np.atleast_1d(np.asarray(p, dtype=float))
+        if np.any(np.isnan(arr)):
+            return None
+        pts.append(arr)
+    if len(pts) < 5:
+        return None
+    P = np.vstack(pts)
+    path = float(np.sum(np.linalg.norm(np.diff(P, axis=0), axis=1)))
+    chord = float(np.linalg.norm(P[-1] - P[0]))
+    if chord < 1e-9:
+        return None
+    if P.shape[1] == 3:
+        c = P.mean(axis=0)
+        _, _, Vt = np.linalg.svd(P - c, full_matrices=False)
+        P2 = (P - c) @ Vt[:2].T
+    else:
+        P2 = P
+    ref = chord
+    try:
+        # Kasa algebraic circle fit: minimise |x² + y² − ax − by − c|².
+        x, y = P2[:, 0], P2[:, 1]
+        A = np.column_stack([x, y, np.ones(len(x))])
+        sol, *_ = np.linalg.lstsq(A, x ** 2 + y ** 2, rcond=None)
+        cx, cy = sol[0] / 2.0, sol[1] / 2.0
+        r2 = sol[2] + cx * cx + cy * cy
+        if np.isfinite(r2) and r2 > 0:
+            R = float(np.sqrt(r2))
+            ang = np.unwrap(np.arctan2(y - cy, x - cx))
+            arc = R * abs(float(ang[-1] - ang[0]))
+            # A sane fit's arc is at least ≈ the chord; anything shorter
+            # means the fit broke (centre inside the cluster etc.) —
+            # keep the chord fallback in that case.
+            if np.isfinite(arc) and arc >= chord * 0.9:
+                ref = arc
+    except Exception:
+        pass
+    if ref < 1e-9:
+        return None
+    return round(path / ref, 4)
+
+
 def _load_index_tip_data(subject_name: str, source: str,
                          trials: list[dict], n_frames: int):
     """Per-frame index-fingertip trajectories for the tortuosity metrics.
@@ -812,6 +877,25 @@ def _build_movement_params(
         tort_3d_open  = _phase_tort(tip3d, open_f, pk)
         tort_3d_close = _phase_tort(tip3d, pk, close_f)
 
+        # Arc-referenced variants (2-D/3-D only — the 1-D distance trace
+        # has no spatial arc): path / fitted-circular-arc length, so a
+        # smooth sweep scores ~1 regardless of how much it bends.
+        def _phase_tort_arc(seq, lo, hi):
+            if seq is None or lo is None or hi is None or hi <= lo:
+                return None
+            return _tortuosity_arc(seq[lo:hi + 1])
+
+        def _cams_tort_arc(lo, hi):
+            vals = [_phase_tort_arc(c, lo, hi) for c in tip2d_cams]
+            if not vals or any(v is None for v in vals):
+                return None
+            return round(sum(vals) / len(vals), 4)
+
+        tort_2d_arc_open  = _cams_tort_arc(open_f, pk)
+        tort_2d_arc_close = _cams_tort_arc(pk, close_f)
+        tort_3d_arc_open  = _phase_tort_arc(tip3d, open_f, pk)
+        tort_3d_arc_close = _phase_tort_arc(tip3d, pk, close_f)
+
         # Per-trial-local frames for the opening and closing event, so
         # the client can slice each trial's distance trace directly
         # without re-computing the global → local offset.
@@ -857,6 +941,12 @@ def _build_movement_params(
             "tort_3d_open": tort_3d_open,
             "tort_3d_close": tort_3d_close,
             "tort_3d_avg": _phase_avg(tort_3d_open, tort_3d_close),
+            "tort_2d_arc_open": tort_2d_arc_open,
+            "tort_2d_arc_close": tort_2d_arc_close,
+            "tort_2d_arc_avg": _phase_avg(tort_2d_arc_open, tort_2d_arc_close),
+            "tort_3d_arc_open": tort_3d_arc_open,
+            "tort_3d_arc_close": tort_3d_arc_close,
+            "tort_3d_arc_avg": _phase_avg(tort_3d_arc_open, tort_3d_arc_close),
             "trial_idx": ti,
         }
         if not valid:
@@ -2762,6 +2852,8 @@ def get_group_comparison(include_auto: bool = Query(False),
             # both endpoints) now have ALL metrics nulled.
             if not data.get("strict_movement_validity"):
                 raise RuntimeError("cache pre-dates movement-validity rules")
+            if subjs and "mean_tort_2d_arc_open" not in subjs[0]:
+                raise RuntimeError("cache pre-dates arc-referenced tortuosity")
             # Newer-but-still-derivable additions can stay in the
             # hot path:
             if subjs and "variance_amplitude" not in subjs[0]:
@@ -2795,6 +2887,8 @@ def get_group_comparison(include_auto: bool = Query(False),
         "tort_dist_open", "tort_dist_close", "tort_dist_avg",
         "tort_2d_open", "tort_2d_close", "tort_2d_avg",
         "tort_3d_open", "tort_3d_close", "tort_3d_avg",
+        "tort_2d_arc_open", "tort_2d_arc_close", "tort_2d_arc_avg",
+        "tort_3d_arc_open", "tort_3d_arc_close", "tort_3d_arc_avg",
     ]
 
     results = []
