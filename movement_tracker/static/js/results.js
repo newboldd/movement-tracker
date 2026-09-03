@@ -4386,7 +4386,7 @@ window._copyGroupColumn = function(paramId, kind, btn) {
     // each metric can be visible alone, both, or neither.
     const seqSuffixes = ['seq_r2', 'seq_slope']
         .filter(s => document.getElementById(prefix + paramId + '_' + s));
-    const divs = ['mean', 'cv', ...seqSuffixes]
+    const divs = ['mean', 'median', 'p75', 'cv', ...seqSuffixes]
         .map(f => document.getElementById(prefix + paramId + '_' + f))
         .filter(Boolean);
     const m = (typeof GROUP_METRICS !== 'undefined')
@@ -6059,8 +6059,15 @@ async function loadGroup() {
 function _initGroupSubjectChecked() {
     if (!cachedGroup || !cachedGroup.subjects) return;
     const includeAuto = document.getElementById('includeAutoToggle').checked;
+    const includeClinic = !!document.getElementById('updatedConsentFilter')?.checked;
     _groupSubjectChecked = {};
     cachedGroup.subjects.forEach(s => {
+        // Consent-filtered subjects start unchecked so the list
+        // mirrors what the plots actually include.
+        if (!includeClinic && !s.updated_consent) {
+            _groupSubjectChecked[s.name] = false;
+            return;
+        }
         _groupSubjectChecked[s.name] = s.has_complete_events ? true : includeAuto;
     });
 }
@@ -6203,12 +6210,18 @@ function _renderGroupSubjectList() {
 window._groupSelectAll = function (state) {
     if (!cachedGroup || !cachedGroup.subjects) return;
     const includeAuto = document.getElementById('includeAutoToggle').checked;
+    const includeClinic = !!document.getElementById('updatedConsentFilter')?.checked;
     cachedGroup.subjects.forEach(s => {
         // "None" always unchecks everything.  "All" respects the
         // include-auto toggle so auto-only subjects don't get pulled
         // in while the toggle is off — matches the dim/deactivated
-        // semantics the user asked for.
+        // semantics the user asked for.  Same for the consent filter:
+        // clinic-consent-only subjects stay unchecked while it's off.
         if (state) {
+            if (!includeClinic && !s.updated_consent) {
+                _groupSubjectChecked[s.name] = false;
+                return;
+            }
             _groupSubjectChecked[s.name] = s.has_complete_events ? true : includeAuto;
         } else {
             _groupSubjectChecked[s.name] = false;
@@ -6283,6 +6296,17 @@ const GROUP_METRICS = [
     },
 ];
 
+// Derive Median / 75th-percentile row specs from each metric's mean
+// key (mean_X → median_X / p75_X).  Frequency is skipped — its "mean"
+// is the derived 1/mean_imi scalar, so no per-movement distribution
+// exists to take a median of; its cells render empty like its CV row.
+GROUP_METRICS.forEach(m => {
+    if (!m.mean || !m.mean.key.startsWith('mean_')) return;
+    const base = m.mean.key.slice(5);
+    m.median = { key: `median_${base}`, unit: m.mean.unit };
+    m.p75 = { key: `p75_${base}`, unit: m.mean.unit };
+});
+
 // Tortuosity variant selection for the Group Comparison column —
 // mirrors the individual-page radios (calculation basis + phase).
 let _groupTortCalc = 'dist';
@@ -6311,6 +6335,14 @@ const GROUP_COLORS = {
 
 let _groupMetricVisible = {};
 
+// Which aggregate ROWS show on the group grid.  Sequence Effect rows
+// keep their own R²/Slope checkboxes next to the seq-mode dropdown.
+let _groupRowVisible = { mean: true, median: true, p75: true, cv: true };
+window._toggleGroupRow = function (field, on) {
+    _groupRowVisible[field] = on;
+    renderGroupPlots();
+};
+
 function renderGroupPlots() {
     const container = document.getElementById('groupPlots');
     const data = cachedGroup;
@@ -6338,6 +6370,8 @@ function renderGroupPlots() {
         _tortM.mean.key = `mean_${v}`;
         _tortM.cv.key = `cv_${v}`;
         _tortM.seq.key = `seq_${v}`;
+        if (_tortM.median) _tortM.median.key = `median_${v}`;
+        if (_tortM.p75) _tortM.p75.key = `p75_${v}`;
         const CALC = { dist: 'Dist', '2d': '2D', '3d': '3D' };
         const PH = { open: 'Open', close: 'Close', avg: 'Avg' };
         _tortM.title = `Tortuosity (${CALC[_groupTortCalc]}, ${PH[_groupTortPhase]})`;
@@ -6382,12 +6416,25 @@ function renderGroupPlots() {
         !!document.querySelector(`#groupSeqMetric input.groupseqm[value="${v}"]:checked`);
     const _showR2 = _seqShow('r2');
     const _showSlope = _seqShow('slope');
-    const ROW_DEFS = [
-        { label: 'Mean', field: 'mean', height: 200 },
-        { label: 'Variance', field: 'cv', height: 180 },
-    ];
+    const ROW_DEFS = [];
+    if (_groupRowVisible.mean)   ROW_DEFS.push({ label: 'Mean', field: 'mean', height: 200 });
+    if (_groupRowVisible.median) ROW_DEFS.push({ label: 'Median', field: 'median', height: 180 });
+    if (_groupRowVisible.p75)    ROW_DEFS.push({ label: '75th %ile', field: 'p75', height: 180 });
+    if (_groupRowVisible.cv)     ROW_DEFS.push({ label: 'Variance', field: 'cv', height: 180 });
     if (_showR2)    ROW_DEFS.push({ label: 'Sequence Effect (R²)',    field: 'seq', seqMetric: 'r2',    height: 180 });
     if (_showSlope) ROW_DEFS.push({ label: 'Sequence Effect (slope)', field: 'seq', seqMetric: 'slope', height: 180 });
+
+    // Row-visibility checkbox bar (Sequence Effect rows are governed
+    // by the R²/Slope checkboxes beside the seq-mode dropdown).
+    html += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;align-items:center;">';
+    html += '<span style="font-size:12px;color:var(--text-muted);font-weight:600;">Rows:</span>';
+    [['mean', 'Mean'], ['median', 'Median'], ['p75', '75th %ile'], ['cv', 'Variance']].forEach(([f, label]) => {
+        html += `<label style="display:flex;align-items:center;gap:3px;font-size:11px;cursor:pointer;">
+            <input type="checkbox" ${_groupRowVisible[f] ? 'checked' : ''} onchange="_toggleGroupRow('${f}', this.checked)">
+            ${label}
+        </label>`;
+    });
+    html += '</div>';
 
     const colW = Math.max(200, Math.min(280, container.clientWidth / visibleMetrics.length));
 
@@ -6455,17 +6502,19 @@ function renderGroupPlots() {
 
     container.innerHTML = html;
 
-    // Closing-velocity mean values are negative; reverse that row's Y
-    // axis so the bars/points point up like the opening-velocity plots.
+    // Closing-velocity values are negative; reverse those rows' Y axes
+    // so the bars/points point up like the opening-velocity plots.
+    // Applies to every value-scaled row (mean / median / 75th %ile).
+    const _valueRow = (row) => ['mean', 'median', 'p75'].includes(row.field);
     const _reverseY = (m, row) =>
-        row.field === 'mean' && (m.id === 'peak_close_vel' || m.id === 'mean_close_vel');
+        _valueRow(row) && (m.id === 'peak_close_vel' || m.id === 'mean_close_vel');
 
     // Tortuosity has a hard floor of 1 (path length ≥ displacement) —
-    // anchor its Mean row just below that (0.8) so points sitting at
+    // anchor its value rows just below that (0.8) so points sitting at
     // exactly 1 stay clearly visible above the plot edge.  Other rows
     // (CV, seq R²/slope) are on their own scales.
     const _yMinFor = (m, row) =>
-        (m.id === 'tortuosity' && row.field === 'mean') ? 0.8 : null;
+        (m.id === 'tortuosity' && _valueRow(row)) ? 0.8 : null;
 
     // Sequence-Effect rows read R² (seq_<mode>_*) or slope
     // (seqslope_<mode>_*) from each subject's cached fields.  ``row``
@@ -7092,7 +7141,21 @@ document.getElementById('lockYAxis').addEventListener('change', () => {
 // the union of saved + auto already.  Toggle only changes the
 // default-checked state of auto-only subjects.
 document.getElementById('includeAutoToggle').addEventListener('change', _onIncludeAutoChanged);
-document.getElementById('updatedConsentFilter')?.addEventListener('change', () => {
+document.getElementById('updatedConsentFilter')?.addEventListener('change', (e) => {
+    // Keep the subject-list checkboxes in sync with the consent filter:
+    // unchecking the filter unchecks the clinic-consent-only subjects
+    // (they're excluded from the plots anyway); re-checking restores
+    // them to the standard default state.
+    const includeClinic = e.target.checked;
+    const includeAuto = document.getElementById('includeAutoToggle').checked;
+    if (cachedGroup && cachedGroup.subjects) {
+        cachedGroup.subjects.forEach(s => {
+            if (s.updated_consent) return;
+            _groupSubjectChecked[s.name] = includeClinic
+                ? (s.has_complete_events ? true : includeAuto)
+                : false;
+        });
+    }
     if (cachedGroup) renderGroupPlots();
 });
 

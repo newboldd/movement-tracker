@@ -2698,6 +2698,8 @@ def get_group_comparison(include_auto: bool = Query(False),
                 raise RuntimeError("cache pre-dates per-mode seq fields")
             if subjs and "mean_tort_dist_open" not in subjs[0]:
                 raise RuntimeError("cache pre-dates tortuosity fields")
+            if subjs and "median_amplitude" not in subjs[0]:
+                raise RuntimeError("cache pre-dates median/p75 fields")
             # Newer-but-still-derivable additions can stay in the
             # hot path:
             if subjs and "variance_amplitude" not in subjs[0]:
@@ -2857,6 +2859,8 @@ def get_group_comparison(include_auto: bool = Query(False),
                 entry[f"mean_{key}"] = round(float(mean_v), 4)
                 entry[f"variance_{key}"] = round(float(std_v), 4)
                 entry[f"cv_{key}"] = round(float(std_v / abs(mean_v)), 4) if mean_v != 0 else None
+                entry[f"median_{key}"] = round(float(np.median(vals)), 4)
+                entry[f"p75_{key}"] = round(float(np.percentile(vals, 75)), 4)
 
                 # Sequence effect under EVERY embedded model — closing
                 # velocities are negated inside _sequence_effect so the
@@ -2872,6 +2876,8 @@ def get_group_comparison(include_auto: bool = Query(False),
                 entry[f"mean_{key}"] = None
                 entry[f"variance_{key}"] = None
                 entry[f"cv_{key}"] = None
+                entry[f"median_{key}"] = None
+                entry[f"p75_{key}"] = None
                 for _sm in ALL_SEQ_MODES_TO_EMBED:
                     entry[f"seq_{_sm}_{key}"] = None
                     entry[f"seqslope_{_sm}_{key}"] = None
