@@ -1123,6 +1123,35 @@ const manoViewer = (() => {
     // Yellow so it stands apart from the red/blue trail points.
     const TRAJ_ARC_COLOR = '#ffd400';
 
+    // Valid open→peak→close triplets (LOCAL frames) for the current
+    // trial: the three events must be consecutive in the merged
+    // open/peak/close stream (pauses ignored) — same structural rule the
+    // backend uses for movement validity.
+    function _validPhaseTriplets() {
+        _ensureSavedEvents();
+        const tr = trials[currentTrialIdx];
+        if (!tr || !savedEvents) return [];
+        const sf = tr.start_frame || 0;
+        const ef = tr.end_frame != null ? tr.end_frame
+            : sf + ((trialData?.n_frames || 0) - 1);
+        const evs = [];
+        for (const t of ['open', 'peak', 'close']) {
+            for (const g of (savedEvents[t] || [])) {
+                if (g >= sf && g <= ef) evs.push({ f: g, t });
+            }
+        }
+        evs.sort((x, y) => x.f - y.f);
+        const out = [];
+        for (let i = 1; i + 1 < evs.length; i++) {
+            if (evs[i].t === 'peak' && evs[i - 1].t === 'open'
+                && evs[i + 1].t === 'close') {
+                out.push({ o: evs[i - 1].f - sf, pk: evs[i].f - sf,
+                           c: evs[i + 1].f - sf });
+            }
+        }
+        return out;
+    }
+
     // Resample a polyline to n points spaced uniformly along its LENGTH,
     // so fits weight the whole path evenly instead of over-weighting the
     // slow turnarounds where frames cluster.
@@ -1399,26 +1428,12 @@ const manoViewer = (() => {
             return null;
         };
 
-        // "Show fitted arc": one free ellipse fit per movement PHASE —
-        // split the plotted span at every open/peak/close event inside
-        // it; no events in the span → one arc across the whole trail.
-        let arcSegs = null;
-        if (trajShowArc) {
-            _ensureSavedEvents();
-            const marks = [];
-            for (const t of ['open', 'peak', 'close']) {
-                for (const g of (savedEvents?.[t] || [])) {
-                    const f = g - startFrame;
-                    if (f > lo && f < hi) marks.push(f);
-                }
-            }
-            marks.sort((a, b) => a - b);
-            const bounds = [lo, ...marks, hi];
-            arcSegs = [];
-            for (let k = 1; k < bounds.length; k++) {
-                if (bounds[k] > bounds[k - 1]) arcSegs.push([bounds[k - 1], bounds[k]]);
-            }
-        }
+        // "Show reference path": per-trial median-path templates.  For
+        // each phase TYPE (opening / closing) the reference is the
+        // translation-aligned point-wise median of ALL the trial's valid
+        // movements' paths — the trial's own stereotyped course, with no
+        // shape assumption.  Deviation from it is the abnormality signal.
+        const trajTriplets = trajShowArc ? _validPhaseTriplets() : null;
 
         for (const { pt: getPt, color } of sources) {
             // Closing half of the movement (thumb-index aperture decreasing)
@@ -1478,10 +1493,65 @@ const manoViewer = (() => {
                 // Dashed fitted arc(s) over the trail — one per phase
                 // segment, fitted to the same (warped, scaled) points
                 // that were just drawn.
-                if (arcSegs) {
-                    for (const [sA, sB] of arcSegs) {
-                        const seg = pts.slice(sA - lo, sB - lo + 1).filter(Boolean);
-                        _drawFittedArc(seg);
+                if (trajTriplets && trajTriplets.length) {
+                    const RES = 30;
+                    // Gather every valid phase's path for this (model,
+                    // joint): arc-length resampled, centroid recorded.
+                    const entries = [];
+                    for (const tp of trajTriplets) {
+                        for (const [type, a, b] of [['open', tp.o, tp.pk],
+                                                     ['close', tp.pk, tp.c]]) {
+                            if (b - a < 4) continue;
+                            const raw = [];
+                            let ok = true;
+                            for (let f = a; f <= b; f++) {
+                                const p = getPt(f, j);
+                                if (!p || !isFinite(p[0]) || !isFinite(p[1])) { ok = false; break; }
+                                raw.push([p[0] * pixelScale, p[1] * pixelScale]);
+                            }
+                            if (!ok || raw.length < 5) continue;
+                            const rs = _resamplePolyByLen(raw, RES);
+                            if (rs.length !== RES) continue;
+                            let cx = 0, cy = 0;
+                            for (const p of rs) { cx += p[0]; cy += p[1]; }
+                            cx /= RES; cy /= RES;
+                            entries.push({ type, a, b, cx, cy,
+                                           ctr: rs.map(p => [p[0] - cx, p[1] - cy]) });
+                        }
+                    }
+                    // Point-wise median template per phase type (needs ≥3
+                    // movements so the median means something).
+                    const templates = {};
+                    for (const type of ['open', 'close']) {
+                        const set = entries.filter(e => e.type === type);
+                        if (set.length < 3) continue;
+                        const tpl = [];
+                        for (let k = 0; k < RES; k++) {
+                            const xs = set.map(e => e.ctr[k][0]).sort((x, y) => x - y);
+                            const ys = set.map(e => e.ctr[k][1]).sort((x, y) => x - y);
+                            tpl.push([xs[(xs.length - 1) >> 1],
+                                      ys[(ys.length - 1) >> 1]]);
+                        }
+                        templates[type] = tpl;
+                    }
+                    // Draw the template under each phase in view, placed
+                    // at that phase's own centroid (translation only).
+                    for (const e of entries) {
+                        if (e.b < lo || e.a > hi) continue;
+                        const tpl = templates[e.type];
+                        if (!tpl) continue;
+                        ctx.save();
+                        ctx.globalAlpha = 0.95;
+                        ctx.strokeStyle = TRAJ_ARC_COLOR;
+                        ctx.lineWidth = (2 * LABEL_SCALE) / scale;
+                        ctx.setLineDash([(6 * LABEL_SCALE) / scale,
+                                         (4 * LABEL_SCALE) / scale]);
+                        ctx.beginPath();
+                        tpl.forEach((p, k) => k
+                            ? ctx.lineTo(p[0] + e.cx, p[1] + e.cy)
+                            : ctx.moveTo(p[0] + e.cx, p[1] + e.cy));
+                        ctx.stroke();
+                        ctx.restore();
                     }
                 }
             }
