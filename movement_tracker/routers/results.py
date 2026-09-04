@@ -1905,23 +1905,76 @@ def detect_jerks(subject_id: int) -> dict:
             if len(perc) < 2:
                 continue
             c0, c1 = cam_names[0], cam_names[1]
-            pk0, _ = find_peaks(perc[c0], height=THRESH, distance=2)
-            pk1, _ = find_peaks(perc[c1], height=THRESH, distance=2)
-            for p in pk0:
-                if not any(abs(frmap[c0][p] - frmap[c1][q]) <= 2 for q in pk1):
+            # Both cameras must deviate at the same resampled index — the
+            # combined excursion signal is the min of the two (a jerk is
+            # real only where BOTH agree it deviates).
+            both = np.minimum(perc[c0], perc[c1])
+            # Contiguous excursions above THRESH → ONE jerk each.  An
+            # out-and-back detour off the template makes residual bimodal
+            # (peaks bracketing the corner where the path crosses back);
+            # grouping the whole excursion and localising to its sharpest
+            # actual TURN puts the marker on the visible corner (e.g. the
+            # 81° cusp), not on the two deviation lobes.
+            Praw = tips[c0][a:b + 1].copy()
+            for k in range(2):
+                v = Praw[:, k]
+                idx = np.arange(len(Praw))
+                good = ~np.isnan(v)
+                if good.sum() >= 2:
+                    Praw[:, k] = np.interp(idx, idx[good], v[good])
+            vraw = np.diff(Praw, axis=0)
+            turn = np.zeros(len(Praw))
+            for i in range(1, len(vraw)):
+                na = np.linalg.norm(vraw[i - 1])
+                nb = np.linalg.norm(vraw[i])
+                if na > 1e-6 and nb > 1e-6:
+                    cth = np.clip(np.dot(vraw[i - 1], vraw[i]) / (na * nb), -1, 1)
+                    turn[i] = np.degrees(np.arccos(cth))
+            above = both >= THRESH
+            # Bridge short sub-threshold gaps: an out-and-back detour dips
+            # below THRESH at its corner (where the path crosses the
+            # template), which would otherwise split one jerk into two
+            # lobes.  Fill gaps of <=3 samples so the detour stays one
+            # excursion and localises to the corner in the gap.
+            g = 0
+            while g < len(above):
+                if above[g]:
+                    g += 1
                     continue
-                gf = int(round(frmap[c0][p])) + a
-                if frames and any(abs(gf - g) <= 2 for g in frames):
-                    # merge: keep the stronger
-                    gprev = min(frames, key=lambda g: abs(g - gf))
-                    if perc[c0][p] > meta.get(str(gprev), {}).get("power", 0):
-                        frames.remove(gprev)
-                        meta.pop(str(gprev), None)
-                    else:
-                        continue
-                frames.append(gf)
-                meta[str(gf)] = {"n": 1, "dur": 3,
-                                 "power": round(float(perc[c0][p]), 3)}
+                h = g
+                while h < len(above) and not above[h]:
+                    h += 1
+                # Bridge only if a sharp TURN sits in the gap (the corner
+                # of an out-and-back detour) — not any low-residual lull.
+                if 0 < g and h < len(above) and (h - g) <= 12:
+                    fg = int(round(frmap[c0][g - 1]))
+                    fh = int(round(frmap[c0][min(h, len(frmap[c0]) - 1)]))
+                    if fh > fg and np.max(turn[fg:fh + 1]) >= 40:
+                        above[g:h] = True
+                g = h
+            i = 0
+            while i < len(above):
+                if not above[i]:
+                    i += 1
+                    continue
+                j = i
+                while j + 1 < len(above) and above[j + 1]:
+                    j += 1
+                # local-frame span of this excursion
+                f_lo = int(round(frmap[c0][i]))
+                f_hi = int(round(frmap[c0][j]))
+                peak_dev = float(np.max(both[i:j + 1]))
+                # localise to the sharpest raw turn inside the span (±1)
+                lo = max(1, f_lo - 1)
+                hi = min(len(turn) - 1, f_hi + 1)
+                loc = lo + int(np.argmax(turn[lo:hi + 1])) if hi > lo else f_lo
+                gf = loc + a
+                if not (frames and any(abs(gf - g) <= 2 for g in frames)):
+                    frames.append(gf)
+                    meta[str(gf)] = {"n": 1,
+                                     "dur": int(max(2, f_hi - f_lo + 1)),
+                                     "power": round(peak_dev, 3)}
+                i = j + 1
     frames = sorted(frames)
 
     events["jerk"] = frames
