@@ -122,3 +122,44 @@ false-positive rate of the *unverified* proposer.  The verification
 layer (segmented-fit Δv/Δx integrals) and per-subject noise-floor
 calibration are expected to lower that floor; the 120 Hz test refines
 the pulse parameters first.
+
+## Physiological refinements + the 60fps separability wall (added after cohort work)
+
+Refinements from Dillan (movements have NO volitional brake):
+- The close is a **mechanical collision** — the finger accelerates until it
+  crashes into the thumb. Terminal deceleration at a close is the crash,
+  not a movement event. Closes may be systematically marked LATE; the true
+  close is the collision (aperture minimum / sudden terminal speed drop),
+  and frames after it are post-contact.
+- The only genuinely *expected* acceleration events are push-off (open)
+  and reverse (aperture apex) — NOT three. Model the intended movement with
+  free pulses at those two only; truncate the analysis window at the
+  collision so the crash decel never registers.
+- Frame 62 (≈3f after open) and ~150 are probably real jerks, not launch/
+  brake. The user's pause marks are exploratory, NOT ground truth — a
+  detector should EXPLAIN the trajectory shape, not reproduce those frames.
+
+The 60fps separability wall (established quantitatively):
+- The prominent mid-opening "dwell-and-reverse" corner (e.g. MSA01_L1 f68:
+  finger arrests mid-opening at ~0.4px/f, tangent flips ~120°, then
+  redirects) IS a real, cross-camera-confirmed shape feature — with a
+  sufficiently stiff smooth model it explains 200-400 px² (more than the
+  translation jerks 88/137). The shipped detector missed it only because
+  edge knots let the spline round the corner.
+- BUT: a dwell/corner jerk and a launch/turnaround are both sharp
+  accelerations; stiffening the model to expose corners also exposes every
+  ballistic boundary acceleration. Absolute explanatory power (px²) scales
+  with movement VIGOR, and controls move far more (Con01: 319px path,
+  40px/f peak vs MSA01: 133px, 13px/f). Result: at every threshold the
+  stiff detector finds MORE jerks in the healthy control than the patient.
+  The dwell/corner class is not separable from vigorous healthy motion at
+  60fps.
+- Two 60fps-detectable regimes remain: (1) TRANSLATION jerks (leave a
+  position offset the flexible-spline position-OMP catches with 0 FP —
+  this is the shipped detector) and (2) dwell/corner jerks — below the
+  60fps floor.
+- 120fps prediction sharpened: a jerk (30-70ms, high-freq) vs a ballistic
+  acceleration (>100ms, low-freq) separate in temporal frequency, which
+  aliases together at 60fps. A high-pass / matched-filter on the 120fps
+  acceleration should recover the dwell/corner jerks independent of vigor —
+  the test of whether regime (2) becomes detectable.
