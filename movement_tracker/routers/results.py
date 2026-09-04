@@ -2026,6 +2026,69 @@ def detect_jerks(subject_id: int) -> dict:
                                      "dur": int(max(2, f_hi - f_lo + 1)),
                                      "power": round(peak_dev, 3)}
                 i = j + 1
+
+        # ── Channel B: movement ARREST (sustained very-low tip speed,
+        # the flattening/divot in the aperture trace).  Catches jerks
+        # that stop the finger without a large position offset — which
+        # the deviation channel misses.  Requires both cameras, >=3
+        # frames, and mid-phase (away from the ballistic accel/decel at
+        # the edges and the turnaround), so normal boundary slowing does
+        # not count.
+        apex_b = pk
+        if c < len(aperture):
+            _sa = aperture[o:c + 1]
+            if not np.all(np.isnan(_sa)):
+                apex_b = o + int(np.nanargmax(_sa))
+        spb = {}
+        for cam in cam_names:
+            Pc = tips[cam][o:c + 1].copy()
+            usable = True
+            for k in range(2):
+                vv = Pc[:, k]
+                ii = np.arange(len(Pc))
+                gd = ~np.isnan(vv)
+                if gd.sum() < 5:
+                    usable = False
+                    break
+                Pc[:, k] = np.interp(ii, ii[gd], vv[gd])
+            if not usable:
+                spb = {}
+                break
+            spb[cam] = np.concatenate(
+                [[0.0], np.linalg.norm(np.diff(Pc, axis=0), axis=1)])
+        if len(spb) >= 2:
+            c0b, c1b = cam_names[0], cam_names[1]
+            for (pa, pb2) in ((o, pk), (pk, c)):
+                Lp = pb2 - pa
+                if Lp < 6:
+                    continue
+                edge = max(2, int(0.30 * Lp))
+                lo_b, hi_b = pa + edge, pb2 - edge
+                seg0 = spb[c0b][pa - o:pb2 - o + 1]
+                seg1 = spb[c1b][pa - o:pb2 - o + 1]
+                pkspd = max(float(np.max(seg0)), float(np.max(seg1)))
+                thr = 0.30 * pkspd
+                nb = pb2 - pa + 1
+                low = [(spb[c0b][pa - o + t] < thr and spb[c1b][pa - o + t] < thr)
+                       for t in range(nb)]
+                t = 0
+                while t < nb:
+                    gfb = pa + t
+                    if not low[t] or gfb < lo_b or gfb > hi_b or abs(gfb - apex_b) <= 3:
+                        t += 1
+                        continue
+                    u = t
+                    while u + 1 < nb and low[u + 1] and pa + u + 1 <= hi_b:
+                        u += 1
+                    if (u - t + 1) >= 3:
+                        loc_b = pa + min(
+                            range(t, u + 1),
+                            key=lambda tt: spb[c0b][pa - o + tt] + spb[c1b][pa - o + tt])
+                        if not (frames and any(abs(loc_b - g) <= 2 for g in frames)):
+                            frames.append(loc_b)
+                            meta[str(loc_b)] = {"n": 1, "dur": int(u - t + 1),
+                                                "power": 0.0, "kind": "arrest"}
+                    t = u + 1
     frames = sorted(frames)
 
     events["jerk"] = frames
