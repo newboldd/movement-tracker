@@ -524,6 +524,8 @@
                 <button class="btn btn-sm" id="evtDeleteBtn" style="flex:1;" title="Delete the event nearest the current frame (X)">Delete (x)</button>
             </div>
             <button class="btn btn-sm btn-success" id="saveEventsBtn" style="width:100%;">Save Events</button>
+            <button class="btn btn-sm" id="detectJerksBtn" style="width:100%;margin-top:4px;border-left:4px solid #fff;"
+                    title="Detect candidate jerk events — brief acceleration pulses on the index-tip trajectory (hypothesized action polyminimyoclonus) — and save them as 'jerk' events. Uses DLC corrections labels within valid open→peak→close movements; requires cross-camera agreement. Re-running replaces previous jerks; other event types are untouched.">Detect Jerks</button>
             <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">Keys 1-4 place, X deletes; Q/W jump to prev/next event.</div>
 
             <!-- 2D Pose Detection -->
@@ -1317,7 +1319,10 @@
                             style="padding:0 8px;font-size:10px;line-height:18px;background:transparent;color:#ff4444;border:none;border-right:1px solid var(--border);cursor:pointer;">C</button>
                     <button class="event-toggle-btn" data-evt="pause"
                             title="Pause events"
-                            style="padding:0 8px;font-size:10px;line-height:18px;background:transparent;color:#cc66ff;border:none;cursor:pointer;">Pa</button>
+                            style="padding:0 8px;font-size:10px;line-height:18px;background:transparent;color:#cc66ff;border:none;border-right:1px solid var(--border);cursor:pointer;">Pa</button>
+                    <button class="event-toggle-btn" data-evt="jerk"
+                            title="Jerk events (detected candidate acceleration pulses)"
+                            style="padding:0 8px;font-size:10px;line-height:18px;background:transparent;color:#ffffff;border:none;cursor:pointer;">J</button>
                 </span>
                 <span>Frame: <strong id="frameDisplay">0</strong> / <span id="totalFrames">0</span></span>
                 <span id="plotValues" style="font-size:11px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
@@ -1415,7 +1420,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=446" type="module"></script>
+    <script src="/static/js/labels.js?v=447" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

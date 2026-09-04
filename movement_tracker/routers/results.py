@@ -1787,6 +1787,116 @@ def get_traces(subject_id: int, source: str = Query("auto")) -> dict:
     return {"trials": result_trials, "subject": subject_name, "y_range": y_range, "data_source": data_source, "available_sources": available_sources}
 
 
+@router.post("/{subject_id}/detect-jerks")
+def detect_jerks(subject_id: int) -> dict:
+    """Detect candidate 'jerk' events — brief acceleration pulses on the
+    index-tip trajectory (hypothesized action polyminimyoclonus) — and
+    save them as ``jerk`` events in the subject's events.csv.
+
+    Strategy (matches the validated analysis, see
+    notes/msa01_120hz_predictions.md):
+      - DLC corrections index tip per camera; per trial (fps-aware):
+        interpolate gaps, Savitzky-Golay smooth (~80ms window), second
+        derivative, subtract the ≤5Hz low-pass "template" acceleration.
+      - Peaks of the residual magnitude > 2× the subject's own median
+        within-movement residual, min separation ~33ms, restricted to
+        valid open→peak→close movements.
+      - Cross-camera coincidence required (±1 frame at 60fps): 93% of
+        true pulses coincide vs ~51% chance, so this halves noise.
+
+    Re-running REPLACES all existing jerk events for the subject.
+    Other event types are untouched.
+    """
+    from scipy.signal import butter, filtfilt, find_peaks, savgol_filter
+    from .labeling import _read_events_csv, _write_events_csv
+    from ..services.dlc_predictions import get_dlc_predictions_for_stage
+
+    subj = _get_subject(subject_id)
+    name = subj["name"]
+    data = get_dlc_predictions_for_stage(name, "corrections")
+    if not data:
+        raise HTTPException(400, "No DLC corrections labels for this subject")
+    settings = get_settings()
+    cam_names = [c for c in settings.camera_names
+                 if c in data and data[c].get("index")]
+    if not cam_names:
+        raise HTTPException(400, "No index-tip labels in DLC corrections")
+    trials = build_trial_map(name)
+    events = _read_events_csv(name)
+    evs = sorted([(f, t) for t in ("open", "peak", "close")
+                  for f in events.get(t, [])])
+    trips = [(evs[i-1][0], evs[i][0], evs[i+1][0])
+             for i in range(1, len(evs) - 1)
+             if evs[i][1] == "peak" and evs[i-1][1] == "open"
+             and evs[i+1][1] == "close"]
+    if not trips:
+        raise HTTPException(
+            400, "No valid open→peak→close movements — save events first")
+
+    tips = {c: np.array([[np.nan, np.nan] if p is None else p
+                          for p in data[c]["index"]], dtype=float)
+            for c in cam_names}
+
+    def detect_cam(tip, t):
+        fps = float(t.get("fps") or 60.0)
+        s, e = t["start_frame"], min(t["end_frame"], len(tip) - 1)
+        X = tip[s:e + 1].copy()
+        n = len(X)
+        if n < 20:
+            return []
+        for k in range(2):
+            v = X[:, k]
+            idx = np.arange(n)
+            good = ~np.isnan(v)
+            if good.sum() < 10:
+                return []
+            X[:, k] = np.interp(idx, idx[good], v[good])
+        win = max(5, int(round(0.08 * fps)) | 1)
+        Xs = np.column_stack([savgol_filter(X[:, k], win, 2)
+                              for k in range(2)])
+        acc = np.gradient(np.gradient(Xs, axis=0), axis=0)
+        b, a = butter(3, 5.0 / (fps / 2.0), btype="low")
+        resid = acc - np.column_stack([filtfilt(b, a, acc[:, k])
+                                       for k in range(2)])
+        mag = np.linalg.norm(resid, axis=1)
+        local = [(o - s, c - s) for o, pk, c in trips if o >= s and c <= e]
+        if not local:
+            return []
+        med = float(np.median(np.concatenate([mag[o:c + 1] for o, c in local])))
+        if med <= 0:
+            return []
+        min_sep = max(2, int(round(0.033 * fps)))
+        out = []
+        for o, c in local:
+            peaks, _ = find_peaks(mag[o:c + 1], height=2.0 * med,
+                                  distance=min_sep)
+            out += [int(p + o + s) for p in peaks]
+        return out
+
+    detected = []
+    for t in trials:
+        fps = float(t.get("fps") or 60.0)
+        tol = max(1, int(round(fps / 60.0)))
+        cam_dets = [detect_cam(tips[c], t) for c in cam_names]
+        if len(cam_dets) >= 2 and cam_dets[1]:
+            keep = [f for f in cam_dets[0]
+                    if any(abs(f - g) <= tol for g in cam_dets[1])]
+        else:
+            keep = cam_dets[0]
+        detected += keep
+    frames = []
+    for f in sorted(set(detected)):
+        if frames and f - frames[-1] <= 1:
+            continue
+        frames.append(f)
+
+    events["jerk"] = frames
+    _write_events_csv(name, events)
+    logger.info("detect-jerks %s: %d candidates across %d movements",
+                name, len(frames), len(trips))
+    return {"n": len(frames), "frames": frames, "n_movements": len(trips)}
+
+
 @router.get("/{subject_id}/movements")
 def get_movements(subject_id: int, source: str = Query("auto")) -> dict:
     """Per-movement parameters for the Movements tab."""

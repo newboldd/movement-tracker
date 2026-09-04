@@ -482,14 +482,15 @@ const manoViewer = (() => {
     // ``showEvents`` flips one event type's markers on/off on the
     // distance plot; all OFF by default to match the user's request.
     let savedEvents = null;
-    const showEvents = { open: false, peak: false, close: false, pause: false };
+    const showEvents = { open: false, peak: false, close: false, pause: false, jerk: false };
     const EVENT_COLORS = {
         open:  '#00cc44',
         peak:  '#ffcc00',
         close: '#ff4444',
         pause: '#cc66ff',
+        jerk:  '#ffffff',
     };
-    const EVENT_TYPES = ['open', 'peak', 'close', 'pause'];
+    const EVENT_TYPES = ['open', 'peak', 'close', 'pause', 'jerk'];
     let _eventsDirty = false;
 
     // ── Event editing (mirrors the Events page: 1/2/3/4/x + buttons) ──
@@ -3196,6 +3197,40 @@ const manoViewer = (() => {
         $('evtPauseBtn')?.addEventListener('click',  () => placeEvent('pause'));
         $('evtDeleteBtn')?.addEventListener('click', () => deleteNearestEvent());
         $('saveEventsBtn')?.addEventListener('click', () => saveTrialEvents());
+        // Detect candidate jerk events (brief acceleration pulses on the
+        // index-tip trajectory) server-side and save them as 'jerk'
+        // events.  Replaces previous jerks; other event types untouched.
+        $('detectJerksBtn')?.addEventListener('click', async () => {
+            if (subjectId == null) return;
+            const btn = $('detectJerksBtn');
+            _ensureSavedEvents();
+            if (savedEvents.jerk.length &&
+                !window.confirm('Re-detect jerks? Existing jerk events for this subject will be replaced.')) {
+                return;
+            }
+            const orig = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = 'Detecting…';
+            try {
+                const r = await api(`/api/results/${subjectId}/detect-jerks`,
+                                    { method: 'POST' });
+                savedEvents = await api(`/api/skeleton/${subjectId}/events`);
+                _ensureSavedEvents();
+                if (!showEvents.jerk) {
+                    showEvents.jerk = true;
+                    _refreshEventToggleButtons();
+                }
+                render();
+                renderDistanceTrace();
+                btn.textContent = `${r.n} jerks found`;
+                setTimeout(() => { btn.textContent = orig; }, 3000);
+            } catch (e) {
+                alert('Jerk detection failed: ' + e.message);
+                btn.textContent = orig;
+            } finally {
+                btn.disabled = false;
+            }
+        });
 
         // Warn before leaving the page with unsaved events.  Intercept the
         // in-app nav links (offer Save / Discard / Cancel); the native
@@ -7436,7 +7471,7 @@ const manoViewer = (() => {
             const R = 5;
             distCtx.globalAlpha = 1.0;
             distCtx.setLineDash([]);
-            for (const t of ['open', 'peak', 'close', 'pause']) {
+            for (const t of EVENT_TYPES) {
                 if (!showEvents[t]) continue;
                 const frames = savedEvents[t];
                 if (!Array.isArray(frames) || !frames.length) continue;
