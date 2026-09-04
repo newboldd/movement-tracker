@@ -1812,7 +1812,9 @@ def detect_jerks(subject_id: int) -> dict:
     from .labeling import _read_events_csv, _write_events_csv
     from ..services.dlc_predictions import get_dlc_predictions_for_stage
 
-    THRESH = 0.08     # fraction of movement chord; tuned MSA01 vs controls
+    THRESH = 0.055    # fraction of movement chord; sensitive enough for
+    #                   prominent low-speed corners (e.g. MSA01 f286),
+    #                   MSA01 ~1.5/mov vs clean controls ~0.5
     M = 40            # arc-length resample points per phase
     subj = _get_subject(subject_id)
     name = subj["name"]
