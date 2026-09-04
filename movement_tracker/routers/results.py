@@ -1964,10 +1964,22 @@ def detect_jerks(subject_id: int) -> dict:
                 f_lo = int(round(frmap[c0][i]))
                 f_hi = int(round(frmap[c0][j]))
                 peak_dev = float(np.max(both[i:j + 1]))
-                # localise to the sharpest raw turn inside the span (±1)
+                # Localise to the jerk ONSET, not its recovery: an
+                # intrusion is a sharp turn AWAY from the intended course,
+                # often followed by an equally sharp turn back toward it.
+                # Mark the EARLIEST strong turn in the span (the
+                # divergence) rather than the largest (which may be the
+                # correction).
                 lo = max(1, f_lo - 1)
                 hi = min(len(turn) - 1, f_hi + 1)
-                loc = lo + int(np.argmax(turn[lo:hi + 1])) if hi > lo else f_lo
+                if hi > lo:
+                    win = turn[lo:hi + 1]
+                    tmax = float(np.max(win))
+                    cut = max(45.0, 0.6 * tmax)
+                    strong = np.where(win >= cut)[0]
+                    loc = lo + int(strong[0] if len(strong) else int(np.argmax(win)))
+                else:
+                    loc = f_lo
                 gf = loc + a
                 if not (frames and any(abs(gf - g) <= 2 for g in frames)):
                     frames.append(gf)
