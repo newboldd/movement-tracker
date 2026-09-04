@@ -90,3 +90,35 @@ model's core.
   open/peak/close events for all movements (pauses not needed).
 - The analysis scripts must read fps from the trial metadata — all
   filter corners and windows above are specified in Hz/ms, not frames.
+
+## Clinical hypothesis (added same day, after preregistration above)
+
+Working hypothesis (Dillan): these pulses are an **action equivalent of
+polyminimyoclonus** — described in ~30 % of MSA (documented clinically
+in MSA01), less frequently in PD, not described in PSP. An action
+version has not been systematically sought. If reliably detectable and
+prevalent in MSA videos, this could aid differential diagnosis of
+parkinsonism, and generates testable electrophysiology predictions
+(surface EMG bursts time-locked to detected pulses; EEG jerk-locked
+back-averaged potentials as in cortical myoclonus).
+
+## Appendix: first-pass 60 fps cohort screen (untuned)
+
+Same detector (2× per-subject median accel residual), all subjects with
+DLC corrections + events; averaged across cameras.  "mid3rd/mov" =
+pulses landing in the middle third of the movement per movement — the
+statistic that separates intrusions from healthy boundary transients.
+
+| group | n | median mid3rd/mov | range |
+|---|---|---|---|
+| MSA | 11 | **0.56** | 0.12 – 1.04 |
+| PD | 10 | 0.42 | 0.26 – 0.72 |
+| PSP | 2 | (0.11 / 2.25) | PSP02 is an extreme outlier (9.0 pulses/mov) — check tracking quality before interpreting |
+| Control | 4 | 0.23 | 0.00 – 0.29 |
+
+Reading: gradient in the hypothesized direction (Control < PD < MSA)
+with real overlap; the control floor of ~0.2 is the current
+false-positive rate of the *unverified* proposer.  The verification
+layer (segmented-fit Δv/Δx integrals) and per-subject noise-floor
+calibration are expected to lower that floor; the 120 Hz test refines
+the pulse parameters first.
