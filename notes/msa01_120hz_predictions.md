@@ -1,0 +1,92 @@
+# Preregistered predictions: MSA01 120 Hz video
+
+*Written 2026-09-03, before any analysis of the 120 Hz recording.*
+
+## Model under test
+
+Abnormal extra movements during finger tapping are a **single elementary
+event type**: a brief monophasic acceleration pulse (one direction,
+~2–4 frames at 60 fps ≈ 30–70 ms of added force) superimposed on the
+smooth intended movement. Compound appearances (kink / interrupt-and-
+translate / out-and-back loop) are runs of 1–3 elementary pulses in
+quick succession, distinguished only by the directions of successive
+pulses. Detection: magnitude of the acceleration residual (measured
+acceleration minus low-pass "template" acceleration, ≤5 Hz), thresholded
+per participant at 2× the median within-movement residual, minimum
+2-frame separation.
+
+## What the 60 fps data established (MSA01 L1+L2, DLC corrections labels)
+
+| Quantity | MSA01 (49 movements) | Con01 control (22 movements) |
+|---|---|---|
+| Pulse rate | 2.8–3.0 / movement (L1 3.3, L2 2.3) | 2.0 / movement |
+| Inter-pulse interval | median 4 frames = 67 ms (IQR 3–6) | median 3, IQR 3–12 (boundary doublets) |
+| Phase position (median) | 0.59 — spread through the movement; 19 % in middle third | 0.84 — boundary transients only; 0 % in middle third |
+| Direction sign-flips between close pulses | 65–73 % (alternating tendency) | 84–94 % (accel/decel pairs by construction) |
+| Cross-camera coincidence (±1 frame) | 93 % (chance ≈ 51 %) | 100 % |
+
+Key artifact identified: the lateral-residual power spectrum shows an
+"8.4 Hz peak" in BOTH subjects with the same processing — that peak is
+the band-pass shape of the filter chain, not physiology. At 60 fps the
+only honest rhythmicity measure is the inter-pulse interval; the true
+spectral question requires 120 Hz.
+
+The control's detections are real but are the *healthy* transport
+accelerations at movement boundaries; the discriminating feature is not
+pulse count but **where** pulses fall (mid-movement) and their
+independence from phase edges.
+
+## Predictions for the 120 Hz video (same participant, same task)
+
+Process with the identical pipeline, fps-aware: Savitzky–Golay window
+≈ 80 ms (9 frames at 120), template low-pass 5 Hz, threshold 2× the
+recording's own median within-movement residual, min separation 4
+frames (= 33 ms).
+
+1. **Rate stability.** Pulse rate per movement within ±30 % of the
+   60 fps estimate: **2–4 pulses/movement** above the 2× threshold.
+   The events are physical, so halving the sampling interval must not
+   change how many there are.
+2. **IPI scales in time, not frames.** Median inter-pulse interval
+   **60–75 ms → mode at 7–9 frames** at 120 fps (was 4 at 60), with
+   *smaller relative spread* than the 60 fps IPI histogram
+   (quantization noise halves). If instead the IPI mode lands at
+   ~4 frames again (= 33 ms), the 60 fps "4-frame" spacing was a
+   sampling artifact and the model is wrong.
+3. **A genuine spectral peak appears.** With Nyquist at 60 Hz, the
+   signed lateral acceleration residual should show a spectral peak at
+   **13–18 Hz** that (a) exceeds the 2–8 Hz floor by >2×, and (b) is
+   **absent when the same pipeline runs on the participant's cleanest
+   movements** (lowest-tortuosity third) — the within-recording control
+   that separates physiology from filter shaping.
+4. **Pulse waveform becomes resolvable.** Individual pulses span
+   **4–8 samples** (30–65 ms) with a measurable single-lobed shape;
+   pairs that merged at 60 fps (e.g. the dense-burst interior) separate
+   into distinct opposed pulses. Concretely: the fraction of detected
+   events wider than 100 ms should drop by at least half relative to
+   60 fps.
+5. **Mid-movement occurrence persists.** ≥15 % of pulses in the middle
+   third of the movement (controls: ~0 %). This is the phase-position
+   signature, and it should be frame-rate independent.
+6. **Direction alternation persists.** Sign-flip rate of the lateral
+   component between consecutive pulses ≤ 100 ms apart: **60–80 %**.
+7. **Amplitude is frame-rate invariant in integral terms.** Per-pulse
+   Δv (time-integral of the residual over the pulse window, in px/s
+   after scaling) matches the 60 fps distribution within ~30 %; the
+   per-frame peak residual will NOT match (it scales with sampling) —
+   integrals are the physical quantity.
+8. **Cross-camera coincidence stays high.** ≥85 % of pulses in one
+   camera have a partner within ±2 frames (~17 ms) in the other.
+
+Falsification summary: the model dies if rate changes drastically with
+frame rate (1), IPI scales in frames rather than ms (2), no
+within-recording spectral contrast emerges (3), or coincidence
+collapses (8). Predictions 4–7 refine parameters rather than test the
+model's core.
+
+## Prerequisites on the 120 Hz video
+
+- Trim/onboard, DLC-label thumb+index (corrections-quality), mark
+  open/peak/close events for all movements (pauses not needed).
+- The analysis scripts must read fps from the trial metadata — all
+  filter corners and windows above are specified in Hz/ms, not frames.
