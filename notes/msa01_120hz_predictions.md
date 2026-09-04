@@ -123,6 +123,14 @@ layer (segmented-fit Δv/Δx integrals) and per-subject noise-floor
 calibration are expected to lower that floor; the 120 Hz test refines
 the pulse parameters first.
 
+Caveat on the "Control" group: it is a convenience sample containing
+both healthy controls and subjects with mixed neurologic disorders,
+not a confirmed-healthy cohort.  Some of its mid-movement detections
+are therefore genuine pathology rather than false positives, and the
+~0.2 floor should be read with that in mind.  A confirmed-healthy
+subset is needed before the control floor can be taken as a true
+false-positive rate.
+
 ## Physiological refinements + the 60fps separability wall (added after cohort work)
 
 Refinements from Dillan (movements have NO volitional brake):
