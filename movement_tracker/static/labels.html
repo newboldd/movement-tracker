@@ -484,9 +484,19 @@
                     <input type="checkbox" id="trajCorrectCamera"> Correct for camera movement
                 </label>
                 <label id="trajShowArcLabel" style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:4px;"
-                       title="Overlay the trial's median-path reference (dashed yellow): for each phase type (opening/closing), the translation-aligned point-wise median path across all the trial's valid movements, placed under each movement. Deviation from it highlights extra movements.">
+                       title="Overlay a per-phase reference curve (dashed yellow) with endpoints pinned to the open/peak/close positions. Deviation from it highlights extra movements.">
                     <input type="checkbox" id="trajShowArc"> Show reference path
                 </label>
+                <div id="trajRefModeRow" style="display:none;padding-left:22px;margin-top:2px;">
+                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"
+                           title="Point-wise median of all the trial's movements per phase type — the trial's own stereotyped path">
+                        <input type="radio" name="trajRefMode" value="median" checked> Median path
+                    </label>
+                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;margin-left:10px;"
+                           title="Free least-squares ellipse fitted to each phase individually (looser reference)">
+                        <input type="radio" name="trajRefMode" value="ellipse"> Ellipse
+                    </label>
+                </div>
             </div>
 
             <!-- Heatmap threshold slider — dims when no joint is active and
@@ -1405,7 +1415,7 @@
     }
     </script>
     <script src="/static/js/touch-shim.js?v=1"></script>
-    <script src="/static/js/labels.js?v=444" type="module"></script>
+    <script src="/static/js/labels.js?v=445" type="module"></script>
     <script src="/static/js/video-export.js?v=1"></script>
     <script>
         document.getElementById('exportVideoBtn').addEventListener('click', () => {

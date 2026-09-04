@@ -456,7 +456,8 @@ const manoViewer = (() => {
     let trajFromOpen = true;    // extend trail back to the last Open event
     let trajToClose = true;     // extend trail forward to the next Close event
     let trajCorrectCamera = false;
-    let trajShowArc = false;    // overlay the fitted arc per phase
+    let trajShowArc = false;    // overlay the reference path per phase
+    let trajRefMode = 'median'; // 'median' path template | 'ellipse' per-phase fit
     let cameraTraj = null;   // {available, H_to_ref_L/R (N×9), n_frames, is_stereo, _trialIdx}
     // Drawn trajectory points for click-to-seek: {x, y, f} in ctx-logical
     // canvas coords (same space as the video canvas click handler's mx/my).
@@ -1176,20 +1177,43 @@ const manoViewer = (() => {
         return out;
     }
 
-    function _dashedCurve(fnT, t0, t1) {
+    function _sampleCurve(fnT, t0, t1, steps = 60) {
+        const out = [];
+        for (let i = 0; i <= steps; i++) {
+            out.push(fnT(t0 + (t1 - t0) * (i / steps)));
+        }
+        return out;
+    }
+
+    function _drawDashedPath(pts) {
+        if (!pts || pts.length < 2) return;
         ctx.save();
         ctx.globalAlpha = 0.95;
         ctx.strokeStyle = TRAJ_ARC_COLOR;
         ctx.lineWidth = (2 * LABEL_SCALE) / scale;
         ctx.setLineDash([(6 * LABEL_SCALE) / scale, (4 * LABEL_SCALE) / scale]);
         ctx.beginPath();
-        const STEPS = 60;
-        for (let i = 0; i <= STEPS; i++) {
-            const [x, y] = fnT(t0 + (t1 - t0) * (i / STEPS));
-            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-        }
+        pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
         ctx.stroke();
         ctx.restore();
+    }
+
+    // Similarity transform (rotation + scale + translation) mapping a
+    // polyline's endpoints EXACTLY onto (d0, d1).
+    function _anchorPolyToEndpoints(poly, d0, d1) {
+        const a0 = poly[0], a1 = poly[poly.length - 1];
+        const vax = a1[0] - a0[0], vay = a1[1] - a0[1];
+        const vdx = d1[0] - d0[0], vdy = d1[1] - d0[1];
+        const La = Math.hypot(vax, vay), Ld = Math.hypot(vdx, vdy);
+        if (La < 1e-6 || Ld < 1e-6) return poly;
+        const s = Ld / La;
+        const cr = (vax * vdx + vay * vdy) / (La * Ld);
+        const sr = (vax * vdy - vay * vdx) / (La * Ld);
+        return poly.map(p => {
+            const qx = p[0] - a0[0], qy = p[1] - a0[1];
+            return [d0[0] + s * (qx * cr - qy * sr),
+                    d0[1] + s * (qx * sr + qy * cr)];
+        });
     }
 
     // Real roots of ax³+bx²+cx+d (Cardano / trigonometric).
@@ -1294,15 +1318,14 @@ const manoViewer = (() => {
                  ru: Math.sqrt(ru2) * sc, rv: Math.sqrt(rv2) * sc, theta };
     }
 
-    // Dashed fitted-arc overlay for one trail segment — the smooth
-    // reference the arc-tortuosity concept divides by, drawn so the fit
-    // can be verified against the plotted trail.  Prefers a direct
+    // Fitted-arc polyline for one trail segment.  Prefers a direct
     // least-squares ELLIPSE (curvature may differ between the two ends
     // of the movement); falls back to the Kasa circle when the ellipse
     // fit fails or degenerates.  ``P`` is [[x, y], ...] in canvas
-    // coords (already pixel-scaled / warp-corrected).
-    function _drawFittedArc(P) {
-        if (P.length < 5) return;
+    // coords (already pixel-scaled / warp-corrected).  Returns the
+    // sampled arc over the data's parametric span, or null.
+    function _fittedArcPoly(P) {
+        if (P.length < 5) return null;
         // Even weighting along the path (not per frame).
         P = _resamplePolyByLen(P, 60);
         // Data extent, for degeneracy caps.
@@ -1334,11 +1357,10 @@ const manoViewer = (() => {
                 while (t - prev < -Math.PI) t += 2 * Math.PI;
                 prev = t; last = t;
             }
-            _dashedCurve((phi) => [
+            return _sampleCurve((phi) => [
                 cx + ru * Math.cos(phi) * ct - rv * Math.sin(phi) * st,
                 cy + ru * Math.cos(phi) * st + rv * Math.sin(phi) * ct,
             ], phi0, last);
-            return;
         }
 
         // Fallback: Kasa least-squares circle.
@@ -1355,7 +1377,7 @@ const manoViewer = (() => {
           + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
         const M = [[Sxx, Sxy, Sx], [Sxy, Syy, Sy], [Sx, Sy, n]];
         const D = det3(M);
-        if (!isFinite(D) || Math.abs(D) < 1e-9) return;
+        if (!isFinite(D) || Math.abs(D) < 1e-9) return null;
         const col = (i, v) => M.map((r, ri) => r.map((c, ci) => ci === i ? v[ri] : c));
         const b = [Sxz, Syz, Sz];
         const a = det3(col(0, b)) / D;
@@ -1363,7 +1385,7 @@ const manoViewer = (() => {
         const c = det3(col(2, b)) / D;
         const ccx = a / 2, ccy = bb / 2;
         const r2 = c + ccx * ccx + ccy * ccy;
-        if (!isFinite(r2) || r2 <= 0) return;
+        if (!isFinite(r2) || r2 <= 0) return null;
         const R = Math.sqrt(r2);
         let prev = Math.atan2(P[0][1] - ccy, P[0][0] - ccx);
         const a0 = prev;
@@ -1374,7 +1396,7 @@ const manoViewer = (() => {
             while (t - prev < -Math.PI) t += 2 * Math.PI;
             prev = t; ang = t;
         }
-        _dashedCurve((t) => [ccx + R * Math.cos(t), ccy + R * Math.sin(t)], a0, ang);
+        return _sampleCurve((t) => [ccx + R * Math.cos(t), ccy + R * Math.sin(t)], a0, ang);
     }
 
     function _drawJointTrails(pixelScale, isLeft, fn) {
@@ -1525,48 +1547,51 @@ const manoViewer = (() => {
                                 return [(qx * ca + qy * sa) / L,
                                         (-qx * sa + qy * ca) / L];
                             });
-                            entries.push({ type, a, b, d0, L, ca, sa, norm });
+                            entries.push({ type, a, b, d0, d1, L, ca, sa, norm, rs });
                         }
                     }
-                    // Point-wise median template per phase type in the
-                    // normalized space (needs ≥3 movements).  Endpoints are
-                    // exactly (0,0) and (1,0) for every contributor, so
-                    // the median inherits them.
-                    const templates = {};
-                    for (const type of ['open', 'close']) {
-                        const set = entries.filter(e => e.type === type);
-                        if (set.length < 3) continue;
-                        const tpl = [];
-                        for (let k = 0; k < RES; k++) {
-                            const xs = set.map(e => e.norm[k][0]).sort((x, y) => x - y);
-                            const ys = set.map(e => e.norm[k][1]).sort((x, y) => x - y);
-                            tpl.push([xs[(xs.length - 1) >> 1],
-                                      ys[(ys.length - 1) >> 1]]);
+                    if (trajRefMode === 'ellipse') {
+                        // Looser alternative: free per-phase ellipse fit
+                        // (circle fallback), its sampled arc similarity-
+                        // mapped so the endpoints land EXACTLY on this
+                        // phase's own event positions.
+                        for (const e of entries) {
+                            if (e.b < lo || e.a > hi) continue;
+                            const poly = _fittedArcPoly(e.rs);
+                            if (poly) _drawDashedPath(
+                                _anchorPolyToEndpoints(poly, e.d0, e.d1));
                         }
-                        templates[type] = tpl;
-                    }
-                    // Draw the template under each phase in view, mapped by
-                    // the similarity transform that puts its endpoints
-                    // EXACTLY on this movement's own event positions
-                    // (open→peak for opening arcs, peak→close for closing).
-                    for (const e of entries) {
-                        if (e.b < lo || e.a > hi) continue;
-                        const tpl = templates[e.type];
-                        if (!tpl) continue;
-                        ctx.save();
-                        ctx.globalAlpha = 0.95;
-                        ctx.strokeStyle = TRAJ_ARC_COLOR;
-                        ctx.lineWidth = (2 * LABEL_SCALE) / scale;
-                        ctx.setLineDash([(6 * LABEL_SCALE) / scale,
-                                         (4 * LABEL_SCALE) / scale]);
-                        ctx.beginPath();
-                        tpl.forEach((p, k) => {
-                            const x = e.d0[0] + e.L * (p[0] * e.ca - p[1] * e.sa);
-                            const y = e.d0[1] + e.L * (p[0] * e.sa + p[1] * e.ca);
-                            if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-                        });
-                        ctx.stroke();
-                        ctx.restore();
+                    } else {
+                        // Point-wise median template per phase type in the
+                        // normalized space (needs ≥3 movements).  Endpoints
+                        // are exactly (0,0) and (1,0) for every
+                        // contributor, so the median inherits them.
+                        const templates = {};
+                        for (const type of ['open', 'close']) {
+                            const set = entries.filter(e => e.type === type);
+                            if (set.length < 3) continue;
+                            const tpl = [];
+                            for (let k = 0; k < RES; k++) {
+                                const xs = set.map(e => e.norm[k][0]).sort((x, y) => x - y);
+                                const ys = set.map(e => e.norm[k][1]).sort((x, y) => x - y);
+                                tpl.push([xs[(xs.length - 1) >> 1],
+                                          ys[(ys.length - 1) >> 1]]);
+                            }
+                            templates[type] = tpl;
+                        }
+                        // Draw the template under each phase in view,
+                        // mapped by the similarity transform that puts its
+                        // endpoints EXACTLY on this movement's own event
+                        // positions (open→peak / peak→close).
+                        for (const e of entries) {
+                            if (e.b < lo || e.a > hi) continue;
+                            const tpl = templates[e.type];
+                            if (!tpl) continue;
+                            _drawDashedPath(tpl.map(p => [
+                                e.d0[0] + e.L * (p[0] * e.ca - p[1] * e.sa),
+                                e.d0[1] + e.L * (p[0] * e.sa + p[1] * e.ca),
+                            ]));
+                        }
                     }
                 }
             }
@@ -3136,7 +3161,15 @@ const manoViewer = (() => {
         });
         $('trajShowArc')?.addEventListener('change', e => {
             trajShowArc = e.target.checked;
+            const row = $('trajRefModeRow');
+            if (row) row.style.display = trajShowArc ? '' : 'none';
             _refreshTraj();
+        });
+        document.querySelectorAll('input[name="trajRefMode"]').forEach(r => {
+            r.addEventListener('change', e => {
+                trajRefMode = e.target.value;
+                _refreshTraj();
+            });
         });
         // Trajectory plotting defaults ON (index tip, event-bounded trail
         // — the from-Open / to-Close boxes ship checked in the HTML, and
