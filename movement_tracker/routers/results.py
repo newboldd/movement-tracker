@@ -1830,13 +1830,23 @@ def detect_jerks(subject_id: int) -> dict:
     events = _read_events_csv(name)
     evs = sorted([(f, t) for t in ("open", "peak", "close")
                   for f in events.get(t, [])])
-    trips = [(evs[i-1][0], evs[i][0], evs[i+1][0])
-             for i in range(1, len(evs) - 1)
-             if evs[i][1] == "peak" and evs[i-1][1] == "open"
-             and evs[i+1][1] == "close"]
-    if len(trips) < 3:
+    # Phases are counted INDEPENDENTLY from consecutive event pairs, so a
+    # movement with an open→peak but no following close still contributes
+    # an opening phase (and vice-versa).  Each phase is (type, a, b).
+    open_phases = []   # (open, peak)
+    close_phases = []  # (peak, close)
+    for i in range(len(evs) - 1):
+        (f0, t0), (f1, t1) = evs[i], evs[i + 1]
+        if t0 == "open" and t1 == "peak":
+            open_phases.append((f0, f1))
+        elif t0 == "peak" and t1 == "close":
+            close_phases.append((f0, f1))
+    phases = ([("open", o, pk) for (o, pk) in open_phases]
+              + [("close", pk, c) for (pk, c) in close_phases])
+    n_mov = len({pk for (_, pk) in open_phases} | {pk for (pk, _) in close_phases})
+    if len(open_phases) < 3 and len(close_phases) < 3:
         raise HTTPException(
-            400, "Need >=3 valid open→peak→close movements to build a template")
+            400, "Need >=3 open→peak or peak→close phases to build a template")
 
     tips = {c: np.array([[np.nan, np.nan] if p is None else p
                           for p in data[c]["index"]], dtype=float)
@@ -1869,179 +1879,179 @@ def detect_jerks(subject_id: int) -> dict:
 
     # ── build per-camera, per-phase-type median templates ──
     acc = {c: {"open": [], "close": []} for c in cam_names}
-    for (o, pk, c) in trips:
-        for typ, a, b in (("open", o, pk), ("close", pk, c)):
-            for cam in cam_names:
-                if b >= len(tips[cam]):
-                    continue
-                P = tips[cam][a:b + 1]
-                if len(P) < 5 or np.isnan(P).any():
-                    continue
-                rs, _ = _resample(P)
-                if rs is None:
-                    continue
-                Q, _, _ = _norm(rs)
-                if Q is not None:
-                    acc[cam][typ].append(Q)
+    for (typ, a, b) in phases:
+        for cam in cam_names:
+            if b >= len(tips[cam]):
+                continue
+            P = tips[cam][a:b + 1]
+            if len(P) < 5 or np.isnan(P).any():
+                continue
+            rs, _ = _resample(P)
+            if rs is None:
+                continue
+            Q, _, _ = _norm(rs)
+            if Q is not None:
+                acc[cam][typ].append(Q)
     tpl = {c: {typ: (np.median(np.stack(v), axis=0) if len(v) >= 3 else None)
                for typ, v in dd.items()} for c, dd in acc.items()}
 
     frames = []
     meta = {}
-    for (o, pk, c) in trips:
-        for typ, a, b in (("open", o, pk), ("close", pk, c)):
-            perc = {}
-            frmap = {}
-            for cam in cam_names:
-                T = tpl[cam][typ]
-                if T is None or b >= len(tips[cam]):
-                    continue
-                P = tips[cam][a:b + 1]
-                if len(P) < 5 or np.isnan(P).any():
-                    continue
-                rs, fr = _resample(P)
-                if rs is None:
-                    continue
-                Q, pose, L = _norm(rs)
-                if Q is None:
-                    continue
-                d0, LL, ca, sa = pose
-                Timg = T @ np.array([[ca, sa], [-sa, ca]]) * LL + d0
-                perc[cam] = np.linalg.norm(rs - Timg, axis=1) / LL
-                frmap[cam] = fr
-            if len(perc) < 2:
+    for (typ, a, b) in phases:
+        perc = {}
+        frmap = {}
+        for cam in cam_names:
+            T = tpl[cam][typ]
+            if T is None or b >= len(tips[cam]):
                 continue
-            c0, c1 = cam_names[0], cam_names[1]
-            # Both cameras must deviate at the same resampled index — the
-            # combined excursion signal is the min of the two (a jerk is
-            # real only where BOTH agree it deviates).
-            both = np.minimum(perc[c0], perc[c1])
-            # Contiguous excursions above THRESH → ONE jerk each.  An
-            # out-and-back detour off the template makes residual bimodal
-            # (peaks bracketing the corner where the path crosses back);
-            # grouping the whole excursion and localising to its sharpest
-            # actual TURN puts the marker on the visible corner (e.g. the
-            # 81° cusp), not on the two deviation lobes.
-            Praw = tips[c0][a:b + 1].copy()
-            for k in range(2):
-                v = Praw[:, k]
-                idx = np.arange(len(Praw))
-                good = ~np.isnan(v)
-                if good.sum() >= 2:
-                    Praw[:, k] = np.interp(idx, idx[good], v[good])
-            vraw = np.diff(Praw, axis=0)
-            turn = np.zeros(len(Praw))
-            for i in range(1, len(vraw)):
-                na = np.linalg.norm(vraw[i - 1])
-                nb = np.linalg.norm(vraw[i])
-                if na > 1e-6 and nb > 1e-6:
-                    cth = np.clip(np.dot(vraw[i - 1], vraw[i]) / (na * nb), -1, 1)
-                    turn[i] = np.degrees(np.arccos(cth))
-            above = both >= THRESH
-            # Bridge short sub-threshold gaps: an out-and-back detour dips
-            # below THRESH at its corner (where the path crosses the
-            # template), which would otherwise split one jerk into two
-            # lobes.  Fill gaps of <=3 samples so the detour stays one
-            # excursion and localises to the corner in the gap.
-            g = 0
-            while g < len(above):
-                if above[g]:
-                    g += 1
-                    continue
-                h = g
-                while h < len(above) and not above[h]:
-                    h += 1
-                # Bridge only if a sharp TURN sits in the gap (the corner
-                # of an out-and-back detour) — not any low-residual lull.
-                if 0 < g and h < len(above) and (h - g) <= 12:
-                    fg = int(round(frmap[c0][g - 1]))
-                    fh = int(round(frmap[c0][min(h, len(frmap[c0]) - 1)]))
-                    if fh > fg and np.max(turn[fg:fh + 1]) >= 40:
-                        above[g:h] = True
-                g = h
-            i = 0
-            while i < len(above):
-                if not above[i]:
-                    i += 1
-                    continue
-                j = i
-                while j + 1 < len(above) and above[j + 1]:
-                    j += 1
-                # local-frame span of this excursion
-                f_lo = int(round(frmap[c0][i]))
-                f_hi = int(round(frmap[c0][j]))
-                peak_dev = float(np.max(both[i:j + 1]))
-                # Localise to the jerk ONSET, not its recovery: an
-                # intrusion is a sharp turn AWAY from the intended course,
-                # often followed by an equally sharp turn back toward it.
-                # Mark the EARLIEST strong turn in the span (the
-                # divergence) rather than the largest (which may be the
-                # correction).
-                lo = max(1, f_lo - 1)
-                hi = min(len(turn) - 1, f_hi + 1)
-                if hi > lo:
-                    win = turn[lo:hi + 1]
-                    tmax = float(np.max(win))
-                    cut = max(45.0, 0.6 * tmax)
-                    strong = np.where(win >= cut)[0]
-                    loc = lo + int(strong[0] if len(strong) else int(np.argmax(win)))
-                else:
-                    loc = f_lo
-                gf = loc + a
+            P = tips[cam][a:b + 1]
+            if len(P) < 5 or np.isnan(P).any():
+                continue
+            rs, fr = _resample(P)
+            if rs is None:
+                continue
+            Q, pose, L = _norm(rs)
+            if Q is None:
+                continue
+            d0, LL, ca, sa = pose
+            Timg = T @ np.array([[ca, sa], [-sa, ca]]) * LL + d0
+            perc[cam] = np.linalg.norm(rs - Timg, axis=1) / LL
+            frmap[cam] = fr
+        if len(perc) < 2:
+            continue
+        c0, c1 = cam_names[0], cam_names[1]
+        # Both cameras must deviate at the same resampled index — the
+        # combined excursion signal is the min of the two (a jerk is
+        # real only where BOTH agree it deviates).
+        both = np.minimum(perc[c0], perc[c1])
+        # Contiguous excursions above THRESH → ONE jerk each.  An
+        # out-and-back detour off the template makes residual bimodal
+        # (peaks bracketing the corner where the path crosses back);
+        # grouping the whole excursion and localising to its sharpest
+        # actual TURN puts the marker on the visible corner (e.g. the
+        # 81° cusp), not on the two deviation lobes.
+        Praw = tips[c0][a:b + 1].copy()
+        for k in range(2):
+            v = Praw[:, k]
+            idx = np.arange(len(Praw))
+            good = ~np.isnan(v)
+            if good.sum() >= 2:
+                Praw[:, k] = np.interp(idx, idx[good], v[good])
+        vraw = np.diff(Praw, axis=0)
+        turn = np.zeros(len(Praw))
+        for i in range(1, len(vraw)):
+            na = np.linalg.norm(vraw[i - 1])
+            nb = np.linalg.norm(vraw[i])
+            if na > 1e-6 and nb > 1e-6:
+                cth = np.clip(np.dot(vraw[i - 1], vraw[i]) / (na * nb), -1, 1)
+                turn[i] = np.degrees(np.arccos(cth))
+        above = both >= THRESH
+        # Bridge short sub-threshold gaps: an out-and-back detour dips
+        # below THRESH at its corner (where the path crosses the
+        # template), which would otherwise split one jerk into two
+        # lobes.  Fill gaps of <=3 samples so the detour stays one
+        # excursion and localises to the corner in the gap.
+        g = 0
+        while g < len(above):
+            if above[g]:
+                g += 1
+                continue
+            h = g
+            while h < len(above) and not above[h]:
+                h += 1
+            # Bridge only if a sharp TURN sits in the gap (the corner
+            # of an out-and-back detour) — not any low-residual lull.
+            if 0 < g and h < len(above) and (h - g) <= 12:
+                fg = int(round(frmap[c0][g - 1]))
+                fh = int(round(frmap[c0][min(h, len(frmap[c0]) - 1)]))
+                if fh > fg and np.max(turn[fg:fh + 1]) >= 40:
+                    above[g:h] = True
+            g = h
+        i = 0
+        while i < len(above):
+            if not above[i]:
+                i += 1
+                continue
+            j = i
+            while j + 1 < len(above) and above[j + 1]:
+                j += 1
+            # local-frame span of this excursion
+            f_lo = int(round(frmap[c0][i]))
+            f_hi = int(round(frmap[c0][j]))
+            peak_dev = float(np.max(both[i:j + 1]))
+            # Localise to the jerk ONSET, not its recovery: an
+            # intrusion is a sharp turn AWAY from the intended course,
+            # often followed by an equally sharp turn back toward it.
+            # Mark the EARLIEST strong turn in the span (the
+            # divergence) rather than the largest (which may be the
+            # correction).
+            lo = max(1, f_lo - 1)
+            hi = min(len(turn) - 1, f_hi + 1)
+            if hi > lo:
+                win = turn[lo:hi + 1]
+                tmax = float(np.max(win))
+                cut = max(45.0, 0.6 * tmax)
+                strong = np.where(win >= cut)[0]
+                loc = lo + int(strong[0] if len(strong) else int(np.argmax(win)))
+            else:
+                loc = f_lo
+            gf = loc + a
 
-                # ── Candidate filter (learned from MSA01_L1 curation) ──
-                # True jerks are sustained direction changes (a real
-                # corner, or a turn spread over several frames); false
-                # positives are the turnaround itself, near-stationary
-                # tracking noise, or brief smooth fast deviations with
-                # little total OR net direction change.  Speeds/turns in
-                # px & degrees.
-                spd = np.concatenate([[0.0], np.linalg.norm(vraw, axis=1)])
-                span = range(max(1, f_lo - 1), min(len(turn), f_hi + 2))
-                cum_turn = float(sum(turn[f] for f in span if spd[f] >= 0.8))
-                mean_spd = float(np.mean([spd[f] for f in span])) if span else 0.0
-                # net direction change: mean velocity before vs after span
-                vin = (np.mean(vraw[max(0, f_lo - 3):f_lo], axis=0)
-                       if f_lo >= 1 else np.array([1.0, 0.0]))
-                vout = (np.mean(vraw[f_hi:min(len(vraw), f_hi + 3)], axis=0)
-                        if f_hi < len(vraw) else np.array([1.0, 0.0]))
-                net_turn = 0.0
-                nvi, nvo = np.linalg.norm(vin), np.linalg.norm(vout)
-                if nvi > 1e-6 and nvo > 1e-6:
-                    net_turn = float(np.degrees(np.arccos(
-                        np.clip(np.dot(vin, vout) / (nvi * nvo), -1, 1))))
-                # aperture turnaround (local index within this phase's
-                # [a, b]); reject candidates on top of it.
-                apex_gf = pk
-                if c < len(aperture):
-                    seg_ap = aperture[o:c + 1]
-                    if not np.all(np.isnan(seg_ap)):
-                        apex_gf = o + int(np.nanargmax(seg_ap))
-                ok = (abs(gf - apex_gf) >= 2 and mean_spd >= 0.5
-                      and (cum_turn >= 90.0 or net_turn >= 65.0))
+            # ── Candidate filter (learned from MSA01_L1 curation) ──
+            # True jerks are sustained direction changes (a real
+            # corner, or a turn spread over several frames); false
+            # positives are the turnaround itself, near-stationary
+            # tracking noise, or brief smooth fast deviations with
+            # little total OR net direction change.  Speeds/turns in
+            # px & degrees.
+            spd = np.concatenate([[0.0], np.linalg.norm(vraw, axis=1)])
+            span = range(max(1, f_lo - 1), min(len(turn), f_hi + 2))
+            cum_turn = float(sum(turn[f] for f in span if spd[f] >= 0.8))
+            mean_spd = float(np.mean([spd[f] for f in span])) if span else 0.0
+            # net direction change: mean velocity before vs after span
+            vin = (np.mean(vraw[max(0, f_lo - 3):f_lo], axis=0)
+                   if f_lo >= 1 else np.array([1.0, 0.0]))
+            vout = (np.mean(vraw[f_hi:min(len(vraw), f_hi + 3)], axis=0)
+                    if f_hi < len(vraw) else np.array([1.0, 0.0]))
+            net_turn = 0.0
+            nvi, nvo = np.linalg.norm(vin), np.linalg.norm(vout)
+            if nvi > 1e-6 and nvo > 1e-6:
+                net_turn = float(np.degrees(np.arccos(
+                    np.clip(np.dot(vin, vout) / (nvi * nvo), -1, 1))))
+            # aperture turnaround (local index within this phase's
+            # [a, b]); reject candidates on top of it.  For an opening
+            # phase the turnaround is at the end (peak); for a closing
+            # phase at the start.
+            apex_gf = b if typ == "open" else a
+            if b < len(aperture):
+                seg_ap = aperture[a:b + 1]
+                if not np.all(np.isnan(seg_ap)):
+                    apex_gf = a + int(np.nanargmax(seg_ap))
+            ok = (abs(gf - apex_gf) >= 2 and mean_spd >= 0.5
+                  and (cum_turn >= 90.0 or net_turn >= 65.0))
 
-                if ok and not (frames and any(abs(gf - g) <= 2 for g in frames)):
-                    frames.append(gf)
-                    meta[str(gf)] = {"n": 1,
-                                     "dur": int(max(2, f_hi - f_lo + 1)),
-                                     "power": round(peak_dev, 3)}
-                i = j + 1
+            if ok and not (frames and any(abs(gf - g) <= 2 for g in frames)):
+                frames.append(gf)
+                meta[str(gf)] = {"n": 1,
+                                 "dur": int(max(2, f_hi - f_lo + 1)),
+                                 "power": round(peak_dev, 3)}
+            i = j + 1
 
         # ── Channel B: movement ARREST (sustained very-low tip speed,
         # the flattening/divot in the aperture trace).  Catches jerks
         # that stop the finger without a large position offset — which
-        # the deviation channel misses.  Requires both cameras, >=3
-        # frames, and mid-phase (away from the ballistic accel/decel at
-        # the edges and the turnaround), so normal boundary slowing does
-        # not count.
-        apex_b = pk
-        if c < len(aperture):
-            _sa = aperture[o:c + 1]
+        # the deviation channel misses.  Runs within THIS phase [a, b]:
+        # requires both cameras, >=3 frames, and mid-phase (away from the
+        # ballistic accel/decel at the edges and the turnaround), so
+        # normal boundary slowing does not count.
+        apex_b = b if typ == "open" else a
+        if b < len(aperture):
+            _sa = aperture[a:b + 1]
             if not np.all(np.isnan(_sa)):
-                apex_b = o + int(np.nanargmax(_sa))
+                apex_b = a + int(np.nanargmax(_sa))
         spb = {}
         for cam in cam_names:
-            Pc = tips[cam][o:c + 1].copy()
+            Pc = tips[cam][a:b + 1].copy()
             usable = True
             for k in range(2):
                 vv = Pc[:, k]
@@ -2058,32 +2068,28 @@ def detect_jerks(subject_id: int) -> dict:
                 [[0.0], np.linalg.norm(np.diff(Pc, axis=0), axis=1)])
         if len(spb) >= 2:
             c0b, c1b = cam_names[0], cam_names[1]
-            for (pa, pb2) in ((o, pk), (pk, c)):
-                Lp = pb2 - pa
-                if Lp < 6:
-                    continue
+            Lp = b - a
+            if Lp >= 6:
                 edge = max(2, int(0.30 * Lp))
-                lo_b, hi_b = pa + edge, pb2 - edge
-                seg0 = spb[c0b][pa - o:pb2 - o + 1]
-                seg1 = spb[c1b][pa - o:pb2 - o + 1]
-                pkspd = max(float(np.max(seg0)), float(np.max(seg1)))
+                lo_b, hi_b = a + edge, b - edge
+                pkspd = max(float(np.max(spb[c0b])), float(np.max(spb[c1b])))
                 thr = 0.30 * pkspd
-                nb = pb2 - pa + 1
-                low = [(spb[c0b][pa - o + t] < thr and spb[c1b][pa - o + t] < thr)
+                nb = b - a + 1
+                low = [(spb[c0b][t] < thr and spb[c1b][t] < thr)
                        for t in range(nb)]
                 t = 0
                 while t < nb:
-                    gfb = pa + t
+                    gfb = a + t
                     if not low[t] or gfb < lo_b or gfb > hi_b or abs(gfb - apex_b) <= 3:
                         t += 1
                         continue
                     u = t
-                    while u + 1 < nb and low[u + 1] and pa + u + 1 <= hi_b:
+                    while u + 1 < nb and low[u + 1] and a + u + 1 <= hi_b:
                         u += 1
                     if (u - t + 1) >= 3:
-                        loc_b = pa + min(
+                        loc_b = a + min(
                             range(t, u + 1),
-                            key=lambda tt: spb[c0b][pa - o + tt] + spb[c1b][pa - o + tt])
+                            key=lambda tt: spb[c0b][tt] + spb[c1b][tt])
                         if not (frames and any(abs(loc_b - g) <= 2 for g in frames)):
                             frames.append(loc_b)
                             meta[str(loc_b)] = {"n": 1, "dur": int(u - t + 1),
@@ -2099,9 +2105,9 @@ def detect_jerks(subject_id: int) -> dict:
     except OSError:
         pass
     logger.info("detect-jerks %s: %d candidates across %d movements",
-                name, len(frames), len(trips))
+                name, len(frames), n_mov)
     return {"n": len(frames), "frames": frames, "meta": meta,
-            "n_movements": len(trips)}
+            "n_movements": n_mov}
 
 
 @router.get("/{subject_id}/jerk-meta")
