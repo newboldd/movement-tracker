@@ -1357,10 +1357,22 @@ const manoViewer = (() => {
                 while (t - prev < -Math.PI) t += 2 * Math.PI;
                 prev = t; last = t;
             }
-            return _sampleCurve((phi) => [
-                cx + ru * Math.cos(phi) * ct - rv * Math.sin(phi) * st,
-                cy + ru * Math.cos(phi) * st + rv * Math.sin(phi) * ct,
-            ], phi0, last);
+            // Degeneracy guards: on a nearly straight path the algebraic
+            // fit collapses onto a small needle-thin ellipse that the
+            // data WRAPS most of the way around (sweep > 180°, or a
+            // major diameter smaller than the data's chord).  The
+            // sampled arc then hooks around the ellipse's end — a
+            // spurious curl the data never made.  Fall back to the
+            // circle (large radius, shallow arc) instead.
+            const chord = Math.hypot(P[P.length - 1][0] - P[0][0],
+                                     P[P.length - 1][1] - P[0][1]);
+            if (Math.abs(last - phi0) <= Math.PI
+                && 2 * Math.max(ru, rv) >= chord) {
+                return _sampleCurve((phi) => [
+                    cx + ru * Math.cos(phi) * ct - rv * Math.sin(phi) * st,
+                    cy + ru * Math.cos(phi) * st + rv * Math.sin(phi) * ct,
+                ], phi0, last);
+            }
         }
 
         // Fallback: Kasa least-squares circle.
