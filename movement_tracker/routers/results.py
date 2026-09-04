@@ -1789,35 +1789,31 @@ def get_traces(subject_id: int, source: str = Query("auto")) -> dict:
 
 @router.post("/{subject_id}/detect-jerks")
 def detect_jerks(subject_id: int) -> dict:
-    """Detect candidate 'jerk' events — brief acceleration pulses on the
-    index-tip trajectory (hypothesized action polyminimyoclonus) — and
-    save them as ``jerk`` events in the subject's events.csv.
+    """Detect candidate 'jerk' events — deviations of the index-tip path
+    from the subject's own stereotyped movement template — and save them
+    as ``jerk`` events (hypothesized action polyminimyoclonus; see
+    notes/msa01_120hz_predictions.md).
 
-    Sparse-deconvolution strategy (validated against Dillan's marked
-    events in MSA01_L1 movements 1-2; see the session notes and
-    notes/msa01_120hz_predictions.md): per valid movement, the observed
-    2D tip path is modelled as SMOOTH intended motion (cubic B-spline
-    with extra knots at the movement edges and around the peak, so the
-    launch / turnaround / braking transients are absorbed structurally)
-    plus a sparse set of few-frame acceleration pulses whose
-    double-integrated responses are chosen greedily (orthogonal matching
-    pursuit) for how much observed trajectory they EXPLAIN.  A pulse is
-    kept only while it reduces the reconstruction error by at least
-    STOP_DSSE (px^2) — conservative operating point: catches prominent
-    translation-type jerks with essentially no boundary false positives;
-    small direction changes at low speed are below the 60fps noise floor
-    by design.  Cross-camera agreement (±2 frames) is required.
+    Method: for each phase TYPE (opening / closing), the reference is the
+    endpoint-normalised point-wise MEDIAN of all the subject's valid
+    movements' index-tip paths (the trial's own stereotyped course).  Per
+    movement, the template is posed onto that movement's own endpoints and
+    the residual (observed − template) is measured as a FRACTION of the
+    movement's chord length — scale-free, so it is independent of camera
+    distance and of movement amplitude (the whole point of the calibrated
+    rig).  A jerk is a residual peak above THRESH (fraction of chord)
+    confirmed in BOTH cameras (±2 frames).  Adjacent peaks merge.
 
-    Each saved jerk carries metadata {dur, power}: pulse duration in
-    frames and its explanatory power (ΔSSE, px^2).  Re-running REPLACES
-    all existing jerk events; other event types are untouched.
+    A stereotyped (healthy) movement hugs its template → small residual →
+    few jerks; an intrusion deviates → a peak.  Each saved jerk carries
+    {dur, power=deviation}.  Re-running REPLACES existing jerks.
     """
-    from scipy.interpolate import BSpline
+    from scipy.signal import find_peaks
     from .labeling import _read_events_csv, _write_events_csv
     from ..services.dlc_predictions import get_dlc_predictions_for_stage
 
-    STOP_DSSE = 15.0     # px^2 — tuned on MSA01_L1 marked events
-    MAX_PULSES = 6
+    THRESH = 0.08     # fraction of movement chord; tuned MSA01 vs controls
+    M = 40            # arc-length resample points per phase
     subj = _get_subject(subject_id)
     name = subj["name"]
     data = get_dlc_predictions_for_stage(name, "corrections")
@@ -1826,8 +1822,8 @@ def detect_jerks(subject_id: int) -> dict:
     settings = get_settings()
     cam_names = [c for c in settings.camera_names
                  if c in data and data[c].get("index")]
-    if not cam_names:
-        raise HTTPException(400, "No index-tip labels in DLC corrections")
+    if len(cam_names) < 2:
+        raise HTTPException(400, "Jerk detection needs both cameras' index labels")
     trials = build_trial_map(name)
     events = _read_events_csv(name)
     evs = sorted([(f, t) for t in ("open", "peak", "close")
@@ -1836,139 +1832,96 @@ def detect_jerks(subject_id: int) -> dict:
              for i in range(1, len(evs) - 1)
              if evs[i][1] == "peak" and evs[i-1][1] == "open"
              and evs[i+1][1] == "close"]
-    if not trips:
+    if len(trips) < 3:
         raise HTTPException(
-            400, "No valid open→peak→close movements — save events first")
+            400, "Need >=3 valid open→peak→close movements to build a template")
 
     tips = {c: np.array([[np.nan, np.nan] if p is None else p
                           for p in data[c]["index"]], dtype=float)
             for c in cam_names}
-    # Thumb-index aperture: its per-movement maximum is the physiological
-    # turnaround (the tapping variable), robust to lateral jerks and to
-    # imprecise 'peak' event labels — used to place the spline's flex
-    # knot so the smooth model absorbs the turnaround there instead of
-    # spending a pulse on it.
-    aperture = np.array([np.nan if v is None else v
-                         for v in (data.get("distances") or [])], dtype=float)
-    frame_fps = {}
-    for t in trials:
-        for f in range(t["start_frame"], t["end_frame"] + 1):
-            frame_fps[f] = float(t.get("fps") or 60.0)
 
-    def _basis(n, apex_local, fps):
-        """Cubic B-spline with edge + turnaround knot refinement."""
-        spacing = max(4, round(7.0 * fps / 60.0))
-        step = max(1, round(2.0 * fps / 60.0))
-        kn = set()
-        f = 0.0
-        while f < n:
-            kn.add(round(f))
-            f += spacing
-        for m in (1, 2, 3):
-            kn.add(m * step)
-            kn.add(n - 1 - m * step)
-        for f in (apex_local - 1, apex_local, apex_local + 1):
-            if 1 <= f <= n - 2:
-                kn.add(f)
-        t_int = sorted(v for v in kn if 0 < v < n - 1)
-        k = 3
-        tk = np.r_[[0.0] * (k + 1), [float(v) for v in t_int],
-                   [float(n - 1)] * (k + 1)]
-        nb = len(tk) - k - 1
-        B = np.zeros((n, nb))
-        x = np.arange(n, dtype=float)
-        for i in range(nb):
-            cv = np.zeros(nb)
-            cv[i] = 1.0
-            B[:, i] = BSpline(tk, cv, k, extrapolate=False)(x)
-        B[np.isnan(B)] = 0.0
-        return B
+    def _resample(P):
+        seg = np.linalg.norm(np.diff(P, axis=0), axis=1)
+        s = np.concatenate([[0.0], np.cumsum(seg)])
+        if s[-1] < 1e-9:
+            return None, None
+        t = np.linspace(0.0, s[-1], M)
+        rs = np.column_stack([np.interp(t, s, P[:, k]) for k in range(2)])
+        frames = np.interp(t, s, np.arange(len(P)))
+        return rs, frames
 
-    def _pulse(n, t0, dur):
-        a = np.zeros(n)
-        a[t0:t0 + dur] = 1.0
-        return np.cumsum(np.cumsum(a))
+    def _norm(rs):
+        d0, d1 = rs[0], rs[-1]
+        v = d1 - d0
+        L = float(np.linalg.norm(v))
+        if L < 1e-6:
+            return None, None, None
+        ca, sa = v / L
+        Q = (rs - d0) @ np.array([[ca, -sa], [sa, ca]]) / L
+        return Q, (d0, L, ca, sa), L
 
-    def _omp(P, B, durs):
-        n = len(P)
-
-        def sse_with(cols):
-            A = np.column_stack([B] + cols) if cols else B
-            r = 0.0
-            for k in range(2):
-                beta, *_ = np.linalg.lstsq(A, P[:, k], rcond=None)
-                r += float(np.sum((P[:, k] - A @ beta) ** 2))
-            return r
-
-        chosen, cols = [], []
-        cur = sse_with(cols)
-        while len(chosen) < MAX_PULSES:
-            best = None
-            for t0 in range(2, n - 3):
-                if any(abs(t0 - c[0]) < 3 for c in chosen):
+    # ── build per-camera, per-phase-type median templates ──
+    acc = {c: {"open": [], "close": []} for c in cam_names}
+    for (o, pk, c) in trips:
+        for typ, a, b in (("open", o, pk), ("close", pk, c)):
+            for cam in cam_names:
+                if b >= len(tips[cam]):
                     continue
-                for dd in durs:
-                    if t0 + dd > n - 1:
-                        continue
-                    s = sse_with(cols + [_pulse(n, t0, dd)])
-                    if best is None or s < best[0]:
-                        best = (s, t0, dd)
-            if best is None or cur - best[0] < STOP_DSSE:
-                break
-            chosen.append((best[1], best[2], cur - best[0]))
-            cols.append(_pulse(n, best[1], best[2]))
-            cur = best[0]
-        return chosen
+                P = tips[cam][a:b + 1]
+                if len(P) < 5 or np.isnan(P).any():
+                    continue
+                rs, _ = _resample(P)
+                if rs is None:
+                    continue
+                Q, _, _ = _norm(rs)
+                if Q is not None:
+                    acc[cam][typ].append(Q)
+    tpl = {c: {typ: (np.median(np.stack(v), axis=0) if len(v) >= 3 else None)
+               for typ, v in dd.items()} for c, dd in acc.items()}
 
     frames = []
     meta = {}
     for (o, pk, c) in trips:
-        fps = frame_fps.get(o, 60.0)
-        durs = (max(2, round(2.0 * fps / 60.0)), max(3, round(3.0 * fps / 60.0)))
-        tol = max(2, round(2.0 * fps / 60.0))
-        # Turnaround = aperture maximum within the movement (falls back to
-        # the labelled peak, then the midpoint, if aperture is unavailable).
-        apex_local = pk - o
-        if c < len(aperture):
-            seg = aperture[o:c + 1]
-            if not np.all(np.isnan(seg)):
-                apex_local = int(np.nanargmax(seg))
-        per_cam = []
-        for cam in cam_names:
-            tip = tips[cam]
-            if c >= len(tip):
-                per_cam.append([])
+        for typ, a, b in (("open", o, pk), ("close", pk, c)):
+            perc = {}
+            frmap = {}
+            for cam in cam_names:
+                T = tpl[cam][typ]
+                if T is None or b >= len(tips[cam]):
+                    continue
+                P = tips[cam][a:b + 1]
+                if len(P) < 5 or np.isnan(P).any():
+                    continue
+                rs, fr = _resample(P)
+                if rs is None:
+                    continue
+                Q, pose, L = _norm(rs)
+                if Q is None:
+                    continue
+                d0, LL, ca, sa = pose
+                Timg = T @ np.array([[ca, sa], [-sa, ca]]) * LL + d0
+                perc[cam] = np.linalg.norm(rs - Timg, axis=1) / LL
+                frmap[cam] = fr
+            if len(perc) < 2:
                 continue
-            P = tip[o:c + 1].copy()
-            n = len(P)
-            bad = False
-            for k in range(2):
-                v = P[:, k]
-                idx = np.arange(n)
-                good = ~np.isnan(v)
-                if good.sum() < max(10, n * 0.5):
-                    bad = True
-                    break
-                P[:, k] = np.interp(idx, idx[good], v[good])
-            if bad or n < 12:
-                per_cam.append([])
-                continue
-            B = _basis(n, apex_local, fps)
-            per_cam.append([(t0 + o, dd, ds) for t0, dd, ds in _omp(P, B, durs)])
-        keep = per_cam[0] if per_cam else []
-        if len(per_cam) >= 2 and per_cam[1]:
-            keep = [p for p in keep
-                    if any(abs(p[0] - q[0]) <= tol for q in per_cam[1])]
-        elif len(per_cam) >= 2 and not per_cam[1] and keep:
-            # second camera produced nothing for this movement — keep
-            # primary-camera pulses only if it had usable data at all
-            pass
-        for f, dd, ds in keep:
-            if frames and any(abs(f - g) <= 1 for g in frames):
-                continue
-            frames.append(f)
-            meta[str(f)] = {"n": 1, "dur": int(dd),
-                            "power": round(float(ds), 1)}
+            c0, c1 = cam_names[0], cam_names[1]
+            pk0, _ = find_peaks(perc[c0], height=THRESH, distance=2)
+            pk1, _ = find_peaks(perc[c1], height=THRESH, distance=2)
+            for p in pk0:
+                if not any(abs(frmap[c0][p] - frmap[c1][q]) <= 2 for q in pk1):
+                    continue
+                gf = int(round(frmap[c0][p])) + a
+                if frames and any(abs(gf - g) <= 2 for g in frames):
+                    # merge: keep the stronger
+                    gprev = min(frames, key=lambda g: abs(g - gf))
+                    if perc[c0][p] > meta.get(str(gprev), {}).get("power", 0):
+                        frames.remove(gprev)
+                        meta.pop(str(gprev), None)
+                    else:
+                        continue
+                frames.append(gf)
+                meta[str(gf)] = {"n": 1, "dur": 3,
+                                 "power": round(float(perc[c0][p]), 3)}
     frames = sorted(frames)
 
     events["jerk"] = frames
