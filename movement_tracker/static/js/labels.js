@@ -1496,7 +1496,10 @@ const manoViewer = (() => {
                 if (trajTriplets && trajTriplets.length) {
                     const RES = 30;
                     // Gather every valid phase's path for this (model,
-                    // joint): arc-length resampled, centroid recorded.
+                    // joint), arc-length resampled and ENDPOINT-NORMALIZED:
+                    // a similarity transform maps start → (0,0) and
+                    // end → (1,0), so the template lives in a space where
+                    // both endpoints are pinned by construction.
                     const entries = [];
                     for (const tp of trajTriplets) {
                         for (const [type, a, b] of [['open', tp.o, tp.pk],
@@ -1512,30 +1515,40 @@ const manoViewer = (() => {
                             if (!ok || raw.length < 5) continue;
                             const rs = _resamplePolyByLen(raw, RES);
                             if (rs.length !== RES) continue;
-                            let cx = 0, cy = 0;
-                            for (const p of rs) { cx += p[0]; cy += p[1]; }
-                            cx /= RES; cy /= RES;
-                            entries.push({ type, a, b, cx, cy,
-                                           ctr: rs.map(p => [p[0] - cx, p[1] - cy]) });
+                            const d0 = rs[0], d1 = rs[RES - 1];
+                            const vx = d1[0] - d0[0], vy = d1[1] - d0[1];
+                            const L = Math.hypot(vx, vy);
+                            if (L < 1e-6) continue;
+                            const ca = vx / L, sa = vy / L;
+                            const norm = rs.map(p => {
+                                const qx = p[0] - d0[0], qy = p[1] - d0[1];
+                                return [(qx * ca + qy * sa) / L,
+                                        (-qx * sa + qy * ca) / L];
+                            });
+                            entries.push({ type, a, b, d0, L, ca, sa, norm });
                         }
                     }
-                    // Point-wise median template per phase type (needs ≥3
-                    // movements so the median means something).
+                    // Point-wise median template per phase type in the
+                    // normalized space (needs ≥3 movements).  Endpoints are
+                    // exactly (0,0) and (1,0) for every contributor, so
+                    // the median inherits them.
                     const templates = {};
                     for (const type of ['open', 'close']) {
                         const set = entries.filter(e => e.type === type);
                         if (set.length < 3) continue;
                         const tpl = [];
                         for (let k = 0; k < RES; k++) {
-                            const xs = set.map(e => e.ctr[k][0]).sort((x, y) => x - y);
-                            const ys = set.map(e => e.ctr[k][1]).sort((x, y) => x - y);
+                            const xs = set.map(e => e.norm[k][0]).sort((x, y) => x - y);
+                            const ys = set.map(e => e.norm[k][1]).sort((x, y) => x - y);
                             tpl.push([xs[(xs.length - 1) >> 1],
                                       ys[(ys.length - 1) >> 1]]);
                         }
                         templates[type] = tpl;
                     }
-                    // Draw the template under each phase in view, placed
-                    // at that phase's own centroid (translation only).
+                    // Draw the template under each phase in view, mapped by
+                    // the similarity transform that puts its endpoints
+                    // EXACTLY on this movement's own event positions
+                    // (open→peak for opening arcs, peak→close for closing).
                     for (const e of entries) {
                         if (e.b < lo || e.a > hi) continue;
                         const tpl = templates[e.type];
@@ -1547,9 +1560,11 @@ const manoViewer = (() => {
                         ctx.setLineDash([(6 * LABEL_SCALE) / scale,
                                          (4 * LABEL_SCALE) / scale]);
                         ctx.beginPath();
-                        tpl.forEach((p, k) => k
-                            ? ctx.lineTo(p[0] + e.cx, p[1] + e.cy)
-                            : ctx.moveTo(p[0] + e.cx, p[1] + e.cy));
+                        tpl.forEach((p, k) => {
+                            const x = e.d0[0] + e.L * (p[0] * e.ca - p[1] * e.sa);
+                            const y = e.d0[1] + e.L * (p[0] * e.sa + p[1] * e.ca);
+                            if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                        });
                         ctx.stroke();
                         ctx.restore();
                     }
