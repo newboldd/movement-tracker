@@ -1862,6 +1862,11 @@ def detect_jerks(subject_id: int) -> dict:
         Q = (rs - d0) @ np.array([[ca, -sa], [sa, ca]]) / L
         return Q, (d0, L, ca, sa), L
 
+    # Thumb-index aperture (mm, 3-D) for the turnaround landmark used by
+    # the candidate filter.
+    aperture = np.array([np.nan if v is None else v
+                         for v in (data.get("distances") or [])], dtype=float)
+
     # ── build per-camera, per-phase-type median templates ──
     acc = {c: {"open": [], "close": []} for c in cam_names}
     for (o, pk, c) in trips:
@@ -1983,7 +1988,39 @@ def detect_jerks(subject_id: int) -> dict:
                 else:
                     loc = f_lo
                 gf = loc + a
-                if not (frames and any(abs(gf - g) <= 2 for g in frames)):
+
+                # ── Candidate filter (learned from MSA01_L1 curation) ──
+                # True jerks are sustained direction changes (a real
+                # corner, or a turn spread over several frames); false
+                # positives are the turnaround itself, near-stationary
+                # tracking noise, or brief smooth fast deviations with
+                # little total OR net direction change.  Speeds/turns in
+                # px & degrees.
+                spd = np.concatenate([[0.0], np.linalg.norm(vraw, axis=1)])
+                span = range(max(1, f_lo - 1), min(len(turn), f_hi + 2))
+                cum_turn = float(sum(turn[f] for f in span if spd[f] >= 0.8))
+                mean_spd = float(np.mean([spd[f] for f in span])) if span else 0.0
+                # net direction change: mean velocity before vs after span
+                vin = (np.mean(vraw[max(0, f_lo - 3):f_lo], axis=0)
+                       if f_lo >= 1 else np.array([1.0, 0.0]))
+                vout = (np.mean(vraw[f_hi:min(len(vraw), f_hi + 3)], axis=0)
+                        if f_hi < len(vraw) else np.array([1.0, 0.0]))
+                net_turn = 0.0
+                nvi, nvo = np.linalg.norm(vin), np.linalg.norm(vout)
+                if nvi > 1e-6 and nvo > 1e-6:
+                    net_turn = float(np.degrees(np.arccos(
+                        np.clip(np.dot(vin, vout) / (nvi * nvo), -1, 1))))
+                # aperture turnaround (local index within this phase's
+                # [a, b]); reject candidates on top of it.
+                apex_gf = pk
+                if c < len(aperture):
+                    seg_ap = aperture[o:c + 1]
+                    if not np.all(np.isnan(seg_ap)):
+                        apex_gf = o + int(np.nanargmax(seg_ap))
+                ok = (abs(gf - apex_gf) >= 2 and mean_spd >= 0.5
+                      and (cum_turn >= 90.0 or net_turn >= 65.0))
+
+                if ok and not (frames and any(abs(gf - g) <= 2 for g in frames)):
                     frames.append(gf)
                     meta[str(gf)] = {"n": 1,
                                      "dur": int(max(2, f_hi - f_lo + 1)),
