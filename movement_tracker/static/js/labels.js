@@ -525,8 +525,9 @@ const manoViewer = (() => {
         }
         const m = jerkMeta[hit.gf] || jerkMeta[String(hit.gf)] || {};
         const n = m.n || 1, dur = m.dur || 3;
-        _jerkTipEl.textContent =
-            `f${hit.gf} — ${n} jerk${n > 1 ? 's' : ''}, ~${dur} frame${dur > 1 ? 's' : ''}`;
+        let txt = `f${hit.gf} — ${n} jerk${n > 1 ? 's' : ''}, ~${dur} frame${dur > 1 ? 's' : ''}`;
+        if (m.power != null) txt += ` · explains ${Math.round(m.power)} px²`;
+        _jerkTipEl.textContent = txt;
         _jerkTipEl.style.left = (e.clientX + 12) + 'px';
         _jerkTipEl.style.top = (e.clientY - 26) + 'px';
         _jerkTipEl.style.display = '';
