@@ -492,6 +492,45 @@ const manoViewer = (() => {
     };
     const EVENT_TYPES = ['open', 'peak', 'close', 'pause', 'jerk'];
     let _eventsDirty = false;
+    // Per-jerk metadata from detect-jerks: frame(str) → {n: pulse count
+    // merged into this event, dur: frames the disturbance persists}.
+    let jerkMeta = {};
+    // Jerk diamonds drawn on the distance plot (canvas coords), for the
+    // hover tooltip.
+    let _jerkHits = [];
+    let _jerkTipEl = null;
+
+    function _hideJerkTooltip() {
+        if (_jerkTipEl) _jerkTipEl.style.display = 'none';
+    }
+
+    function _updateJerkTooltip(e) {
+        if (!_jerkHits.length) { _hideJerkTooltip(); return; }
+        const rect = distCanvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        let hit = null, best = 8;
+        for (const h of _jerkHits) {
+            const d = Math.max(Math.abs(mx - h.x), Math.abs(my - h.y));
+            if (d < best) { best = d; hit = h; }
+        }
+        if (!hit) { _hideJerkTooltip(); return; }
+        if (!_jerkTipEl) {
+            _jerkTipEl = document.createElement('div');
+            _jerkTipEl.style.cssText =
+                'position:fixed;z-index:1000;pointer-events:none;' +
+                'background:rgba(20,20,35,0.95);color:#fff;' +
+                'border:1px solid #888;border-radius:4px;' +
+                'padding:3px 7px;font-size:11px;white-space:nowrap;';
+            document.body.appendChild(_jerkTipEl);
+        }
+        const m = jerkMeta[hit.gf] || jerkMeta[String(hit.gf)] || {};
+        const n = m.n || 1, dur = m.dur || 3;
+        _jerkTipEl.textContent =
+            `f${hit.gf} — ${n} jerk${n > 1 ? 's' : ''}, ~${dur} frame${dur > 1 ? 's' : ''}`;
+        _jerkTipEl.style.left = (e.clientX + 12) + 'px';
+        _jerkTipEl.style.top = (e.clientY - 26) + 'px';
+        _jerkTipEl.style.display = '';
+    }
 
     // ── Event editing (mirrors the Events page: 1/2/3/4/x + buttons) ──
     function _ensureSavedEvents() {
@@ -1463,6 +1502,26 @@ const manoViewer = (() => {
             return null;
         };
 
+        // Jerk windows (LOCAL frames): each detected jerk covers
+        // [frame, frame + dur - 1] per its metadata — the presumed
+        // extent of the disturbance.  Trail points/segments inside a
+        // window are drawn WHITE, and the reference fit treats them as
+        // interruptions.  Gated on the J visibility toggle.
+        let jerkWins = null;
+        if (showEvents.jerk && savedEvents && Array.isArray(savedEvents.jerk)) {
+            jerkWins = [];
+            for (const g of savedEvents.jerk) {
+                const lf = g - startFrame;
+                if (lf > hi || lf < lo - 16) continue;
+                const m = jerkMeta[g] || jerkMeta[String(g)] || {};
+                const dur = Math.max(1, Math.min(16, m.dur || 3));
+                jerkWins.push([lf, lf + dur - 1]);
+            }
+            if (!jerkWins.length) jerkWins = null;
+        }
+        const _inJerk = (f) => !!(jerkWins
+            && jerkWins.some(w => f >= w[0] && f <= w[1]));
+
         // "Show reference path": per-trial median-path templates.  For
         // each phase TYPE (opening / closing) the reference is the
         // translation-aligned point-wise median of ALL the trial's valid
@@ -1501,10 +1560,12 @@ const manoViewer = (() => {
                     pts.push([x * pixelScale, y * pixelScale, f]);
                 }
                 // Polyline (break across gaps).  Colour each segment by the
-                // movement direction at its later endpoint.
+                // movement direction at its later endpoint; segments inside
+                // a jerk window draw WHITE.
                 for (let k = 1; k < pts.length; k++) {
                     if (pts[k - 1] && pts[k]) {
-                        const segCol = _isClosing(pts[k][2]) ? closeColor : color;
+                        const segCol = _inJerk(pts[k][2]) ? '#ffffff'
+                            : (_isClosing(pts[k][2]) ? closeColor : color);
                         drawLine(pts[k - 1][0], pts[k - 1][1], pts[k][0], pts[k][1], segCol, 1.5, 0.8);
                     }
                 }
@@ -1514,7 +1575,9 @@ const manoViewer = (() => {
                     if (!p) continue;
                     const et = _evTypeAtLocal(p[2]);
                     if (et) drawJoint(p[0], p[1], EVENT_COLORS[et], 3.4);
-                    else drawJoint(p[0], p[1], _isClosing(p[2]) ? closeColor : color, 1.3);
+                    else drawJoint(p[0], p[1],
+                        _inJerk(p[2]) ? '#ffffff'
+                            : (_isClosing(p[2]) ? closeColor : color), 1.3);
                     // Record for click-to-seek (x/y already in ctx-logical px).
                     _trajHitPoints.push({ x: p[0], y: p[1], f: p[2] });
                 }
@@ -1595,15 +1658,72 @@ const manoViewer = (() => {
                         // Draw the template under each phase in view,
                         // mapped by the similarity transform that puts its
                         // endpoints EXACTLY on this movement's own event
-                        // positions (open→peak / peak→close).
+                        // positions (open→peak / peak→close).  When jerk
+                        // windows fall inside the phase, split it into the
+                        // clean runs between them and refit each run with
+                        // its own translation (the interrupt-and-translate
+                        // model) — the reference then shows the resumed
+                        // intended course on either side of each jerk.
                         for (const e of entries) {
                             if (e.b < lo || e.a > hi) continue;
                             const tpl = templates[e.type];
                             if (!tpl) continue;
-                            _drawDashedPath(tpl.map(p => [
+                            const tplImg = tpl.map(p => [
                                 e.d0[0] + e.L * (p[0] * e.ca - p[1] * e.sa),
                                 e.d0[1] + e.L * (p[0] * e.sa + p[1] * e.ca),
-                            ]));
+                            ]);
+                            const wins = jerkWins
+                                ? jerkWins.filter(w => w[1] >= e.a && w[0] <= e.b)
+                                          .sort((x, y) => x[0] - y[0])
+                                : [];
+                            if (!wins.length) {
+                                _drawDashedPath(tplImg);
+                                continue;
+                            }
+                            // Clean frame runs between jerk windows.
+                            const segs = [];
+                            let start = e.a;
+                            for (const [wa, wb] of wins) {
+                                if (wa - 1 >= start) segs.push([start, Math.min(wa - 1, e.b)]);
+                                start = Math.max(start, wb + 1);
+                            }
+                            if (start <= e.b) segs.push([start, e.b]);
+                            for (const [sa, sb] of segs) {
+                                if (sb - sa < 2) continue;
+                                const segPts = [];
+                                for (let f = sa; f <= sb; f++) {
+                                    const p = getPt(f, j);
+                                    if (p && isFinite(p[0]) && isFinite(p[1])) {
+                                        segPts.push([p[0] * pixelScale, p[1] * pixelScale]);
+                                    }
+                                }
+                                if (segPts.length < 3) continue;
+                                // ICP translation of the template onto the run.
+                                let ox = 0, oy = 0, idxs = null;
+                                for (let it = 0; it < 3; it++) {
+                                    idxs = segPts.map(q => {
+                                        let bi = 0, bd = Infinity;
+                                        for (let m2 = 0; m2 < tplImg.length; m2++) {
+                                            const dx = tplImg[m2][0] + ox - q[0];
+                                            const dy = tplImg[m2][1] + oy - q[1];
+                                            const d2 = dx * dx + dy * dy;
+                                            if (d2 < bd) { bd = d2; bi = m2; }
+                                        }
+                                        return bi;
+                                    });
+                                    let sx = 0, sy = 0;
+                                    for (let q2 = 0; q2 < segPts.length; q2++) {
+                                        sx += segPts[q2][0] - tplImg[idxs[q2]][0];
+                                        sy += segPts[q2][1] - tplImg[idxs[q2]][1];
+                                    }
+                                    ox = sx / segPts.length;
+                                    oy = sy / segPts.length;
+                                }
+                                const i0 = Math.min(...idxs), i1 = Math.max(...idxs);
+                                if (i1 - i0 < 1) continue;
+                                _drawDashedPath(tplImg.slice(i0, i1 + 1)
+                                    .map(p => [p[0] + ox, p[1] + oy]));
+                            }
                         }
                     }
                 }
@@ -2236,6 +2356,11 @@ const manoViewer = (() => {
             savedEvents = await api(`/api/skeleton/${sid}/events`);
         } catch {
             savedEvents = null;
+        }
+        try {
+            jerkMeta = (await api(`/api/results/${sid}/jerk-meta`)).frames || {};
+        } catch {
+            jerkMeta = {};
         }
 
         const trialBtns = $('trialBtns');
@@ -3215,6 +3340,7 @@ const manoViewer = (() => {
                 const r = await api(`/api/results/${subjectId}/detect-jerks`,
                                     { method: 'POST' });
                 savedEvents = await api(`/api/skeleton/${subjectId}/events`);
+                jerkMeta = r.meta || {};
                 _ensureSavedEvents();
                 if (!showEvents.jerk) {
                     showEvents.jerk = true;
@@ -4790,6 +4916,7 @@ const manoViewer = (() => {
                     const near = _constraintHitZones.some(hz => Math.abs(my - hz.y) < 8);
                     distCanvas.style.cursor = near ? 'ns-resize' : 'crosshair';
                 }
+                _updateJerkTooltip(e);
                 return;
             }
             const rect = distCanvas.getBoundingClientRect();
@@ -4802,7 +4929,10 @@ const manoViewer = (() => {
             renderDistanceTrace();
         });
         distCanvas.addEventListener('mouseup', () => { _cstDrag = null; });
-        distCanvas.addEventListener('mouseleave', () => { _cstDrag = null; });
+        distCanvas.addEventListener('mouseleave', () => {
+            _cstDrag = null;
+            _hideJerkTooltip();
+        });
         distCanvas.addEventListener('click', e => {
             if (_cstDrag) return;
             if (!trialData) return;
@@ -7471,6 +7601,7 @@ const manoViewer = (() => {
             const R = 5;
             distCtx.globalAlpha = 1.0;
             distCtx.setLineDash([]);
+            _jerkHits = [];
             for (const t of EVENT_TYPES) {
                 if (!showEvents[t]) continue;
                 const frames = savedEvents[t];
@@ -7484,6 +7615,7 @@ const manoViewer = (() => {
                     const y = (dv != null && isFinite(dv))
                         ? Math.max(R, Math.min(plotH - R, anchor.toY(dv)))
                         : plotH * 0.5;
+                    if (t === 'jerk') _jerkHits.push({ x, y, gf });
                     distCtx.beginPath();
                     distCtx.moveTo(x, y - R);
                     distCtx.lineTo(x + R, y);

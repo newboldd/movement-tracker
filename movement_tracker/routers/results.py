@@ -1838,18 +1838,19 @@ def detect_jerks(subject_id: int) -> dict:
             for c in cam_names}
 
     def detect_cam(tip, t):
+        """Returns (frames, trial_start, mag, med) or None."""
         fps = float(t.get("fps") or 60.0)
         s, e = t["start_frame"], min(t["end_frame"], len(tip) - 1)
         X = tip[s:e + 1].copy()
         n = len(X)
         if n < 20:
-            return []
+            return None
         for k in range(2):
             v = X[:, k]
             idx = np.arange(n)
             good = ~np.isnan(v)
             if good.sum() < 10:
-                return []
+                return None
             X[:, k] = np.interp(idx, idx[good], v[good])
         win = max(5, int(round(0.08 * fps)) | 1)
         Xs = np.column_stack([savgol_filter(X[:, k], win, 2)
@@ -1861,28 +1862,33 @@ def detect_jerks(subject_id: int) -> dict:
         mag = np.linalg.norm(resid, axis=1)
         local = [(o - s, c - s) for o, pk, c in trips if o >= s and c <= e]
         if not local:
-            return []
+            return None
         med = float(np.median(np.concatenate([mag[o:c + 1] for o, c in local])))
         if med <= 0:
-            return []
+            return None
         min_sep = max(2, int(round(0.033 * fps)))
         out = []
         for o, c in local:
             peaks, _ = find_peaks(mag[o:c + 1], height=2.0 * med,
                                   distance=min_sep)
             out += [int(p + o + s) for p in peaks]
-        return out
+        return out, s, mag, med
 
     detected = []
+    cam0_by_trial = []   # (s, e, mag, med) for the primary camera, per trial
     for t in trials:
         fps = float(t.get("fps") or 60.0)
         tol = max(1, int(round(fps / 60.0)))
-        cam_dets = [detect_cam(tips[c], t) for c in cam_names]
-        if len(cam_dets) >= 2 and cam_dets[1]:
-            keep = [f for f in cam_dets[0]
-                    if any(abs(f - g) <= tol for g in cam_dets[1])]
+        cam_res = [detect_cam(tips[c], t) for c in cam_names]
+        d0 = cam_res[0]
+        if d0 is None:
+            continue
+        cam0_by_trial.append((d0[1], d0[1] + len(d0[2]) - 1, d0[2], d0[3]))
+        if len(cam_res) >= 2 and cam_res[1] is not None and cam_res[1][0]:
+            keep = [f for f in d0[0]
+                    if any(abs(f - g) <= tol for g in cam_res[1][0])]
         else:
-            keep = cam_dets[0]
+            keep = d0[0]
         detected += keep
     frames = []
     for f in sorted(set(detected)):
@@ -1890,11 +1896,56 @@ def detect_jerks(subject_id: int) -> dict:
             continue
         frames.append(f)
 
+    # Per-jerk metadata: how long the disturbance persists (frames the
+    # residual stays elevated after the peak — the presumed extent of
+    # the jerk sequence) and how many distinct residual peaks fall in
+    # that window (adjacent pulses closer than the enforced separation
+    # merge into one saved event; this recovers the multiplicity).
+    meta = {}
+    for f in frames:
+        rec = next(((s, e, mag, med) for s, e, mag, med in cam0_by_trial
+                    if s <= f <= e), None)
+        if rec is None:
+            meta[str(f)] = {"n": 1, "dur": 3}
+            continue
+        s, e, mag, med = rec
+        i = f - s
+        lo_i = i
+        while lo_i - 1 >= 0 and i - lo_i < 8 and mag[lo_i - 1] >= 1.5 * med:
+            lo_i -= 1
+        hi_i = i
+        while hi_i + 1 < len(mag) and hi_i - i < 12 and mag[hi_i + 1] >= 1.5 * med:
+            hi_i += 1
+        seg = mag[lo_i:hi_i + 1]
+        pk_, _ = find_peaks(seg, height=2.0 * med, distance=1)
+        n_p = max(1, int(len(pk_)))
+        meta[str(f)] = {"n": n_p, "dur": int(hi_i - i + 1)}
+
     events["jerk"] = frames
     _write_events_csv(name, events)
+    meta_path = settings.dlc_path / name / "jerk_meta.json"
+    try:
+        meta_path.write_text(_json.dumps({"frames": meta}))
+    except OSError:
+        pass
     logger.info("detect-jerks %s: %d candidates across %d movements",
                 name, len(frames), len(trips))
-    return {"n": len(frames), "frames": frames, "n_movements": len(trips)}
+    return {"n": len(frames), "frames": frames, "meta": meta,
+            "n_movements": len(trips)}
+
+
+@router.get("/{subject_id}/jerk-meta")
+def get_jerk_meta(subject_id: int) -> dict:
+    """Per-jerk metadata written by detect-jerks: {frame: {n, dur}}."""
+    subj = _get_subject(subject_id)
+    settings = get_settings()
+    path = settings.dlc_path / subj["name"] / "jerk_meta.json"
+    if not path.is_file():
+        return {"frames": {}}
+    try:
+        return _json.loads(path.read_text())
+    except Exception:
+        return {"frames": {}}
 
 
 @router.get("/{subject_id}/movements")
