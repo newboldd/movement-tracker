@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: BUSL-1.1" src="https://img.shields.io/badge/license-BUSL--1.1-blue.svg"></a>
-  <a href="#"><img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9+-3776ab.svg?logo=python&logoColor=white"></a>
+  <a href="#"><img alt="Python 3.9-3.12" src="https://img.shields.io/badge/python-3.9--3.12-3776ab.svg?logo=python&logoColor=white"></a>
   <a href="https://fastapi.tiangolo.com/"><img alt="FastAPI" src="https://img.shields.io/badge/web-FastAPI-009688?logo=fastapi&logoColor=white"></a>
   <a href="https://deeplabcut.github.io/DeepLabCut/"><img alt="DeepLabCut" src="https://img.shields.io/badge/pose-DeepLabCut-555.svg"></a>
   <a href="https://mediapipe.dev/"><img alt="MediaPipe" src="https://img.shields.io/badge/hands-MediaPipe-4285F4?logo=google&logoColor=white"></a>
@@ -112,6 +112,13 @@ python scripts/download_sample.py
 | [Plotly](https://plotly.com/javascript/) |
 
 Full list in `requirements.txt`; installed automatically by `setup.sh`.
+
+**Python 3.9-3.12 only.** MediaPipe publishes no builds for Python 3.13+, so on a
+newer interpreter the dependency install fails with `no matching distribution found
+for mediapipe`. The launchers now detect this and say so; the fix is to install
+[Python 3.11](https://www.python.org/downloads/release/python-3119/) alongside your
+existing Python (nothing needs to be removed) and re-run. This is a version
+constraint, not a permissions or IT-policy problem.
 
 ---
 

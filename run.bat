@@ -149,9 +149,16 @@ where python >nul 2>nul && (
     )
 )
 
-:: 5. No Python found — try to auto-install
+:: 5. No Python found (or only an unsupported version) — try to auto-install
+:autoinstall
 echo.
-echo Python not found. Attempting automatic install...
+if defined PY_TOO_NEW (
+    echo Found Python !PY_TOO_NEW!, but Movement Tracker needs Python 3.9-3.12.
+    echo MediaPipe has no builds for Python 3.13+, so the install would fail.
+    echo Installing a private copy of Python 3.11 just for this app...
+) else (
+    echo Python not found. Attempting automatic install...
+)
 echo.
 
 set "PY_ZIP=%TEMP%\python-3.11-embed.zip"
@@ -261,7 +268,37 @@ pause
 exit /b 1
 
 :found
-echo Using Python: %PYTHON%
+:: Verify the interpreter is in the supported range (3.9-3.12).
+:: mediapipe is pinned <0.10.19 in requirements.txt and ships no wheels for
+:: 3.13+, so a newer Python fails at pip time with a misleading error.
+set "PY_VER="
+for /f "delims=" %%V in ('%PYTHON% -c "import sys;print('.'.join(map(str,sys.version_info[:2])))" 2^>nul') do set "PY_VER=%%V"
+set "PY_OK="
+for %%G in (3.9 3.10 3.11 3.12) do if "!PY_VER!"=="%%G" set "PY_OK=1"
+if not defined PY_OK (
+    if not defined PY_RETRIED (
+        set "PY_RETRIED=1"
+        set "PY_TOO_NEW=!PY_VER!"
+        set "PYTHON="
+        goto :autoinstall
+    )
+    echo.
+    echo ============================================================
+    echo ERROR: Unsupported Python version (!PY_VER!^)
+    echo ============================================================
+    echo.
+    echo Movement Tracker needs Python 3.9-3.12. MediaPipe, the hand-tracking
+    echo library, publishes no builds for Python 3.13 or newer.
+    echo.
+    echo This is NOT an IT restriction. Install Python 3.11 from:
+    echo     https://www.python.org/downloads/release/python-3119/
+    echo then re-run this script. It installs alongside your current Python
+    echo and nothing else has to be removed.
+    echo.
+    pause
+    exit /b 1
+)
+echo Using Python: %PYTHON% (!PY_VER!^)
 
 :: ── Determine pip command ───────────────────────────────────────
 :: Prefer pip.pyz (no .exe, avoids Group Policy blocks on locked-down machines)
@@ -310,8 +347,13 @@ if errorlevel 1 (
     echo ERROR: Failed to install dependencies.
     echo ============================================================
     echo.
-    echo This is often caused by hospital/enterprise Group Policy
-    echo blocking programs in the Downloads folder.
+    echo Python in use: %PYTHON% (!PY_VER!^)
+    echo.
+    echo If the log above says "no matching distribution" for mediapipe,
+    echo the Python version is the problem, not your IT policy: install
+    echo Python 3.11 from https://www.python.org/downloads/release/python-3119/
+    echo and re-run. Otherwise this is often caused by hospital/enterprise
+    echo Group Policy blocking programs in the Downloads folder.
     echo.
     echo Try these fixes (easiest first^):
     echo.

@@ -56,15 +56,36 @@ try_install() {
 
 # ── Python ────────────────────────────────────────────────────────────────
 
+# Supported range: mediapipe is pinned <0.10.19 (see requirements.txt) and
+# publishes no wheels for Python 3.13+, so anything newer fails at pip install
+# time with a confusing "no matching distribution" error.
+PY_MIN_MINOR=9
+PY_MAX_MINOR=12
+
+# Set when find_python rejected an otherwise-usable interpreter for being too new
+TOO_NEW_PYTHON=""
+
+# Sets FOUND_PYTHON / TOO_NEW_PYTHON as globals (also echoes the command, so it
+# must be called in the current shell -- not a $(...) subshell -- for the
+# globals to survive).
 find_python() {
-    for cmd in python3.12 python3.11 python3.10 python3.9 python3 python; do
+    TOO_NEW_PYTHON=""
+    FOUND_PYTHON=""
+    # Supported versions first; the newer names are only probed so we can give a
+    # precise "too new" message instead of a pip failure later.
+    for cmd in python3.12 python3.11 python3.10 python3.9 python3 python python3.13 python3.14; do
         if command -v "$cmd" &>/dev/null; then
             version=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
             major=$(echo "$version" | cut -d. -f1)
             minor=$(echo "$version" | cut -d. -f2)
-            if [ "$major" -eq 3 ] && [ "$minor" -ge 9 ]; then
+            [ -z "$major" ] && continue
+            if [ "$major" -eq 3 ] && [ "$minor" -ge "$PY_MIN_MINOR" ] && [ "$minor" -le "$PY_MAX_MINOR" ]; then
+                FOUND_PYTHON="$cmd"
                 echo "$cmd"
                 return 0
+            fi
+            if [ "$major" -eq 3 ] && [ "$minor" -gt "$PY_MAX_MINOR" ] && [ -z "$TOO_NEW_PYTHON" ]; then
+                TOO_NEW_PYTHON="$cmd $version"
             fi
         fi
     done
@@ -73,7 +94,17 @@ find_python() {
 
 install_python() {
     print_header "Installing Python"
-    echo "Python 3.9+ is required but was not found."
+    if [ -n "$TOO_NEW_PYTHON" ]; then
+        set -- $TOO_NEW_PYTHON
+        echo "Found Python $2 ($1), but Movement Tracker needs Python 3.$PY_MIN_MINOR-3.$PY_MAX_MINOR."
+        echo ""
+        echo "MediaPipe (the hand-tracking library) has no builds for Python 3.13+,"
+        echo "so installing the dependencies on $2 will fail. This is not an IT"
+        echo "restriction -- a side-by-side Python 3.11 install fixes it, and you do"
+        echo "not need to remove the Python you already have."
+    else
+        echo "Python 3.$PY_MIN_MINOR-3.$PY_MAX_MINOR is required but was not found."
+    fi
     echo ""
 
     if [ "$OS" = "Darwin" ]; then
@@ -117,15 +148,17 @@ install_python() {
 }
 
 # Find Python, install if missing, then find again
-PYTHON=$(find_python) || {
+find_python >/dev/null || {
     install_python
-    PYTHON=$(find_python) || {
+    find_python >/dev/null || {
         echo ""
-        echo "Python 3.9+ still not found after install attempt."
-        echo "Please install it manually from https://www.python.org/downloads/ and re-run."
+        echo "No Python between 3.$PY_MIN_MINOR and 3.$PY_MAX_MINOR found after the install attempt."
+        echo "Install Python 3.11 from https://www.python.org/downloads/release/python-3119/"
+        echo "and re-run this script. It installs alongside any newer Python you have."
         exit 1
     }
 }
+PYTHON="$FOUND_PYTHON"
 
 echo "Using Python: $PYTHON ($($PYTHON --version))"
 
