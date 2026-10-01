@@ -3452,6 +3452,27 @@ _MOVE_PARAM_LABELS = {
     "mean_close_vel": "Mean Close Vel (mm/s)",
 }
 
+# Tortuosity variants (path length / reference), selectable on the
+# Explore page like any aggregatable movement parameter.  Chord-ref for
+# all three bases; fitted-arc ref only for the spatial (2D/3D) bases.
+_TORT_PARAM_LABELS = {
+    "tort_dist_open":  "Tort: Dist, Open",
+    "tort_dist_close": "Tort: Dist, Close",
+    "tort_dist_avg":   "Tort: Dist, Avg",
+    "tort_2d_open":  "Tort: 2D, Open",
+    "tort_2d_close": "Tort: 2D, Close",
+    "tort_2d_avg":   "Tort: 2D, Avg",
+    "tort_3d_open":  "Tort: 3D, Open",
+    "tort_3d_close": "Tort: 3D, Close",
+    "tort_3d_avg":   "Tort: 3D, Avg",
+    "tort_2d_arc_open":  "Tort: 2D Arc, Open",
+    "tort_2d_arc_close": "Tort: 2D Arc, Close",
+    "tort_2d_arc_avg":   "Tort: 2D Arc, Avg",
+    "tort_3d_arc_open":  "Tort: 3D Arc, Open",
+    "tort_3d_arc_close": "Tort: 3D Arc, Close",
+    "tort_3d_arc_avg":   "Tort: 3D Arc, Avg",
+}
+
 
 def _explore_variable_catalog() -> list[dict]:
     """Catalog of plottable variables, one entry per base variable.
@@ -3464,6 +3485,9 @@ def _explore_variable_catalog() -> list[dict]:
            for k, lbl in _CLINICAL_VARS]
     for k, lbl in _MOVE_PARAM_LABELS.items():
         out.append({"key": k, "label": lbl, "category": "movement",
+                    "aggregatable": True})
+    for k, lbl in _TORT_PARAM_LABELS.items():
+        out.append({"key": k, "label": lbl, "category": "tortuosity",
                     "aggregatable": True})
     out.append({"key": "frequency", "label": "Frequency (Hz)",
                 "category": "movement", "aggregatable": False})
@@ -3484,7 +3508,7 @@ def _explore_value_keys() -> list[str]:
     """Underlying per-subject value keys the UI looks up."""
     from ..services.cache_config import ALL_SEQ_MODES_TO_EMBED
     keys = [k for k, _ in _CLINICAL_VARS] + ["frequency"]
-    for k in _MOVE_PARAM_LABELS:
+    for k in (list(_MOVE_PARAM_LABELS) + list(_TORT_PARAM_LABELS)):
         keys += [f"mean_{k}", f"variance_{k}", f"cv_{k}"]
         # Per-mode seq fields — the frontend reads
         # ``seq_<mode>_<param>`` / ``seqslope_<mode>_<param>`` based
@@ -3585,6 +3609,9 @@ def get_explore_variables(include_auto: bool = Query(False),
             # cache → recompute.
             if subjs and "seq_linear_full_amplitude" not in (subjs[0].get("vars") or {}):
                 raise RuntimeError("cache pre-dates per-mode seq fields")
+            # Tortuosity variables were added to the catalog + vars.
+            if subjs and "mean_tort_dist_open" not in (subjs[0].get("vars") or {}):
+                raise RuntimeError("cache pre-dates tortuosity variables")
             # Newer-but-derivable: variance (σ) = |cv * mean|.
             if subjs and "variance_amplitude" not in (subjs[0].get("vars") or {}):
                 for s in subjs:

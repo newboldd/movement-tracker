@@ -159,6 +159,17 @@
                     <input type="checkbox" id="exAnova" style="margin:0;"> ANOVA
                 </label>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
+                <label id="exLabelSubjLabel"
+                       title="Label each dot with its subject (ID or a per-group number from the ID)"
+                       style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);">
+                    <input type="checkbox" id="exLabelSubj" style="margin:0;"> Label subjects
+                </label>
+                <select id="exLabelStyle" style="font-size:11px;"
+                        title="Subject ID shows e.g. MSA01; Number shows the ID's digits (1, 3, 14)">
+                    <option value="id" selected>Subject ID</option>
+                    <option value="num">Number</option>
+                </select>
+                <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
                 <span id="exInfo" style="font-size:11px;color:var(--text-muted);"></span>
                 <span style="flex:1 1 auto;"></span>
                 <button id="exCopyBtn" class="btn btn-sm" title="Copy to clipboard"
@@ -222,6 +233,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/explore.js?v=43"></script>
+    <script src="/static/js/explore.js?v=44"></script>
 </body>
 </html>

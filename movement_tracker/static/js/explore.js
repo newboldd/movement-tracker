@@ -9,6 +9,18 @@ const GROUP_COLORS = {
     PSP: '#9C27B0',
 };
 
+// Subject point-labeling (off by default).  Style: full ID or the
+// number embedded in the ID (MSA01 → 1, MSA03 → 3, PD14 → 14).
+function _exLabelsOn() { return !!($('exLabelSubj') && $('exLabelSubj').checked); }
+function _exLabelStyle() { return ($('exLabelStyle') && $('exLabelStyle').value) || 'id'; }
+function _subjectIdNumber(name) {
+    const m = String(name).match(/(\d+)(?=\D*$)/);
+    return m ? String(parseInt(m[1], 10)) : String(name);
+}
+function _exLabelText(name) {
+    return _exLabelStyle() === 'num' ? _subjectIdNumber(name) : String(name);
+}
+
 let _data = null;        // { groups, subjects, variables }
 let _varMeta = {};       // base key -> { label, aggregatable }
 let _subjChecked = {};   // subject name -> bool
@@ -153,14 +165,15 @@ async function loadExplore() {
 
 function _optionsHtml(selectedKey) {
     // Grouped by category, with optgroups.
-    const byCat = { clinical: [], movement: [] };
+    const byCat = { clinical: [], movement: [], tortuosity: [] };
     _data.variables.forEach(v => { (byCat[v.category] || (byCat[v.category] = [])).push(v); });
     const grp = (label, items) => items.length
         ? `<optgroup label="${label}">` +
           items.map(v => `<option value="${v.key}" ${v.key === selectedKey ? 'selected' : ''}>${v.label}</option>`).join('') +
           '</optgroup>'
         : '';
-    return grp('Clinical', byCat.clinical) + grp('Movement', byCat.movement);
+    return grp('Clinical', byCat.clinical) + grp('Movement', byCat.movement)
+         + grp('Tortuosity', byCat.tortuosity);
 }
 
 function _populateVarSelectors() {
@@ -579,6 +592,7 @@ function renderScatter() {
     const groups = _data.groups;
     let n = 0;
     const active = _activeSubjects();
+    const showLabels = _exLabelsOn();
     const traces = groups.map(g => {
         const subs = active.filter(s =>
             s.group === g && _val(s, X.key) != null && _val(s, Y.key) != null);
@@ -586,11 +600,13 @@ function renderScatter() {
         return {
             x: subs.map(s => _val(s, X.key)),
             y: subs.map(s => _val(s, Y.key)),
-            text: subs.map(s => s.name),
-            type: 'scatter', mode: 'markers', name: g,
+            customdata: subs.map(s => s.name),          // full name — hover + click
+            text: showLabels ? subs.map(s => _exLabelText(s.name)) : undefined,
+            type: 'scatter', mode: showLabels ? 'markers+text' : 'markers', name: g,
+            textposition: 'top center', textfont: { size: 14, color: '#555' },
             marker: { color: GROUP_COLORS[g] || '#999', size: 18, opacity: 0.8,
                       line: { color: '#333', width: 1 } },
-            hovertemplate: `%{text}<br>${X.label}: %{x:.3f}<br>${Y.label}: %{y:.3f}<extra>${g}</extra>`,
+            hovertemplate: `%{customdata}<br>${X.label}: %{x:.3f}<br>${Y.label}: %{y:.3f}<extra>${g}</extra>`,
         };
     });
     // Always include a (possibly invisible) best-fit trace so legend
@@ -670,8 +686,7 @@ function _wireSubjectClickPersistence(divId) {
     div.on('plotly_click', async (ev) => {
         const pt = ev && ev.points && ev.points[0];
         if (!pt) return;
-        let name = pt.text;
-        if (!name && typeof pt.customdata === 'string') name = pt.customdata;
+        let name = (typeof pt.customdata === 'string') ? pt.customdata : pt.text;
         if (!name || typeof name !== 'string') return;
         const map = await _ensureExploreSubjectIdMap();
         const id = map[name];
@@ -816,19 +831,25 @@ function renderBar() {
         width: 0.6, showlegend: false,
     };
 
-    const dotX = [], dotY = [], dotText = [], dotColors = [];
+    const showLabels = _exLabelsOn();
+    const dotX = [], dotY = [], dotNames = [], dotLabels = [], dotColors = [];
     groups.forEach((g, gi) => {
         const subs = byGroup[g];
         subs.forEach((s, si) => {
             const jitter = subs.length > 1 ? -0.22 + (si / (subs.length - 1)) * 0.44 : 0;
-            dotX.push(gi + jitter); dotY.push(_val(s, key)); dotText.push(s.name);
+            dotX.push(gi + jitter); dotY.push(_val(s, key));
+            dotNames.push(s.name); dotLabels.push(_exLabelText(s.name));
             dotColors.push(GROUP_COLORS[g] || '#999');
         });
     });
     const dotTrace = {
-        x: dotX, y: dotY, text: dotText, type: 'scatter', mode: 'markers',
+        x: dotX, y: dotY,
+        customdata: dotNames,                        // full name — hover + click
+        text: showLabels ? dotLabels : undefined,    // visible label (ID or number)
+        type: 'scatter', mode: showLabels ? 'markers+text' : 'markers',
+        textposition: 'top center', textfont: { size: 13, color: '#555' },
         marker: { color: dotColors, size: 16, opacity: 0.85, line: { color: '#333', width: 1 } },
-        hovertemplate: '%{text}<br>%{y:.3f}<extra></extra>', showlegend: false,
+        hovertemplate: '%{customdata}<br>%{y:.3f}<extra></extra>', showlegend: false,
     };
 
     $('exInfo').textContent = `n = ${n}`;
@@ -952,6 +973,9 @@ document.querySelectorAll('input[name="exPlotType"]').forEach(r =>
 // the already-present best-fit trace in place so axes don't re-fit.
 $('exBestFit').addEventListener('change', _refitBestFitFromVisible);
 $('exAnova').addEventListener('change', render);
+// Subject point labels (on/off + ID/number style) — pure re-render.
+$('exLabelSubj')?.addEventListener('change', render);
+$('exLabelStyle')?.addEventListener('change', () => { if (_exLabelsOn()) render(); });
 function _resetRange(minId, maxId) {
     const minEl = $(minId), maxEl = $(maxId);
     if (minEl) minEl.value = '';
