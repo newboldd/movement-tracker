@@ -6605,7 +6605,8 @@ function renderGroupPlots() {
 // ─────────────────────────────────────────────────────────────────
 let _tortSecMode  = 'subject';   // 'subject' (one dot/subject) | 'all' (one dot/movement)
 let _tortSecStat  = 'mean';      // mean | median | p25 | p75 | variance (per-subject only)
-let _tortSecLabels = false;      // subject-ID text labels (per-subject only; off by default)
+let _tortSecLabels = false;      // text labels on dots (per-subject only; off by default)
+let _tortSecLabelStyle = 'id';   // 'id' (MSA01) | 'num' (per-group 1,2,3…)
 let _tortSecPhase = 'avg';       // open | close | avg  (both plots)
 let _tortSecCalc  = '2d';        // 2d | 3d             (right plot)
 let _tortSecRef   = 'chord';     // chord | arc         (right plot)
@@ -6621,6 +6622,7 @@ window._setGroupTortSec = function (kind, val) {
     if (kind === 'mode') _tortSecMode = val;
     else if (kind === 'stat') _tortSecStat = val;
     else if (kind === 'labels') _tortSecLabels = !!val;
+    else if (kind === 'labelStyle') _tortSecLabelStyle = val;
     else if (kind === 'phase') _tortSecPhase = val;
     else if (kind === 'calc') _tortSecCalc = val;
     else if (kind === 'ref') _tortSecRef = val;
@@ -6669,9 +6671,17 @@ function renderGroupTort() {
             ${opt('variance', 'Variance', _tortSecStat)}
         </select></label>`;
     html += `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;margin:0;${dis}"
-        title="Add a text label with each subject's ID next to its dot (per-subject mode only)">
+        title="Label each dot with its subject's ID or a per-group number (per-subject mode only)">
         <input type="checkbox" ${_tortSecLabels ? 'checked' : ''} ${perSubject ? '' : 'disabled'}
-            onchange="_setGroupTortSec('labels', this.checked)"> Label subject IDs</label>`;
+            onchange="_setGroupTortSec('labels', this.checked)"> Label subjects</label>`;
+    // Label style selector — only meaningful when labels are on.
+    const styleDis = (perSubject && _tortSecLabels) ? '' : 'opacity:0.4;pointer-events:none;';
+    html += `<select onchange="_setGroupTortSec('labelStyle', this.value)" style="font-size:12px;${styleDis}"
+        title="Subject ID shows e.g. MSA01; Number shows a compact 1,2,3… within each diagnosis group"
+        ${(perSubject && _tortSecLabels) ? '' : 'disabled'}>
+        ${opt('id', 'Subject ID', _tortSecLabelStyle)}
+        ${opt('num', 'Number by group', _tortSecLabelStyle)}
+    </select>`;
     html += '</div>';
 
     // ── Two side-by-side plot cells ────────────────────────────
@@ -6750,11 +6760,31 @@ function _groupTortPoints(key) {
     return { byGroup, groups };
 }
 
+// Map each subject name → its ordinal (1-based) within its diagnosis
+// group, ordered by name (numeric-aware so MSA2 < MSA10).  Built over
+// the full subject list so a subject's number is stable regardless of
+// which others are currently checked.
+function _groupNumberMap() {
+    const map = {};
+    if (!cachedGroup || !cachedGroup.subjects) return map;
+    const byG = {};
+    cachedGroup.subjects.forEach(s => {
+        const g = s.diagnosis || 'Control';
+        (byG[g] = byG[g] || []).push(s.name);
+    });
+    Object.values(byG).forEach(names => {
+        names.sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
+        names.forEach((n, i) => { map[n] = i + 1; });
+    });
+    return map;
+}
+
 function _drawGroupTortPlot(divId, key) {
     const el = document.getElementById(divId);
     if (!el) return;
     const { byGroup, groups } = _groupTortPoints(key);
     const perSubject = _tortSecMode === 'subject';
+    const numMap = _groupNumberMap();
     // Variance is a per-subject statistic only; in all-movements mode the
     // dots are raw tortuosity values, so the ≥1 floor + "Tortuosity" axis
     // always apply there regardless of the (disabled) stat selector.
@@ -6785,7 +6815,7 @@ function _drawGroupTortPlot(divId, key) {
 
     // Dots.  Per-subject: spread evenly (as the grid does).  All-movements:
     // deterministic even spread across a wider band (many points).
-    const dotX = [], dotY = [], dotText = [], dotColors = [], dotSizes = [],
+    const dotX = [], dotY = [], dotNames = [], dotColors = [], dotSizes = [],
           dotOpac = [], dotLineW = [], dotLineC = [], dotLabels = [];
     groups.forEach((g, gi) => {
         const pts = byGroup[g];
@@ -6795,8 +6825,10 @@ function _drawGroupTortPlot(divId, key) {
             const jitter = n > 1 ? (-band / 2 + (i / (n - 1)) * band) : 0;
             dotX.push(gi + jitter);
             dotY.push(p.val);
-            dotText.push(p.name);
-            dotLabels.push(p.name);
+            dotNames.push(p.name);   // full name — hover + click target
+            // Visible label: full ID or compact per-group number.
+            dotLabels.push(_tortSecLabelStyle === 'num'
+                ? String(numMap[p.name] ?? '') : p.name);
             const gc = GROUP_COLORS[g] || '#999';
             const hot = highlightedSubject === p.name;
             dotColors.push(gc);
@@ -6809,15 +6841,16 @@ function _drawGroupTortPlot(divId, key) {
 
     const showLabels = perSubject && _tortSecLabels;
     const dotTrace = {
-        x: dotX, y: dotY, text: dotText,
+        x: dotX, y: dotY,
+        customdata: dotNames,          // full subject name (hover + click)
+        text: showLabels ? dotLabels : undefined,   // visible label (ID or number)
         type: 'scatter',
         mode: showLabels ? 'markers+text' : 'markers',
         marker: { color: dotColors, size: dotSizes, opacity: dotOpac,
                   line: { color: dotLineC, width: dotLineW } },
-        texttemplate: showLabels ? dotLabels.map(() => '%{text}') : undefined,
         textposition: 'top center',
-        textfont: { size: 8, color: '#555' },
-        hovertemplate: '%{text}<br>%{y:.3f}<extra></extra>',
+        textfont: { size: 9, color: '#555' },
+        hovertemplate: '%{customdata}<br>%{y:.3f}<extra></extra>',
         showlegend: false,
     };
 
@@ -6854,7 +6887,7 @@ function _drawGroupTortPlot(divId, key) {
     plotDiv.on('plotly_click', (ev) => {
         if (ev.points && ev.points.length > 0) {
             const pt = ev.points[0];
-            if (pt.curveNumber === 1 && pt.text) highlightSubject(String(pt.text));
+            if (pt.curveNumber === 1 && pt.customdata) highlightSubject(String(pt.customdata));
         }
     });
 }
