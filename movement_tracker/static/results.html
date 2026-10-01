@@ -500,6 +500,12 @@
                 <span id="highlightedSubject"></span>
             </div>
             <div id="groupSubjectList" class="group-subject-list"></div>
+            <!-- Dedicated tortuosity section: two large scatters
+                 (distance-trace tortuosity | fingertip-trajectory
+                 tortuosity).  Controls + plots built by renderGroupTort().
+                 Honors the same source / exclusion / consent / auto
+                 filters as the grid below via _activeGroupSubjects(). -->
+            <div id="groupTortSection" style="margin-bottom:20px;"></div>
             <div id="groupPlots" class="results-plot-grid">
                 <div class="results-no-data" style="grid-column:1/-1;">Loading group data...</div>
             </div>
@@ -589,6 +595,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/results.js?v=170"></script>
+    <script src="/static/js/results.js?v=172"></script>
 </body>
 </html>

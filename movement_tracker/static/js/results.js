@@ -6577,6 +6577,9 @@ function renderGroupPlots() {
         });
     });
 
+    // Dedicated tortuosity section (two large scatters) above the grid.
+    renderGroupTort();
+
     // Dose-response scatters — one per (metric × row), aligned with the
     // bar grid.
     ROW_DEFS.forEach((row) => {
@@ -6591,6 +6594,279 @@ function renderGroupPlots() {
         });
     });
 }
+
+// ─────────────────────────────────────────────────────────────────
+// Dedicated tortuosity section (two large scatters above the grid).
+// Left: distance-trace tortuosity.  Right: fingertip-trajectory
+// tortuosity (2D/3D × chord/arc).  Shared across both plots: a
+// movement-vs-subject mode toggle, the phase (open/close/avg), and —
+// in per-subject mode — the summary statistic and optional subject-ID
+// labels.  Reads the same filtered subject set as the grid.
+// ─────────────────────────────────────────────────────────────────
+let _tortSecMode  = 'subject';   // 'subject' (one dot/subject) | 'all' (one dot/movement)
+let _tortSecStat  = 'mean';      // mean | median | p25 | p75 | variance (per-subject only)
+let _tortSecLabels = false;      // subject-ID text labels (per-subject only; off by default)
+let _tortSecPhase = 'avg';       // open | close | avg  (both plots)
+let _tortSecCalc  = '2d';        // 2d | 3d             (right plot)
+let _tortSecRef   = 'chord';     // chord | arc         (right plot)
+
+const _TORT_STAT_PREFIX = {
+    mean: 'mean', median: 'median', p25: 'p25', p75: 'p75', variance: 'variance',
+};
+const _TORT_STAT_LABEL = {
+    mean: 'Mean', median: 'Median', p25: '25th %ile', p75: '75th %ile', variance: 'Variance',
+};
+
+window._setGroupTortSec = function (kind, val) {
+    if (kind === 'mode') _tortSecMode = val;
+    else if (kind === 'stat') _tortSecStat = val;
+    else if (kind === 'labels') _tortSecLabels = !!val;
+    else if (kind === 'phase') _tortSecPhase = val;
+    else if (kind === 'calc') _tortSecCalc = val;
+    else if (kind === 'ref') _tortSecRef = val;
+    renderGroupTort();
+};
+
+function renderGroupTort() {
+    const host = document.getElementById('groupTortSection');
+    if (!host) return;
+    const data = cachedGroup;
+    if (!data || !data.subjects || data.subjects.length === 0) { host.innerHTML = ''; return; }
+
+    const perSubject = _tortSecMode === 'subject';
+    const opt = (v, label, cur) =>
+        `<option value="${v}" ${v === cur ? 'selected' : ''}>${label}</option>`;
+
+    // ── Controls bar ───────────────────────────────────────────
+    let html = '<div style="display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;'
+             + 'margin-bottom:10px;font-size:12px;color:var(--text-muted);">';
+    html += '<span style="font-size:13px;font-weight:700;color:#444;">Tortuosity</span>';
+    // Mode
+    html += '<span style="display:inline-flex;align-items:center;gap:8px;">'
+          + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;margin:0;">
+                <input type="radio" name="tortSecMode" value="all" ${!perSubject ? 'checked' : ''}
+                    onchange="_setGroupTortSec('mode','all')"> All movements</label>`
+          + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;margin:0;">
+                <input type="radio" name="tortSecMode" value="subject" ${perSubject ? 'checked' : ''}
+                    onchange="_setGroupTortSec('mode','subject')"> Per subject</label>`
+          + '</span>';
+    html += '<span style="border-left:1px solid #ccc;height:18px;"></span>';
+    // Phase (both plots)
+    html += `<label style="display:inline-flex;align-items:center;gap:4px;margin:0;">Phase:
+        <select onchange="_setGroupTortSec('phase', this.value)" style="font-size:12px;">
+            ${opt('open', 'Open', _tortSecPhase)}
+            ${opt('close', 'Close', _tortSecPhase)}
+            ${opt('avg', 'Average', _tortSecPhase)}
+        </select></label>`;
+    // Per-subject-only: statistic + labels
+    const dis = perSubject ? '' : 'opacity:0.4;pointer-events:none;';
+    html += `<label style="display:inline-flex;align-items:center;gap:4px;margin:0;${dis}">Statistic:
+        <select onchange="_setGroupTortSec('stat', this.value)" style="font-size:12px;" ${perSubject ? '' : 'disabled'}>
+            ${opt('mean', 'Mean', _tortSecStat)}
+            ${opt('median', 'Median', _tortSecStat)}
+            ${opt('p25', '25th %ile', _tortSecStat)}
+            ${opt('p75', '75th %ile', _tortSecStat)}
+            ${opt('variance', 'Variance', _tortSecStat)}
+        </select></label>`;
+    html += `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;margin:0;${dis}"
+        title="Add a text label with each subject's ID next to its dot (per-subject mode only)">
+        <input type="checkbox" ${_tortSecLabels ? 'checked' : ''} ${perSubject ? '' : 'disabled'}
+            onchange="_setGroupTortSec('labels', this.checked)"> Label subject IDs</label>`;
+    html += '</div>';
+
+    // ── Two side-by-side plot cells ────────────────────────────
+    const titleBar = (title, which) =>
+        `<div style="display:flex;align-items:center;justify-content:center;gap:6px;padding:2px 0 4px;">
+            <span style="font-size:13px;font-weight:700;">${title}</span>
+            <button class="btn btn-sm" title="Copy to clipboard" style="padding:2px 5px;line-height:0;"
+                onclick="_copyGroupTort('${which}', this)">${COPY_ICON_HTML}</button>
+        </div>`;
+    const PH = { open: 'Opening', close: 'Closing', avg: 'Averaged' };
+    const statTxt = perSubject ? `${_TORT_STAT_LABEL[_tortSecStat]} / subject` : 'All movements';
+    const distTitle = `Distance trace — ${PH[_tortSecPhase]}`;
+    const arc = (_tortSecRef === 'arc') ? ' (arc ref)' : '';
+    const trajTitle = `Fingertip ${_tortSecCalc.toUpperCase()}${arc} — ${PH[_tortSecPhase]}`;
+
+    html += `<div style="display:grid;grid-template-columns:repeat(2, minmax(0, 1fr));gap:14px;">`;
+    // Left cell (distance)
+    html += `<div>${titleBar(distTitle, 'dist')}
+        <div id="grpTortDist" style="height:360px;"></div>
+        <div style="text-align:center;font-size:10px;color:#999;margin-top:2px;">${statTxt}</div>
+    </div>`;
+    // Right cell (trajectory) — 2D/3D + chord/arc selectors in its header
+    html += `<div>
+        <div style="display:flex;align-items:center;justify-content:center;gap:8px;padding:2px 0 4px;flex-wrap:wrap;">
+            <span style="font-size:13px;font-weight:700;">${trajTitle}</span>
+            <select onchange="_setGroupTortSec('calc', this.value)" style="font-size:11px;">
+                ${opt('2d', '2D', _tortSecCalc)}
+                ${opt('3d', '3D', _tortSecCalc)}
+            </select>
+            <select onchange="_setGroupTortSec('ref', this.value)" style="font-size:11px;"
+                title="Chord: path / straight-line displacement. Fitted arc: path / least-squares arc (smooth sweep ≈ 1)">
+                ${opt('chord', 'Chord ref', _tortSecRef)}
+                ${opt('arc', 'Fitted arc ref', _tortSecRef)}
+            </select>
+            <button class="btn btn-sm" title="Copy to clipboard" style="padding:2px 5px;line-height:0;"
+                onclick="_copyGroupTort('traj', this)">${COPY_ICON_HTML}</button>
+        </div>
+        <div id="grpTortTraj" style="height:360px;"></div>
+        <div style="text-align:center;font-size:10px;color:#999;margin-top:2px;">${statTxt}</div>
+    </div>`;
+    html += '</div>';
+
+    host.innerHTML = html;
+
+    // Keys: distance has no arc variant; trajectory honors calc + ref.
+    const distKey = `tort_dist_${_tortSecPhase}`;
+    const arcSeg = (_tortSecRef === 'arc') ? '_arc' : '';
+    const trajKey = `tort_${_tortSecCalc}${arcSeg}_${_tortSecPhase}`;
+    _drawGroupTortPlot('grpTortDist', distKey);
+    _drawGroupTortPlot('grpTortTraj', trajKey);
+}
+
+// Build the per-group point set for a tortuosity key under the current
+// mode: per-subject (one aggregated value each) or all-movements (every
+// movement value).  Returns { byGroup: {g: [{name, val}]} }.
+function _groupTortPoints(key) {
+    const subjects = _activeGroupSubjects();
+    const groups = (cachedGroup && cachedGroup.groups) || [];
+    const byGroup = {};
+    groups.forEach(g => { byGroup[g] = []; });
+    const perSubject = _tortSecMode === 'subject';
+    const field = `${_TORT_STAT_PREFIX[_tortSecStat]}_${key}`;
+    subjects.forEach(s => {
+        const g = s.diagnosis || 'Control';
+        if (!byGroup[g]) return;
+        if (perSubject) {
+            const v = s[field];
+            if (v != null && isFinite(v)) byGroup[g].push({ name: s.name, val: v });
+        } else {
+            const arr = (s.tort_series && s.tort_series[key]) || [];
+            arr.forEach(v => {
+                if (v != null && isFinite(v)) byGroup[g].push({ name: s.name, val: v });
+            });
+        }
+    });
+    return { byGroup, groups };
+}
+
+function _drawGroupTortPlot(divId, key) {
+    const el = document.getElementById(divId);
+    if (!el) return;
+    const { byGroup, groups } = _groupTortPoints(key);
+    const perSubject = _tortSecMode === 'subject';
+    // Variance is a per-subject statistic only; in all-movements mode the
+    // dots are raw tortuosity values, so the ≥1 floor + "Tortuosity" axis
+    // always apply there regardless of the (disabled) stat selector.
+    const isVariance = perSubject && _tortSecStat === 'variance';
+
+    // Group-mean bar + SEM (over whatever points are in the group).
+    const groupMeans = [], groupSems = [];
+    groups.forEach(g => {
+        const vals = byGroup[g].map(p => p.val);
+        if (vals.length) {
+            const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+            const std = Math.sqrt(vals.reduce((a, v) => a + (v - mean) ** 2, 0) / vals.length);
+            groupMeans.push(mean);
+            groupSems.push(std / Math.sqrt(vals.length));
+        } else { groupMeans.push(0); groupSems.push(0); }
+    });
+
+    const barTrace = {
+        x: groups.map((_, i) => i),
+        y: groupMeans,
+        customdata: groups,
+        type: 'bar',
+        marker: { color: groups.map(g => GROUP_COLORS[g] || '#999'), opacity: 0.25 },
+        error_y: { type: 'data', array: groupSems, visible: true, color: '#666', thickness: 1.5 },
+        hovertemplate: '%{customdata}<br>Mean: %{y:.3f}<extra></extra>',
+        showlegend: false, width: 0.6,
+    };
+
+    // Dots.  Per-subject: spread evenly (as the grid does).  All-movements:
+    // deterministic even spread across a wider band (many points).
+    const dotX = [], dotY = [], dotText = [], dotColors = [], dotSizes = [],
+          dotOpac = [], dotLineW = [], dotLineC = [], dotLabels = [];
+    groups.forEach((g, gi) => {
+        const pts = byGroup[g];
+        const n = pts.length;
+        const band = perSubject ? 0.5 : 0.6;
+        pts.forEach((p, i) => {
+            const jitter = n > 1 ? (-band / 2 + (i / (n - 1)) * band) : 0;
+            dotX.push(gi + jitter);
+            dotY.push(p.val);
+            dotText.push(p.name);
+            dotLabels.push(p.name);
+            const gc = GROUP_COLORS[g] || '#999';
+            const hot = highlightedSubject === p.name;
+            dotColors.push(gc);
+            dotLineC.push(hot ? '#000' : '#333');
+            dotLineW.push(hot ? 2 : 0.5);
+            dotSizes.push(hot ? 10 : (perSubject ? 7 : 4));
+            dotOpac.push(hot ? 1.0 : (perSubject ? 0.8 : 0.45));
+        });
+    });
+
+    const showLabels = perSubject && _tortSecLabels;
+    const dotTrace = {
+        x: dotX, y: dotY, text: dotText,
+        type: 'scatter',
+        mode: showLabels ? 'markers+text' : 'markers',
+        marker: { color: dotColors, size: dotSizes, opacity: dotOpac,
+                  line: { color: dotLineC, width: dotLineW } },
+        texttemplate: showLabels ? dotLabels.map(() => '%{text}') : undefined,
+        textposition: 'top center',
+        textfont: { size: 8, color: '#555' },
+        hovertemplate: '%{text}<br>%{y:.3f}<extra></extra>',
+        showlegend: false,
+    };
+
+    const layout = {
+        margin: { t: 8, b: 30, l: 56, r: 10 },
+        xaxis: { tickvals: groups.map((_, i) => i), ticktext: groups,
+                 color: '#666', tickfont: { size: 11 } },
+        yaxis: { title: { text: isVariance ? 'Variance' : 'Tortuosity',
+                          font: { size: 11, color: '#444' }, standoff: 8 },
+                 color: '#666', gridcolor: '#f0f0f0', tickfont: { size: 10 },
+                 autorange: true,
+                 // Variance (spread) is non-negative — anchor the axis at 0.
+                 rangemode: isVariance ? 'tozero' : 'normal' },
+        plot_bgcolor: '#fff', paper_bgcolor: '#fff', bargap: 0.5,
+    };
+    // Tortuosity value scales have a hard floor of 1 — anchor just below
+    // (0.8) so points at exactly 1 stay visible.  Variance starts at 0.
+    if (!isVariance) {
+        const hi = Math.max(0.8,
+            ...groupMeans.map((v, i) => v + (groupSems[i] || 0)),
+            ...dotY.filter(v => isFinite(v)));
+        const pad = Math.max((hi - 0.8) * 0.05, 0.01);
+        layout.yaxis.autorange = false;
+        layout.yaxis.range = [0.8, hi + pad];
+        layout.xaxis.showline = true;
+        layout.xaxis.linecolor = '#666';
+        layout.xaxis.linewidth = 1;
+    }
+
+    Plotly.newPlot(divId, [barTrace, dotTrace], layout,
+                   { responsive: true, displayModeBar: false });
+
+    const plotDiv = document.getElementById(divId);
+    plotDiv.on('plotly_click', (ev) => {
+        if (ev.points && ev.points.length > 0) {
+            const pt = ev.points[0];
+            if (pt.curveNumber === 1 && pt.text) highlightSubject(String(pt.text));
+        }
+    });
+}
+
+window._copyGroupTort = function (which, btn) {
+    const div = document.getElementById(which === 'dist' ? 'grpTortDist' : 'grpTortTraj');
+    if (!div) return;
+    const stem = which === 'dist'
+        ? `group_tortuosity_distance_${_tortSecPhase}`
+        : `group_tortuosity_${_tortSecCalc}${_tortSecRef === 'arc' ? '_arc' : ''}_${_tortSecPhase}`;
+    return _copyPlotsAsPng([div], stem, btn);
+};
 
 function renderDoseScatter(divId, data, paramKey, reverseY, yLabel, yMin) {
     // Levodopa plots include PD subjects only.

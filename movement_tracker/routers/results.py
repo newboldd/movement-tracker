@@ -3191,6 +3191,12 @@ def get_group_comparison(include_auto: bool = Query(False),
                 raise RuntimeError("cache pre-dates movement-validity rules")
             if subjs and "mean_tort_2d_arc_open" not in subjs[0]:
                 raise RuntimeError("cache pre-dates arc-referenced tortuosity")
+            # 25th-percentile aggregate + per-movement tortuosity series
+            # (for the Group page's dedicated tortuosity section).
+            if subjs and "p25_amplitude" not in subjs[0]:
+                raise RuntimeError("cache pre-dates p25 fields")
+            if subjs and "tort_series" not in subjs[0]:
+                raise RuntimeError("cache pre-dates per-movement tort series")
             # Newer-but-still-derivable additions can stay in the
             # hot path:
             if subjs and "variance_amplitude" not in subjs[0]:
@@ -3353,6 +3359,7 @@ def get_group_comparison(include_auto: bool = Query(False),
                 entry[f"variance_{key}"] = round(float(std_v), 4)
                 entry[f"cv_{key}"] = round(float(std_v / abs(mean_v)), 4) if mean_v != 0 else None
                 entry[f"median_{key}"] = round(float(np.median(vals)), 4)
+                entry[f"p25_{key}"] = round(float(np.percentile(vals, 25)), 4)
                 entry[f"p75_{key}"] = round(float(np.percentile(vals, 75)), 4)
 
                 # Sequence effect under EVERY embedded model — closing
@@ -3370,6 +3377,7 @@ def get_group_comparison(include_auto: bool = Query(False),
                 entry[f"variance_{key}"] = None
                 entry[f"cv_{key}"] = None
                 entry[f"median_{key}"] = None
+                entry[f"p25_{key}"] = None
                 entry[f"p75_{key}"] = None
                 for _sm in ALL_SEQ_MODES_TO_EMBED:
                     entry[f"seq_{_sm}_{key}"] = None
@@ -3378,6 +3386,15 @@ def get_group_comparison(include_auto: bool = Query(False),
         # Frequency = 1 / mean IMI
         mean_imi = entry.get("mean_imi")
         entry["frequency"] = round(1.0 / mean_imi, 4) if mean_imi and mean_imi > 0 else None
+
+        # Per-movement tortuosity values (selected hand+trial movements),
+        # one array per tort variant.  Feeds the Group page's dedicated
+        # tortuosity section in "all movements" mode (dozens of points
+        # per subject); nulls dropped per key.
+        entry["tort_series"] = {
+            k: [round(float(m[k]), 4) for m in movements if m.get(k) is not None]
+            for k in PARAM_KEYS if k.startswith("tort_")
+        }
 
         results.append(entry)
 
