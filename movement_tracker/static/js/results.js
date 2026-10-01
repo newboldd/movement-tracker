@@ -6760,23 +6760,12 @@ function _groupTortPoints(key) {
     return { byGroup, groups };
 }
 
-// Map each subject name → its ordinal (1-based) within its diagnosis
-// group, ordered by name (numeric-aware so MSA2 < MSA10).  Built over
-// the full subject list so a subject's number is stable regardless of
-// which others are currently checked.
-function _groupNumberMap() {
-    const map = {};
-    if (!cachedGroup || !cachedGroup.subjects) return map;
-    const byG = {};
-    cachedGroup.subjects.forEach(s => {
-        const g = s.diagnosis || 'Control';
-        (byG[g] = byG[g] || []).push(s.name);
-    });
-    Object.values(byG).forEach(names => {
-        names.sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
-        names.forEach((n, i) => { map[n] = i + 1; });
-    });
-    return map;
+// The number embedded in a subject's ID (MSA01 → 1, MSA03 → 3, PD14 →
+// 14), taken from the last run of digits in the name with leading zeros
+// stripped.  Falls back to the full name when it has no digits.
+function _subjectIdNumber(name) {
+    const m = String(name).match(/(\d+)(?=\D*$)/);
+    return m ? String(parseInt(m[1], 10)) : String(name);
 }
 
 function _drawGroupTortPlot(divId, key) {
@@ -6784,7 +6773,6 @@ function _drawGroupTortPlot(divId, key) {
     if (!el) return;
     const { byGroup, groups } = _groupTortPoints(key);
     const perSubject = _tortSecMode === 'subject';
-    const numMap = _groupNumberMap();
     // Variance is a per-subject statistic only; in all-movements mode the
     // dots are raw tortuosity values, so the ≥1 floor + "Tortuosity" axis
     // always apply there regardless of the (disabled) stat selector.
@@ -6828,7 +6816,7 @@ function _drawGroupTortPlot(divId, key) {
             dotNames.push(p.name);   // full name — hover + click target
             // Visible label: full ID or compact per-group number.
             dotLabels.push(_tortSecLabelStyle === 'num'
-                ? String(numMap[p.name] ?? '') : p.name);
+                ? _subjectIdNumber(p.name) : p.name);
             const gc = GROUP_COLORS[g] || '#999';
             const hot = highlightedSubject === p.name;
             dotColors.push(gc);
