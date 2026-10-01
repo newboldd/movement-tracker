@@ -593,10 +593,15 @@ function renderScatter() {
     let n = 0;
     const active = _activeSubjects();
     const showLabels = _exLabelsOn();
+    // On Auto source, no-DLC subjects render as hollow dots (white fill,
+    // same thin black outline); their group is read from marker color
+    // otherwise, so keep the outline and just blank the fill.
+    const sourceAuto = (($('exSourceSelect') && $('exSourceSelect').value) || 'auto') === 'auto';
     const traces = groups.map(g => {
         const subs = active.filter(s =>
             s.group === g && _val(s, X.key) != null && _val(s, Y.key) != null);
         n += subs.length;
+        const gc = GROUP_COLORS[g] || '#999';
         return {
             x: subs.map(s => _val(s, X.key)),
             y: subs.map(s => _val(s, Y.key)),
@@ -604,8 +609,8 @@ function renderScatter() {
             text: showLabels ? subs.map(s => _exLabelText(s.name)) : undefined,
             type: 'scatter', mode: showLabels ? 'markers+text' : 'markers', name: g,
             textposition: 'top center', textfont: { size: 14, color: '#555' },
-            marker: { color: GROUP_COLORS[g] || '#999', size: 18, opacity: 0.8,
-                      line: { color: '#333', width: 1 } },
+            marker: { color: subs.map(s => (sourceAuto && !s.has_dlc) ? '#ffffff' : gc),
+                      size: 18, opacity: 0.8, line: { color: '#333', width: 1 } },
             hovertemplate: `%{customdata}<br>${X.label}: %{x:.3f}<br>${Y.label}: %{y:.3f}<extra>${g}</extra>`,
         };
     });
@@ -832,6 +837,7 @@ function renderBar() {
     };
 
     const showLabels = _exLabelsOn();
+    const sourceAuto = (($('exSourceSelect') && $('exSourceSelect').value) || 'auto') === 'auto';
     const dotX = [], dotY = [], dotNames = [], dotLabels = [], dotColors = [];
     groups.forEach((g, gi) => {
         const subs = byGroup[g];
@@ -839,7 +845,8 @@ function renderBar() {
             const jitter = subs.length > 1 ? -0.22 + (si / (subs.length - 1)) * 0.44 : 0;
             dotX.push(gi + jitter); dotY.push(_val(s, key));
             dotNames.push(s.name); dotLabels.push(_exLabelText(s.name));
-            dotColors.push(GROUP_COLORS[g] || '#999');
+            // No DLC on Auto source → hollow white dot (thin black outline).
+            dotColors.push((sourceAuto && !s.has_dlc) ? '#ffffff' : (GROUP_COLORS[g] || '#999'));
         });
     });
     const dotTrace = {

@@ -3212,6 +3212,12 @@ def get_group_comparison(include_auto: bool = Query(False),
                             s[f"variance_{base}"] = None
                         else:
                             s[f"variance_{base}"] = round(abs(float(cv_v) * float(m_v)), 4)
+            # has_dlc is a cheap filesystem check — derive for old caches
+            # instead of forcing a full recompute.
+            if subjs and "has_dlc" not in subjs[0]:
+                for s in subjs:
+                    nm = s.get("name")
+                    s["has_dlc"] = bool(_try_source_quick(nm, "corrections")) if nm else False
             return data
         except Exception:
             pass
@@ -3315,6 +3321,10 @@ def get_group_comparison(include_auto: bool = Query(False),
             "levodopa_off": _is_levodopa_off(subj.get("levodopa")),
             "laterality_raw": subj.get("laterality") or None,
             "laterality_side": _laterality_more_side(subj.get("laterality")),
+            # Whether the subject has DLC (corrections) data at all — used
+            # by the plots to draw no-DLC subjects as hollow dots when the
+            # source selector is on Auto.
+            "has_dlc": _try_source_quick(subject_name, "corrections"),
             # Surfaced to the Group Comparison / Explore "Updated
             # consent" filters; toggled from the subject detail panel.
             "updated_consent": bool(subj.get("updated_consent")),
@@ -3631,6 +3641,11 @@ def get_explore_variables(include_auto: bool = Query(False),
             if "variance" not in (cat.get("aggregators") or []):
                 cat.setdefault("aggregators", []).append("variance")
                 data["catalog"] = cat
+            # has_dlc: cheap derive for old caches (no full recompute).
+            if subjs and "has_dlc" not in subjs[0]:
+                for s in subjs:
+                    nm = s.get("name")
+                    s["has_dlc"] = bool(_try_source_quick(nm, "corrections")) if nm else False
             return data
         except Exception:
             pass    # corrupt cache → recompute
@@ -3673,6 +3688,7 @@ def get_explore_variables(include_auto: bool = Query(False),
             "has_complete_events": s.get("has_complete_events", False),
             "laterality_side": s.get("laterality_side"),
             "updated_consent": bool(s.get("updated_consent")),
+            "has_dlc": bool(s.get("has_dlc", False)),
             "vars": vars_,
         })
 

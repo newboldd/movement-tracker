@@ -6747,13 +6747,14 @@ function _groupTortPoints(key) {
     subjects.forEach(s => {
         const g = s.diagnosis || 'Control';
         if (!byGroup[g]) return;
+        const dlc = !!s.has_dlc;
         if (perSubject) {
             const v = s[field];
-            if (v != null && isFinite(v)) byGroup[g].push({ name: s.name, val: v });
+            if (v != null && isFinite(v)) byGroup[g].push({ name: s.name, val: v, dlc });
         } else {
             const arr = (s.tort_series && s.tort_series[key]) || [];
             arr.forEach(v => {
-                if (v != null && isFinite(v)) byGroup[g].push({ name: s.name, val: v });
+                if (v != null && isFinite(v)) byGroup[g].push({ name: s.name, val: v, dlc });
             });
         }
     });
@@ -6773,6 +6774,7 @@ function _drawGroupTortPlot(divId, key) {
     if (!el) return;
     const { byGroup, groups } = _groupTortPoints(key);
     const perSubject = _tortSecMode === 'subject';
+    const sourceAuto = (document.getElementById('groupSourceSelect')?.value || 'auto') === 'auto';
     // Variance is a per-subject statistic only; in all-movements mode the
     // dots are raw tortuosity values, so the ≥1 floor + "Tortuosity" axis
     // always apply there regardless of the (disabled) stat selector.
@@ -6819,7 +6821,9 @@ function _drawGroupTortPlot(divId, key) {
                 ? _subjectIdNumber(p.name) : p.name);
             const gc = GROUP_COLORS[g] || '#999';
             const hot = highlightedSubject === p.name;
-            dotColors.push(gc);
+            const noDlc = sourceAuto && !p.dlc;
+            // No DLC on Auto source → hollow white dot, thin black outline.
+            dotColors.push(noDlc ? '#ffffff' : gc);
             dotLineC.push(hot ? '#000' : '#333');
             dotLineW.push(hot ? 2 : 0.5);
             dotSizes.push(hot ? 10 : (perSubject ? 7 : 4));
@@ -7064,6 +7068,10 @@ function renderGroupBar(divId, data, paramKey, reverseY, yLabel, yMin) {
     const dotLineWidths = [];
     const dotLineColors = [];
 
+    // On Auto source, subjects with no DLC (corrections) data are drawn
+    // as hollow dots (white fill, thin black outline) — their group is
+    // still read from the column they sit in.
+    const sourceAuto = (document.getElementById('groupSourceSelect')?.value || 'auto') === 'auto';
     groups.forEach((g, gi) => {
         const subs = byGroup[g];
         subs.forEach((s, si) => {
@@ -7080,12 +7088,21 @@ function renderGroupBar(divId, data, paramKey, reverseY, yLabel, yMin) {
             const groupColor = GROUP_COLORS[g] || '#999';
             const isHighlighted = highlightedSubject === s.name;
             const isAuto = s.event_source === 'auto';
+            const noDlc = sourceAuto && !s.has_dlc;
 
-            // Auto-detected: open circle (white fill, colored border)
-            // Saved: filled circle
-            dotColors.push(isAuto ? '#ffffff' : groupColor);
-            dotLineColors.push(isAuto ? groupColor : '#333');
-            dotLineWidths.push(isAuto ? 2 : (isHighlighted ? 2 : 0.5));
+            if (noDlc) {
+                // No DLC results: hollow, thin black outline (same as
+                // the filled dots), group encoded by column position.
+                dotColors.push('#ffffff');
+                dotLineColors.push('#333');
+                dotLineWidths.push(isHighlighted ? 2 : 0.5);
+            } else {
+                // Auto-detected events: open circle (white fill, colored
+                // border).  Saved: filled circle.
+                dotColors.push(isAuto ? '#ffffff' : groupColor);
+                dotLineColors.push(isAuto ? groupColor : '#333');
+                dotLineWidths.push(isAuto ? 2 : (isHighlighted ? 2 : 0.5));
+            }
             dotSizes.push(isHighlighted ? 10 : 6);
             dotOpacities.push(isHighlighted ? 1.0 : 0.7);
         });
