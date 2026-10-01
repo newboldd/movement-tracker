@@ -1028,9 +1028,9 @@ $('exCopyBtn').addEventListener('click', async () => {
         });
         // Build a File with a sensible name so Finder paste names the
         // file something useful.  Pattern: explore_<kind>_<labels>.png
-        const plotType = $('exPlotType').value;
-        const xVar = $('exVarX').value || 'x';
-        const yVar = $('exVarY').value || 'y';
+        const plotType = _exPlotMode();
+        const xVar = $('exVarX')?.value || 'x';
+        const yVar = $('exVarY')?.value || 'y';
         const stemRaw = (plotType === 'scatter')
             ? `explore_${xVar}_vs_${yVar}`
             : `explore_${xVar}_by_group`;
