@@ -170,6 +170,15 @@ schema pass (which would otherwise be a silent no-op).
 - **Cache busting**: bump `?v=N` in the HTML when changing a JS file.
 - **macOS Gatekeeper**: a downloaded zip needs "Open Anyway" once under
   System Settings → Privacy & Security.
+- **Shared data directory**: pointing this app and the full Movement
+  Tracker at one data directory is supported, so anything touching the
+  shared tables must stay in its own lane. The queue manager filters
+  every read by `RESOURCE_MAP`'s job types — add a job type there and to
+  `_run_job` together, or it will be queued and never drained. Settings
+  keys this app does not model are preserved on save (`Settings._foreign`).
+- **Port**: both apps default to 8080. The launchers reclaim the port only
+  from a process whose command line contains `dlc_labeler`, and otherwise
+  move to the next free port. Do not reintroduce an unconditional kill.
 
 ## Testing
 

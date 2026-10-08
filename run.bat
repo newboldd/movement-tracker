@@ -292,6 +292,33 @@ if exist "calibration" (
     xcopy /I /Y /Q /D "calibration\*" "%DLC_DATA_DIR%\calibration\" >nul 2>nul
 )
 
+:: ── Port ───────────────────────────────────────────────────────
+:: Movement Tracker defaults to this same port.  If something already
+:: holds it, step up to the next free one rather than refuse to start
+:: — and never kill whatever is there.
+set /a PORT_TRIES=0
+:portcheck
+netstat -ano -p TCP | findstr /r /c:":%DLC_PORT%  *.*LISTENING" >nul 2>&1
+if not errorlevel 1 (
+    set /a PORT_TRIES+=1
+    if !PORT_TRIES! GEQ 20 (
+        echo.
+        echo Could not find a free port near %DLC_PORT%.
+        echo Set DLC_PORT in .env to one you know is free.
+        echo.
+        pause
+        exit /b 1
+    )
+    set /a DLC_PORT+=1
+    goto :portcheck
+)
+if !PORT_TRIES! GTR 0 (
+    echo.
+    echo The default port was busy ^(Movement Tracker, perhaps^).
+    echo Using port !DLC_PORT! instead. Set DLC_PORT in .env to pin this.
+    echo.
+)
+
 :: ── Launch ─────────────────────────────────────────────────────
 echo.
 echo Starting DLC Labeler at http://localhost:%DLC_PORT%

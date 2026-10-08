@@ -70,6 +70,56 @@ data with no reconfiguration — the two apps share the layout and the
         └── {Subject}_{Trial}/       # MediaPipe passes, one npz per pass
 ```
 
+## Running alongside Movement Tracker
+
+The two apps are built to coexist. Install this one in its own folder —
+a separate clone or unzip — and it gets its own `.venv`. The Python
+package is `dlc_labeler`, not `movement_tracker`, so nothing collides
+even if you do put them in one environment.
+
+That leaves two things to decide.
+
+**Which data directory.** By default this app reuses Movement Tracker's:
+it reads `MT_DATA_DIR` and `~/.movement_tracker/data_dir` as fallbacks,
+so it opens the same subjects, videos and DLC projects with no setup.
+That is usually what you want — label here, and the work shows up there.
+To keep them apart instead, put a `.env` next to `setup.sh`:
+
+```
+DLC_DATA_DIR=~/data/dlc-labeler
+```
+
+or set it from **Settings → Data directory**, which writes
+`~/.dlc_labeler/data_dir` and takes precedence over Movement Tracker's.
+
+**Whether they run at the same time.** They can, on separate data
+directories. On a *shared* data directory, run one at a time. SQLite
+handles the concurrent reads, and each app ignores the other's jobs — but
+two servers writing the same database while both drain a job queue is
+more coordination than either was built for, and `settings.json` is
+shared, so changing camera names or bodyparts in one changes them in the
+other.
+
+Specifically, when the data directory is shared:
+
+- **Jobs stay separate.** This app only ever picks up the job types it
+  owns (`mediapipe`, `train`, `refine`, `analyze`, `install-dlc`). It
+  will not claim, run, show or fail a Movement Tracker job — HRnet,
+  skeleton fits, deidentify and preproc are invisible to it, and left
+  alone.
+- **Labels are shared, deliberately.** Both apps read the same
+  `frame_labels`, `labeled-data/` and `corrections/`. A frame labeled
+  here is a frame labeled there.
+- **The database schema is shared.** This app adds one column Movement
+  Tracker does not have (`subjects.notes`) and creates no tables of its
+  own beyond the ones they both use. Opening the same database with
+  either app is safe in both directions.
+
+**The port.** Both default to 8080. Neither launcher will kill the other:
+if the port is held by something that is not this app, it moves up to the
+next free one and tells you. Pin a port with `DLC_PORT=8081` in `.env` if
+you would rather it be predictable.
+
 ## Getting a subject onto the screen
 
 Name the trial videos `{Subject}_{Trial}.mp4` — `Con01_R1.mp4`,

@@ -149,21 +149,31 @@ class QueueManager:
         return True
 
     def get_state(self) -> dict:
-        """Return the queue state the Jobs page renders."""
+        """Return the queue state the Jobs page renders.
+
+        Scoped to this app's job types throughout: a shared data directory
+        means the tables can also hold the full Movement Tracker app's
+        work, and showing someone a queued job they cannot cancel or a
+        failed job they never started is worse than not showing it.
+        """
+        owned = sorted(RESOURCE_MAP)
+        ph = ",".join("?" * len(owned))
         with get_db_ctx() as db:
             queued = db.execute(
-                "SELECT * FROM job_queue WHERE status = 'queued' "
-                "ORDER BY resource, position").fetchall()
+                f"SELECT * FROM job_queue WHERE status = 'queued' "
+                f"AND job_type IN ({ph}) "
+                f"ORDER BY resource, position", owned).fetchall()
             running = db.execute(
                 # COALESCE so a queue row whose jobs row hasn't reported
                 # yet still shows the queue-level progress.
-                "SELECT q.*, "
-                "COALESCE(j.progress_pct, q.progress_pct, 0) AS progress_pct, "
-                "j.epoch_info, j.log_path, j.params_json "
-                "FROM job_queue q LEFT JOIN jobs j ON q.job_id = j.id "
-                "WHERE q.status = 'running' ORDER BY q.started_at").fetchall()
+                f"SELECT q.*, "
+                f"COALESCE(j.progress_pct, q.progress_pct, 0) AS progress_pct, "
+                f"j.epoch_info, j.log_path, j.params_json "
+                f"FROM job_queue q LEFT JOIN jobs j ON q.job_id = j.id "
+                f"WHERE q.status = 'running' AND q.job_type IN ({ph}) "
+                f"ORDER BY q.started_at", owned).fetchall()
             history = db.execute(
-                """SELECT
+                f"""SELECT
                        j.id AS job_id,
                        COALESCE(q.job_type, j.job_type) AS job_type,
                        COALESCE(q.subject_ids, json_array(COALESCE(s.name, ''))) AS subject_ids,
@@ -181,8 +191,9 @@ class QueueManager:
                    LEFT JOIN subjects s ON j.subject_id = s.id
                    LEFT JOIN job_queue q ON q.job_id = j.id
                    WHERE j.status IN ('completed', 'failed', 'cancelled')
+                     AND j.job_type IN ({ph})
                    ORDER BY COALESCE(q.finished_at, j.finished_at) DESC
-                   LIMIT 50""").fetchall()
+                   LIMIT 50""", owned).fetchall()
 
         return {
             "cpu_queue": [q for q in queued if q["resource"] == "cpu"],
@@ -200,9 +211,12 @@ class QueueManager:
         progress; one whose process is gone is marked failed so the lane
         frees up instead of blocking the queue forever.
         """
+        owned = sorted(RESOURCE_MAP)
+        placeholders = ",".join("?" * len(owned))
         with get_db_ctx() as db:
             stale = db.execute(
-                "SELECT * FROM job_queue WHERE status = 'running'").fetchall()
+                f"SELECT * FROM job_queue WHERE status = 'running' "
+                f"AND job_type IN ({placeholders})", owned).fetchall()
 
         for item in stale:
             queue_id = item["id"]
@@ -273,10 +287,19 @@ class QueueManager:
                     return
                 self._running[resource] = None
 
+        # Only ever pick up job types this app owns.  The queue table lives
+        # in the shared database, and a data directory can legitimately be
+        # shared with the full Movement Tracker app — which queues job types
+        # this fork has no executor for (hrnet, skeleton_*, deidentify,
+        # preproc).  Without this filter, whichever drain loop reached the
+        # row first would claim the other app's job and fail it.
+        owned = sorted(RESOURCE_MAP)
+        placeholders = ",".join("?" * len(owned))
         with get_db_ctx() as db:
             next_item = db.execute(
-                "SELECT * FROM job_queue WHERE resource = ? AND status = 'queued' "
-                "ORDER BY position LIMIT 1", (resource,)).fetchone()
+                f"SELECT * FROM job_queue WHERE resource = ? AND status = 'queued' "
+                f"AND job_type IN ({placeholders}) "
+                f"ORDER BY position LIMIT 1", (resource, *owned)).fetchone()
 
         if next_item:
             self._launch_item(next_item)

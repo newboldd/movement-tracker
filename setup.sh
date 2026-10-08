@@ -192,13 +192,48 @@ if [ -d "$PROJECT_DIR/calibration" ]; then
 fi
 
 # ── Free the port ─────────────────────────────────────────────────────────
+#
+# Reclaim the port from a previous run of THIS app, but never from anything
+# else.  Movement Tracker defaults to the same 8080, and silently killing a
+# colleague's running server — or your own, mid-training — is not a thing a
+# launcher should do.  Anything else on the port means we move up.
 
-if command -v lsof &>/dev/null; then
-    existing=$(lsof -ti ":$PORT" 2>/dev/null || true)
-    if [ -n "$existing" ]; then
-        echo "Stopping an existing server on port $PORT..."
-        echo "$existing" | xargs kill -9 2>/dev/null || true
+port_owner() {
+    command -v lsof &>/dev/null || return 1
+    local pids
+    pids=$(lsof -ti ":$1" 2>/dev/null) || return 1
+    [ -n "$pids" ] || return 1
+    echo "$pids"
+}
+
+port_is_ours() {
+    local pid
+    for pid in $1; do
+        ps -p "$pid" -o args= 2>/dev/null | grep -q "dlc_labeler" || return 1
+    done
+    return 0
+}
+
+owners=$(port_owner "$PORT" || true)
+if [ -n "$owners" ]; then
+    if port_is_ours "$owners"; then
+        echo "Stopping a previous DLC Labeler on port $PORT..."
+        echo "$owners" | xargs kill 2>/dev/null || true
         sleep 1
+        # Still there after a polite TERM? Then insist.
+        still=$(port_owner "$PORT" || true)
+        [ -n "$still" ] && { echo "$still" | xargs kill -9 2>/dev/null || true; sleep 1; }
+    else
+        echo ""
+        echo "Port $PORT is in use by another program (possibly Movement Tracker)."
+        for try in $(seq $((PORT + 1)) $((PORT + 20))); do
+            if ! port_owner "$try" >/dev/null 2>&1; then
+                PORT=$try
+                break
+            fi
+        done
+        echo "Using port $PORT instead. Set DLC_PORT in .env to pin this."
+        echo ""
     fi
 fi
 
