@@ -28,3 +28,11 @@ imageio-ffmpeg>=0.4.9
 # bumping a number.
 mediapipe>=0.10.0,<0.10.19
 protobuf>=3.20,<5
+
+# Frame selection.
+#
+# DeepLabCut's own k-means frame picker is MiniBatchKMeans from
+# scikit-learn.  It is in the base tier because selecting frames to
+# label (and to send out for labeling) has to work on a machine that
+# will never train.
+scikit-learn>=1.0
