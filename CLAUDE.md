@@ -176,9 +176,13 @@ schema pass (which would otherwise be a silent no-op).
   every read by `RESOURCE_MAP`'s job types — add a job type there and to
   `_run_job` together, or it will be queued and never drained. Settings
   keys this app does not model are preserved on save (`Settings._foreign`).
-- **Port**: both apps default to 8080. The launchers reclaim the port only
-  from a process whose command line contains `dlc_labeler`, and otherwise
-  move to the next free port. Do not reintroduce an unconditional kill.
+- **Port and browser**: both apps default to 8080. `scripts/launcher.py`
+  answers both launch questions — `free <port>` (by binding, not by
+  parsing lsof/netstat) and `open <port>` (which waits for the server to
+  answer before opening a browser). Do not reintroduce an unconditional
+  kill, a netstat parse, or a fixed sleep before opening the URL: a sleep
+  sends the browser to whatever else holds the port when startup fails,
+  which on these machines is Movement Tracker.
 
 ## Testing
 

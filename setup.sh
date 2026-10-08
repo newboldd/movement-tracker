@@ -191,50 +191,73 @@ if [ -d "$PROJECT_DIR/calibration" ]; then
     done
 fi
 
-# ── Free the port ─────────────────────────────────────────────────────────
+# ── Choose a port ─────────────────────────────────────────────────────────
 #
-# Reclaim the port from a previous run of THIS app, but never from anything
-# else.  Movement Tracker defaults to the same 8080, and silently killing a
-# colleague's running server — or your own, mid-training — is not a thing a
-# launcher should do.  Anything else on the port means we move up.
+# Movement Tracker defaults to this same 8080.  Two rules: never kill
+# something that is not this app, and never hand the browser a port we are
+# not actually serving on — opening the URL of a *different* app that
+# happens to hold 8080 is the most confusing failure there is.
+#
+# Freeness is decided by trying to bind the port, not by reading lsof or
+# netstat.  Binding is the same question the server itself will ask, needs
+# no external tool, and cannot be fooled by a listener owned by another
+# user or by a machine without lsof installed.
 
-port_owner() {
+LAUNCHER="$PROJECT_DIR/scripts/launcher.py"
+
+port_free() {
+    "$VENV_PY" "$LAUNCHER" free "$1"
+}
+
+# Only used to decide whether a busy port is OUR stale server, so a missing
+# lsof costs nothing: we simply move to the next free port instead.
+port_held_by_us() {
     command -v lsof &>/dev/null || return 1
-    local pids
+    local pids pid
     pids=$(lsof -ti ":$1" 2>/dev/null) || return 1
     [ -n "$pids" ] || return 1
+    for pid in $pids; do
+        # Match the uvicorn target exactly.  A loose "dlc_labeler" would
+        # also match an editor or a tail -f with the path open.
+        ps -p "$pid" -o args= 2>/dev/null | grep -q "dlc_labeler.app:app" || return 1
+    done
     echo "$pids"
 }
 
-port_is_ours() {
-    local pid
-    for pid in $1; do
-        ps -p "$pid" -o args= 2>/dev/null | grep -q "dlc_labeler" || return 1
-    done
-    return 0
-}
-
-owners=$(port_owner "$PORT" || true)
-if [ -n "$owners" ]; then
-    if port_is_ours "$owners"; then
+if ! port_free "$PORT"; then
+    if ours=$(port_held_by_us "$PORT"); then
         echo "Stopping a previous DLC Labeler on port $PORT..."
-        echo "$owners" | xargs kill 2>/dev/null || true
-        sleep 1
-        # Still there after a polite TERM? Then insist.
-        still=$(port_owner "$PORT" || true)
-        [ -n "$still" ] && { echo "$still" | xargs kill -9 2>/dev/null || true; sleep 1; }
-    else
-        echo ""
-        echo "Port $PORT is in use by another program (possibly Movement Tracker)."
-        for try in $(seq $((PORT + 1)) $((PORT + 20))); do
-            if ! port_owner "$try" >/dev/null 2>&1; then
-                PORT=$try
-                break
-            fi
+        echo "$ours" | xargs kill 2>/dev/null || true
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            port_free "$PORT" && break
+            sleep 0.5
         done
-        echo "Using port $PORT instead. Set DLC_PORT in .env to pin this."
-        echo ""
+        if ! port_free "$PORT"; then
+            echo "$ours" | xargs kill -9 2>/dev/null || true
+            sleep 1
+        fi
     fi
+fi
+
+if ! port_free "$PORT"; then
+    busy=$PORT
+    for try in $(seq $((PORT + 1)) $((PORT + 20))); do
+        if port_free "$try"; then
+            PORT=$try
+            break
+        fi
+    done
+    if [ "$PORT" = "$busy" ]; then
+        echo ""
+        echo "Port $busy is in use and no free port was found in "
+        echo "$((busy + 1))-$((busy + 20)). Set DLC_PORT in .env to a free one."
+        echo ""
+        exit 1
+    fi
+    echo ""
+    echo "Port $busy is in use by another program (Movement Tracker, perhaps)."
+    echo "Using port $PORT instead. Set DLC_PORT in .env to pin this."
+    echo ""
 fi
 
 # ── Launch ────────────────────────────────────────────────────────────────
@@ -253,8 +276,10 @@ echo ""
 
 cd "$PROJECT_DIR"
 
-(sleep 2 && { open "http://localhost:$PORT" 2>/dev/null \
-    || xdg-open "http://localhost:$PORT" 2>/dev/null; }) &
+# Open the browser only once this server is answering, and only on the
+# port it is answering on.  A fixed sleep would send the browser to
+# whatever else holds the port when our start fails.
+("$VENV_PY" "$LAUNCHER" open "$PORT" 60 >/dev/null 2>&1 || true) &
 
 # Exit code 42 means "restart" — the Settings page uses it when the data
 # directory changes, because DATA_DIR is resolved at import time.

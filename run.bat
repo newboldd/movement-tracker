@@ -293,13 +293,15 @@ if exist "calibration" (
 )
 
 :: ── Port ───────────────────────────────────────────────────────
-:: Movement Tracker defaults to this same port.  If something already
-:: holds it, step up to the next free one rather than refuse to start
-:: — and never kill whatever is there.
+:: Movement Tracker defaults to this same port.  Ask Python whether the
+:: port can be bound rather than parsing netstat: netstat's output format
+:: varies by Windows version and locale, and getting it wrong means
+:: uvicorn fails to bind while the browser still opens that port — which
+:: on a machine running Movement Tracker shows ITS interface.
 set /a PORT_TRIES=0
 :portcheck
-netstat -ano -p TCP | findstr /r /c:":%DLC_PORT%  *.*LISTENING" >nul 2>&1
-if not errorlevel 1 (
+%PYTHON% "%~dp0scripts\launcher.py" free %DLC_PORT% >nul 2>&1
+if errorlevel 1 (
     set /a PORT_TRIES+=1
     if !PORT_TRIES! GEQ 20 (
         echo.
@@ -331,7 +333,10 @@ if errorlevel 1 (
 )
 echo.
 
-start "" cmd /c "timeout /t 2 /nobreak >nul & start http://localhost:%DLC_PORT%"
+:: Open the browser only once the server answers, and only on the port it
+:: answers on — never after a fixed delay, which would open whatever else
+:: holds the port if our start fails.
+start "" /b %PYTHON% "%~dp0scripts\launcher.py" open %DLC_PORT% 60
 
 :: Exit code 42 means "restart" — the Settings page uses it when the
 :: data directory changes.

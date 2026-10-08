@@ -116,9 +116,15 @@ Specifically, when the data directory is shared:
   either app is safe in both directions.
 
 **The port.** Both default to 8080. Neither launcher will kill the other:
-if the port is held by something that is not this app, it moves up to the
-next free one and tells you. Pin a port with `DLC_PORT=8081` in `.env` if
-you would rather it be predictable.
+if the port is held by anything that is not this app, it moves up to the
+next free one, says so, and opens the browser on the port it actually
+started on. Pin a port with `DLC_PORT=8081` in `.env` if you would rather
+it be predictable.
+
+If Movement Tracker's interface appears when you launch this, you are
+looking at Movement Tracker on port 8080, not at this app — check the
+port in the address bar against the `Starting DLC Labeler at …` line the
+launcher prints.
 
 ## Getting a subject onto the screen
 
