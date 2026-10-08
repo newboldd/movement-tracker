@@ -47,7 +47,7 @@ MANIFEST_NAME = "package.json"
 FRAMES_CSV = "frames.csv"
 FRAMES_DIR = "frames"
 
-README = """\
+README_TEMPLATE = """\
 DLC Labeler — frames to label
 =============================
 
@@ -55,21 +55,26 @@ This folder holds video frames cropped around the hand, selected for
 labeling.  Everything needed is here; you do not need the original
 videos or DeepLabCut.
 
+Label {n_points} point{plural} on every frame, in this order:
+{points}
+
 To label them
 -------------
 1. Install DLC Labeler:  https://github.com/newboldd/movement-tracker
-   (clone the branch named in package.json, then run ./setup.sh, or
-   run.bat on Windows)
+   Clone it, then run ./setup.sh (macOS, Linux) or run.bat (Windows).
+   package.json records the exact version this folder was made with, if
+   you ever need to match it.
 2. Put this whole folder inside the app's data directory, under
    `packages/`.
 3. Open the app, press "Sync from disk" on the Subjects page, and this
-   package appears as a subject.
-4. Open it on the Label page and label every frame: click to place each
-   point in order, drag to adjust, right-click to remove.
+   package appears as a subject named `{name}`.
+4. Open it on the Label page: click to place each point in the order
+   above, drag to adjust, right-click to remove.
    The arrow keys move between frames; the up arrow jumps to the next
    frame you have not labeled yet.
-5. Labels save as you go. When you are finished, send the whole folder
-   back — your labels travel with it, in `labels/`.
+5. Labels save as you go, into `labels/labels.csv` inside this folder.
+   When you are finished, send the whole folder back — your labels
+   travel with it, and there is nothing to export.
 
 If a frame should not be labeled
 --------------------------------
@@ -84,6 +89,21 @@ What the numbers in the filenames mean
 where in the original video each image was cropped from, which is how
 your labels get mapped back.  Do not rename the files.
 """
+
+
+def _readme(name: str, bodyparts: list[str]) -> str:
+    """The instructions that ship inside a package.
+
+    The bodyparts go in by name and in order: a package labeled with the
+    points in the wrong order is worse than one not labeled at all, and
+    the person opening it has no other way to know what was wanted.
+    """
+    return README_TEMPLATE.format(
+        name=name,
+        n_points=len(bodyparts),
+        plural="" if len(bodyparts) == 1 else "s",
+        points="\n".join(f"  {i + 1}. {bp}" for i, bp in enumerate(bodyparts)),
+    )
 
 
 def _source_video(subject_name: str, trial: dict) -> str:
@@ -278,7 +298,7 @@ def export_package(subject_name: str, dest_dir: str | Path, *,
         "notes": notes,
     }
     (root / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2))
-    (root / "README.txt").write_text(README)
+    (root / "README.txt").write_text(_readme(name, settings.bodyparts))
 
     if progress:
         progress(100.0)
@@ -321,3 +341,242 @@ def read_frames_csv(package_dir: str | Path) -> list[dict]:
                     row[key] = int(row[key])
             out.append(row)
     return out
+
+
+# ── Opening a package as a subject ─────────────────────────────────────
+#
+# A received package has no videos, so the app has to be able to label a
+# directory of images directly.  Rather than inventing a second kind of
+# subject, a package becomes an ordinary subject whose trials are backed
+# by image files instead of video files: one trial per frames directory,
+# single-camera, frames in file order.  Everything downstream — the
+# timeline, the label store, commit — then works unchanged.
+
+# Image sizes are read once per directory; a package's images are all
+# the same size and never change under us.
+_dims_cache: dict[str, tuple[int, int]] = {}
+
+# What a frames trial reports as its frame rate.  A package is a sparse
+# set of frames with no timebase, so there is nothing true to report;
+# this exists only to keep "frames per second" arithmetic from dividing
+# by zero.
+NOMINAL_FPS = 30.0
+
+_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
+
+
+def package_dir(subject_name: str) -> Path | None:
+    """The package directory for this subject name, if there is one."""
+    root = get_settings().packages_path / subject_name
+    if not root.is_dir():
+        return None
+    return root if read_manifest(root) else None
+
+
+def list_packages() -> list[dict]:
+    """Every package in the packages directory, newest first.
+
+    Returns ``[{name, dir, manifest}]``.  A folder without a readable
+    manifest is skipped rather than guessed at — being strict here is
+    what keeps a stray folder of holiday photos from becoming a subject.
+    """
+    root = get_settings().packages_path
+    if not root.is_dir():
+        return []
+    found = []
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir():
+            continue
+        manifest = read_manifest(entry)
+        if manifest:
+            found.append({"name": entry.name, "dir": str(entry),
+                          "manifest": manifest})
+    found.sort(key=lambda p: p["manifest"].get("created_at") or "", reverse=True)
+    return found
+
+
+def _image_dims(path: Path) -> tuple[int, int]:
+    """(width, height) of an image, cached per directory."""
+    key = str(path.parent)
+    if key not in _dims_cache:
+        img = cv2.imread(str(path))
+        if img is None:
+            raise ValueError(f"Could not read image {path}")
+        _dims_cache[key] = (int(img.shape[1]), int(img.shape[0]))
+    return _dims_cache[key]
+
+
+def package_trials(subject_name: str) -> list[dict]:
+    """Trial dicts for a package, in the shape ``build_trial_map`` returns.
+
+    ``frames.csv`` is the source of order and of each image's crop, so
+    labels can be mapped back to the original video later.  When it is
+    missing — a package someone rearranged by hand — the directory
+    listing stands in, and the crop geometry is simply unknown.
+    """
+    root = package_dir(subject_name)
+    if root is None:
+        return []
+
+    rows_by_dir: dict[str, list[dict]] = {}
+    for row in read_frames_csv(root):
+        image = (row.get("image") or "").replace("\\", "/")
+        parts = image.split("/")
+        if len(parts) < 2:
+            continue
+        rows_by_dir.setdefault(parts[-2], []).append(row)
+
+    frames_root = root / FRAMES_DIR
+    dir_names = sorted(d.name for d in frames_root.iterdir() if d.is_dir()) \
+        if frames_root.is_dir() else sorted(rows_by_dir)
+
+    trials = []
+    for dir_name in dir_names:
+        directory = frames_root / dir_name
+        on_disk = {p.name: p for p in sorted(directory.iterdir())
+                   if p.is_file() and p.suffix.lower() in _IMAGE_SUFFIXES} \
+            if directory.is_dir() else {}
+
+        ordered: list[tuple[Path, dict | None]] = []
+        seen = set()
+        # CSV order first, so a package's frames stay in the order it
+        # recorded them even if a filename sorts oddly.
+        for row in sorted(rows_by_dir.get(dir_name, []),
+                          key=lambda r: r.get("local_frame") or 0):
+            fname = (row.get("image") or "").replace("\\", "/").split("/")[-1]
+            if fname in on_disk:
+                ordered.append((on_disk[fname], row))
+                seen.add(fname)
+        # Images the CSV does not mention — including ones a collaborator
+        # added — come after, so nothing on disk is silently unlabelable.
+        for fname, path in on_disk.items():
+            if fname not in seen:
+                ordered.append((path, None))
+
+        if not ordered:
+            continue
+        try:
+            width, height = _image_dims(ordered[0][0])
+        except ValueError as e:
+            logger.warning("Skipping %s: %s", directory, e)
+            continue
+
+        trials.append({
+            "kind": "frames",
+            # The directory stands in for the video file: it is what
+            # identifies the trial on disk, and Path(...).stem still works.
+            "video_path": str(directory),
+            "trial_name": dir_name,
+            "trial_stem": dir_name,
+            "frames": [str(p) for p, _ in ordered],
+            "frame_rows": [r for _, r in ordered],
+            "frame_count": len(ordered),
+            "fps": NOMINAL_FPS,
+            "width": width,
+            "height": height,
+            "frame_offset": 0,
+            "cameras": [{"name": "default", "path": str(directory), "idx": 0}],
+        })
+    return trials
+
+
+LABELS_DIR = "labels"
+LABELS_CSV = "labels.csv"
+
+
+def package_image_index(subject_name: str) -> dict[int, dict]:
+    """Map each global frame number to the package image it draws.
+
+    The global frame number is what the label store keys on, and the
+    image path is what a returned package keys on, so this is the join
+    between the two — used to write labels out and to read them back.
+    """
+    from .video import build_trial_map
+
+    index: dict[int, dict] = {}
+    for trial in build_trial_map(subject_name, camera_mode="single"):
+        if trial.get("kind") != "frames":
+            continue
+        rows = trial.get("frame_rows") or []
+        for local, path in enumerate(trial.get("frames") or []):
+            index[trial["start_frame"] + local] = {
+                "image": f"{FRAMES_DIR}/{trial['trial_name']}/{Path(path).name}",
+                "trial_name": trial["trial_name"],
+                "local_frame": local,
+                "row": rows[local] if local < len(rows) else None,
+            }
+    return index
+
+
+def write_labels_into_package(subject_name: str) -> dict | None:
+    """Write this package's labels into the package folder itself.
+
+    The whole point of a package is that it travels as one folder.  If
+    the labels only lived in the database, sending the folder back would
+    send back the frames and nothing else — so every save is mirrored
+    into ``labels/labels.csv``, keyed by image name, and the folder is
+    complete at all times without anybody having to remember to export.
+
+    Returns a summary, or None when this subject is not a package.
+    """
+    root = package_dir(subject_name)
+    if root is None:
+        return None
+
+    from ..db import get_db_ctx
+
+    with get_db_ctx() as db:
+        subj = db.execute("SELECT id FROM subjects WHERE name = ?",
+                          (subject_name,)).fetchone()
+        if not subj:
+            return None
+        # Newest write per frame wins: a package is labeled in one pass,
+        # but re-opening it makes a second session and both are the same
+        # person's work on the same images.
+        rows = db.execute(
+            """SELECT fl.frame_num, fl.keypoints, fl.updated_at
+                 FROM frame_labels fl
+                 JOIN label_sessions ls ON fl.session_id = ls.id
+                WHERE ls.subject_id = ?
+                ORDER BY fl.updated_at""",
+            (subj["id"],)).fetchall()
+
+    manifest = read_manifest(root) or {}
+    bodyparts = manifest.get("bodyparts") or get_settings().bodyparts
+    index = package_image_index(subject_name)
+
+    best: dict[int, dict] = {}
+    for row in rows:
+        kp = row["keypoints"]
+        kp = json.loads(kp) if isinstance(kp, str) else (kp or {})
+        entry = index.get(row["frame_num"])
+        if entry is None:
+            continue
+        if not any(kp.get(bp) for bp in bodyparts):
+            # An emptied frame is a deliberate "not this one" — drop it
+            # from the file rather than writing a row of blanks.
+            best.pop(row["frame_num"], None)
+            continue
+        best[row["frame_num"]] = {
+            "entry": entry, "kp": kp, "updated_at": row["updated_at"]}
+
+    out_dir = root / LABELS_DIR
+    out_dir.mkdir(exist_ok=True)
+    fieldnames = ["image", "labeled_at"]
+    for bp in bodyparts:
+        fieldnames += [f"{bp}_x", f"{bp}_y"]
+
+    with open(out_dir / LABELS_CSV, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for key in sorted(best):
+            item = best[key]
+            out = {"image": item["entry"]["image"],
+                   "labeled_at": item["updated_at"]}
+            for bp in bodyparts:
+                point = item["kp"].get(bp)
+                out[f"{bp}_x"] = round(float(point[0]), 2) if point else ""
+                out[f"{bp}_y"] = round(float(point[1]), 2) if point else ""
+            writer.writerow(out)
+
+    return {"labeled": len(best), "path": str(out_dir / LABELS_CSV)}

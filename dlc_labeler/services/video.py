@@ -332,7 +332,21 @@ def build_trial_map(subject_name: str, camera_mode: str | None = None) -> list[d
         camera_mode: Override for camera mode (per-subject). If None, uses global default.
     """
     videos = get_subject_videos(subject_name)
-    settings = get_settings()
+
+    # A subject with no videos may be a labeling package: a folder of
+    # frames someone was sent to label, with no video behind it.  Videos
+    # are checked first so a package can never shadow a real recording
+    # that happens to share its name.
+    if not videos:
+        from .labelpack import package_trials
+        trials = package_trials(subject_name)
+        if trials:
+            offset = 0
+            for trial in trials:
+                trial["start_frame"] = offset
+                trial["end_frame"] = offset + trial["frame_count"] - 1
+                offset += trial["frame_count"]
+            return trials
 
     # Group multicam files by trial
     grouped = _group_multicam_videos(subject_name, videos, camera_mode=camera_mode)
@@ -405,6 +419,30 @@ def _extract_frame_cached(video_path: str, frame_num: int, side: str,
     return bytes(jpeg)
 
 
+@lru_cache(maxsize=FRAME_CACHE_SIZE)
+def _encode_image_cached(image_path: str) -> bytes:
+    """Read one image file from a labeling package and serve it as JPEG.
+
+    Re-encoded rather than served as-is so the page's frame path is the
+    same whatever the package holds, and so a 16-bit or oddly-formatted
+    PNG still displays.
+    """
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError(f"Could not read image {image_path}")
+    _, jpeg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+    return bytes(jpeg)
+
+
+def _frame_image_path(trial: dict, local_frame: int) -> str:
+    """The image file backing one frame of a ``frames`` trial."""
+    frames = trial.get("frames") or []
+    if not 0 <= local_frame < len(frames):
+        raise ValueError(f"Frame {local_frame} out of range for "
+                         f"{trial.get('trial_name')}")
+    return frames[local_frame]
+
+
 def _deidentified_path(video_path: str) -> str | None:
     """Return the deidentified version of a video if it exists and is not corrupt.
 
@@ -453,6 +491,11 @@ def extract_frame(subject_name: str, global_frame: int, side: str,
         trials = build_trial_map(subject_name, camera_mode=camera_mode)
     video_path, local_frame, trial = _resolve_frame(trials, global_frame)
 
+    # A labeling package's frames are image files, with no video to seek
+    # in and no stereo half to crop out — the crop happened at export.
+    if trial.get("kind") == "frames":
+        return _encode_image_cached(_frame_image_path(trial, local_frame))
+
     settings = get_settings()
     mode = camera_mode or settings.default_camera_mode
 
@@ -476,8 +519,20 @@ def extract_frame(subject_name: str, global_frame: int, side: str,
 
 
 def extract_frame_raw(video_path: str, frame_num: int, side: str,
-                      camera_mode: str | None = None) -> np.ndarray:
-    """Extract a frame as a raw numpy array (for saving PNGs on commit)."""
+                      camera_mode: str | None = None,
+                      trial: dict | None = None) -> np.ndarray:
+    """Extract a frame as a raw numpy array (for saving PNGs on commit).
+
+    ``trial`` is only needed for labeling packages, whose frames are
+    image files rather than positions in a video.
+    """
+    if trial is not None and trial.get("kind") == "frames":
+        path = _frame_image_path(trial, frame_num)
+        img = cv2.imread(path)
+        if img is None:
+            raise ValueError(f"Could not read image {path}")
+        return img
+
     cap = cv2.VideoCapture(video_path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
     ret, frame = cap.read()

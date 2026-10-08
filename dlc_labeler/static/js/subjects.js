@@ -31,9 +31,10 @@ const subjectsPage = (() => {
         body.innerHTML = subjects.map(s => `
             <tr data-id="${s.id}">
                 <td class="name-col"><a href="/label?subject=${s.id}"
-                    style="color:var(--text);text-decoration:none;">${s.name}</a></td>
+                    style="color:var(--text);text-decoration:none;">${s.name}</a>
+                    ${packageBadge(s)}</td>
                 <td><span class="badge badge-${s.stage}">${s.stage}</span></td>
-                <td>${s.video_count}</td>
+                <td>${s.is_package ? `${s.package.image_count} frames` : s.video_count}</td>
                 <td>${s.labeled_frame_count || 0}</td>
                 <td class="prog-col"><div class="trial-chips" id="chips-${s.id}">
                     <span style="font-size:10px;color:var(--text-muted);">…</span>
@@ -44,6 +45,17 @@ const subjectsPage = (() => {
                 </td>
             </tr>
         `).join('');
+    }
+
+    /* A received package is not a recording; saying so on the row is what
+     * stops it reading as a subject whose videos have gone missing. */
+    function packageBadge(s) {
+        if (!s.is_package) return '';
+        const from = s.package.subject ? ` from ${s.package.subject}` : '';
+        return `<span class="badge" style="background:var(--surface);`
+            + `border:1px solid var(--border);color:var(--text-muted);`
+            + `margin-left:6px;" title="A labeling package${from}, `
+            + `${s.package.image_count} frames to label">package</span>`;
     }
 
     async function loadTrialStatus(subjectId) {

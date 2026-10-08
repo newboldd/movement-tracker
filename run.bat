@@ -288,6 +288,7 @@ if not exist "%DLC_DATA_DIR%" mkdir "%DLC_DATA_DIR%" 2>nul
 if not exist "%DLC_DATA_DIR%\dlc" mkdir "%DLC_DATA_DIR%\dlc" 2>nul
 if not exist "%DLC_DATA_DIR%\videos" mkdir "%DLC_DATA_DIR%\videos" 2>nul
 if not exist "%DLC_DATA_DIR%\calibration" mkdir "%DLC_DATA_DIR%\calibration" 2>nul
+if not exist "%DLC_DATA_DIR%\packages" mkdir "%DLC_DATA_DIR%\packages" 2>nul
 if exist "calibration" (
     xcopy /I /Y /Q /D "calibration\*" "%DLC_DATA_DIR%\calibration\" >nul 2>nul
 )

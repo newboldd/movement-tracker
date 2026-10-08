@@ -196,6 +196,9 @@ def queue_subjects() -> List[dict]:
             "name": row["name"],
             "stage": row["stage"],
             "trial_count": len(trials),
+            # A labeling package has frames but no videos, so nothing on
+            # this page can be run against it.
+            "is_package": any(t.get("kind") == "frames" for t in trials),
             "has_project": (dlc_dir / "config.yaml").exists(),
             "has_labeled_data": (dlc_dir / "labeled-data").is_dir() and any(
                 (dlc_dir / "labeled-data").glob("round*/CollectedData_*.csv")),

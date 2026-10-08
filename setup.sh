@@ -179,7 +179,8 @@ fi
 
 # ── Data directory ────────────────────────────────────────────────────────
 
-mkdir -p "$DLC_DATA_DIR/dlc" "$DLC_DATA_DIR/videos" "$DLC_DATA_DIR/calibration"
+mkdir -p "$DLC_DATA_DIR/dlc" "$DLC_DATA_DIR/videos" \
+         "$DLC_DATA_DIR/calibration" "$DLC_DATA_DIR/packages"
 
 # Ship the bundled calibration so a stereo rig that matches it gets 3D
 # straight away.  Never overwrite one that is already there.

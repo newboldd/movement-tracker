@@ -302,6 +302,7 @@ async function openSession(newMode) {
     mpPassSpecs = info.mp_passes || [];
 
     if (!cameraNames.includes(currentSide)) currentSide = cameraNames[0];
+    updateSideToggle();
 
     el('committedCount').textContent =
         `${info.committed_frame_count || 0} frames committed to DLC`;
@@ -557,6 +558,9 @@ async function renderVideoFrame(frame) {
     const trialIdx = trialForFrame(frame);
     const trial = trials[trialIdx];
     if (!trial) return false;
+    // A labeling package is a folder of images; there is no video to
+    // decode, so don't ask for one and wait for the 404.
+    if (trial.kind === 'frames') return false;
 
     let justLoaded = false;
     if (videoTrialLoaded !== trialIdx || videoSideLoaded !== currentSide) {
@@ -1454,6 +1458,8 @@ async function startPlayback() {
     const trial = trials[trialIdx];
     if (!trial) return;
     currentTrialIdx = trialIdx;
+    // No video behind a package's frames — step them instead.
+    if (trial.kind === 'frames') { fallbackPlay(trial.fps); return; }
 
     const frameOffset = trial.frame_offset || 0;
     const startTime = Math.max(0,
@@ -1876,10 +1882,14 @@ function renderTimeline() {
     // whether both cameras have them — a frame labeled on one camera only
     // triangulates to nothing.
     c.font = '8px -apple-system, sans-serif';
-    cameraNames.slice(0, 2).forEach((cam, i) => {
-        c.fillStyle = 'rgba(170,159,189,0.55)';
-        c.fillText(cam, 2, rowY[i] + rowH - 1);
-    });
+    // With one camera there is nothing to compare against, so the row
+    // labels would just be a column of names for a single row.
+    if (!singleCamera()) {
+        cameraNames.slice(0, 2).forEach((cam, i) => {
+            c.fillStyle = 'rgba(170,159,189,0.55)';
+            c.fillText(cam, 2, rowY[i] + rowH - 1);
+        });
+    }
     for (const key of manual.keys()) {
         const [f, ...sp] = key.split('_');
         const side = sp.join('_');
@@ -2069,10 +2079,18 @@ function updateSideToggle() {
     const t = el('sideToggle');
     t.textContent = currentSide;
     t.className = 'side-toggle ' + (sideIndex(currentSide) === 0 ? 'os' : 'od');
+    // One camera means one image per frame; a switch that showed the
+    // same picture under a different name would only invite labeling
+    // the same frame twice.
+    t.style.display = singleCamera() ? 'none' : '';
+}
+
+function singleCamera() {
+    return cameraMode === 'single' || cameraNames.length < 2;
 }
 
 function toggleSide() {
-    if (cameraNames.length < 2) return;
+    if (singleCamera()) return;
     currentSide = otherSide();
     updateSideToggle();
     setNavState({ side: currentSide });

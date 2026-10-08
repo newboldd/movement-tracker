@@ -212,6 +212,16 @@ def get_session_info(session_id: int) -> dict:
     trials = build_trial_map(subj["name"], camera_mode=camera_mode)
     total_frames = trials[-1]["end_frame"] + 1 if trials else 0
 
+    # A package carries the bodyparts it was made for.  Whoever labels it
+    # may have different ones configured, and labeling the wrong points
+    # into someone else's project is not a mistake you find out about
+    # until you try to import the result — so the package wins.
+    from ..services.labelpack import read_manifest
+    package = None
+    if trials and trials[0].get("kind") == "frames":
+        package = read_manifest(settings.packages_path / subj["name"])
+    bodyparts = (package or {}).get("bodyparts") or settings.bodyparts
+
     trial_info = []
     for t in trials:
         entry = {
@@ -222,6 +232,10 @@ def get_session_info(session_id: int) -> dict:
             "fps": t["fps"],
             "frame_offset": t.get("frame_offset", 0),
         }
+        if t.get("kind") == "frames":
+            # Tells the page not to reach for a video it will not get:
+            # this trial is a folder of images.
+            entry["kind"] = "frames"
         cameras = t.get("cameras", [])
         if len(cameras) > 1:
             entry["cameras"] = [{"name": c["name"], "idx": c["idx"]}
@@ -250,13 +264,14 @@ def get_session_info(session_id: int) -> dict:
         "subject": subj,
         "trials": trial_info,
         "total_frames": total_frames,
-        "bodyparts": settings.bodyparts,
+        "bodyparts": bodyparts,
         "camera_names": settings.camera_names,
         "camera_mode": camera_mode,
         "committed_frame_count": committed_frame_count,
         "crop_boxes": crop_boxes,
         "has_calibration": get_calibration_for_subject(subj["name"]) is not None,
         "mp_passes": MP_PASSES,
+        "package": package,
     }
 
 
@@ -307,6 +322,11 @@ def get_video(
     if trial < 0 or trial >= len(trials):
         raise HTTPException(400,
                             f"Trial index {trial} out of range (0-{len(trials) - 1})")
+
+    if trials[trial].get("kind") == "frames":
+        raise HTTPException(
+            404, "This trial is a folder of frames, not a video — the page "
+                 "draws it from /frame instead.")
 
     video_path = trials[trial]["video_path"]
     if camera_mode == "multicam" and side:
@@ -679,6 +699,21 @@ def get_labels(session_id: int) -> List[dict]:
     return labels
 
 
+def _mirror_labels_into_package(subject_name: str) -> None:
+    """Write a package subject's labels into its own folder, best-effort.
+
+    A failure here must never cost someone their labels — those are
+    already committed to the database by the time this runs — so it is
+    logged and swallowed.
+    """
+    from ..services.labelpack import write_labels_into_package
+    try:
+        write_labels_into_package(subject_name)
+    except Exception:
+        logger.warning("Could not write labels into the package for %s",
+                       subject_name, exc_info=True)
+
+
 @router.put("/sessions/{session_id}/labels")
 def save_labels(session_id: int, req: LabelBatchSave) -> dict:
     """Batch-upsert labels and return the frames' recomputed 3D distances.
@@ -700,6 +735,10 @@ def save_labels(session_id: int, req: LabelBatchSave) -> dict:
                 (session_id, label.frame_num, label.trial_idx, label.side,
                  json.dumps(label.keypoints)),
             )
+
+    # A package has to stay complete as a folder: the labels belong in it,
+    # not only in a database that is not going to be posted back.
+    _mirror_labels_into_package(subj["name"])
 
     affected = {label.frame_num for label in req.labels}
     if not affected:
@@ -742,12 +781,14 @@ def save_labels(session_id: int, req: LabelBatchSave) -> dict:
 def delete_label(session_id: int, frame_num: int,
                  side: str = Query(...)) -> dict:
     """Delete this session's labels for one frame and camera."""
+    _session, subj = _session_and_subject(session_id)
     with get_db_ctx() as db:
         db.execute(
             "DELETE FROM frame_labels "
             "WHERE session_id = ? AND frame_num = ? AND side = ?",
             (session_id, frame_num, side),
         )
+    _mirror_labels_into_package(subj["name"])
     return {"deleted": True}
 
 

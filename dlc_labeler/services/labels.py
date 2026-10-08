@@ -238,7 +238,7 @@ def commit_labels_to_dlc(
         # Extract frame as PNG
         img_filename = f"img{img_idx:04d}.png"
         frame_array = extract_frame_raw(video_path, local_frame, label["side"],
-                                        camera_mode=camera_mode)
+                                        camera_mode=camera_mode, trial=trial)
         png_path = labeled_data_dir / img_filename
         cv2.imwrite(str(png_path), frame_array)
 

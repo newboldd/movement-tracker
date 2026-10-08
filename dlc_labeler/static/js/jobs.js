@@ -130,6 +130,9 @@ const jobsPage = (() => {
     /* Why a step can't run for a subject yet — shown rather than just
      * disabling the card, so the fix is obvious. */
     function ineligibleReason(s) {
+        // Every job here works from the videos, and a received package
+        // has none — it is for labeling on the Label page, nothing else.
+        if (s.is_package) return 'a labeling package — label it, don’t run it';
         if (selectedStep === 'mediapipe') {
             return s.trial_count ? null : 'no trial videos found';
         }

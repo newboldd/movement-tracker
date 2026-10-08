@@ -59,10 +59,24 @@ def _subject_row_to_response(row: dict) -> dict:
     exists = bool(dlc_path and dlc_path.exists())
     videos = _find_videos(row["name"]) if row.get("name") else []
 
+    # A labeling package has no videos, so without this it would read as
+    # an empty subject rather than a folder of frames waiting to be done.
+    package = None
+    if not videos and row.get("name"):
+        from ..services.labelpack import read_manifest
+        pkg_dir = get_settings().packages_path / row["name"]
+        package = read_manifest(pkg_dir) if pkg_dir.is_dir() else None
+
     return {
         **row,
         "stage_idx": STAGE_INDEX.get(row.get("stage", "created"), 0),
         "video_count": len(videos),
+        "is_package": package is not None,
+        "package": ({"subject": package.get("subject"),
+                     "image_count": package.get("image_count"),
+                     "created_at": package.get("created_at"),
+                     "directories": package.get("directories") or []}
+                    if package else None),
         "has_project": exists and (dlc_path / "config.yaml").exists(),
         "has_snapshots": _has_snapshots(dlc_path) if exists else False,
         "has_labels": _has_labeled_data(dlc_path) if exists else False,
@@ -326,6 +340,26 @@ def sync_from_filesystem() -> dict:
             "video_count": len(trials),
         }
 
+    # Labeling packages: folders of frames, with no video behind them.
+    # Last, so a package can never displace a subject that has real
+    # recordings — build_trial_map resolves the same way round.
+    from ..services.labelpack import list_packages
+    for pkg in list_packages():
+        if pkg["name"] in discovered:
+            logger.warning("Package %s shares a name with an existing "
+                           "subject; the subject wins", pkg["name"])
+            continue
+        discovered[pkg["name"]] = {
+            "name": pkg["name"],
+            "stage": "labeling",
+            "dlc_dir": pkg["name"],
+            "camera_name": None,
+            "video_count": len(pkg["manifest"].get("directories") or []),
+            # One image directory per camera already, each cropped at
+            # export — there is no stereo frame left to split.
+            "camera_mode": "single",
+        }
+
     created = updated = 0
     with get_db_ctx() as db:
         for name, subj in discovered.items():
@@ -346,7 +380,8 @@ def sync_from_filesystem() -> dict:
                            (name, stage, dlc_dir, camera_name, camera_mode)
                        VALUES (?, ?, ?, ?, ?)""",
                     (name, subj["stage"], subj["dlc_dir"],
-                     subj.get("camera_name"), settings.default_camera_mode))
+                     subj.get("camera_name"),
+                     subj.get("camera_mode") or settings.default_camera_mode))
                 created += 1
 
         # Drop rows whose subject has neither a project nor any video
