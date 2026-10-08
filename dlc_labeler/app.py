@@ -12,7 +12,9 @@ from starlette.requests import Request
 
 from .config import get_settings
 from .db import get_db_ctx, init_db
-from .routers import jobs, labeling, queue, settings as settings_router, subjects
+from .routers import (
+    jobs, labeling, packages, queue, settings as settings_router, subjects,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -74,6 +76,7 @@ app.include_router(subjects.router)
 app.include_router(labeling.router)
 app.include_router(jobs.router)
 app.include_router(queue.router)
+app.include_router(packages.router)
 app.include_router(settings_router.router)
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

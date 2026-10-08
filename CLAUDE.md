@@ -22,7 +22,8 @@ Opens at http://localhost:8080. `.env` holds local config
 
 ## Architecture
 
-**Backend**: FastAPI, SQLite, OpenCV, MediaPipe, ffmpeg (via imageio-ffmpeg)
+**Backend**: FastAPI, SQLite, OpenCV, MediaPipe, scikit-learn (k-means
+frame selection), ffmpeg (via imageio-ffmpeg)
 **Frontend**: vanilla JS, HTML5 Canvas for video and labeling, three.js
 (vendored, no CDN) for the 3D view
 **No build step** — static files are served directly.
@@ -38,11 +39,14 @@ dlc_labeler/
 │   ├── subjects.py     # CRUD + filesystem discovery
 │   ├── queue.py        # the Jobs page's API
 │   ├── jobs.py         # job detail, log tail, SSE, cancel
+│   ├── packages.py     # list packages, import returned labels
 │   └── settings.py     # settings, status, data directory
 ├── services/
 │   ├── video.py              # trial maps, frame extraction, stereo split
 │   ├── mediapipe_prelabel.py # hand passes + best-per-frame fusion
 │   ├── labels.py             # commit to DLC, corrections CSVs
+│   ├── frameselect.py        # DLC's k-means, on MediaPipe crops
+│   ├── labelpack.py          # export/read/import labeling packages
 │   ├── dlc_predictions.py    # read DLC CSVs back as layers
 │   ├── dlc_pipeline.py       # STANDALONE: train/refine/analyze subprocess
 │   ├── dlc_wrapper.py        # config.yaml repair
@@ -97,6 +101,30 @@ a `.params.json` sidecar recording how it was produced.
 
 `build_combined_mp_npz_for_trial` rebuilds the fusion automatically
 whenever a source pass is written and two or more exist.
+
+### Labeling packages
+A package is a folder under `DATA_DIR/packages/` holding frames to be
+labeled elsewhere: `package.json` (manifest), `frames.csv` (one row per
+image, with its crop offset and source frame), `frames/<Trial>_<Camera>/
+img0042.png`, and `labels/labels.csv`.
+
+`services/frameselect.py` picks the frames with DeepLabCut's own
+`KmeansbasedFrameselectioncv2` — transcribed from it, not approximated —
+applied to per-frame crops around the MediaPipe hand. At DLC's 30px
+working width a whole camera half leaves the hand about two pixels, so
+cropping first is what makes the clusters be postures rather than arm
+positions.
+
+A package is read back as an ordinary subject whose trials have
+`kind == "frames"`: `build_trial_map` returns them when a subject has no
+videos, `extract_frame` reads the image file, and `/video` 404s so the
+page falls back to its JPEG path. Labels save through to
+`labels/labels.csv` on every write, because the folder is what travels.
+
+`import_package_labels` maps each image back by **trial name and local
+frame**, not by the global frame number the package recorded — global
+numbering shifts if a trial is added. Crop offsets turn the crop's
+coordinates back into camera-half coordinates.
 
 ### Layers
 Everything the Label page draws is a layer with one shape. Bodypart
@@ -174,7 +202,9 @@ schema pass (which would otherwise be a silent no-op).
   Tracker at one data directory is supported, so anything touching the
   shared tables must stay in its own lane. The queue manager filters
   every read by `RESOURCE_MAP`'s job types — add a job type there and to
-  `_run_job` together, or it will be queued and never drained. Settings
+  `_run_job` together (and to `STEP_DEFINITIONS` and `worker.py`'s
+  `JOB_DISPATCH` to make it reachable), or it will be queued and never
+  drained. Settings
   keys this app does not model are preserved on save (`Settings._foreign`).
 - **Port and browser**: both apps default to 8080. `scripts/launcher.py`
   answers both launch questions — `free <port>` (by binding, not by

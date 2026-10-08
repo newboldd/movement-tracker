@@ -580,3 +580,204 @@ def write_labels_into_package(subject_name: str) -> dict | None:
             writer.writerow(out)
 
     return {"labeled": len(best), "path": str(out_dir / LABELS_CSV)}
+
+
+# ── Bringing a labeled package home ────────────────────────────────────
+
+
+def read_package_labels(package_dir: str | Path) -> dict[str, dict]:
+    """``labels/labels.csv`` as ``{image: {bodypart: (x, y)}}``.
+
+    Coordinates are in the cropped image's own pixel space — turning
+    them back into video coordinates is :func:`import_package_labels`'s
+    job, because only the project knows which video they belong to.
+    """
+    path = Path(package_dir) / LABELS_DIR / LABELS_CSV
+    if not path.is_file():
+        return {}
+
+    out: dict[str, dict] = {}
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            image = (row.get("image") or "").replace("\\", "/")
+            if not image:
+                continue
+            points = {}
+            for key, value in row.items():
+                if not key.endswith("_x") or value in (None, ""):
+                    continue
+                bodypart = key[:-2]
+                y_value = row.get(f"{bodypart}_y")
+                if y_value in (None, ""):
+                    continue
+                try:
+                    points[bodypart] = (float(value), float(y_value))
+                except ValueError:
+                    continue
+            if points:
+                out[image] = points
+    return out
+
+
+def import_package_labels(package_name: str, *, target_subject: str | None = None,
+                          overwrite: bool = False,
+                          dry_run: bool = False) -> dict:
+    """Merge a returned package's labels into the subject they came from.
+
+    Each image is mapped back by trial name and local frame rather than
+    by the global frame number the package recorded: global numbering
+    depends on which trials exist, and a trial added since the export
+    would silently shift every label by a whole video.  The crop offset
+    in ``frames.csv`` turns the crop's coordinates back into the camera
+    half's, which is the space the label store uses.
+
+    Nothing is overwritten unless asked.  A frame already labeled with
+    different coordinates is reported as a conflict and left alone —
+    somebody has done that frame twice, and which of them is right is
+    not a decision to make silently.
+    """
+    from ..db import get_db_ctx
+    from .video import build_trial_map
+
+    root = get_settings().packages_path / package_name
+    manifest = read_manifest(root)
+    if manifest is None:
+        raise ValueError(f"{package_name} is not a labeling package")
+
+    subject_name = target_subject or manifest.get("subject")
+    if not subject_name:
+        raise ValueError("The package does not say which subject it came from")
+
+    with get_db_ctx() as db:
+        subj = db.execute("SELECT id, camera_mode FROM subjects WHERE name = ?",
+                          (subject_name,)).fetchone()
+    if not subj:
+        raise ValueError(f"No subject named {subject_name} on this machine")
+
+    camera_mode = subj.get("camera_mode") or get_settings().default_camera_mode
+    trials = build_trial_map(subject_name, camera_mode=camera_mode)
+    if not trials or trials[0].get("kind") == "frames":
+        raise ValueError(f"{subject_name} has no trial videos to import into")
+    trial_by_name = {t["trial_name"]: (i, t) for i, t in enumerate(trials)}
+
+    frames = {r["image"].replace("\\", "/"): r for r in read_frames_csv(root)}
+    labels = read_package_labels(root)
+
+    report = {
+        "package": package_name,
+        "subject": subject_name,
+        "labeled_images": len(labels),
+        "imported": 0,
+        "conflicts": [],
+        "unknown_trial": [],
+        "out_of_range": [],
+        "missing_images": [],
+        "unlabeled": 0,
+        "unknown_bodyparts": [],
+        "dry_run": dry_run,
+    }
+
+    # Images the package listed but that are no longer in the folder: a
+    # collaborator deleting a frame that showed a face is expected, and
+    # worth reporting rather than passing over in silence.
+    for image in frames:
+        if not (root / image).is_file():
+            report["missing_images"].append(image)
+    report["unlabeled"] = max(
+        len(frames) - len(report["missing_images"]) - len(labels), 0)
+
+    known_bodyparts = set(get_settings().bodyparts)
+    pending: list[tuple[int, int, str, dict]] = []
+
+    for image, points in sorted(labels.items()):
+        row = frames.get(image)
+        if row is None:
+            report["unknown_trial"].append(image)
+            continue
+        entry = trial_by_name.get(row.get("trial_name"))
+        if entry is None:
+            report["unknown_trial"].append(image)
+            continue
+        trial_idx, trial = entry
+        local_frame = int(row.get("local_frame") or 0)
+        if not 0 <= local_frame < trial["frame_count"]:
+            report["out_of_range"].append(image)
+            continue
+
+        x0 = int(row.get("crop_x0") or 0)
+        y0 = int(row.get("crop_y0") or 0)
+        keypoints = {}
+        for bodypart, (x, y) in points.items():
+            if bodypart not in known_bodyparts:
+                if bodypart not in report["unknown_bodyparts"]:
+                    report["unknown_bodyparts"].append(bodypart)
+            keypoints[bodypart] = [round(x0 + x, 2), round(y0 + y, 2)]
+
+        pending.append((trial["start_frame"] + local_frame, trial_idx,
+                        row.get("camera") or "", keypoints))
+
+    if not pending:
+        return report
+
+    with get_db_ctx() as db:
+        session = db.execute(
+            """SELECT ls.id, COUNT(fl.id) AS label_count
+                 FROM label_sessions ls
+                 LEFT JOIN frame_labels fl ON fl.session_id = ls.id
+                WHERE ls.subject_id = ? AND ls.session_type = 'initial'
+                  AND ls.status = 'active'
+                GROUP BY ls.id
+                ORDER BY label_count DESC, ls.id DESC LIMIT 1""",
+            (subj["id"],)).fetchone()
+        session_id = session["id"] if session else None
+
+        if session_id is None:
+            if dry_run:
+                report["session_id"] = None
+            else:
+                iteration = db.execute(
+                    "SELECT iteration FROM subjects WHERE id = ?",
+                    (subj["id"],)).fetchone()["iteration"]
+                session_id = db.execute(
+                    """INSERT INTO label_sessions
+                           (subject_id, iteration, session_type)
+                       VALUES (?, ?, 'initial')""",
+                    (subj["id"], iteration)).lastrowid
+
+        for frame_num, trial_idx, side, keypoints in pending:
+            existing = None
+            if session_id is not None:
+                existing = db.execute(
+                    "SELECT keypoints FROM frame_labels "
+                    "WHERE session_id = ? AND frame_num = ? AND side = ?",
+                    (session_id, frame_num, side)).fetchone()
+            if existing:
+                old = existing["keypoints"]
+                old = json.loads(old) if isinstance(old, str) else (old or {})
+                if old == keypoints:
+                    continue  # Already imported; importing twice is a no-op.
+                if not overwrite:
+                    report["conflicts"].append(
+                        {"frame": frame_num, "camera": side,
+                         "existing": old, "incoming": keypoints})
+                    continue
+
+            report["imported"] += 1
+            if dry_run:
+                continue
+            db.execute(
+                """INSERT INTO frame_labels
+                       (session_id, frame_num, trial_idx, side, keypoints,
+                        updated_at)
+                   VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                   ON CONFLICT(session_id, frame_num, trial_idx, side)
+                   DO UPDATE SET keypoints = excluded.keypoints,
+                                 updated_at = CURRENT_TIMESTAMP""",
+                (session_id, frame_num, trial_idx, side,
+                 json.dumps(keypoints)))
+
+    report["session_id"] = session_id
+    logger.info("Imported %d labels from %s into %s (%d conflicts)",
+                report["imported"], package_name, subject_name,
+                len(report["conflicts"]))
+    return report

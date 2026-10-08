@@ -60,6 +60,7 @@ data with no reconfiguration — the two apps share the layout and the
 ├── videos/                 # {Subject}_{Trial}.mp4
 │   └── deidentified/       # face-blurred copies, used when present
 ├── calibration/            # stereo calibration YAML + camera_assignments
+├── packages/               # folders of frames, sent out and received back
 └── dlc/
     └── {Subject}/
         ├── config.yaml
@@ -103,7 +104,8 @@ other.
 Specifically, when the data directory is shared:
 
 - **Jobs stay separate.** This app only ever picks up the job types it
-  owns (`mediapipe`, `train`, `refine`, `analyze`, `install-dlc`). It
+  owns (`mediapipe`, `export-frames`, `train`, `refine`, `analyze`,
+  `install-dlc`). It
   will not claim, run, show or fail a Movement Tracker job — HRnet,
   skeleton fits, deidentify and preproc are invisible to it, and left
   alone.
@@ -194,6 +196,57 @@ app works normally in 2D and reports distances in pixels.
 
 Point Settings at a calibration YAML, and map subjects to cameras with a
 `camera_assignments.yaml` in the data directory's `calibration/` folder.
+
+## Sending frames out to be labeled
+
+Labeling is the slow part, and it parallelises across people. **Export
+frames to label** on the Jobs page picks a spread of frames and writes
+them as a self-contained folder — a *package* — that someone else can
+label without the videos, without DeepLabCut, and without access to this
+data directory.
+
+Frames are picked with DeepLabCut's own k-means frame selector, but
+applied to per-frame crops around the MediaPipe hand rather than to whole
+frames. That matters more than it sounds: the selector squeezes each
+frame to 30 pixels wide before clustering, so on a 1920-pixel camera half
+the hand is about two pixels and the clusters end up sorting by arm
+position, lighting and background. Cropping to the hand first means the
+clusters are hand postures, which is what you want a spread of.
+
+The crop box is a constant size per trial (the 95th percentile of the
+hand's extent, times 1.6, so one bad detection cannot inflate it) and
+recentres on every frame. Frames MediaPipe lost borrow the nearest good
+centre and are flagged in `frames.csv` — those are often the frames most
+worth labeling, so dropping them would bias the training set towards the
+easy ones. If a face-blurred render exists, the frames are cut from that.
+
+A package looks like this:
+
+```
+Con01_label_20260408/
+├── package.json        what this is, which subject, how it was selected
+├── README.txt          instructions for whoever receives it
+├── frames.csv          one row per image, with its crop and source frame
+├── frames/
+│   └── Con01_R1_OS/
+│       └── img0042.png
+└── labels/             filled in as they label
+```
+
+**To label one**, install this app, drop the folder into the data
+directory under `packages/`, and press **Sync from disk** — it appears
+as a subject and opens on the Label page like any other. Labels save
+into `labels/labels.csv` inside the folder as they go, so sending the
+whole folder back is all there is to it.
+
+**To bring one home**, drop the returned folder into `packages/`, press
+Sync, and press **Import labels** on its row. Each image's labels are
+mapped back through its crop offset onto the original video frame and
+merged into the subject's labeling session, ready to review and commit.
+It always runs a dry pass first and tells you how many frames will land,
+how many images never came back, and which frames are already labeled
+differently — those are left alone unless you say otherwise. Importing
+the same package twice does nothing the second time.
 
 ## Jobs
 

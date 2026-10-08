@@ -41,10 +41,17 @@ const subjectsPage = (() => {
                 </div></td>
                 <td style="text-align:right;white-space:nowrap;">
                     <a class="btn btn-sm" href="/label?subject=${s.id}">Label</a>
-                    <a class="btn btn-sm" href="/jobs?subject=${s.id}">Jobs</a>
+                    ${s.is_package
+                        ? `<button class="btn btn-sm" data-import="${s.name}"
+                             title="Map these labels back onto ${s.package.subject
+                                 || 'their subject'}'s video frames">Import labels</button>`
+                        : `<a class="btn btn-sm" href="/jobs?subject=${s.id}">Jobs</a>`}
                 </td>
             </tr>
         `).join('');
+
+        document.querySelectorAll('[data-import]').forEach(b =>
+            b.addEventListener('click', () => importLabels(b, b.dataset.import)));
     }
 
     /* A received package is not a recording; saying so on the row is what
@@ -56,6 +63,79 @@ const subjectsPage = (() => {
             + `border:1px solid var(--border);color:var(--text-muted);`
             + `margin-left:6px;" title="A labeling package${from}, `
             + `${s.package.image_count} frames to label">package</span>`;
+    }
+
+    /* Bringing a labeled package home.  Always a dry run first: the
+     * person deserves to see how many frames land, and what collides
+     * with labels already there, before anything is written. */
+    async function importLabels(btn, packageName) {
+        const label = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Checking…';
+        try {
+            const plan = await post(
+                `/api/packages/${encodeURIComponent(packageName)}/import?dry_run=true`);
+            const lines = [
+                `${plan.imported} frame(s) would be added to ${plan.subject}.`,
+                `${plan.labeled_images} of the package's images are labeled; `
+                    + `${plan.unlabeled} are not.`,
+            ];
+            if (plan.conflicts.length) {
+                lines.push('', `${plan.conflicts.length} frame(s) are already `
+                    + 'labeled differently. Press OK to import everything else '
+                    + 'and leave those alone.');
+            }
+            if (plan.missing_images.length) {
+                lines.push('', `${plan.missing_images.length} image(s) were `
+                    + 'deleted from the package and cannot be labeled.');
+            }
+            if (plan.unknown_trial.length) {
+                lines.push('', `${plan.unknown_trial.length} image(s) do not `
+                    + 'match any trial of this subject and will be skipped.');
+            }
+            if (plan.unknown_bodyparts.length) {
+                lines.push('', 'Bodyparts this project does not have: '
+                    + plan.unknown_bodyparts.join(', '));
+            }
+            if (!plan.imported && !plan.conflicts.length) {
+                alert(lines.join('\n') + '\n\nNothing to import.');
+                return;
+            }
+            if (!confirm(lines.join('\n'))) return;
+
+            btn.textContent = 'Importing…';
+            const done = await post(
+                `/api/packages/${encodeURIComponent(packageName)}/import`);
+            let msg = `Imported ${done.imported} frame(s) into ${done.subject}.`;
+            if (done.conflicts.length) {
+                msg += `\n\n${done.conflicts.length} frame(s) were left alone `
+                    + 'because they are already labeled differently. Overwrite '
+                    + 'them with the package\u2019s version?';
+                if (confirm(msg)) {
+                    const forced = await post(
+                        `/api/packages/${encodeURIComponent(packageName)}`
+                        + '/import?overwrite=true');
+                    alert(`Overwrote ${forced.imported} frame(s).`);
+                    return;
+                }
+            }
+            alert(msg);
+        } catch (e) {
+            alert(`Could not import: ${e.message}`);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = label;
+        }
+    }
+
+    async function post(url) {
+        const r = await fetch(url, { method: 'POST' });
+        if (!r.ok) {
+            let detail = r.statusText;
+            try { detail = (await r.json()).detail || detail; } catch (e) { /* not JSON */ }
+            throw new Error(detail);
+        }
+        return r.json();
     }
 
     async function loadTrialStatus(subjectId) {
