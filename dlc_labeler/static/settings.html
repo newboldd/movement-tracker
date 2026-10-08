@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DLC Labeler — Settings</title>
+    <link rel="stylesheet" href="/static/css/main.css?v=1">
+    <style>
+        .form-row { margin-bottom: 14px; }
+        .form-row label {
+            display: block; font-size: 12px; color: var(--text-muted);
+            margin-bottom: 3px;
+        }
+        .form-row input[type=text], .form-row input[type=number], .form-row select {
+            width: 100%; padding: 6px 8px; background: var(--bg);
+            border: 1px solid var(--border); border-radius: var(--radius);
+            color: var(--text); font-size: 13px; font-family: inherit;
+        }
+        .form-row .hint { font-size: 11px; color: var(--text-muted); margin-top: 3px; }
+        .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+        .status-grid {
+            display: grid; grid-template-columns: auto 1fr; gap: 4px 14px;
+            font-size: 13px;
+        }
+        .status-grid .k { color: var(--text-muted); }
+        .status-grid .v { font-family: 'Consolas', monospace; font-size: 12px; word-break: break-all; }
+        .ok { color: var(--green); }
+        .bad { color: var(--orange); }
+        .issue {
+            font-size: 12px; color: #ffcc80; padding: 6px 10px;
+            background: rgba(255,152,0,0.08); border: 1px solid var(--orange);
+            border-radius: var(--radius); margin-bottom: 6px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header"></div>
+
+    <div class="container">
+        <div class="card">
+            <h2>This machine</h2>
+            <div id="issues"></div>
+            <div class="status-grid" id="statusGrid"></div>
+        </div>
+
+        <div class="card">
+            <h2>Data directory</h2>
+            <div class="form-row">
+                <label>Where videos, DLC projects and the database live</label>
+                <input type="text" id="dataDir" placeholder="/Users/you/data/dlc-labeler">
+                <div class="hint" id="dataDirHint"></div>
+            </div>
+            <button class="btn" id="saveDataDir">Save and restart</button>
+            <span id="dataDirStatus" style="font-size:12px;color:var(--text-muted);margin-left:8px;"></span>
+        </div>
+
+        <div class="card">
+            <h2>Project</h2>
+            <div class="two-col">
+                <div class="form-row">
+                    <label>Video directory</label>
+                    <input type="text" id="videoDir">
+                    <div class="hint">Trial videos named {Subject}_{Trial}.mp4</div>
+                </div>
+                <div class="form-row">
+                    <label>Camera layout</label>
+                    <select id="cameraMode">
+                        <option value="stereo">stereo — both cameras in one side-by-side file</option>
+                        <option value="multicam">multicam — one file per camera</option>
+                        <option value="single">single — one camera</option>
+                    </select>
+                    <div class="hint">Default for new subjects; each subject can override it</div>
+                </div>
+                <div class="form-row">
+                    <label>Camera names (comma separated)</label>
+                    <input type="text" id="cameraNames">
+                    <div class="hint">Left/first camera first. Stereo files are split at the midline in this order.</div>
+                </div>
+                <div class="form-row">
+                    <label>Bodyparts to label (comma separated)</label>
+                    <input type="text" id="bodyparts">
+                    <div class="hint">What you click in order on each frame, and what DLC is trained on</div>
+                </div>
+            </div>
+            <div class="two-col">
+                <div class="form-row">
+                    <label>DeepLabCut network</label>
+                    <input type="text" id="netType">
+                    <div class="hint">e.g. resnet_50, resnet_101</div>
+                </div>
+                <div class="form-row">
+                    <label>Python with DeepLabCut installed</label>
+                    <input type="text" id="pythonExe">
+                    <div class="hint">Leave as the app's own interpreter unless DLC lives in a separate conda env</div>
+                </div>
+            </div>
+            <div class="form-row">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                    <input type="checkbox" id="preferDeident" style="width:auto;">
+                    Show face-blurred videos when a blurred copy exists
+                </label>
+            </div>
+            <button class="btn btn-primary" id="saveSettings">Save</button>
+            <span id="settingsStatus" style="font-size:12px;color:var(--text-muted);margin-left:8px;"></span>
+        </div>
+
+        <div class="card">
+            <h2>Stereo calibration</h2>
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">
+                Needed for the 3D view and for distances in millimetres. Without
+                it, labeling and training work normally and distances are
+                reported in pixels.
+            </div>
+            <div id="calibList"></div>
+            <div class="form-row" style="margin-top:10px;">
+                <label>Add or replace a calibration — name and YAML path</label>
+                <div style="display:flex;gap:8px;">
+                    <input type="text" id="calibName" placeholder="camera1" style="max-width:160px;">
+                    <input type="text" id="calibPath" placeholder="/path/to/cam1_calibration.yaml">
+                    <button class="btn btn-sm" id="checkCalib">Check</button>
+                </div>
+                <div class="hint" id="calibCheck"></div>
+            </div>
+            <button class="btn" id="addCalib">Add calibration</button>
+        </div>
+    </div>
+
+    <script src="/static/js/nav.js?v=1"></script>
+    <script src="/static/js/settings.js?v=1"></script>
+</body>
+</html>

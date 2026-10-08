@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DLC Labeler — Jobs</title>
+    <link rel="stylesheet" href="/static/css/main.css?v=1">
+    <style>
+        .step-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+        .step-btn {
+            padding: 6px 14px; font-size: 13px; cursor: pointer;
+            border: 1px solid var(--border); border-radius: var(--radius);
+            background: var(--bg); color: var(--text-muted); font-family: inherit;
+        }
+        .step-btn:hover:not(.active):not(:disabled) { background: var(--bg-hover); color: var(--text); }
+        .step-btn.active {
+            background: var(--blue); border-color: var(--blue);
+            color: #1f0f3a; font-weight: 600;
+        }
+        .step-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .step-btn .res {
+            font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px;
+            opacity: 0.7; margin-left: 5px;
+        }
+
+        .subject-grid {
+            display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 5px; max-height: 280px; overflow-y: auto;
+            background: var(--bg); padding: 8px; border-radius: var(--radius);
+        }
+        .subj-card {
+            border: 1px solid var(--border); border-radius: var(--radius);
+            padding: 5px 8px; cursor: pointer; background: var(--bg-card);
+            font-size: 12px;
+        }
+        .subj-card:hover { border-color: var(--blue); }
+        .subj-card.selected { border-color: var(--blue); background: var(--bg-hover); }
+        .subj-card .nm { font-weight: 600; }
+        .subj-card .meta { font-size: 10px; color: var(--text-muted); }
+        .subj-card.ineligible { opacity: 0.4; cursor: not-allowed; }
+        .tchips { display: flex; gap: 2px; flex-wrap: wrap; margin-top: 3px; }
+        .tchip {
+            font-size: 9px; padding: 0 4px; border-radius: 2px;
+            border: 1px solid var(--border); color: var(--text-muted);
+        }
+        .tchip.done { border-color: var(--green); color: #a5d6a7; }
+
+        .opt-row {
+            display: flex; gap: 16px; flex-wrap: wrap; align-items: center;
+            font-size: 12px; color: var(--text-muted); margin: 10px 0;
+        }
+        .opt-row label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+
+        .lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .lane {
+            background: var(--bg); border: 1px solid var(--border);
+            border-radius: var(--radius); padding: 10px;
+        }
+        .lane h3 {
+            font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px;
+            color: var(--text-muted); margin-bottom: 8px;
+        }
+        .qitem {
+            border-left: 3px solid var(--border); padding: 5px 8px;
+            margin-bottom: 5px; background: var(--bg-card);
+            border-radius: 0 var(--radius) var(--radius) 0; font-size: 12px;
+        }
+        .qitem.running { border-left-color: var(--orange); }
+        .qitem .top { display: flex; align-items: center; gap: 6px; }
+        .qitem .nm { font-weight: 600; }
+        .qitem .ty { font-size: 10px; color: var(--text-muted); }
+        .qitem .acts { margin-left: auto; display: flex; gap: 4px; }
+        .qitem .acts button {
+            background: none; border: none; color: var(--text-muted);
+            cursor: pointer; font-size: 11px; padding: 0 3px;
+        }
+        .qitem .acts button:hover { color: var(--red); }
+        .empty-state { font-size: 11px; color: var(--text-muted); }
+
+        .hist-table { width: 100%; font-size: 12px; border-collapse: collapse; }
+        .hist-table th {
+            text-align: left; color: var(--text-muted); font-weight: 500;
+            font-size: 11px; padding: 3px 6px; border-bottom: 1px solid var(--border);
+        }
+        .hist-table td { padding: 3px 6px; border-bottom: 1px solid rgba(255,255,255,0.04); }
+        .hist-table tr:hover td { background: var(--bg-hover); }
+
+        .warn {
+            padding: 8px 12px; border-radius: var(--radius); font-size: 13px;
+            margin-bottom: 12px; border: 1px solid;
+        }
+        .warn.info { border-color: var(--border); background: var(--bg); color: var(--text-muted); }
+        .warn.bad { border-color: var(--orange); background: rgba(255,152,0,0.08); color: #ffcc80; }
+
+        #logModal pre {
+            max-height: 62vh; overflow: auto; background: var(--bg);
+            padding: 12px; border-radius: var(--radius); font-size: 11px;
+            white-space: pre-wrap; word-break: break-all; margin: 0;
+            font-family: 'Consolas', monospace; line-height: 1.5;
+        }
+        #logModal .modal { max-width: 1000px; width: 92vw; }
+    </style>
+</head>
+<body>
+    <div class="header"></div>
+
+    <div class="container">
+        <div class="card">
+            <h2>Run a job</h2>
+
+            <div id="envWarn" class="warn info" style="display:none;"></div>
+
+            <div class="step-row" id="stepRow"></div>
+            <div class="mini" id="stepHelp"
+                 style="font-size:12px;color:var(--text-muted);margin-bottom:10px;"></div>
+
+            <div id="mpOptions" class="opt-row" style="display:none;">
+                <label title="Feed frames in descending order so the tracker enters a hard frame already locked on. Saved beside the forward pass, not over it.">
+                    <input type="checkbox" id="optReverse"> Backwards pass
+                </label>
+                <label title="Run the full palm detector on every frame with no between-frame tracker. Slower, but recovers frames the tracker loses.">
+                    <input type="checkbox" id="optStatic"> Frame-by-frame mode
+                </label>
+                <label title="Crop to the box saved for each trial before detecting. Uncheck to detect on the whole camera half.">
+                    <input type="checkbox" id="optBbox" checked> Use the saved crop box
+                </label>
+                <span style="font-size:11px;">
+                    Each pass is kept separately; the best result per frame is fused
+                    automatically once two or more exist.
+                </span>
+            </div>
+
+            <div id="gpuOptions" class="opt-row" style="display:none;">
+                <label>GPU <select id="gpuSelect" style="margin-left:4px;"></select></label>
+            </div>
+
+            <h3 style="font-size:12px;color:var(--text-muted);margin:10px 0 6px;
+                       text-transform:uppercase;letter-spacing:0.6px;">
+                Subjects
+                <button class="btn btn-sm" id="selectAllBtn" style="margin-left:8px;">All</button>
+                <button class="btn btn-sm" id="selectNoneBtn">None</button>
+            </h3>
+            <div class="subject-grid" id="subjectGrid"></div>
+
+            <div style="margin-top:12px;display:flex;align-items:center;gap:10px;">
+                <button class="btn btn-primary" id="launchBtn">Add to queue</button>
+                <span id="launchStatus" style="font-size:12px;color:var(--text-muted);"></span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Queue</h2>
+            <div class="lanes">
+                <div class="lane">
+                    <h3>CPU — MediaPipe</h3>
+                    <div id="cpuLane"><span class="empty-state">Empty</span></div>
+                </div>
+                <div class="lane">
+                    <h3>GPU — DeepLabCut</h3>
+                    <div id="gpuLane"><span class="empty-state">Empty</span></div>
+                </div>
+            </div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:8px;">
+                The two lanes run at the same time; jobs inside a lane run one
+                at a time. A job keeps running if you close the browser or the
+                app restarts.
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Recent jobs</h2>
+            <div id="historyBox"><span class="empty-state">Nothing yet</span></div>
+        </div>
+
+        <div class="card">
+            <h2 style="display:flex;align-items:center;gap:10px;">
+                Lifetime history
+                <span id="lifetimeSummary" style="font-size:12px;color:var(--text-muted);"></span>
+            </h2>
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">
+                Every run ever recorded, with the app version it ran on. Written
+                to <code id="historyPath">job_history.jsonl</code> in the data
+                directory, so it survives the database being deleted.
+            </div>
+            <div id="lifetimeBox" style="max-height:40vh;overflow-y:auto;">
+                <span class="empty-state">Nothing recorded yet</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="logModal">
+        <div class="modal">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+                <h3 style="margin:0;" id="logTitle">Job log</h3>
+                <span id="logStatus" style="font-size:12px;color:var(--text-muted);"></span>
+                <button class="btn btn-sm" id="logClose" style="margin-left:auto;">Close</button>
+            </div>
+            <pre id="logContent">Loading…</pre>
+        </div>
+    </div>
+
+    <script src="/static/js/nav.js?v=1"></script>
+    <script src="/static/js/jobs.js?v=1"></script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+# DLC Labeler — training and inference (the second tier of the install).
+#
+# Installed by `./setup.sh --with-dlc`, by `run.bat --with-dlc` on
+# Windows, or by the "Install DeepLabCut" button on the Jobs page.  Kept
+# out of the base install because it pulls in torch and is several GB:
+# someone whose whole job is labeling frames never needs it, and on a
+# shared teaching machine that download is the slowest part of setup by
+# an order of magnitude.
+#
+# Everything in requirements.txt is also required — install both.
+
+deeplabcut>=3.0.0
+tables>=3.7.0
+pandas>=1.3.0
+
+# torch is a deeplabcut dependency and will be resolved automatically.
+# If a machine has a CUDA GPU and pip installs a CPU-only build, install
+# the right one for the machine's CUDA version first, then re-run this
+# file:  https://pytorch.org/get-started/locally/

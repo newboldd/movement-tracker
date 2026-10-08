@@ -1,0 +1,597 @@
+/* DLC Labeler — Main Styles */
+
+:root {
+    /* Palette shifted from navy-blue to deep purple to match the
+       app icon and the Movement Viewer color scheme.  Hex values
+       echo the viewer's deep-purple bg (#5a1f8e), shadow-ring
+       purple (#2d0f5a), and vivid icon-body purple (#8e30c2),
+       darkened to keep the same dark-UI vibe.
+
+       --blue keeps its name so every existing
+       `color: var(--blue)` reference continues to resolve to the
+       app's primary-accent hue — it's now a bright lavender. */
+    --bg: #1f0f3a;
+    --bg-card: #2e1554;
+    --bg-hover: #3a1d68;
+    --text: #e0e0e0;
+    --text-muted: #aa9fbd;
+    --accent: #5a1f8e;
+    --blue: #a195c0;
+    --green: #4caf50;
+    --orange: #ff9800;
+    --red: #f44336;
+    --purple: #9c27b0;
+    --border: #4a2a78;
+    --radius: 6px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+    /* Block macOS / Chromium two-finger swipe-to-go-back/forward
+       gestures.  Horizontal-scrollable plot wrappers can still
+       scroll internally; this only kills the page-level history
+       navigation that hijacks scroll-bar drags inside Plotly. */
+    overscroll-behavior-x: none;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+}
+
+/* ── Layout ─────────────────────────────────────────── */
+.header {
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+}
+
+.header h1 {
+    font-size: 24px;
+    font-weight: 800;
+    margin: 0;
+    letter-spacing: -0.01em;
+}
+
+.header h1 a {
+    color: var(--text);
+    text-decoration: none;
+    transition: color 0.2s, text-shadow 0.2s;
+    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
+}
+
+.header h1 a:hover {
+    color: var(--blue);
+    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.35);
+}
+
+.header nav {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    margin-left: auto;
+}
+
+.header nav a {
+    color: var(--text-muted);
+    text-decoration: none;
+    font-size: 14px;
+    transition: color 0.2s;
+    padding-bottom: 2px;
+    border-bottom: 2px solid transparent;
+}
+
+.header nav a:hover {
+    color: var(--text);
+    border-bottom-color: var(--blue);
+}
+
+.header nav a.active {
+    color: var(--blue);
+    border-bottom-color: var(--blue);
+}
+
+/* "Subjects" link — slightly bolder to stand out */
+.header nav a[href="/subjects"] {
+    font-weight: 600;
+    color: var(--text);
+}
+
+/* Dropdown submenu in nav */
+.nav-dropdown {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+.nav-dropdown > a::after {
+    content: ' \25BE';
+    font-size: 10px;
+    opacity: 0.6;
+}
+.nav-dropdown-menu {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: -8px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 4px 0;
+    min-width: 140px;
+    z-index: 100;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    padding-top: 12px;  /* extra invisible padding to bridge hover gap */
+    margin-top: 0;
+    background-clip: padding-box;
+}
+/* Invisible bridge between trigger and menu */
+.nav-dropdown-menu::before {
+    content: '';
+    position: absolute;
+    top: -8px;
+    left: 0;
+    right: 0;
+    height: 12px;
+}
+.nav-dropdown:hover .nav-dropdown-menu,
+.nav-dropdown:focus-within .nav-dropdown-menu {
+    display: block;
+}
+.nav-dropdown-menu a {
+    display: block;
+    padding: 6px 16px;
+    color: var(--text-muted);
+    text-decoration: none;
+    font-size: 13px;
+    white-space: nowrap;
+    border-bottom: none;
+}
+.nav-dropdown-menu a:hover {
+    color: var(--text);
+    background: var(--bg);
+}
+.nav-dropdown-menu a.active {
+    color: var(--blue);
+}
+
+/* Flashing job status dot */
+.nav-job-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #4CAF50;
+    margin-right: 4px;
+    animation: job-pulse 1.5s ease-in-out infinite;
+}
+@keyframes job-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}
+
+/* In-process trial chip — yellow pulse matching the job-pulse rhythm.
+   Used by the Remote queue rows, trial-detail modal, AND nav-dropdown
+   active-job rows so the "currently running on GPU" trial is obvious
+   wherever it's shown. */
+.trial-current {
+    animation: job-pulse 1.5s ease-in-out infinite;
+}
+
+/* Jobs nav dropdown — mirrors the Queue block on the Jobs page */
+.nav-jobs-dropdown {
+    min-width: 420px !important;
+    padding: 8px 12px !important;
+    right: 0;
+    left: auto !important;
+}
+/* Compact queue item rows inside nav dropdown */
+.nav-qi {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 3px;
+    border-radius: 3px;
+    margin-bottom: 2px;
+    border-left: 2px solid transparent;
+}
+.nav-qi.nav-qi-run { border-left-color: var(--orange, #FF9800); }
+.nav-qi-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.nav-qi-type {
+    font-size: 10px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+.nav-qi-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+}
+.nav-qi-name > span:first-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+}
+.nav-qi button {
+    font-size: 10px;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 0 2px;
+    margin-left: auto;
+    line-height: 1;
+    flex-shrink: 0;
+}
+.nav-qi button:hover { color: var(--red, #f44336); }
+
+.container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 24px;
+}
+
+/* ── Cards ──────────────────────────────────────────── */
+.card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin-bottom: 16px;
+}
+
+.card h2 {
+    font-size: 16px;
+    margin-bottom: 12px;
+    color: var(--text);
+}
+
+/* ── Stage badges ───────────────────────────────────── */
+.badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 500;
+    text-transform: capitalize;
+}
+
+/* One colour per stage of the DeepLabCut loop, grey through to green. */
+.badge-created   { background: #37474f; color: #90a4ae; }   /* nothing done yet */
+.badge-labeling  { background: #283593; color: #7986cb; }   /* labels in progress */
+.badge-committed { background: #6a1b9a; color: #ce93d8; }   /* training set written */
+.badge-training  { background: #880e4f; color: #f48fb1; }   /* training running */
+.badge-trained   { background: #b71c1c; color: #ef9a9a; }   /* model exists */
+.badge-analyzed  { background: #d84315; color: #ff8a65; }   /* predictions exist */
+.badge-corrected { background: #f57f17; color: #fff176; }   /* predictions reviewed */
+.badge-refined   { background: #2e7d32; color: #a5d6a7; }   /* retrained on corrections */
+
+/* ── Subject table ──────────────────────────────────── */
+.subject-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+}
+
+.subject-table th {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 2px solid var(--border);
+    color: var(--text-muted);
+    font-weight: 500;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.subject-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+}
+
+.subject-table tr:hover td {
+    background: var(--bg-hover);
+}
+
+.subject-table .name-col {
+    font-weight: 600;
+    color: var(--blue);
+    cursor: pointer;
+}
+.subject-table .name-col:hover {
+    text-decoration: underline;
+}
+
+/* ── Buttons ────────────────────────────────────────── */
+.btn {
+    display: inline-block;
+    padding: 6px 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--accent);
+    color: var(--text);
+    font-size: 13px;
+    cursor: pointer;
+    text-decoration: none;
+    transition: background 0.15s;
+}
+.btn:hover { background: #1a4a80; }
+.btn-sm { padding: 3px 10px; font-size: 12px; }
+.btn-primary { background: var(--blue); color: #fff; border-color: var(--blue); }
+.btn-primary:hover { background: #3a8adf; }
+.btn-danger { background: var(--red); border-color: var(--red); }
+.btn-danger:hover { background: #d32f2f; }
+.btn-success { background: var(--green); border-color: var(--green); }
+.btn-success:hover { background: #388e3c; }
+
+/* ── Job indicators ─────────────────────────────────── */
+.job-indicator {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+}
+.job-running  { background: var(--orange); animation: pulse 1.5s infinite; }
+.job-pending  { background: var(--accent); animation: pulse 2s infinite; }
+.job-completed { background: var(--green); }
+.job-failed   { background: var(--red); }
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+/* ── Progress bar ───────────────────────────────────── */
+.progress-bar {
+    width: 100%;
+    height: 6px;
+    background: var(--bg);
+    border-radius: 3px;
+    overflow: hidden;
+}
+.progress-bar .fill {
+    height: 100%;
+    background: var(--blue);
+    border-radius: 3px;
+    transition: width 0.3s;
+}
+
+/* ── Modal ──────────────────────────────────────────── */
+.modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+}
+.modal-overlay.active { display: flex; }
+
+.modal {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px;
+    min-width: 400px;
+    max-width: 600px;
+}
+.modal h3 { margin-bottom: 16px; }
+.modal .form-group { margin-bottom: 12px; }
+.modal label { display: block; font-size: 13px; color: var(--text-muted); margin-bottom: 4px; }
+.modal input, .modal select {
+    width: 100%;
+    padding: 8px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 14px;
+}
+.modal .actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 16px;
+}
+
+/* ── Subject detail panel ───────────────────────────── */
+.detail-panel {
+    display: none;
+}
+.detail-panel.active {
+    display: block;
+}
+.detail-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+.detail-section h3 {
+    font-size: 14px;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.detail-section .info-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    font-size: 13px;
+}
+.detail-section .info-row .label { color: var(--text-muted); }
+
+/* ── Labeling page ──────────────────────────────────── */
+.labeling-layout {
+    display: flex;
+    height: calc(100vh - 52px);
+}
+
+.labeling-sidebar {
+    width: 240px;
+    background: var(--bg-card);
+    border-right: 1px solid var(--border);
+    padding: 16px;
+    overflow-y: auto;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.labeling-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    position: relative;
+}
+
+.canvas-container {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.canvas-container canvas {
+    cursor: crosshair;
+    outline: none;
+}
+
+
+.timeline-container {
+    height: 80px;
+    background: var(--bg-card);
+    border-top: 1px solid var(--border);
+    padding: 8px 16px;
+    flex-shrink: 0;
+}
+
+.timeline-canvas {
+    outline: none;
+}
+
+.controls-bar {
+    background: var(--bg-card);
+    border-top: 1px solid var(--border);
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
+    flex-shrink: 0;
+}
+
+.controls-bar .frame-display {
+    font-family: 'Consolas', monospace;
+    color: var(--blue);
+    min-width: 180px;
+}
+
+.controls-bar .side-toggle {
+    padding: 4px 12px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-weight: 600;
+}
+.controls-bar .side-toggle.os { background: #1b5e20; color: #81c784; }
+.controls-bar .side-toggle.od { background: #0d47a1; color: #64b5f6; }
+
+.shortcut-list {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.shortcut-list kbd {
+    display: inline-block;
+    padding: 1px 5px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    font-family: monospace;
+    font-size: 11px;
+    margin: 0 2px;
+}
+
+/* ── Timeline ───────────────────────────────────────── */
+.timeline-canvas {
+    width: 100%;
+    height: 100%;
+}
+
+/* ── Label count indicator ──────────────────────────── */
+.label-count {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.label-count strong { color: var(--green); }
+
+/* ── Distance trace ─────────────────────────────────── */
+.distance-trace-container {
+    height: 120px;
+    background: var(--bg-card);
+    border-top: 1px solid var(--border);
+    padding: 8px 16px;
+    flex-shrink: 0;
+    position: relative;
+}
+
+.distance-trace-container canvas {
+    width: 100%;
+    height: 100%;
+    cursor: pointer;
+}
+
+.distance-trace-label {
+    position: absolute;
+    top: 4px;
+    left: 20px;
+    font-size: 11px;
+    color: var(--text-muted);
+    pointer-events: none;
+    z-index: 1;
+}
+
+/* ── Responsive ─────────────────────────────────────── */
+@media (max-width: 900px) {
+    .detail-grid { grid-template-columns: 1fr; }
+    .labeling-sidebar { width: 180px; }
+}
+
+/* Inline links inside cards — the default blue is unreadable on the
+   dark purple background. */
+.card a { color: var(--blue); }
+.card a:hover { color: var(--text); }
+
+/* Toolbar toggles that stay on (3D, crop-box edit). */
+.btn.active {
+    background: var(--blue); border-color: var(--blue);
+    color: #1f0f3a; font-weight: 600;
+}
+
+/* Disabled controls — without this a disabled button looks clickable. */
+.btn:disabled, button:disabled, input:disabled, select:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+.btn:disabled:hover { background: var(--accent); }

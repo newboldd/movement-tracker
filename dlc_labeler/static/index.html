@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DLC Labeler</title>
+    <link rel="stylesheet" href="/static/css/main.css?v=1">
+    <style>
+        .subject-table td.prog-col { padding: 4px 8px; }
+        .trial-chips { display: flex; gap: 3px; flex-wrap: wrap; }
+        .trial-chip {
+            font-size: 10px; padding: 1px 5px; border-radius: 3px;
+            border: 1px solid var(--border); background: var(--bg);
+            color: var(--text-muted); white-space: nowrap;
+        }
+        .trial-chip.mp   { border-color: #00cccc; color: #7fe3e3; }
+        .trial-chip.pred { border-color: var(--green); color: #a5d6a7; }
+        .trial-chip.corr { border-color: var(--orange); color: #ffcc80; }
+        .empty-hint {
+            padding: 20px; text-align: center; color: var(--text-muted);
+            font-size: 13px; line-height: 1.7;
+        }
+        .empty-hint code {
+            background: var(--bg); padding: 1px 5px; border-radius: 3px;
+            font-family: monospace; color: var(--text);
+        }
+    </style>
+</head>
+<body>
+    <div class="header"></div>
+
+    <div class="container">
+        <div class="card">
+            <h2 style="display:flex;align-items:center;gap:10px;">
+                Subjects
+                <button class="btn btn-sm" id="syncBtn" title="Re-scan the data directory for new videos and DLC projects">Sync from disk</button>
+                <span id="syncStatus" style="font-size:12px;color:var(--text-muted);"></span>
+            </h2>
+
+            <div id="emptyHint" class="empty-hint" style="display:none;">
+                No subjects yet.<br>
+                Put trial videos named <code>{Subject}_{Trial}.mp4</code>
+                (for example <code>Con01_R1.mp4</code>) in<br>
+                <code id="videoDirHint">the video directory</code>
+                and press <strong>Sync from disk</strong>.
+            </div>
+
+            <table class="subject-table" id="subjectTable" style="display:none;">
+                <thead>
+                    <tr>
+                        <th class="name-col">Subject</th>
+                        <th>Stage</th>
+                        <th>Trials</th>
+                        <th>Labeled frames</th>
+                        <th class="prog-col">Per-trial progress</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="subjectBody"></tbody>
+            </table>
+        </div>
+
+        <div class="card">
+            <h2>How this works</h2>
+            <ol style="font-size:13px;color:var(--text-muted);line-height:1.9;padding-left:20px;">
+                <li>Run <strong>MediaPipe</strong> on a subject from the
+                    <a href="/jobs">Jobs</a> page. It finds the hand, which frames the
+                    default zoom while you label.</li>
+                <li>On the <a href="/label">Label</a> page, place keypoints on a
+                    spread of frames and press <strong>Save &amp; commit</strong>.</li>
+                <li>Run <strong>Train</strong> from Jobs. It builds the training set,
+                    trains, and analyzes every trial.</li>
+                <li>Back on Label, switch to <strong>Correct</strong>, fix the
+                    predictions that are wrong, and save.</li>
+                <li>Switch to <strong>Refine</strong>, pick the corrected frames worth
+                    training on, commit, then run <strong>Refine</strong> from Jobs.</li>
+            </ol>
+        </div>
+    </div>
+
+    <script src="/static/js/nav.js?v=1"></script>
+    <script src="/static/js/subjects.js?v=1"></script>
+</body>
+</html>

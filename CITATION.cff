@@ -1,10 +1,12 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it using the metadata below."
-title: "Movement Tracker"
+title: "DLC Labeler"
 abstract: >
-  A web-based tool for video-based movement analysis, integrating DeepLabCut
-  pose estimation, MediaPipe hand tracking, and MANO hand model fitting.
-  Designed for clinical research on fine motor impairment.
+  A web app for DeepLabCut keypoint labeling on stereo video: manual
+  frame labeling, MediaPipe-assisted framing, model predictions in 2D and
+  3D, correction and refinement rounds, and local job management. A
+  stripped-down fork of Movement Tracker focused on field-standard
+  DeepLabCut analysis.
 authors:
   - family-names: Newbold
     given-names: Dillan

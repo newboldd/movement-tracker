@@ -1,0 +1,13 @@
+#!/bin/bash
+# DLC Labeler .app launcher.
+#
+# Resolves the project root (the folder containing this .app), then opens
+# a Terminal window running ./setup.sh — on purpose, so the install and
+# server logs are visible rather than the app silently doing nothing.
+APP_PATH="$(cd "$(dirname "$0")/../../.." && pwd)"
+osascript <<APPLESCRIPT
+tell application "Terminal"
+    activate
+    do script "cd \"$APP_PATH\" && ./setup.sh"
+end tell
+APPLESCRIPT

@@ -1,102 +1,68 @@
 @echo off
 setlocal enabledelayedexpansion
 
+:: DLC Labeler — one-click setup and launch for Windows.
+::
+::   run.bat               install what labeling needs, then start
+::   run.bat --with-dlc    also install DeepLabCut, for training
+::
+:: Written for locked-down machines.  On a managed laptop the usual
+:: failure is not a missing Python but Group Policy refusing to run one:
+:: so this tries, in order, an existing venv, a portable Python under
+:: AppData\Local, then a portable Python next to this script, and uses
+:: pip.pyz (a zipapp, no .exe) rather than pip.exe wherever it can.
+
 cd /d "%~dp0"
 
-:: ── First-run: create a "Movement Tracker.lnk" shortcut so users
-::    see the hand icon (icon.ico) instead of the generic .bat icon.
-if exist "icon.ico" if not exist "Movement Tracker.lnk" (
+set "WITH_DLC="
+if /i "%~1"=="--with-dlc" set "WITH_DLC=1"
+
+:: ── First run: make a shortcut with the app icon ───────────────
+if exist "icon.ico" if not exist "DLC Labeler.lnk" (
     powershell -NoProfile -Command ^
         "$ws = New-Object -ComObject WScript.Shell;" ^
-        "$sc = $ws.CreateShortcut((Join-Path (Get-Location) 'Movement Tracker.lnk'));" ^
+        "$sc = $ws.CreateShortcut((Join-Path (Get-Location) 'DLC Labeler.lnk'));" ^
         "$sc.TargetPath = (Join-Path (Get-Location) 'run.bat');" ^
         "$sc.WorkingDirectory = (Get-Location).Path;" ^
         "$sc.IconLocation = (Join-Path (Get-Location) 'icon.ico');" ^
-        "$sc.Description = 'Movement Tracker';" ^
+        "$sc.Description = 'DLC Labeler';" ^
         "$sc.Save()" >nul 2>&1
 )
 
-:: ── Upgrade: migrate data from a previous installation ─────────
-if "%~1"=="upgrade" (
-    if "%~2"=="" (
-        echo Usage: run.bat upgrade "C:\path\to\old\movement-tracker-master"
-        echo.
-        echo This copies your database, videos, DLC data, and settings from
-        echo a previous installation into this one.
-        pause
-        exit /b 1
+:: ── Data directory ─────────────────────────────────────────────
+:: .env next to this script may set DLC_DATA_DIR (MT_DATA_DIR is read
+:: too, so a machine already set up for Movement Tracker keeps its data).
+if exist ".env" (
+    for /f "usebackq tokens=1,* delims==" %%A in (".env") do (
+        set "_k=%%A"
+        set "_k=!_k: =!"
+        if /i "!_k!"=="DLC_DATA_DIR" set "DLC_DATA_DIR=%%B"
+        if /i "!_k!"=="MT_DATA_DIR" if not defined DLC_DATA_DIR set "DLC_DATA_DIR=%%B"
+        if /i "!_k!"=="DLC_PORT" set "DLC_PORT=%%B"
     )
-    set "OLD=%~2"
-
-    echo.
-    echo Migrating data from: !OLD!
-    echo                  to: %~dp0
-    echo.
-
-    :: Database
-    if exist "!OLD!\movement_tracker\dlc_app.db" (
-        echo Copying database...
-        copy /y "!OLD!\movement_tracker\dlc_app.db" "movement_tracker\dlc_app.db" >nul
-        echo   OK: dlc_app.db
-    )
-
-    :: Settings
-    if exist "!OLD!\movement_tracker\settings.json" (
-        echo Copying settings...
-        copy /y "!OLD!\movement_tracker\settings.json" "movement_tracker\settings.json" >nul
-        echo   OK: settings.json
-    )
-
-    :: Videos
-    if exist "!OLD!\videos" (
-        echo Copying videos...
-        xcopy /E /I /Y /Q "!OLD!\videos" "videos" >nul
-        echo   OK: videos\
-    )
-
-    :: DLC data
-    if exist "!OLD!\dlc" (
-        echo Copying DLC data...
-        xcopy /E /I /Y /Q "!OLD!\dlc" "dlc" >nul
-        echo   OK: dlc\
-    )
-
-    :: Portable Python (reuse if present, saves re-download)
-    if exist "!OLD!\.python" (
-        echo Copying portable Python...
-        xcopy /E /I /Y /Q "!OLD!\.python" ".python" >nul
-        echo   OK: .python\
-    )
-    :: Also check AppData location from previous installs
-    if exist "%LOCALAPPDATA%\MovementTracker\python\python.exe" (
-        echo Found existing portable Python in AppData.
-    )
-
-    echo.
-    echo Migration complete! Starting Movement Tracker...
-    echo.
 )
+if not defined DLC_DATA_DIR if defined MT_DATA_DIR set "DLC_DATA_DIR=%MT_DATA_DIR%"
+if not defined DLC_DATA_DIR set "DLC_DATA_DIR=%~dp0data"
+if not defined DLC_PORT set "DLC_PORT=8080"
 
 :: ── Find Python ────────────────────────────────────────────────
-:: Priority: .venv > active conda env > mano conda env > Anaconda base > system python
+:: Priority: local .venv > portable Python from a previous run >
+:: active conda env > conda base > system python > fresh portable install.
 set "PYTHON="
 
-:: 1. Check for local .venv
 if exist ".venv\Scripts\python.exe" (
     set "PYTHON=.venv\Scripts\python.exe"
     goto :found
 )
 
-:: 1b. Check for portable Python in AppData (from previous run on locked-down machine)
-if exist "%LOCALAPPDATA%\MovementTracker\python\python.exe" (
-    "%LOCALAPPDATA%\MovementTracker\python\python.exe" -c "print('ok')" >nul 2>nul
+if exist "%LOCALAPPDATA%\DLCLabeler\python\python.exe" (
+    "%LOCALAPPDATA%\DLCLabeler\python\python.exe" -c "print('ok')" >nul 2>nul
     if not errorlevel 1 (
-        set "PYTHON=%LOCALAPPDATA%\MovementTracker\python\python.exe"
+        set "PYTHON=%LOCALAPPDATA%\DLCLabeler\python\python.exe"
         goto :found
     )
 )
 
-:: 2. Already in a conda env with uvicorn?
 if defined CONDA_PREFIX (
     "%CONDA_PREFIX%\python.exe" -c "import uvicorn" 2>nul && (
         set "PYTHON=%CONDA_PREFIX%\python.exe"
@@ -104,8 +70,7 @@ if defined CONDA_PREFIX (
     )
 )
 
-:: 3. Try to find conda and activate 'mano' env
-:: Check common conda locations when launched from File Explorer (no conda on PATH)
+:: Conda is often installed but not on PATH when launched from Explorer.
 set "CONDA_BAT="
 where conda >nul 2>nul && (
     for /f "delims=" %%C in ('where conda') do set "CONDA_BAT=%%~dpCactivate.bat"
@@ -122,23 +87,20 @@ if not defined CONDA_BAT (
         if exist %%D set "CONDA_BAT=%%~D"
     )
 )
-
 if defined CONDA_BAT (
-    :: Try activating 'mano' env
-    call "%CONDA_BAT%" mano 2>nul
+    call "%CONDA_BAT%" dlc 2>nul
     if defined CONDA_PREFIX (
-        set "PYTHON=%CONDA_PREFIX%\python.exe"
+        set "PYTHON=!CONDA_PREFIX!\python.exe"
         if exist "!PYTHON!" goto :found
     )
-    :: Fall back to conda base
     call "%CONDA_BAT%" 2>nul
     if defined CONDA_PREFIX (
-        set "PYTHON=%CONDA_PREFIX%\python.exe"
+        set "PYTHON=!CONDA_PREFIX!\python.exe"
         if exist "!PYTHON!" goto :found
     )
 )
 
-:: 4. Fall back to system python (verify it's real, not the Windows Store alias)
+:: System python, but not the Windows Store stub, which exits silently.
 where python >nul 2>nul && (
     for /f "delims=" %%P in ('python -c "import sys; print(sys.executable)" 2^>nul') do (
         echo %%P | findstr /i "WindowsApps" >nul
@@ -149,87 +111,67 @@ where python >nul 2>nul && (
     )
 )
 
-:: 5. No Python found — try to auto-install
 echo.
-echo Python not found. Attempting automatic install...
+echo Python not found. Installing a private copy...
 echo.
 
 set "PY_ZIP=%TEMP%\python-3.11-embed.zip"
-
-:: Try two locations for portable Python:
-::   1. %LOCALAPPDATA%\MovementTracker  (AppLocker usually allows AppData\Local)
-::   2. .python\ next to this script     (fallback, may be blocked in Downloads)
-set "PORTABLE_DIR_APPDATA=%LOCALAPPDATA%\MovementTracker\python"
+set "PORTABLE_DIR_APPDATA=%LOCALAPPDATA%\DLCLabeler\python"
 set "PORTABLE_DIR_LOCAL=%~dp0.python"
 
-:: Check if we already have a working portable Python in either location
-if exist "!PORTABLE_DIR_APPDATA!\python.exe" (
-    "!PORTABLE_DIR_APPDATA!\python.exe" -c "print('ok')" >nul 2>nul
-    if not errorlevel 1 (
-        set "PORTABLE_DIR=!PORTABLE_DIR_APPDATA!"
-        goto :portable_ready
-    )
-    echo Note: Python in AppData is blocked by Group Policy, trying next...
-)
 if exist "!PORTABLE_DIR_LOCAL!\python.exe" (
     "!PORTABLE_DIR_LOCAL!\python.exe" -c "print('ok')" >nul 2>nul
     if not errorlevel 1 (
         set "PORTABLE_DIR=!PORTABLE_DIR_LOCAL!"
         goto :portable_ready
     )
-    echo Note: Python in local folder is blocked by Group Policy...
 )
 
-:: Download and extract portable Python
-echo Setting up portable Python...
 echo Downloading portable Python 3.11...
 powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip' -OutFile '!PY_ZIP!' }" 2>nul
 if not exist "!PY_ZIP!" (
     echo.
-    echo Could not download Python. Check your internet connection.
+    echo Could not download Python. Check the internet connection.
     echo.
     pause
     exit /b 1
 )
 
-:: Try extracting to AppData\Local first (less likely to be blocked by Group Policy)
+:: AppData\Local first — it is the location most policies still allow.
 set "PORTABLE_DIR=!PORTABLE_DIR_APPDATA!"
-echo Extracting to %LOCALAPPDATA%\MovementTracker\...
+echo Extracting to %LOCALAPPDATA%\DLCLabeler\...
 mkdir "!PORTABLE_DIR!" 2>nul
 powershell -Command "Expand-Archive -Path '!PY_ZIP!' -DestinationPath '!PORTABLE_DIR!' -Force" 2>nul
-
-:: Enable pip in embeddable Python (uncomment 'import site' in python311._pth)
+:: The embeddable build ships with site imports disabled, which also
+:: disables pip; re-enable it.
 powershell -Command "(Get-Content '!PORTABLE_DIR!\python311._pth') -replace '^#import site','import site' | Set-Content '!PORTABLE_DIR!\python311._pth'" 2>nul
 
-:: Verify it actually runs (Group Policy check)
 "!PORTABLE_DIR!\python.exe" -c "print('ok')" >nul 2>nul
 if errorlevel 1 (
-    echo Python in AppData blocked by Group Policy, trying local folder...
+    echo AppData is blocked by policy here. Trying this folder instead...
     rmdir /s /q "!PORTABLE_DIR!" 2>nul
-
-    :: Fall back to .python\ next to the script
     set "PORTABLE_DIR=!PORTABLE_DIR_LOCAL!"
-    echo Extracting to !PORTABLE_DIR!...
     mkdir "!PORTABLE_DIR!" 2>nul
     powershell -Command "Expand-Archive -Path '!PY_ZIP!' -DestinationPath '!PORTABLE_DIR!' -Force" 2>nul
     powershell -Command "(Get-Content '!PORTABLE_DIR!\python311._pth') -replace '^#import site','import site' | Set-Content '!PORTABLE_DIR!\python311._pth'" 2>nul
-
-    :: Verify again
     "!PORTABLE_DIR!\python.exe" -c "print('ok')" >nul 2>nul
     if errorlevel 1 (
         echo.
         echo ============================================================
-        echo ERROR: Python is blocked by Group Policy in all locations.
+        echo Python is blocked by Group Policy in every location tried.
         echo ============================================================
         echo.
-        echo Your IT department blocks .exe files from running in:
-        echo   - %LOCALAPPDATA%\MovementTracker\
+        echo Programs cannot run from:
+        echo   - %LOCALAPPDATA%\DLCLabeler\
         echo   - %~dp0
         echo.
-        echo Please ask IT to do ONE of the following:
-        echo   1. Install Python 3.11 system-wide (recommended^)
-        echo   2. Whitelist this folder: %LOCALAPPDATA%\MovementTracker\
-        echo   3. Install Anaconda for your user account
+        echo Ask IT for ONE of these:
+        echo   1. Python 3.11 installed system-wide ^(simplest^)
+        echo   2. %LOCALAPPDATA%\DLCLabeler\ added to the allow list
+        echo   3. Anaconda installed for your user account
+        echo.
+        echo Or move this folder out of Downloads ^(e.g. to C:\DLCLabeler^)
+        echo and run it again — that alone often fixes it.
         echo.
         del "!PY_ZIP!" 2>nul
         pause
@@ -241,7 +183,7 @@ del "!PY_ZIP!" 2>nul
 :portable_ready
 echo Using portable Python at: !PORTABLE_DIR!
 
-:: Download pip as a standalone zip app (no .exe files — avoids Group Policy blocks)
+:: pip as a zipapp: no pip.exe is created, so nothing new has to pass policy.
 set "PIP_PYZ=!PORTABLE_DIR!\pip.pyz"
 if not exist "!PIP_PYZ!" (
     echo Downloading pip...
@@ -254,8 +196,8 @@ if exist "!PORTABLE_DIR!\python.exe" (
 )
 
 echo.
-echo All automatic install methods failed.
-echo Please ask IT to install Python 3.11 or Anaconda, then re-run this script.
+echo Every automatic install path failed. Ask IT to install Python 3.11
+echo or Anaconda, then run this again.
 echo.
 pause
 exit /b 1
@@ -263,43 +205,37 @@ exit /b 1
 :found
 echo Using Python: %PYTHON%
 
-:: ── Determine pip command ───────────────────────────────────────
-:: Prefer pip.pyz (no .exe, avoids Group Policy blocks on locked-down machines)
-set "PIP_CMD="
-:: Check both possible pip.pyz locations
+:: ── Pick a pip ─────────────────────────────────────────────────
 set "PIP_PYZ="
-if exist "%LOCALAPPDATA%\MovementTracker\python\pip.pyz" set "PIP_PYZ=%LOCALAPPDATA%\MovementTracker\python\pip.pyz"
+if exist "%LOCALAPPDATA%\DLCLabeler\python\pip.pyz" set "PIP_PYZ=%LOCALAPPDATA%\DLCLabeler\python\pip.pyz"
 if exist "%~dp0.python\pip.pyz" set "PIP_PYZ=%~dp0.python\pip.pyz"
-if defined PIP_PYZ (
-    set "PIP_CMD=%PYTHON% "%PIP_PYZ%""
-) else (
-    set "PIP_CMD=%PYTHON% -m pip"
-)
 
-:: ── Check dependencies ─────────────────────────────────────────
+:: ── Base dependencies ──────────────────────────────────────────
 echo Checking dependencies...
-%PYTHON% -c "import uvicorn, fastapi, cv2, numpy, pandas, mediapipe" 2>nul
+%PYTHON% -c "import uvicorn, fastapi, cv2, numpy, yaml, mediapipe" 2>nul
 if errorlevel 1 (
-    echo Installing missing dependencies (this may take a few minutes^)...
+    echo Installing dependencies ^(a few minutes^)...
 
-    :: Strategy 1: offline wheels directory (for air-gapped / locked-down machines)
+    :: A wheels\ folder lets a locked-down or offline machine install
+    :: from media copied off an unrestricted one.
     if exist "%~dp0wheels" (
-        echo Found local wheels directory, installing offline...
-        %PIP_CMD% install --no-index --find-links "%~dp0wheels" -r requirements.txt --no-build-isolation
+        echo Found a local wheels folder — installing offline...
+        if defined PIP_PYZ (
+            %PYTHON% "%PIP_PYZ%" install --no-index --find-links "%~dp0wheels" -r requirements.txt
+        ) else (
+            %PYTHON% -m pip install --no-index --find-links "%~dp0wheels" -r requirements.txt
+        )
         if not errorlevel 1 goto :deps_ok
-        echo Offline install failed, trying online...
+        echo Offline install failed; trying online...
     )
 
-    :: Strategy 2: pip.pyz with --only-binary (no .exe created, no compiling)
     if defined PIP_PYZ (
         %PYTHON% "%PIP_PYZ%" install --only-binary :all: --no-cache-dir -r requirements.txt
         if not errorlevel 1 goto :deps_ok
-        echo pip.pyz binary-only install failed, trying with source builds...
         %PYTHON% "%PIP_PYZ%" install --no-cache-dir -r requirements.txt
         if not errorlevel 1 goto :deps_ok
     )
 
-    :: Strategy 3: standard pip module (works when pip.exe isn't blocked)
     %PYTHON% -m pip install --only-binary :all: -r requirements.txt
     if not errorlevel 1 goto :deps_ok
     %PYTHON% -m pip install -r requirements.txt
@@ -307,56 +243,76 @@ if errorlevel 1 (
 
     echo.
     echo ============================================================
-    echo ERROR: Failed to install dependencies.
+    echo Could not install the dependencies.
     echo ============================================================
     echo.
-    echo This is often caused by hospital/enterprise Group Policy
-    echo blocking programs in the Downloads folder.
+    echo On managed laptops this is usually Group Policy blocking the
+    echo Downloads folder. In order of how often it works:
     echo.
-    echo Try these fixes (easiest first^):
-    echo.
-    echo  1. MOVE this folder to C:\MovementTracker and re-run
-    echo     (paths outside Downloads are less likely to be blocked^)
-    echo.
-    echo  2. Ask IT to whitelist this folder:
-    echo     %~dp0
-    echo.
+    echo  1. MOVE this folder to C:\DLCLabeler and run it again
+    echo  2. Ask IT to allow: %~dp0
     echo  3. Ask IT to install Python 3.11 system-wide, then re-run
-    echo.
-    echo  4. On another (unrestricted^) PC, run:
+    echo  4. On an unrestricted PC run:
     echo       pip download -r requirements.txt -d wheels\
-    echo     Copy the "wheels" folder into this directory, then re-run.
-    echo     (This enables fully offline installation.^)
+    echo     copy the wheels folder in here, and run again ^(fully offline^)
     echo.
     pause
     exit /b 1
 )
 :deps_ok
 
-:: ── Sample data ──────────────────────────────────────────────────
-if not exist "sample_data\Con01_R1.mp4" (
-    echo Downloading sample video...
-    %PYTHON% scripts\download_sample.py
+:: ── DeepLabCut (second tier) ───────────────────────────────────
+if defined WITH_DLC (
+    %PYTHON% -c "import deeplabcut" 2>nul
+    if errorlevel 1 (
+        echo.
+        echo Installing DeepLabCut ^(several GB — the slow part, once^)...
+        if defined PIP_PYZ (
+            %PYTHON% "%PIP_PYZ%" install -r requirements-dlc.txt
+        ) else (
+            %PYTHON% -m pip install -r requirements-dlc.txt
+        )
+        if errorlevel 1 (
+            echo.
+            echo DeepLabCut did not install. Labeling still works; you can
+            echo retry from the Jobs page.
+            echo.
+        )
+    ) else (
+        echo DeepLabCut is already installed.
+    )
 )
 
-:: ── Ensure default directories exist ────────────────────────────
-if not exist "dlc" mkdir dlc
+:: ── Data directory ─────────────────────────────────────────────
+if not exist "%DLC_DATA_DIR%" mkdir "%DLC_DATA_DIR%" 2>nul
+if not exist "%DLC_DATA_DIR%\dlc" mkdir "%DLC_DATA_DIR%\dlc" 2>nul
+if not exist "%DLC_DATA_DIR%\videos" mkdir "%DLC_DATA_DIR%\videos" 2>nul
+if not exist "%DLC_DATA_DIR%\calibration" mkdir "%DLC_DATA_DIR%\calibration" 2>nul
+if exist "calibration" (
+    xcopy /I /Y /Q /D "calibration\*" "%DLC_DATA_DIR%\calibration\" >nul 2>nul
+)
 
-:: ── Launch ──────────────────────────────────────────────────────
+:: ── Launch ─────────────────────────────────────────────────────
 echo.
-echo Starting Movement Tracker...
-echo Dashboard will open at http://localhost:8080
+echo Starting DLC Labeler at http://localhost:%DLC_PORT%
+echo Data directory: %DLC_DATA_DIR%
+%PYTHON% -c "import deeplabcut" 2>nul
+if errorlevel 1 (
+    echo.
+    echo DeepLabCut is not installed, so training and analysis are off.
+    echo Add it with:  run.bat --with-dlc
+)
 echo.
 
-:: Open browser after a short delay (background, non-blocking)
-start "" cmd /c "timeout /t 2 /nobreak >nul & start http://localhost:8080"
+start "" cmd /c "timeout /t 2 /nobreak >nul & start http://localhost:%DLC_PORT%"
 
-:: ── Launch with restart loop (exit code 42 = restart after update) ──
+:: Exit code 42 means "restart" — the Settings page uses it when the
+:: data directory changes.
 :launch
-%PYTHON% -m uvicorn movement_tracker.app:app --host 127.0.0.1 --port 8080 --timeout-graceful-shutdown 3
+%PYTHON% -m uvicorn dlc_labeler.app:app --host 127.0.0.1 --port %DLC_PORT% --timeout-graceful-shutdown 3
 if %errorlevel%==42 (
     echo.
-    echo Restarting after update...
+    echo Restarting...
     echo.
     goto :launch
 )

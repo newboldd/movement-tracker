@@ -2,42 +2,36 @@
 __pycache__/
 *.pyc
 .venv/
+.python/
 
-# App runtime data
+# Local config
+.env
+
+# Runtime data.  Everything the app produces lives in the data directory
+# (DLC_DATA_DIR), which is outside the repo by default — these entries
+# cover the case where someone points it at the project folder itself.
+data/
+videos/
+dlc/
+sample_data/
 *.db
+*.db-wal
+*.db-shm
 settings.json
+job_history.jsonl
 *.log
+
+# Offline install media (see run.bat)
+wheels/
+
+# Per-machine calibrations.  cam1_calibration.yaml is the shipped
+# example; a rig's own calibration belongs in the data directory.
+calibration/cam2_calibration.yaml
+calibration/camera1_recalibrated.yaml
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Data directories (created at runtime)
-videos/
-dlc/
-
-# Sample data (downloaded separately via scripts/download_sample.py)
-sample_data/
-
-# Development scratch scripts (contain hardcoded local paths/subject IDs)
-scratch/
-
-# Claude conversation history
+# Tooling
 .claude/
-.python/
-.env
-calibration/cam2_calibration.yaml
-calibration/camera1_recalibrated.yaml
-
-# Runtime cache (recomputed per machine)
-.preview_distances.json
-
-# Stray / local-only artifacts
-.fuse_hidden*
-*.db-wal
-*.db-shm
-methods.pages
-methods_draft.docx
-
-# Static results export (publish separately to GitHub Pages)
-/site/

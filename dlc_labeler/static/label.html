@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DLC Labeler</title>
+    <link rel="stylesheet" href="/static/css/main.css?v=1">
+    <style>
+        body { overflow: hidden; }
+
+        /* Hide the sidebar scrollbar; it still scrolls by wheel/trackpad. */
+        #sidebarScroll { scrollbar-width: none; -ms-overflow-style: none; }
+        #sidebarScroll::-webkit-scrollbar { width: 0; height: 0; display: none; }
+
+        /* Don't ring buttons on mouse click, only on keyboard focus. */
+        button:focus:not(:focus-visible), .btn:focus:not(:focus-visible),
+        select:focus:not(:focus-visible) { outline: none; box-shadow: none; }
+
+        .sb-section {
+            font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px;
+            color: var(--text-muted); margin: 14px 0 6px;
+            border-bottom: 1px solid var(--border); padding-bottom: 3px;
+        }
+        .sb-section:first-child { margin-top: 0; }
+
+        /* Mode switch — which kind of session is open. */
+        .mode-row { display: flex; gap: 3px; }
+        .mode-btn {
+            flex: 1; padding: 4px 0; font-size: 11px; cursor: pointer;
+            border: 1px solid var(--border); border-radius: var(--radius);
+            background: var(--bg); color: var(--text-muted); font-family: inherit;
+        }
+        .mode-btn:hover:not(.active) { background: var(--bg-hover); color: var(--text); }
+        .mode-btn.active {
+            background: var(--blue); border-color: var(--blue);
+            color: #1f0f3a; font-weight: 600;
+        }
+
+        /* Layer grid: name, 2D toggle, 3D toggle. */
+        #layerGrid {
+            display: grid; grid-template-columns: 1fr 24px 24px;
+            gap: 3px 4px; align-items: center; font-size: 12px;
+        }
+        #layerGrid .hdr {
+            font-size: 9px; color: var(--text-muted); text-align: center;
+        }
+        #layerGrid input { margin: 0; justify-self: center; cursor: pointer; }
+        #layerGrid .lname { color: var(--text-muted); display: flex; align-items: center; gap: 5px; }
+        #layerGrid .lname.indent { padding-left: 12px; }
+        #layerGrid .lname.unavailable { opacity: 0.35; }
+        .swatch {
+            display: inline-block; width: 9px; height: 9px; border-radius: 2px;
+            border: 1px solid rgba(255,255,255,0.18); flex-shrink: 0;
+        }
+
+        .finger-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px 8px; }
+        .finger-toggle {
+            display: flex; align-items: center; gap: 4px;
+            font-size: 11px; cursor: pointer; color: var(--text-muted);
+        }
+        .finger-toggle input { margin: 0; }
+
+        .row { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+        .row + .row { margin-top: 5px; }
+        .row label { color: var(--text-muted); cursor: pointer; display: flex;
+                     align-items: center; gap: 5px; }
+        .mini { font-size: 11px; color: var(--text-muted); line-height: 1.5; }
+        .sb-btn { width: 100%; margin-top: 5px; }
+
+        /* Viewports: video canvas with the 3D view docked beside or over it. */
+        .viewports { position: absolute; inset: 0; display: flex; }
+        .vp-2d { position: relative; flex: 1; min-width: 0; }
+        .vp-2d canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+        .vp-3d {
+            position: relative; width: 38%; min-width: 260px;
+            border-left: 1px solid var(--border); background: #120822;
+            display: none;
+        }
+        .vp-3d.active { display: block; }
+        .vp-3d canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+        .vp-3d-hint {
+            position: absolute; bottom: 6px; left: 8px; right: 8px;
+            font-size: 10px; color: var(--text-muted); pointer-events: none;
+        }
+
+        .timeline-container { height: 74px; }
+        .distance-trace-container { height: 110px; }
+
+        .status-pill {
+            font-size: 11px; padding: 1px 7px; border-radius: 9px;
+            border: 1px solid var(--border); color: var(--text-muted);
+        }
+        .status-pill.dirty { border-color: var(--orange); color: #ffcc80; }
+        .status-pill.saved { border-color: var(--green); color: #a5d6a7; }
+
+        #refinePanel table { width: 100%; font-size: 11px; border-collapse: collapse; }
+        #refinePanel th { text-align: left; color: var(--text-muted); font-weight: 500; }
+        #refinePanel td { padding: 1px 0; }
+        #refineList { max-height: 190px; overflow-y: auto; }
+
+        .toast {
+            position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+            background: var(--bg-card); border: 1px solid var(--border);
+            border-radius: var(--radius); padding: 8px 16px; font-size: 13px;
+            z-index: 50; box-shadow: 0 4px 16px rgba(0,0,0,0.5); max-width: 70vw;
+        }
+        .toast.err { border-color: var(--red); color: #ffcdd2; }
+        .toast.ok { border-color: var(--green); }
+    </style>
+</head>
+<body data-subject-nav>
+    <div class="header"></div>
+
+    <div class="labeling-layout">
+        <div class="labeling-sidebar">
+            <div id="sidebarScroll" style="flex:1;min-height:0;overflow-y:auto;">
+
+                <div class="sb-section">Mode</div>
+                <div class="mode-row" id="modeRow">
+                    <button class="mode-btn active" data-mode="initial"
+                            title="Place keypoints on raw video to build the first training set">Label</button>
+                    <button class="mode-btn" data-mode="corrections"
+                            title="Edit the model's predictions and save them as corrections">Correct</button>
+                    <button class="mode-btn" data-mode="refine"
+                            title="Choose corrected frames to add to the training set">Refine</button>
+                </div>
+                <div class="mini" id="modeHelp" style="margin-top:6px;"></div>
+
+                <div class="sb-section">Session</div>
+                <div class="label-count">This session: <strong id="labelCount">0</strong> frames</div>
+                <div class="mini" id="committedCount"></div>
+                <div class="mini" id="calibNote"></div>
+
+                <div class="sb-section">Layers</div>
+                <div id="layerGrid">
+                    <span></span><span class="hdr">2D</span><span class="hdr">3D</span>
+                </div>
+                <div class="mini" id="layerNote" style="margin-top:6px;"></div>
+
+                <div class="sb-section">Hand joints <span style="text-transform:none;letter-spacing:0;">(MediaPipe)</span></div>
+                <div class="finger-grid" id="fingerGrid"></div>
+
+                <div class="sb-section">Zoom</div>
+                <div class="row">
+                    <label title="Frame each new frame on the hand, using the labels or MediaPipe landmarks">
+                        <input type="checkbox" id="autoZoomCb" checked> Auto-zoom to hand
+                    </label>
+                </div>
+                <div class="row">
+                    <label title="Use the trial's saved crop box for the zoom instead of the per-frame points — steadier, but wider">
+                        <input type="checkbox" id="boxZoomCb"> Zoom to crop box
+                    </label>
+                </div>
+                <button class="btn btn-sm sb-btn" id="editBoxBtn"
+                        title="Drag the box MediaPipe crops to. Also frames the 'Zoom to crop box' view.">Edit crop box</button>
+                <div id="boxActions" style="display:none;">
+                    <button class="btn btn-sm sb-btn" id="saveBoxBtn">Save box</button>
+                    <label class="mini" style="display:flex;align-items:center;gap:5px;margin-top:4px;cursor:pointer;">
+                        <input type="checkbox" id="boxAllTrials"> apply to trials with no box
+                    </label>
+                    <button class="btn btn-sm sb-btn" id="redetectBtn"
+                            title="Re-run MediaPipe on this trial inside the box">Re-detect this trial</button>
+                    <button class="btn btn-sm sb-btn" id="cancelBoxBtn">Cancel</button>
+                </div>
+                <div class="mini" id="boxStatus" style="margin-top:4px;"></div>
+
+                <div class="sb-section">Actions</div>
+                <button class="btn btn-sm btn-success sb-btn" id="commitBtn">Save &amp; commit</button>
+                <button class="btn btn-sm sb-btn" id="saveCorrBtn" style="display:none;">Save corrections</button>
+                <div class="mini" id="actionHelp" style="margin-top:5px;"></div>
+
+                <div id="refinePanel" style="display:none;">
+                    <div class="sb-section">Frames to train on</div>
+                    <div class="mini" id="refineSummary"></div>
+                    <div id="refineList" style="margin-top:4px;"></div>
+                    <button class="btn btn-sm sb-btn" id="refineAllBtn">Select all</button>
+                    <button class="btn btn-sm sb-btn" id="refineNoneBtn">Select none</button>
+                </div>
+
+                <div class="sb-section">Shortcuts</div>
+                <div class="shortcut-list" id="shortcutList"></div>
+            </div>
+        </div>
+
+        <div class="labeling-main">
+            <div class="canvas-container" id="canvasContainer">
+                <div class="viewports">
+                    <div class="vp-2d" id="vp2d">
+                        <canvas id="labelCanvas" tabindex="0"></canvas>
+                    </div>
+                    <div class="vp-3d" id="vp3d">
+                        <div class="vp-3d-hint">drag to orbit · scroll to zoom · shift-drag to pan</div>
+                    </div>
+                </div>
+                <video id="videoPlayer" style="display:none;" muted preload="auto"></video>
+            </div>
+
+            <div class="controls-bar">
+                <button class="btn btn-sm" id="playBtn" title="Play / pause (space)"
+                        style="width:32px;">&#9654;</button>
+                <input type="range" id="speedSlider" min="0" max="9" value="5"
+                       style="width:84px;cursor:pointer;" title="Playback speed">
+                <span id="speedLabel" style="font-size:11px;color:var(--blue);min-width:30px;">1x</span>
+                <span class="frame-display" id="frameDisplay"
+                      title="Click to switch between frame number, time, and both"
+                      style="cursor:pointer;">Frame 0 / 0</span>
+                <span id="sideToggle" class="side-toggle os" title="Switch camera (E)">OS</span>
+                <button class="btn btn-sm" id="view3dBtn" title="Show the triangulated 3D view (D)">3D</button>
+                <button class="btn btn-sm" id="resetZoomBtn" title="Reset zoom (R)">Fit</button>
+                <span class="status-pill" id="savePill">saved</span>
+                <span id="labelInfo" style="font-size:12px;color:var(--text-muted);margin-left:auto;"></span>
+            </div>
+
+            <div class="timeline-container">
+                <canvas id="timelineCanvas" class="timeline-canvas"></canvas>
+            </div>
+
+            <div class="distance-trace-container" id="traceContainer">
+                <div class="distance-trace-label" id="traceLabel"></div>
+                <canvas id="traceCanvas"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "/static/vendor/three.module.js?v=1"
+        }
+    }
+    </script>
+    <script src="/static/js/nav.js?v=1"></script>
+    <script src="/static/js/label.js?v=1" type="module"></script>
+</body>
+</html>

@@ -1,67 +1,67 @@
 #!/usr/bin/env bash
-# One-command setup and launch for Movement Tracker.
+# One-command setup and launch for DLC Labeler (macOS / Linux).
 #
 # Usage:
-#   ./setup.sh
+#   ./setup.sh                 install what labeling needs, then start
+#   ./setup.sh --with-dlc      also install DeepLabCut, for training
+#   ./setup.sh --reinstall     rebuild the virtual environment from scratch
 #
-# What it does:
-#   1. Checks for Python 3.9+ — installs it if missing (where possible)
-#   2. Checks for ffmpeg — installs it if missing (where possible)
-#   3. Creates a virtual environment (first run only)
-#   4. Installs Python dependencies (first run only)
-#   5. Downloads sample video if not already present
-#   6. Starts the web app and opens your browser
+# The install is deliberately two-tier.  The base tier is small and fast
+# and is all you need to label frames, run MediaPipe and review
+# predictions.  DeepLabCut and torch are several GB and only matter on a
+# machine that will actually train, so they are opt-in — via --with-dlc
+# here, or the button on the Jobs page later.
+#
+# Data (videos, DLC projects, the database) lives outside the code, in
+# DLC_DATA_DIR.  Set it in a .env file next to this script:
+#     DLC_DATA_DIR=~/data/dlc-labeler
 
-set -e
+set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$PROJECT_DIR/.venv"
 REQUIREMENTS="$PROJECT_DIR/requirements.txt"
-PORT=8080
+REQUIREMENTS_DLC="$PROJECT_DIR/requirements-dlc.txt"
+PORT="${DLC_PORT:-8080}"
 
-# Load local env overrides (e.g. MT_DATA_DIR)
+WITH_DLC=0
+REINSTALL=0
+for arg in "$@"; do
+    case "$arg" in
+        --with-dlc)  WITH_DLC=1 ;;
+        --reinstall) REINSTALL=1 ;;
+        -h|--help)   sed -n '2,20p' "$0"; exit 0 ;;
+        *) echo "Unknown option: $arg (try --help)"; exit 1 ;;
+    esac
+done
+
+# Local overrides (DLC_DATA_DIR, DLC_PORT, …)
 if [ -f "$PROJECT_DIR/.env" ]; then
     set -a
+    # shellcheck disable=SC1091
     source "$PROJECT_DIR/.env"
     set +a
 fi
 
-# Data directory: separate from code. Defaults to PROJECT_DIR if not set.
-# Override via .env file or MT_DATA_DIR env var.
-export MT_DATA_DIR="${MT_DATA_DIR:-$PROJECT_DIR}"
+# MT_DATA_DIR is honoured too, so a machine already set up for the full
+# Movement Tracker app points at the same data without being re-configured.
+export DLC_DATA_DIR="${DLC_DATA_DIR:-${MT_DATA_DIR:-$PROJECT_DIR/data}}"
+PORT="${DLC_PORT:-$PORT}"
 OS="$(uname -s)"   # Darwin | Linux
 
-# ── Helpers ───────────────────────────────────────────────────────────────
-
 print_header() { echo ""; echo "── $1 ──────────────────────────────────"; }
-
-# Attempt a brew / apt / dnf install; return 1 if nothing worked
-try_install() {
-    local pkg_brew="$1" pkg_apt="$2" pkg_dnf="$3"
-    if [ "$OS" = "Darwin" ] && command -v brew &>/dev/null; then
-        brew install "$pkg_brew"
-        return 0
-    elif command -v apt-get &>/dev/null; then
-        sudo apt-get install -y "$pkg_apt"
-        return 0
-    elif command -v dnf &>/dev/null; then
-        sudo dnf install -y "$pkg_dnf"
-        return 0
-    elif command -v yum &>/dev/null; then
-        sudo yum install -y "$pkg_dnf"
-        return 0
-    fi
-    return 1
-}
 
 # ── Python ────────────────────────────────────────────────────────────────
 
 find_python() {
+    # 3.9 is the floor FastAPI and the type hints here need; mediapipe
+    # wheels below 0.10.19 stop at 3.12, so prefer 3.11/3.12 and warn
+    # rather than fail on anything newer.
     for cmd in python3.12 python3.11 python3.10 python3.9 python3 python; do
         if command -v "$cmd" &>/dev/null; then
-            version=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
-            major=$(echo "$version" | cut -d. -f1)
-            minor=$(echo "$version" | cut -d. -f2)
+            version=$("$cmd" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null) || continue
+            major=${version%%.*}
+            minor=${version##*.}
             if [ "$major" -eq 3 ] && [ "$minor" -ge 9 ]; then
                 echo "$cmd"
                 return 0
@@ -75,211 +75,162 @@ install_python() {
     print_header "Installing Python"
     echo "Python 3.9+ is required but was not found."
     echo ""
-
     if [ "$OS" = "Darwin" ]; then
         if command -v brew &>/dev/null; then
             echo "Installing Python 3.11 via Homebrew..."
             brew install python@3.11
         else
-            echo "Homebrew is not installed."
-            echo ""
-            echo "The easiest options:"
-            echo "  1. Install Homebrew (https://brew.sh), then re-run this script."
-            echo "  2. Download Python directly from https://www.python.org/downloads/"
-            echo "     Install it, then re-run this script."
+            echo "Homebrew is not installed. Either:"
+            echo "  1. Install Homebrew (https://brew.sh) and re-run this script, or"
+            echo "  2. Install Python from https://www.python.org/downloads/"
             exit 1
         fi
     elif [ "$OS" = "Linux" ]; then
         if command -v apt-get &>/dev/null; then
-            echo "Installing Python 3.11 via apt..."
-            sudo apt-get update -q
-            sudo apt-get install -y python3.11 python3.11-venv python3-pip
+            sudo apt-get update -q && sudo apt-get install -y python3.11 python3.11-venv python3-pip
         elif command -v dnf &>/dev/null; then
-            echo "Installing Python 3.11 via dnf..."
             sudo dnf install -y python3.11
-        elif command -v yum &>/dev/null; then
-            echo "Installing Python 3 via yum..."
-            sudo yum install -y python3
         else
             echo "Could not detect a package manager."
-            echo ""
-            echo "Please install Python 3.9+ manually:"
-            echo "  → https://www.python.org/downloads/"
+            echo "Install Python 3.9+ from https://www.python.org/downloads/ and re-run."
             exit 1
         fi
     else
         echo "Automatic install is not supported on this OS."
-        echo ""
-        echo "Please install Python 3.9+ from:"
-        echo "  → https://www.python.org/downloads/"
+        echo "Install Python 3.9+ from https://www.python.org/downloads/ and re-run."
         exit 1
     fi
 }
 
-# Find Python, install if missing, then find again
 PYTHON=$(find_python) || {
     install_python
     PYTHON=$(find_python) || {
-        echo ""
-        echo "Python 3.9+ still not found after install attempt."
-        echo "Please install it manually from https://www.python.org/downloads/ and re-run."
+        echo "Python 3.9+ still not found. Install it manually and re-run."
         exit 1
     }
 }
 
-echo "Using Python: $PYTHON ($($PYTHON --version))"
+PY_VERSION=$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+echo "Using Python: $PYTHON ($($PYTHON --version 2>&1))"
+
+case "$PY_VERSION" in
+    3.13|3.14|3.15)
+        echo ""
+        echo "WARNING: MediaPipe does not publish wheels for Python $PY_VERSION."
+        echo "         Hand detection will not install. Everything else works."
+        echo "         Install Python 3.11 or 3.12 and re-run to get MediaPipe."
+        echo ""
+        ;;
+esac
 
 # ── ffmpeg ────────────────────────────────────────────────────────────────
-
+# imageio-ffmpeg bundles a binary, so a system ffmpeg is a nicety, not a
+# requirement.  Don't make a missing one look like a failure.
 if ! command -v ffmpeg &>/dev/null; then
-    print_header "Checking ffmpeg"
-    if ! try_install ffmpeg ffmpeg ffmpeg; then
-        echo "ffmpeg not found on system PATH."
-        echo "A bundled version (imageio-ffmpeg) will be used instead."
-        echo ""
-    else
-        echo "ffmpeg installed."
-    fi
+    echo "No system ffmpeg found — the bundled one (imageio-ffmpeg) will be used."
 fi
 
 # ── Virtual environment ───────────────────────────────────────────────────
 
+if [ "$REINSTALL" = "1" ] && [ -d "$VENV_DIR" ]; then
+    print_header "Removing the old virtual environment"
+    rm -rf "$VENV_DIR"
+fi
+
 if [ ! -d "$VENV_DIR" ]; then
-    print_header "Creating virtual environment"
+    print_header "Creating the virtual environment"
     "$PYTHON" -m venv "$VENV_DIR"
 fi
 
-source "$VENV_DIR/bin/activate"
+VENV_PY="$VENV_DIR/bin/python"
 
-# ── Python dependencies ───────────────────────────────────────────────────
-
+# Re-install whenever requirements.txt is newer than the last successful run.
 if [ ! -f "$VENV_DIR/.installed" ] || [ "$REQUIREMENTS" -nt "$VENV_DIR/.installed" ]; then
     print_header "Installing Python dependencies"
-    echo "This may take several minutes on first run (DeepLabCut and friends are large)."
+    echo "A few minutes on first run."
     echo ""
-    "$VENV_DIR/bin/pip" install --upgrade pip -q
-    "$VENV_DIR/bin/pip" install -r "$REQUIREMENTS"
+    "$VENV_PY" -m pip install --upgrade pip -q
+    if ! "$VENV_PY" -m pip install -r "$REQUIREMENTS"; then
+        echo ""
+        echo "Dependency install failed."
+        echo "If it was MediaPipe, check that this Python is 3.9-3.12:"
+        echo "  $("$VENV_PY" --version 2>&1)"
+        exit 1
+    fi
     touch "$VENV_DIR/.installed"
     echo ""
     echo "Dependencies installed."
 fi
 
-# ── Sample data ───────────────────────────────────────────────────────────
+# ── DeepLabCut (second tier) ──────────────────────────────────────────────
 
-if [ ! -f "$MT_DATA_DIR/sample_data/Con01_R1.mp4" ]; then
-    print_header "Downloading sample data"
-    "$PYTHON" "$PROJECT_DIR/scripts/download_sample.py"
+if [ "$WITH_DLC" = "1" ]; then
+    if "$VENV_PY" -c "import deeplabcut" 2>/dev/null; then
+        echo "DeepLabCut is already installed."
+    else
+        print_header "Installing DeepLabCut"
+        echo "Several GB — this is the slow part. It only has to happen once."
+        echo ""
+        "$VENV_PY" -m pip install -r "$REQUIREMENTS_DLC"
+        echo ""
+        echo "DeepLabCut installed."
+    fi
 fi
 
-# ── Ensure default directories exist ─────────────────────────────────────
-mkdir -p "$MT_DATA_DIR/dlc"
+# ── Data directory ────────────────────────────────────────────────────────
 
-# ── Kill any existing server on the port ─────────────────────────────────
+mkdir -p "$DLC_DATA_DIR/dlc" "$DLC_DATA_DIR/videos" "$DLC_DATA_DIR/calibration"
 
-existing=$(lsof -ti :$PORT 2>/dev/null || true)
-if [ -n "$existing" ]; then
-    echo "Stopping existing server on port $PORT..."
-    echo "$existing" | xargs kill -9 2>/dev/null || true
-    sleep 1
+# Ship the bundled calibration so a stereo rig that matches it gets 3D
+# straight away.  Never overwrite one that is already there.
+if [ -d "$PROJECT_DIR/calibration" ]; then
+    for f in "$PROJECT_DIR"/calibration/*; do
+        [ -f "$f" ] || continue
+        dest="$DLC_DATA_DIR/calibration/$(basename "$f")"
+        [ -e "$dest" ] || cp "$f" "$dest"
+    done
 fi
 
-# ── Shortcut hint (first run only) ────────────────────────────────────────
+# ── Free the port ─────────────────────────────────────────────────────────
 
-if [ ! -f "$VENV_DIR/.shortcut_hint_shown" ]; then
-    echo ""
-    echo "┌──────────────────────────────────────────────────────────────┐"
-    echo "│  TIP: Drag 'Movement Tracker.command' to your Dock  │"
-    echo "│  or Desktop for quick access — just double-click to launch. │"
-    echo "└──────────────────────────────────────────────────────────────┘"
-    touch "$VENV_DIR/.shortcut_hint_shown"
+if command -v lsof &>/dev/null; then
+    existing=$(lsof -ti ":$PORT" 2>/dev/null || true)
+    if [ -n "$existing" ]; then
+        echo "Stopping an existing server on port $PORT..."
+        echo "$existing" | xargs kill -9 2>/dev/null || true
+        sleep 1
+    fi
 fi
-
-# ── Auto-update ──────────────────────────────────────────────────────────
-
-# Skip auto-update when running from a git checkout — the developer's
-# local commits would otherwise get clobbered every launch by whatever
-# is currently on origin/master.  End-user installs (downloaded zip,
-# no .git/ directory) still run the auto-update path.
-# Set MT_NO_AUTO_UPDATE=1 in .env to force-disable even outside git.
-if [ -d "$PROJECT_DIR/.git" ] || [ "${MT_NO_AUTO_UPDATE:-0}" = "1" ]; then
-    echo ""
-    echo "Auto-update skipped (dev checkout or MT_NO_AUTO_UPDATE=1)."
-else
-
-echo ""
-echo "Checking for updates..."
-"$VENV_DIR/bin/python" -c "
-import urllib.request, json, sys, os, zipfile, shutil, tempfile
-
-try:
-    VERSION_FILE = os.path.join('$PROJECT_DIR', 'VERSION')
-    local_sha = open(VERSION_FILE).read().strip() if os.path.exists(VERSION_FILE) else ''
-    req = urllib.request.Request(
-        'https://api.github.com/repos/newboldd/movement-tracker/commits/master',
-        headers={'User-Agent': 'MovementTracker', 'Accept': 'application/vnd.github.v3+json'})
-    resp = urllib.request.urlopen(req, timeout=10)
-    remote = json.loads(resp.read())
-    remote_sha = remote['sha']
-    if local_sha == remote_sha:
-        print('Already up to date.')
-        sys.exit(0)
-    print(f'Update available: {remote_sha[:8]} — {remote[\"commit\"][\"message\"].splitlines()[0]}')
-    print('Downloading...')
-    zip_url = 'https://github.com/newboldd/movement-tracker/archive/refs/heads/master.zip'
-    tmp = tempfile.mkdtemp(prefix='mt_update_')
-    zip_path = os.path.join(tmp, 'update.zip')
-    urllib.request.urlretrieve(zip_url, zip_path)
-    with zipfile.ZipFile(zip_path) as zf:
-        zf.extractall(tmp)
-    src = os.path.join(tmp, 'movement-tracker-master')
-    # Copy code files (preserve data)
-    for item in ['movement_tracker', 'requirements.txt', 'setup.sh', 'run.bat',
-                 'scripts', 'calibration', 'Movement Tracker.command', 'CLAUDE.md', 'VERSION']:
-        s = os.path.join(src, item)
-        d = os.path.join('$PROJECT_DIR', item)
-        if os.path.isdir(s):
-            if os.path.exists(d): shutil.rmtree(d)
-            shutil.copytree(s, d)
-        elif os.path.isfile(s):
-            shutil.copy2(s, d)
-    # Update VERSION
-    with open(VERSION_FILE, 'w') as f: f.write(remote_sha)
-    shutil.rmtree(tmp, ignore_errors=True)
-    # Reinstall deps
-    import subprocess
-    subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', '--disable-pip-version-check',
-                    '-r', os.path.join('$PROJECT_DIR', 'requirements.txt')], timeout=120)
-    # Restore execute permissions
-    for script in ['setup.sh', 'Movement Tracker.command']:
-        p = os.path.join('$PROJECT_DIR', script)
-        if os.path.exists(p): os.chmod(p, 0o755)
-    print('Updated successfully.')
-except Exception as e:
-    print(f'Update check failed (non-fatal): {e}')
-" 2>&1 || true
-
-fi   # end of auto-update skip-on-git-checkout guard
 
 # ── Launch ────────────────────────────────────────────────────────────────
 
 echo ""
-echo "Starting Movement Tracker at http://localhost:$PORT"
+echo "Starting DLC Labeler at http://localhost:$PORT"
+echo "Data directory: $DLC_DATA_DIR"
+if ! "$VENV_PY" -c "import deeplabcut" 2>/dev/null; then
+    echo ""
+    echo "DeepLabCut is not installed, so training and analysis are off."
+    echo "Add it any time with:  ./setup.sh --with-dlc"
+fi
+echo ""
 echo "Press Ctrl+C to stop."
 echo ""
 
 cd "$PROJECT_DIR"
 
-# Open browser after a short delay (background, non-fatal)
-(sleep 2 && open "http://localhost:$PORT" 2>/dev/null || xdg-open "http://localhost:$PORT" 2>/dev/null) &
+(sleep 2 && { open "http://localhost:$PORT" 2>/dev/null \
+    || xdg-open "http://localhost:$PORT" 2>/dev/null; }) &
 
-# Launch with restart loop (exit code 42 = restart after in-app update)
+# Exit code 42 means "restart" — the Settings page uses it when the data
+# directory changes, because DATA_DIR is resolved at import time.
 while true; do
-    "$VENV_DIR/bin/python" -m uvicorn movement_tracker.app:app --host 127.0.0.1 --port "$PORT" --reload --timeout-graceful-shutdown 3
+    set +e
+    "$VENV_PY" -m uvicorn dlc_labeler.app:app \
+        --host 127.0.0.1 --port "$PORT" --timeout-graceful-shutdown 3
     exit_code=$?
-    if [ "$exit_code" -ne 42 ]; then
-        break
-    fi
+    set -e
+    [ "$exit_code" -eq 42 ] || break
     echo ""
-    echo "Restarting after update..."
+    echo "Restarting..."
     echo ""
 done

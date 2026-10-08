@@ -1,15 +1,30 @@
+# DLC Labeler — base install.
+#
+# Everything here is needed to label frames, run MediaPipe, view
+# predictions in 2D and 3D, and commit a DeepLabCut training set.
+# Training and inference need DeepLabCut itself, which is several GB and
+# lives in requirements-dlc.txt — install it with `./setup.sh --with-dlc`
+# or the button on the Jobs page, once a machine actually needs to train.
+
+# Web app
 fastapi>=0.100.0
 uvicorn>=0.20.0
 python-multipart>=0.0.5
 pydantic>=2.0.0
+
+# Video, frames and geometry
 opencv-python-headless>=4.8.0
-numpy>=1.20.0
-pandas>=1.3.0
-tables>=3.7.0
+numpy>=1.20.0,<2.0
 pyyaml>=5.0
+
+# Bundled ffmpeg, so nothing has to be installed system-wide
+imageio-ffmpeg>=0.4.9
+
+# Hand landmarks.
+#
+# Pinned below 0.10.19: that release removed the `mediapipe.solutions`
+# API this app detects hands with.  Lifting the pin means rewriting
+# services/mediapipe_prelabel.py against the Tasks API, not just
+# bumping a number.
 mediapipe>=0.10.0,<0.10.19
 protobuf>=3.20,<5
-imageio-ffmpeg>=0.4.9
-# Apple Vision hand pose (macOS only — silently skipped on other platforms)
-pyobjc-framework-Vision>=10.0; sys_platform == "darwin"
-pyobjc-framework-Quartz>=10.0; sys_platform == "darwin"
