@@ -36,6 +36,7 @@ def _pid_alive(pid: int) -> bool:
 # Which lane each job type needs.
 RESOURCE_MAP = {
     "mediapipe": "cpu",
+    "export-frames": "cpu",
     "install-dlc": "cpu",
     "train": "gpu",
     "refine": "gpu",
@@ -47,6 +48,10 @@ STEP_DEFINITIONS = [
     {"name": "mediapipe", "resource": "cpu", "label": "MediaPipe (Hands)",
      "help": "Detect 21 hand landmarks per camera. Run this first — it "
              "drives the default zoom while you label."},
+    {"name": "export-frames", "resource": "cpu", "label": "Export frames to label",
+     "help": "Pick frames with DeepLabCut's k-means, cropped around the "
+             "MediaPipe hand, and write them as a folder you can send to "
+             "someone else to label."},
     {"name": "train", "resource": "gpu", "label": "Train (round 1)",
      "help": "Create the training dataset from committed labels, train "
              "from scratch, then analyze every trial into labels_v1/."},
@@ -431,6 +436,16 @@ class QueueManager:
                     trial_idx=extra_params.get("trial_idx"),
                     reverse=bool(extra_params.get("reverse")),
                     use_bbox=extra_params.get("use_bbox", True),
+                )
+            elif job_type == "export-frames":
+                local_executor.execute_export_frames(
+                    subject_name, job_id, log_path,
+                    n_per_trial=int(extra_params.get("n_per_trial", 20)),
+                    cameras=extra_params.get("cameras") or None,
+                    dest_dir=extra_params.get("dest_dir") or None,
+                    package_name=extra_params.get("package_name") or None,
+                    step=int(extra_params.get("step", 1)),
+                    seed=extra_params.get("seed"),
                 )
             elif job_type in ("train", "refine", "analyze"):
                 local_executor.execute_dlc(

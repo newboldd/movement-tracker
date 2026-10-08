@@ -130,6 +130,39 @@
                 </span>
             </div>
 
+            <div id="exportOptions" class="opt-row" style="display:none;">
+                <label title="How many frames to pick from each trial, for each camera. k-means groups the trial's frames by how the hand looks and takes one from each group, so these come out spread across the postures rather than across the clock.">
+                    Frames per trial
+                    <input type="number" id="optNPerTrial" value="20" min="1" max="500"
+                           style="width:60px;margin-left:4px;">
+                </label>
+                <label title="Which cameras to export. Both means each selected frame is written twice, once per camera, and each is labeled on its own.">
+                    Cameras <span id="optCameras" style="display:inline-flex;gap:8px;margin-left:4px;"></span>
+                </label>
+                <label title="Consider only every Nth frame. Raise it to speed up selection on long trials — adjacent frames rarely differ enough to matter.">
+                    Every Nth frame
+                    <input type="number" id="optStep" value="1" min="1" max="50"
+                           style="width:46px;margin-left:4px;">
+                </label>
+                <label title="Same seed, same frames. Leave blank for a fresh selection each time.">
+                    Seed
+                    <input type="number" id="optSeed" placeholder="none"
+                           style="width:64px;margin-left:4px;">
+                </label>
+                <label title="The folder name inside the packages directory. Defaults to Subject_label_<today>.">
+                    Name
+                    <input type="text" id="optPackageName" placeholder="auto"
+                           style="width:150px;margin-left:4px;">
+                </label>
+                <span style="font-size:11px;flex-basis:100%;">
+                    Needs MediaPipe to have run: the crop follows the hand it
+                    found. Packages are written to
+                    <code id="packagesDir">packages/</code> — send the whole
+                    folder, and open a returned one with
+                    <strong>Sync from disk</strong> on the Subjects page.
+                </span>
+            </div>
+
             <div id="gpuOptions" class="opt-row" style="display:none;">
                 <label>GPU <select id="gpuSelect" style="margin-left:4px;"></select></label>
             </div>
@@ -200,6 +233,6 @@
     </div>
 
     <script src="/static/js/nav.js?v=1"></script>
-    <script src="/static/js/jobs.js?v=1"></script>
+    <script src="/static/js/jobs.js?v=2"></script>
 </body>
 </html>

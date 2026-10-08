@@ -11,7 +11,7 @@ Each record carries:
 - Total wall-clock duration
 - Per-stage timings recorded via :func:`add_stage` / :class:`stage_timer`
   -- e.g. video upload time, per-trial compute time, download time
-- The git commit hash currently running (read from the VERSION file)
+- The git commit hash currently running
 - The hostname so multi-machine setups stay disambiguated
 
 The DB only keeps recent jobs (job-history view); this file accumulates
@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import socket
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -46,18 +47,37 @@ def _history_path() -> Path:
     return DATA_DIR / "job_history.jsonl"
 
 
-def _git_version() -> str | None:
-    """Read the latest commit hash from the VERSION file written at
-    startup.  Returns None if the file is missing or empty."""
+_version_memo: str | None | tuple = ()
+
+
+def git_version() -> str | None:
+    """The commit this app is running, or None outside a checkout.
+
+    Asked of git directly, falling back to a VERSION file for installs
+    unpacked from a zip with no .git.  Memoised: the answer cannot change
+    while the process runs, and this is called once per finished job.
+    """
+    global _version_memo
+    if _version_memo != ():
+        return _version_memo  # type: ignore[return-value]
+
+    version = None
     try:
         from ..config import PROJECT_DIR
-        vp = Path(PROJECT_DIR) / "VERSION"
-        if vp.exists():
-            v = vp.read_text().strip()
-            return v or None
+        out = subprocess.run(
+            ["git", "-C", str(PROJECT_DIR), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5)
+        if out.returncode == 0:
+            version = out.stdout.strip() or None
+        if version is None:
+            vp = Path(PROJECT_DIR) / "VERSION"
+            if vp.exists():
+                version = vp.read_text().strip() or None
     except Exception:
-        pass
-    return None
+        version = None
+
+    _version_memo = version
+    return version
 
 
 def add_stage(job_id: int, name: str, duration_sec: float, **extra) -> None:
@@ -157,7 +177,7 @@ def finalize_job_record(job_id: int, *, status_override: str | None = None,
 
         record = {
             "ts":              _now_utc_iso(),
-            "git_version":     _git_version(),
+            "git_version":     git_version(),
             "host":            socket.gethostname(),
             "job_id":          int(job_id),
             "job_type":        job.get("job_type"),

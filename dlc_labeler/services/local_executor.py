@@ -91,6 +91,38 @@ class LocalExecutor:
         self._launch_worker("mediapipe", subject_name, job_id, log_path,
                             extra_args=extra)
 
+    # ── Frame export ────────────────────────────────────────────────────
+
+    def execute_export_frames(self, subject_name: str, job_id: int,
+                              log_path: str, n_per_trial: int = 20,
+                              cameras: list[str] | None = None,
+                              dest_dir: str | None = None,
+                              package_name: str | None = None,
+                              step: int = 1, seed: int | None = None):
+        """Select frames for a subject and write them as a labeling package.
+
+        A subprocess like every other job, and for the same reason: it
+        decodes every trial of a subject once, which on a long session is
+        minutes of work that must not be lost to the app reloading.
+        """
+        settings = get_settings()
+        dest = dest_dir or str(settings.packages_path)
+
+        extra = [
+            "--n-per-trial", str(n_per_trial),
+            "--dest-dir", dest,
+            "--step", str(step),
+        ]
+        if cameras:
+            extra += ["--cameras", *cameras]
+        if package_name:
+            extra += ["--package-name", package_name]
+        if seed is not None:
+            extra += ["--seed", str(seed)]
+
+        self._launch_worker("export-frames", subject_name, job_id, log_path,
+                            extra_args=extra)
+
     def _launch_worker(self, job_type: str, subject_name: str, job_id: int,
                        log_path: str, extra_args: list[str] | None = None,
                        progress_parser=None):

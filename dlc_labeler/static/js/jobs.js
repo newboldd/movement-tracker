@@ -49,6 +49,15 @@ const jobsPage = (() => {
             warn.style.display = 'none';
         }
 
+        /* One checkbox per configured camera, both ticked: a package is
+         * normally wanted for the whole rig, and dropping one camera is
+         * the exception. */
+        const cams = env.camera_names || [];
+        el('optCameras').innerHTML = cams.map(c =>
+            `<label style="gap:3px;"><input type="checkbox" class="cam-cb" `
+            + `value="${c}" checked> ${c}</label>`).join('');
+        if (env.packages_dir) el('packagesDir').textContent = env.packages_dir;
+
         const gpuSel = el('gpuSelect');
         gpuSel.innerHTML = (env.gpus || []).map(g =>
             `<option value="${g.index}">GPU ${g.index} — ${g.name}`
@@ -80,6 +89,7 @@ const jobsPage = (() => {
             b.classList.toggle('active', b.dataset.step === name));
         el('stepHelp').textContent = step ? (step.help || '') : '';
         el('mpOptions').style.display = (name === 'mediapipe') ? 'flex' : 'none';
+        el('exportOptions').style.display = (name === 'export-frames') ? 'flex' : 'none';
         el('gpuOptions').style.display =
             (step && step.resource === 'gpu' && (env.gpus || []).length > 1)
                 ? 'flex' : 'none';
@@ -123,6 +133,12 @@ const jobsPage = (() => {
         if (selectedStep === 'mediapipe') {
             return s.trial_count ? null : 'no trial videos found';
         }
+        if (selectedStep === 'export-frames') {
+            if (!s.trial_count) return 'no trial videos found';
+            const anyMp = s.trials.some(t =>
+                t.has_best || t.has_forward || t.has_reverse || t.has_static);
+            return anyMp ? null : 'run MediaPipe first — the crop follows the hand';
+        }
         if (selectedStep === 'train') {
             return s.has_labeled_data ? null : 'commit some labels first';
         }
@@ -152,7 +168,10 @@ const jobsPage = (() => {
                 + (reason ? ' ineligible' : '');
             card.title = reason || `${s.trial_count} trial(s), stage ${s.stage}`;
 
-            const chips = selectedStep === 'mediapipe'
+            // Export is chosen by how much MediaPipe a trial has, same as
+            // MediaPipe itself, so it gets the same chips.
+            const chips = (selectedStep === 'mediapipe'
+                           || selectedStep === 'export-frames')
                 ? s.trials.map(t => {
                     const n = ['has_forward', 'has_reverse', 'has_static']
                         .filter(k => t[k]).length;
@@ -208,6 +227,20 @@ const jobsPage = (() => {
             body.static_image_mode = el('optStatic').checked;
             body.use_bbox = el('optBbox').checked;
         }
+        if (selectedStep === 'export-frames') {
+            const cams = [...document.querySelectorAll('.cam-cb')]
+                .filter(c => c.checked).map(c => c.value);
+            if (!cams.length) {
+                el('launchStatus').textContent = 'Pick at least one camera.';
+                return;
+            }
+            const seed = el('optSeed').value.trim();
+            body.n_per_trial = parseInt(el('optNPerTrial').value, 10) || 20;
+            body.step = parseInt(el('optStep').value, 10) || 1;
+            body.cameras = cams;
+            body.seed = seed === '' ? null : parseInt(seed, 10);
+            body.package_name = el('optPackageName').value.trim() || null;
+        }
 
         el('launchBtn').disabled = true;
         el('launchStatus').textContent = 'Queueing…';
@@ -237,6 +270,9 @@ const jobsPage = (() => {
         if (p.pass) extra.push(p.pass);
         if (p.trial_name) extra.push(p.trial_name);
         if (p.cropped) extra.push('cropped');
+        if (p.n_per_trial) extra.push(`${p.n_per_trial}/trial`);
+        if (p.cameras && p.cameras.length) extra.push(p.cameras.join('+'));
+        if (p.package_name) extra.push(p.package_name);
         return { subs, extra: extra.join(' · ') };
     }
 

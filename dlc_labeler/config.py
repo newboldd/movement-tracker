@@ -127,6 +127,18 @@ class Settings:
         """DLC project directory — in DATA_DIR, so data stays out of the code."""
         return DATA_DIR / "dlc"
 
+    @property
+    def packages_path(self) -> Path:
+        """Labeling packages — folders of frames, sent out and received back.
+
+        Both ends of the trip live here: packages this machine exported
+        and packages a collaborator returned.  In DATA_DIR rather than
+        beside the code so a package survives updating the app, and so
+        "put it in the data directory under packages/" is the one
+        instruction a collaborator needs.
+        """
+        return DATA_DIR / "packages"
+
     def dlc_installed(self, *, refresh: bool = False) -> bool:
         """True when ``python_executable`` can import deeplabcut.
 

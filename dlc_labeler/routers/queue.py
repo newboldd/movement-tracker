@@ -38,6 +38,8 @@ def get_steps() -> dict:
         "dlc_installed": settings.dlc_installed(),
         "dlc_python": settings.python_executable or sys.executable,
         "dlc_requirements": str(PROJECT_DIR / "requirements-dlc.txt"),
+        "camera_names": settings.camera_names,
+        "packages_dir": str(settings.packages_path),
     }
 
 
@@ -79,15 +81,38 @@ def launch(req: JobLaunch) -> dict:
         # Name the pass in the queue row so the page can label it.
         extra["pass"] = ("reverse" if req.reverse else
                          "frame-by-frame" if req.static_image_mode else "forward")
+    elif req.job_type == "export-frames":
+        if not 1 <= req.n_per_trial <= 500:
+            raise HTTPException(400, "Frames per trial must be between 1 and 500")
+        if req.step < 1:
+            raise HTTPException(400, "Step must be 1 or more")
+        known = settings.camera_names or []
+        for cam in req.cameras or []:
+            if cam not in known:
+                raise HTTPException(400, f"Unknown camera: {cam}")
+        extra = {
+            "n_per_trial": req.n_per_trial,
+            "cameras": req.cameras or None,
+            "dest_dir": req.dest_dir or str(settings.packages_path),
+            "step": req.step,
+            "seed": req.seed,
+        }
 
     queued = []
     for name in req.subjects:
+        params = dict(extra)
+        if req.job_type == "export-frames" and req.package_name:
+            # One name across several subjects would have them overwrite
+            # each other, so it becomes a prefix instead.
+            params["package_name"] = (f"{req.package_name}_{name}"
+                                      if len(req.subjects) > 1
+                                      else req.package_name)
         try:
             queued.append({
                 "subject": name,
                 **queue_manager.enqueue(req.job_type, [name],
                                         gpu_index=req.gpu_index,
-                                        extra_params=extra),
+                                        extra_params=params),
             })
         except ValueError as e:
             raise HTTPException(400, str(e))

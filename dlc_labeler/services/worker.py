@@ -92,6 +92,29 @@ def run_mediapipe(subject_name: str, static_image_mode: bool = False,
             use_bbox=use_bbox)
 
 
+def run_export_frames(subject_name: str, dest_dir: str, n_per_trial: int,
+                      cameras: list | None, package_name: str | None,
+                      step: int, seed: int | None):
+    from dlc_labeler.config import get_settings
+    from dlc_labeler.services.labelpack import export_package
+
+    result = export_package(
+        subject_name, dest_dir or get_settings().packages_path,
+        n_per_trial=n_per_trial,
+        cameras=cameras or None,
+        step=step,
+        seed=seed,
+        package_name=package_name,
+        progress=_progress_printer(),
+    )
+    # Printed, not just returned: the log is where whoever ran this looks
+    # for the folder to go and find.
+    print(f"Wrote {result['image_count']} images to {result['package_dir']}",
+          flush=True)
+    for note in result.get("notes", []):
+        print(f"NOTE: {note}", flush=True)
+
+
 JOB_DISPATCH = {
     "mediapipe": lambda a: run_mediapipe(
         a.subject,
@@ -99,6 +122,15 @@ JOB_DISPATCH = {
         trial_idx=a.trial_idx,
         reverse=a.reverse,
         use_bbox=not a.no_bbox,
+    ),
+    "export-frames": lambda a: run_export_frames(
+        a.subject,
+        a.dest_dir,
+        a.n_per_trial,
+        a.cameras,
+        a.package_name,
+        a.step,
+        a.seed,
     ),
 }
 
@@ -121,6 +153,19 @@ def main():
                         help="Ignore saved crop boxes; use the full camera half")
     parser.add_argument("--data-dir", default=None,
                         help="DLC_DATA_DIR for this subprocess")
+    # export-frames
+    parser.add_argument("--dest-dir", default="",
+                        help="Where to write the labeling package")
+    parser.add_argument("--n-per-trial", type=int, default=20,
+                        help="Frames to pick per trial per camera")
+    parser.add_argument("--cameras", nargs="*", default=None,
+                        help="Cameras to export (default: all)")
+    parser.add_argument("--package-name", default=None,
+                        help="Folder name for the package")
+    parser.add_argument("--step", type=int, default=1,
+                        help="Consider every Nth frame when selecting")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Make the selection reproducible")
 
     args = parser.parse_args()
 

@@ -25,17 +25,17 @@ import csv
 import json
 import logging
 import math
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
 
-from ..config import PROJECT_DIR, get_settings
+from ..config import get_settings
 from .frameselect import (
     CROP_PADDING, CROP_SIDE_PERCENTILE, DLC_RESIZE_WIDTH, FrameChoice,
     select_for_subject,
 )
+from .job_history import git_version
 from .video import (
     _deidentified_path, _get_no_face_videos, build_trial_map,
 )
@@ -84,20 +84,6 @@ What the numbers in the filenames mean
 where in the original video each image was cropped from, which is how
 your labels get mapped back.  Do not rename the files.
 """
-
-
-def _app_version() -> str | None:
-    """The git commit this package was produced by, when there is one."""
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(PROJECT_DIR), "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if out.returncode == 0:
-            return out.stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return None
 
 
 def _source_video(subject_name: str, trial: dict) -> str:
@@ -264,7 +250,7 @@ def export_package(subject_name: str, dest_dir: str | Path, *,
         "schema": PACKAGE_SCHEMA,
         "name": name,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "app_version": _app_version(),
+        "app_version": git_version(),
         "subject": subject_name,
         "camera_mode": camera_mode,
         "cameras": cam_names,

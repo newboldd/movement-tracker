@@ -75,6 +75,13 @@ class JobLaunch(BaseModel):
     static_image_mode: bool = False
     use_bbox: bool = True
     trial_idx: Optional[int] = None
+    # Frame-export options
+    n_per_trial: int = 20
+    cameras: Optional[List[str]] = None
+    dest_dir: Optional[str] = None
+    package_name: Optional[str] = None
+    step: int = 1
+    seed: Optional[int] = None
 
 
 class JobResponse(BaseModel):
