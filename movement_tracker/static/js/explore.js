@@ -497,6 +497,125 @@ function _lnGamma(x) {
     for (let j = 0; j < 6; j++) { y += 1; ser += cof[j] / y; }
     return -tmp + Math.log(2.5066282746310005 * ser / x);
 }
+// Complementary error function (Abramowitz & Stegun 7.1.26, ~1e-7).
+function _erfc(x) {
+    const z = Math.abs(x);
+    const t = 1 / (1 + z / 2);
+    const r = t * Math.exp(-z * z - 1.26551223 + t * (1.00002368 + t * (0.37409196
+        + t * (0.09678418 + t * (-0.18628806 + t * (0.27886807 + t * (-1.13520398
+        + t * (1.48851587 + t * (-0.82215223 + t * 0.17087277)))))))));
+    return x >= 0 ? r : 2 - r;
+}
+// Two-sided normal p-value for a z-score.
+function _normP2Tail(z) { return _erfc(Math.abs(z) / Math.SQRT2); }
+// Regularized upper incomplete gamma Q(a, x) = 1 - P(a, x) (NR gser/gcf).
+function _gammaQ(a, x) {
+    if (x <= 0 || a <= 0) return 1;
+    const gln = _lnGamma(a);
+    if (x < a + 1) {           // series for P, then Q = 1 - P
+        let ap = a, sum = 1 / a, del = 1 / a;
+        for (let n = 0; n < 300; n++) {
+            ap++; del *= x / ap; sum += del;
+            if (Math.abs(del) < Math.abs(sum) * 1e-15) break;
+        }
+        return 1 - sum * Math.exp(-x + a * Math.log(x) - gln);
+    }
+    const FPMIN = 1e-300;      // continued fraction for Q directly
+    let b = x + 1 - a, c = 1 / FPMIN, d = 1 / b, h = d;
+    for (let i = 1; i <= 300; i++) {
+        const an = -i * (i - a);
+        b += 2; d = an * d + b; if (Math.abs(d) < FPMIN) d = FPMIN;
+        c = b + an / c; if (Math.abs(c) < FPMIN) c = FPMIN;
+        d = 1 / d; const del = d * c; h *= del;
+        if (Math.abs(del - 1) < 1e-15) break;
+    }
+    return Math.exp(-x + a * Math.log(x) - gln) * h;
+}
+// Upper-tail p-value for chi-square: P(X² > x | df).
+function _chiSqP(x, df) { return (x <= 0 || df <= 0) ? 1 : _gammaQ(df / 2, x / 2); }
+
+// Kruskal–Wallis H test (tie-corrected).  ``groups`` is an array of
+// value-arrays.  Returns {H, df, p, k, N, meanRanks, nn, idx, tieSum}
+// (idx = original indices of the non-empty groups) or null.
+function _kruskalWallis(groups) {
+    const nonEmpty = groups.map((g, i) => [g, i]).filter(([g]) => g.length > 0);
+    const k = nonEmpty.length;
+    if (k < 2) return null;
+    const pooled = [];
+    nonEmpty.forEach(([g], gi) => g.forEach(v => pooled.push({ v, gi })));
+    const N = pooled.length;
+    if (N - k < 1) return null;
+    pooled.sort((a, b) => a.v - b.v);
+    let tieSum = 0, i = 0;             // average-rank assignment with ties
+    while (i < N) {
+        let j = i;
+        while (j + 1 < N && pooled[j + 1].v === pooled[i].v) j++;
+        const avg = (i + j) / 2 + 1;
+        for (let m = i; m <= j; m++) pooled[m].rank = avg;
+        const t = j - i + 1; if (t > 1) tieSum += t * t * t - t;
+        i = j + 1;
+    }
+    const Rsum = new Array(k).fill(0), nn = new Array(k).fill(0);
+    pooled.forEach(p => { Rsum[p.gi] += p.rank; nn[p.gi]++; });
+    let H = 12 / (N * (N + 1)) * Rsum.reduce((a, R, gi) => a + R * R / nn[gi], 0) - 3 * (N + 1);
+    const C = 1 - tieSum / (N * N * N - N);
+    if (C > 0) H /= C;
+    const df = k - 1;
+    return { H, df, p: _chiSqP(H, df), k, N, nn, tieSum,
+             idx: nonEmpty.map(([, i2]) => i2),
+             meanRanks: Rsum.map((R, gi) => R / nn[gi]) };
+}
+// Dunn's pairwise post-hoc from a Kruskal–Wallis result, Bonferroni-
+// adjusted.  Returns [{ia, ib, z, p}] where ia/ib index the original
+// groups array.
+function _dunnPairs(kw) {
+    const { N, tieSum, nn, meanRanks, idx } = kw;
+    const varBase = (N * (N + 1) / 12) - tieSum / (12 * (N - 1));
+    const k = idx.length, m = k * (k - 1) / 2;
+    const out = [];
+    for (let a = 0; a < k; a++) {
+        for (let b = a + 1; b < k; b++) {
+            const se = Math.sqrt(varBase * (1 / nn[a] + 1 / nn[b]));
+            const z = se > 0 ? (meanRanks[a] - meanRanks[b]) / se : 0;
+            out.push({ ia: idx[a], ib: idx[b], z, p: Math.min(1, _normP2Tail(z) * m) });
+        }
+    }
+    return out;
+}
+// Format the parametric (one-way ANOVA + Welch) block for the side box.
+function _fmtAnovaParametric(groupVals, labels) {
+    const res = _oneWayANOVA(groupVals);
+    if (!res) return 'ANOVA (parametric): not enough data';
+    const lines = ['ANOVA (parametric)',
+                   `F(${res.df1}, ${res.df2}) = ${res.F.toFixed(2)}`,
+                   `  ${_fmtP(res.p)}`];
+    if (res.p < 0.05) {
+        lines.push('Post-hoc (Welch):');
+        const idx = labels.map((g, i) => [g, i]).filter(([, i]) => groupVals[i].length >= 2);
+        for (let i = 0; i < idx.length; i++) {
+            for (let j = i + 1; j < idx.length; j++) {
+                const [ga, ia] = idx[i], [gb, ib] = idx[j];
+                const t = _welchT(groupVals[ia], groupVals[ib]);
+                if (t) lines.push(`  ${ga} vs ${gb}: ${_fmtP(t.p)}`);
+            }
+        }
+    }
+    return lines.join('\n');
+}
+// Format the non-parametric (Kruskal–Wallis + Dunn) block.
+function _fmtAnovaNonparametric(groupVals, labels) {
+    const kw = _kruskalWallis(groupVals);
+    if (!kw) return 'Kruskal–Wallis: not enough data';
+    const lines = ['Kruskal–Wallis',
+                   `H(${kw.df}) = ${kw.H.toFixed(2)}`,
+                   `  ${_fmtP(kw.p)}`];
+    if (kw.p < 0.05) {
+        lines.push('Post-hoc (Dunn, Bonferroni):');
+        _dunnPairs(kw).forEach(pr =>
+            lines.push(`  ${labels[pr.ia]} vs ${labels[pr.ib]}: ${_fmtP(pr.p)}`));
+    }
+    return lines.join('\n');
+}
 
 function _val(s, key) {
     const v = s.vars[key];
@@ -860,35 +979,19 @@ function renderBar() {
     };
 
     $('exInfo').textContent = `n = ${n}`;
-    // ANOVA + post-hoc Welch's t pairwise — populates the side text box.
+    // Group-difference tests — parametric (ANOVA + Welch) and/or
+    // non-parametric (Kruskal–Wallis + Dunn), per the two checkboxes.
     const fitBox = $('exFitBox');
-    const anovaOn = $('exAnova') && $('exAnova').checked;
+    const paramOn    = $('exAnovaParam') && $('exAnovaParam').checked;
+    const nonparamOn = $('exAnovaNonparam') && $('exAnovaNonparam').checked;
     if (fitBox) {
-        if (anovaOn) {
+        if (paramOn || nonparamOn) {
             const groupVals = groups.map(g => byGroup[g].map(s => _val(s, key)));
-            const res = _oneWayANOVA(groupVals);
-            if (!res) {
-                fitBox.style.display = '';
-                fitBox.textContent = 'ANOVA: not enough data';
-            } else {
-                const lines = [
-                    `ANOVA F(${res.df1}, ${res.df2}) = ${res.F.toFixed(2)}`,
-                    `      ${_fmtP(res.p)}`,
-                ];
-                if (res.p < 0.05) {
-                    lines.push('', 'Post-hoc (Welch):');
-                    const idx = groups.map((g, i) => [g, i]).filter(([g, i]) => groupVals[i].length >= 2);
-                    for (let i = 0; i < idx.length; i++) {
-                        for (let j = i + 1; j < idx.length; j++) {
-                            const [ga, ia] = idx[i], [gb, ib] = idx[j];
-                            const t = _welchT(groupVals[ia], groupVals[ib]);
-                            if (t) lines.push(`  ${ga} vs ${gb}: ${_fmtP(t.p)}`);
-                        }
-                    }
-                }
-                fitBox.style.display = '';
-                fitBox.textContent = lines.join('\n');
-            }
+            const sections = [];
+            if (paramOn)    sections.push(_fmtAnovaParametric(groupVals, groups));
+            if (nonparamOn) sections.push(_fmtAnovaNonparametric(groupVals, groups));
+            fitBox.style.display = '';
+            fitBox.textContent = sections.join('\n\n');
         } else {
             fitBox.style.display = 'none';
             fitBox.textContent = '';
@@ -979,7 +1082,8 @@ document.querySelectorAll('input[name="exPlotType"]').forEach(r =>
 // Toggling Slope doesn't change the underlying data — just restyle
 // the already-present best-fit trace in place so axes don't re-fit.
 $('exBestFit').addEventListener('change', _refitBestFitFromVisible);
-$('exAnova').addEventListener('change', render);
+$('exAnovaParam')?.addEventListener('change', render);
+$('exAnovaNonparam')?.addEventListener('change', render);
 // Subject point labels (on/off + ID/number style) — pure re-render.
 $('exLabelSubj')?.addEventListener('change', render);
 $('exLabelStyle')?.addEventListener('change', () => { if (_exLabelsOn()) render(); });

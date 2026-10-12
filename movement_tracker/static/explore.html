@@ -154,10 +154,18 @@
                        style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);">
                     <input type="checkbox" id="exBestFit" style="margin:0;" checked> Slope
                 </label>
-                <label id="exAnovaLabel"
-                       style="display:none;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);">
-                    <input type="checkbox" id="exAnova" style="margin:0;"> ANOVA
-                </label>
+                <span id="exAnovaLabel"
+                      style="display:none;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);">
+                    ANOVA:
+                    <label style="display:inline-flex;align-items:center;gap:3px;margin:0;cursor:pointer;"
+                           title="One-way ANOVA (F-test on means) with Welch t post-hoc">
+                        <input type="checkbox" id="exAnovaParam" style="margin:0;"> parametric
+                    </label>
+                    <label style="display:inline-flex;align-items:center;gap:3px;margin:0;cursor:pointer;"
+                           title="Kruskal–Wallis (rank-based) with Dunn post-hoc (Bonferroni)">
+                        <input type="checkbox" id="exAnovaNonparam" style="margin:0;"> non-parametric
+                    </label>
+                </span>
                 <span style="border-left:1px solid #ccc;height:20px;margin:0 6px;"></span>
                 <label id="exLabelSubjLabel"
                        title="Label each dot with its subject (ID or a per-group number from the ID)"
@@ -233,6 +241,6 @@
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <script src="/static/js/nav.js?v=12"></script>
     <script src="/static/js/api.js"></script>
-    <script src="/static/js/explore.js?v=46"></script>
+    <script src="/static/js/explore.js?v=47"></script>
 </body>
 </html>
