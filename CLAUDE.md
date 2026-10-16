@@ -24,8 +24,7 @@ Opens at http://localhost:8080. `.env` holds local config
 
 **Backend**: FastAPI, SQLite, OpenCV, MediaPipe, scikit-learn (k-means
 frame selection), ffmpeg (via imageio-ffmpeg)
-**Frontend**: vanilla JS, HTML5 Canvas for video and labeling, three.js
-(vendored, no CDN) for the 3D view
+**Frontend**: vanilla JS, HTML5 Canvas for video and labeling
 **No build step** — static files are served directly.
 
 ```
@@ -64,8 +63,7 @@ dlc_labeler/
     ├── jobs.html  / js/jobs.js
     ├── index.html / js/subjects.js
     ├── settings.html / js/settings.js
-    ├── js/nav.js                      # shared header, built in JS
-    └── vendor/                        # three.js + OrbitControls, vendored
+    └── js/nav.js                      # shared header, built in JS
 ```
 
 ### Data layout (outside the repo, at `DLC_DATA_DIR`)
@@ -131,7 +129,7 @@ Everything the Label page draws is a layer with one shape. Bodypart
 layers (`dlc`, `refine`, `corrections`, `committed`) are subject-wide
 `{camera: {bodypart: [[x,y]|null, ...]}}`; MediaPipe layers are per trial
 with all 21 joints, shipped as base64 float32 (`_f32` / `decodeF32`)
-because JSON for a trial's 2D+3D arrays is megabytes of text.
+because JSON for a trial's landmark arrays is megabytes of text.
 
 ### The DeepLabCut loop
 `initial` session → commit → `labeled-data/round{N}/` → **train** →
@@ -193,8 +191,8 @@ schema pass (which would otherwise be a silent no-op).
   must be the same row.
 - **DATA_DIR is resolved at import time**, so changing it re-execs the
   process (exit code 42; the launchers loop on it).
-- **three.js is vendored** under `static/vendor/`. Do not switch it back
-  to a CDN — these machines are often offline or firewalled.
+- **No CDNs.** These machines are often offline or firewalled, so every
+  asset the pages need is served from `static/`. Vendor anything new.
 - **Cache busting**: bump `?v=N` in the HTML when changing a JS file.
 - **macOS Gatekeeper**: a downloaded zip needs "Open Anyway" once under
   System Settings → Privacy & Security.

@@ -1,18 +1,16 @@
 /* The labeling page.
  *
- * One page, three modes against the same canvas:
+ * One page, three session modes against the same canvas:
  *   Label    place keypoints on raw video to build the first training set
  *   Correct  edit the model's predictions and save them as corrections
  *   Refine   pick corrected frames to add to the training set
  *
  * Everything the page draws is a "layer": the manual labels of this
  * session, labels committed earlier, DLC predictions, saved corrections,
- * and each MediaPipe pass.  Layers share one shape, so the 2D canvas, the
- * 3D view, the timeline and the distance trace all read them the same way.
+ * and each MediaPipe pass.  Layers share one shape, so the canvas, the
+ * timeline and the distance trace all read them the same way.
  */
 
-import * as THREE from 'three';
-import { OrbitControls } from '/static/vendor/OrbitControls.js';
 
 const labeler = (() => {
 
@@ -77,14 +75,14 @@ const deletedKeys = new Set();
 
 // Layer data. Bodypart layers hold subject-wide arrays; MediaPipe layers
 // hold one trial's typed arrays and are refetched when the trial changes.
-const bpData = {};          // key -> {cam: {bp: [...]}, joints_3d: {...}, distances: [...]}
+const bpData = {};          // key -> {cam: {bp: [...]}, distances: [...]}
 let mpTrial = null;         // {trial_idx, start_frame, passes: {key: {...}}}
 let mpPassSpecs = [];       // from the server: key, label, colour
 let availableMp = {};       // trial_idx -> [pass keys]
 let availableStages = [];   // which bodypart stages have data
 let hasCommittedLabels = false;
 
-// Layer visibility: key -> {d2: bool, d3: bool}
+// Layer visibility: key -> {d2: bool}
 const layerVis = new Map();
 const visibleJoints = new Set([...Array(21).keys()]);
 
@@ -111,10 +109,6 @@ const refineSelected = new Set();
 
 // Distances the server recomputed for frames edited in this session.
 let manualDistances = {};
-
-// 3D
-let three = null;            // {scene, camera, renderer, controls, root}
-let show3d = false;
 
 // Timeline / trace
 let timelineCanvas, timelineCtx, traceCanvas, traceCtx;
@@ -228,18 +222,46 @@ function mpFrame2d(passKey, frame, side) {
     return arr.data.subarray(local * j * 2, (local + 1) * j * 2);
 }
 
-/* 21x3 triangulated joints for one frame of a pass. */
-function mpFrame3d(passKey, frame) {
-    const p = mpPass(passKey);
-    if (!p || !p.j3d) return null;
-    const local = frame - mpTrial.start_frame;
-    const [n, j] = p.j3d.shape;
-    if (local < 0 || local >= n) return null;
-    return p.j3d.data.subarray(local * j * 3, (local + 1) * j * 3);
+/* Every MediaPipe landmark for a frame and camera, from the best pass
+ * available.  A visible pass wins so the zoom agrees with what is drawn;
+ * otherwise any pass will do, because framing the view on the hand is
+ * useful whether or not the landmarks are switched on. */
+function mpPointsFor(frame, side) {
+    const order = [...mpPassSpecs].sort((a, b) =>
+        (vis(`mp_${b.key}`).d2 ? 1 : 0) - (vis(`mp_${a.key}`).d2 ? 1 : 0));
+    for (const spec of order) {
+        const lm = mpFrame2d(spec.key, frame, side);
+        if (!lm) continue;
+        const pts = [];
+        for (let j = 0; j < lm.length / 2; j++) {
+            if (Number.isFinite(lm[j * 2])) pts.push([lm[j * 2], lm[j * 2 + 1]]);
+        }
+        if (pts.length) return pts;
+    }
+    return [];
+}
+
+/* Where the hand is on one frame and camera, as a single point.
+ *
+ * Labels first, then whatever prediction layer has it, then MediaPipe.
+ * The fallback is the point of this: on a frame nobody has labeled yet
+ * — which is every frame you are about to label — MediaPipe is the only
+ * thing that knows where the hand is. */
+function handCentroid(frame, side) {
+    let pts = [];
+    for (const bp of bodyparts) {
+        const c = manualAt(frame, side, bp) || (ghostAt(frame, side, bp) || {}).coords;
+        if (c) pts.push(c);
+    }
+    if (!pts.length) pts = mpPointsFor(frame, side);
+    if (!pts.length) return null;
+    let sx = 0, sy = 0;
+    for (const [x, y] of pts) { sx += x; sy += y; }
+    return [sx / pts.length, sy / pts.length];
 }
 
 function vis(key) {
-    return layerVis.get(key) || { d2: false, d3: false };
+    return layerVis.get(key) || { d2: false };
 }
 
 // ── Session loading ──────────────────────────────────────────────────────
@@ -286,8 +308,6 @@ async function openSession(newMode) {
     videoTrialLoaded = -1;
     videoSideLoaded = null;
     mpTrial = null;
-    manual3dCache = { key: null, points: {}, distance: null };
-    if (three) three.framed = false;
     for (const k of Object.keys(bpData)) delete bpData[k];
 
     const info = await api(`/api/labeling/sessions/${sessionId}/info`);
@@ -307,7 +327,7 @@ async function openSession(newMode) {
     el('committedCount').textContent =
         `${info.committed_frame_count || 0} frames committed to DLC`;
     el('calibNote').textContent = hasCalibration
-        ? 'Stereo calibration loaded — 3D and mm distances available'
+        ? 'Stereo calibration loaded — distances in mm'
         : 'No stereo calibration for this subject — 2D only, distances in pixels';
     el('calibNote').style.color = hasCalibration ? '' : 'var(--orange)';
 
@@ -375,7 +395,7 @@ async function loadMpTrial(trialIdx) {
         for (const [key, p] of Object.entries(d.passes || {})) {
             passes[key] = {
                 label: p.label, color: p.color,
-                os: decodeF32(p.OS), od: decodeF32(p.OD), j3d: decodeF32(p.joints_3d),
+                os: decodeF32(p.OS), od: decodeF32(p.OD),
                 distances: p.distances || null,
                 distancesClean: p.distances_clean || null,
                 sourceOS: p.source_OS || null, sourceOD: p.source_OD || null,
@@ -395,19 +415,17 @@ async function loadMpTrial(trialIdx) {
 function layerCatalog() {
     const out = [];
     out.push({ key: 'manual', label: 'Manual (this session)', color: MANUAL_COLOR,
-               available: true, has3d: hasCalibration });
+               available: true });
     for (const spec of BP_LAYERS) {
         out.push({ key: spec.key, label: spec.label, color: spec.color,
-                   available: !!bpData[spec.key],
-                   has3d: hasCalibration && !!(bpData[spec.key] || {}).joints_3d });
+                   available: !!bpData[spec.key] });
     }
     const presentHere = availableMp[currentTrialIdx]
         || availableMp[String(currentTrialIdx)] || [];
     for (const spec of mpPassSpecs) {
         out.push({ key: `mp_${spec.key}`, label: spec.label, color: spec.color,
                    indent: true, mpPass: spec.key,
-                   available: presentHere.includes(spec.key),
-                   has3d: hasCalibration });
+                   available: presentHere.includes(spec.key) });
     }
     return out;
 }
@@ -419,24 +437,17 @@ function buildLayerGrid() {
 
     // Sensible first view: what you are working on, plus the hand.
     if (!layerVis.size) {
-        const defaults = {
-            manual: { d2: true, d3: true },
-            corrections: { d2: true, d3: false },
-            dlc: { d2: true, d3: false },
-            refine: { d2: true, d3: false },
-            committed: { d2: true, d3: false },
-            mp_best: { d2: true, d3: true },
-            mp_forward: { d2: true, d3: true },
-        };
-        for (const l of cat) layerVis.set(l.key, { ...(defaults[l.key] || { d2: false, d3: false }) });
+        const on = ['manual', 'corrections', 'dlc', 'refine', 'committed',
+                    'mp_best', 'mp_forward'];
+        for (const l of cat) layerVis.set(l.key, { d2: on.includes(l.key) });
         // Only one MediaPipe pass on by default: the fused one if it exists.
         if (cat.some(l => l.key === 'mp_best' && l.available)) {
-            layerVis.set('mp_forward', { d2: false, d3: false });
+            layerVis.set('mp_forward', { d2: false });
         }
     }
-    for (const l of cat) if (!layerVis.has(l.key)) layerVis.set(l.key, { d2: false, d3: false });
+    for (const l of cat) if (!layerVis.has(l.key)) layerVis.set(l.key, { d2: false });
 
-    grid.innerHTML = '<span></span><span class="hdr">2D</span><span class="hdr">3D</span>';
+    grid.innerHTML = '';
     for (const l of cat) {
         const v = vis(l.key);
         const name = document.createElement('span');
@@ -447,29 +458,21 @@ function buildLayerGrid() {
         if (!l.available) name.title = 'No data for this trial yet';
         grid.appendChild(name);
 
-        for (const dim of ['d2', 'd3']) {
-            const cb = document.createElement('input');
-            cb.type = 'checkbox';
-            cb.checked = !!v[dim] && l.available && (dim === 'd2' || l.has3d);
-            cb.disabled = !l.available || (dim === 'd3' && !l.has3d);
-            if (dim === 'd3' && !l.has3d) {
-                cb.title = hasCalibration
-                    ? 'No triangulated points for this layer'
-                    : 'Needs a stereo calibration for this subject';
-            }
-            cb.addEventListener('change', () => {
-                layerVis.get(l.key)[dim] = cb.checked;
-                if (dim === 'd3' && cb.checked && !show3d) toggle3d(true);
-                render();
-                update3d();
-                renderTrace();
-            });
-            grid.appendChild(cb);
-        }
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = !!v.d2 && l.available;
+        cb.disabled = !l.available;
+        cb.addEventListener('change', () => {
+            layerVis.get(l.key).d2 = cb.checked;
+            render();
+            renderTrace();
+        });
+        grid.appendChild(cb);
     }
 
     const note = el('layerNote');
-    const bestOn = vis('mp_best').d2 || vis('mp_best').d3;
+    const bestOn = vis('mp_best').d2
+        && cat.some(l => l.key === 'mp_best' && l.available);
     note.textContent = bestOn
         ? 'Best per frame picks, for each frame and camera, whichever pass '
         + 'triangulates to the most plausible thumb-index aperture.'
@@ -491,7 +494,6 @@ function buildFingerGrid() {
                 if (cb.checked) visibleJoints.add(j); else visibleJoints.delete(j);
             }
             render();
-            update3d();
         });
         lab.appendChild(cb);
         lab.appendChild(document.createTextNode(f.label));
@@ -665,7 +667,6 @@ async function gotoFrame(frame, opts = {}) {
     updateFrameDisplay();
     renderTimeline();
     renderTrace();
-    update3d();
 }
 
 function pickTrial(trialIdx) {
@@ -730,24 +731,14 @@ function applyAutoZoom(frame) {
         }
     }
 
-    const pts = [];
+    let pts = [];
     for (const bp of bodyparts) {
         const c = manualAt(frame, currentSide, bp) || (ghostAt(frame, currentSide, bp) || {}).coords;
         if (c) pts.push(c);
     }
-    // No bodypart coordinates: use the whole hand from whichever
-    // MediaPipe pass is on, which is the common case on a fresh subject.
-    if (!pts.length) {
-        for (const spec of mpPassSpecs) {
-            if (!vis(`mp_${spec.key}`).d2) continue;
-            const lm = mpFrame2d(spec.key, frame, currentSide);
-            if (!lm) continue;
-            for (let j = 0; j < lm.length / 2; j++) {
-                if (Number.isFinite(lm[j * 2])) pts.push([lm[j * 2], lm[j * 2 + 1]]);
-            }
-            if (pts.length) break;
-        }
-    }
+    // No bodypart coordinates: use the whole MediaPipe hand, which is the
+    // common case on a fresh subject.
+    if (!pts.length) pts = mpPointsFor(frame, currentSide);
 
     if (!pts.length) {
         const box = (cropBoxes[currentTrialIdx]
@@ -1039,7 +1030,6 @@ async function redetectTrial() {
                 availableMp = layers.mp_by_trial || {};
                 await loadMpTrial(currentTrialIdx);
                 render();
-                update3d();
                 renderTrace();
             } else if (job.status === 'failed') {
                 el('boxStatus').textContent = `Detection failed: ${job.error_msg || ''}`;
@@ -1136,7 +1126,6 @@ function placeLabel(ix, iy) {
     }
 
     render();
-    update3d();
     updateLabelCount();
     scheduleSave();
 }
@@ -1156,7 +1145,6 @@ function removeLabel(bp) {
         dirtyKeys.add(key);
     }
     render();
-    update3d();
     updateLabelCount();
     scheduleSave();
 }
@@ -1193,7 +1181,6 @@ function applyUndoEntry(entry, toStack) {
         gotoFrame(frame);
     } else {
         render();
-        update3d();
     }
     updateLabelCount();
     scheduleSave();
@@ -1538,12 +1525,11 @@ function videoDrawLoop(now, metadata) {
     drawVideoToCanvas(currentFrame, { rezoom: false });
     updateFrameDisplay();
 
-    // The timeline, trace and 3D view are context, not the thing being
+    // The timeline and trace are context, not the thing being
     // watched; refreshing them every frame at 60 fps costs more than it adds.
     if (currentFrame % 10 === 0) {
         renderTimeline();
         renderTrace();
-        update3d();
     }
 
     if ('requestVideoFrameCallback' in videoEl) {
@@ -1585,260 +1571,6 @@ function fallbackPlay(fpsOverride) {
             el('playBtn').innerHTML = '&#9654;';
         }
     })();
-}
-
-// ── 3D view ──────────────────────────────────────────────────────────────
-
-function toggle3d(on) {
-    show3d = (on == null) ? !show3d : on;
-    el('vp3d').classList.toggle('active', show3d);
-    el('view3dBtn').classList.toggle('active', show3d);
-    if (show3d) {
-        if (!three) setup3d();
-        resize3d();
-        update3d();
-    }
-    // The 2D viewport just changed width.
-    requestAnimationFrame(() => {
-        if (videoFrameMode) drawVideoToCanvas(currentFrame);
-        else { if (!hasUserZoom) applyAutoZoom(currentFrame); render(); }
-    });
-}
-
-function setup3d() {
-    const host = el('vp3d');
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x120822);
-
-    const camera = new THREE.PerspectiveCamera(
-        40, host.clientWidth / Math.max(host.clientHeight, 1), 1, 20000);
-    camera.position.set(0, 0, -400);
-
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setPixelRatio(window.devicePixelRatio || 1);
-    renderer.setSize(host.clientWidth, host.clientHeight);
-    host.appendChild(renderer.domElement);
-
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.12;
-
-    scene.add(new THREE.AmbientLight(0xffffff, 0.75));
-    const dir = new THREE.DirectionalLight(0xffffff, 0.5);
-    dir.position.set(1, 1, -1);
-    scene.add(dir);
-
-    // Everything we draw hangs off one group, so a frame change can clear
-    // it without touching the lights, camera or controls.
-    const root = new THREE.Group();
-    scene.add(root);
-
-    three = { scene, camera, renderer, controls, root, framed: false };
-
-    (function animate() {
-        if (!three) return;
-        requestAnimationFrame(animate);
-        if (!show3d) return;
-        three.controls.update();
-        three.renderer.render(three.scene, three.camera);
-    })();
-
-    new ResizeObserver(resize3d).observe(host);
-}
-
-function resize3d() {
-    if (!three) return;
-    const host = el('vp3d');
-    const w = host.clientWidth, h = Math.max(host.clientHeight, 1);
-    three.camera.aspect = w / h;
-    three.camera.updateProjectionMatrix();
-    three.renderer.setSize(w, h);
-}
-
-function clear3d() {
-    const root = three.root;
-    while (root.children.length) {
-        const c = root.children.pop();
-        c.geometry?.dispose();
-        if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
-        else c.material?.dispose();
-    }
-}
-
-function add3dSphere(x, y, z, color, radius) {
-    const m = new THREE.Mesh(
-        new THREE.SphereGeometry(radius, 12, 10),
-        new THREE.MeshLambertMaterial({ color }));
-    m.position.set(x, y, z);
-    three.root.add(m);
-}
-
-function add3dLine(pts, color, opacity) {
-    const g = new THREE.BufferGeometry().setFromPoints(
-        pts.map(p => new THREE.Vector3(p[0], p[1], p[2])));
-    three.root.add(new THREE.Line(g, new THREE.LineBasicMaterial({
-        color, transparent: opacity < 1, opacity,
-    })));
-}
-
-function update3d() {
-    if (!three || !show3d) return;
-    clear3d();
-
-    const centroid = [0, 0, 0];
-    const lo = [Infinity, Infinity, Infinity];
-    const hi = [-Infinity, -Infinity, -Infinity];
-    let nPts = 0;
-    const note = (x, y, z) => {
-        centroid[0] += x; centroid[1] += y; centroid[2] += z; nPts++;
-        lo[0] = Math.min(lo[0], x); hi[0] = Math.max(hi[0], x);
-        lo[1] = Math.min(lo[1], y); hi[1] = Math.max(hi[1], y);
-        lo[2] = Math.min(lo[2], z); hi[2] = Math.max(hi[2], z);
-    };
-
-    // MediaPipe hands: the full 21-joint skeleton, which is what makes the
-    // 3D view legible as a hand rather than a pair of floating dots.
-    for (const spec of mpPassSpecs) {
-        if (!vis(`mp_${spec.key}`).d3) continue;
-        const j3d = mpFrame3d(spec.key, currentFrame);
-        if (!j3d) continue;
-        const color = new THREE.Color(spec.color);
-        for (let j = 0; j < j3d.length / 3; j++) {
-            if (!visibleJoints.has(j)) continue;
-            const x = j3d[j * 3], y = j3d[j * 3 + 1], z = j3d[j * 3 + 2];
-            if (!Number.isFinite(x)) continue;
-            add3dSphere(x, y, z, color, 3);
-            note(x, y, z);
-        }
-        for (const [a, b] of HAND_BONES) {
-            if (!visibleJoints.has(a) || !visibleJoints.has(b)) continue;
-            const ax = j3d[a * 3], bx = j3d[b * 3];
-            if (!Number.isFinite(ax) || !Number.isFinite(bx)) continue;
-            add3dLine([[ax, j3d[a * 3 + 1], j3d[a * 3 + 2]],
-                       [bx, j3d[b * 3 + 1], j3d[b * 3 + 2]]], color, 0.85);
-        }
-    }
-
-    // Bodypart layers: a marker per labeled point, plus the segment between
-    // them — the thumb-index aperture is the measurement, so show it.
-    const drawBpLayer = (key, color) => {
-        const d = bpData[key];
-        const j3 = d && d.joints_3d;
-        if (!j3) return null;
-        const pts = [];
-        for (const bp of bodyparts) {
-            const p = (j3[bp] || [])[currentFrame];
-            if (!p || p[0] == null) continue;
-            add3dSphere(p[0], p[1], p[2], new THREE.Color(color), 4.5);
-            note(p[0], p[1], p[2]);
-            pts.push(p);
-        }
-        if (pts.length === 2) add3dLine(pts, new THREE.Color(color), 0.9);
-        return pts;
-    };
-
-    for (const spec of BP_LAYERS) {
-        if (vis(spec.key).d3) drawBpLayer(spec.key, spec.color);
-    }
-
-    // Manual labels triangulate client-side only when both cameras have a
-    // point; without that there is no depth to show, so nothing is drawn
-    // rather than something misleading.
-    if (vis('manual').d3) {
-        const pts = manual3dForFrame();
-        for (const p of pts) {
-            add3dSphere(p[0], p[1], p[2], new THREE.Color(MANUAL_COLOR), 5);
-            note(p[0], p[1], p[2]);
-        }
-        if (pts.length === 2) add3dLine(pts, new THREE.Color(MANUAL_COLOR), 1);
-    }
-
-    if (nPts) {
-        const t = new THREE.Vector3(centroid[0] / nPts, centroid[1] / nPts,
-                                    centroid[2] / nPts);
-        if (!three.framed) {
-            // Frame the content once, then leave the camera to the user.
-            // Triangulated points sit a few metres from the camera origin in
-            // millimetres, so a fixed starting pose shows a speck.
-            const radius = Math.max(
-                Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2, 30);
-            three.camera.near = Math.max(radius / 100, 0.1);
-            three.camera.far = radius * 200;
-            three.camera.updateProjectionMatrix();
-            // Look along -Z, the direction the cameras face, so the first
-            // view matches what the 2D canvas shows.
-            three.camera.position.set(t.x, t.y, t.z - radius * 3.2);
-            three.controls.target.copy(t);
-            three.framed = true;
-        } else {
-            // Re-centre gently afterwards: snapping the orbit target on every
-            // frame during playback makes the view lurch.
-            three.controls.target.lerp(t, 0.2);
-        }
-        three.controls.update();
-    }
-}
-
-/* 3D for this session's manual labels.
- *
- * The saved layers arrive already triangulated, but manual points move as
- * you drag, so these are triangulated on demand by the server — the same
- * undistort-and-triangulate the stored coordinates came from, so the live
- * marker and the saved layer can't disagree. Cached per frame, and only
- * re-requested when a point actually moves. */
-let manual3dCache = { key: null, points: {}, distance: null };
-let manual3dPending = false;
-
-function manualPointsForFrame() {
-    if (cameraNames.length < 2) return null;
-    const base = bpData.corrections || bpData.refine || bpData.dlc;
-    const points = {};
-    let any = false;
-    for (const bp of bodyparts) {
-        const cams = {};
-        for (const cam of cameraNames.slice(0, 2)) {
-            const m = manualAt(currentFrame, cam, bp);
-            const b = base && base[cam] && (base[cam][bp] || [])[currentFrame];
-            const c = m || b;
-            if (c && c[0] != null) cams[cam] = [c[0], c[1]];
-        }
-        if (Object.keys(cams).length === 2) { points[bp] = cams; any = true; }
-    }
-    return any ? points : null;
-}
-
-function manual3dKey(points) {
-    return currentFrame + '|' + JSON.stringify(points);
-}
-
-/* Returns whatever 3D we have for the manual layer now, and refreshes it in
- * the background when the points have changed. Drawing the previous answer
- * for one frame beats blocking the render on a round trip. */
-function manual3dForFrame() {
-    if (!hasCalibration) return [];
-    const points = manualPointsForFrame();
-    if (!points) { manual3dCache = { key: null, points: {}, distance: null }; return []; }
-
-    const key = manual3dKey(points);
-    if (key !== manual3dCache.key && !manual3dPending) {
-        manual3dPending = true;
-        api(`/api/labeling/sessions/${sessionId}/triangulate`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ points }),
-        }).then(r => {
-            manual3dCache = { key, points: r.points || {},
-                              distance: r.distance ?? null };
-            if (show3d) update3d();
-        }).catch(() => {
-            // Leave the previous answer in place; a failed triangulation is
-            // not worth clearing a correct marker over.
-        }).finally(() => { manual3dPending = false; });
-    }
-
-    return bodyparts
-        .map(bp => manual3dCache.points[bp])
-        .filter(p => p && p[0] != null);
 }
 
 // ── Timeline ─────────────────────────────────────────────────────────────
@@ -1933,7 +1665,7 @@ function traceSeries() {
     const out = [];
     if (!mpTrial) return out;
     for (const spec of mpPassSpecs) {
-        if (!vis(`mp_${spec.key}`).d2 && !vis(`mp_${spec.key}`).d3) continue;
+        if (!vis(`mp_${spec.key}`).d2) continue;
         const p = mpPass(spec.key);
         if (!p) continue;
         const seq = p.distancesClean || p.distances;
@@ -1942,7 +1674,7 @@ function traceSeries() {
                    offset: mpTrial.start_frame });
     }
     for (const spec of BP_LAYERS) {
-        if (!vis(spec.key).d2 && !vis(spec.key).d3) continue;
+        if (!vis(spec.key).d2) continue;
         const d = bpData[spec.key];
         if (!d || !d.distances) continue;
         out.push({ label: spec.label, color: spec.color, values: d.distances,
@@ -2089,12 +1821,36 @@ function singleCamera() {
     return cameraMode === 'single' || cameraNames.length < 2;
 }
 
+/* Switch camera without losing your place.
+ *
+ * The same hand sits at different pixels in OS and OD — that offset is
+ * the stereo disparity, and at labeling zoom it is most of the screen.
+ * Keeping the pixel transform would put the hand off-view and make the
+ * E key useless for the thing it is for: placing the same point on both
+ * cameras. So shift the view by the disparity, measured from the labels
+ * when this frame has them and from MediaPipe when it does not.
+ *
+ * Only matters once the user has zoomed; before that applyAutoZoom
+ * reframes from scratch and already lands on the hand. */
 function toggleSide() {
     if (singleCamera()) return;
-    currentSide = otherSide();
+    const from = currentSide, to = otherSide();
+    let shift = null;
+    if (hasUserZoom && !boxMode) {
+        const a = handCentroid(currentFrame, from);
+        const b = handCentroid(currentFrame, to);
+        if (a && b) shift = [b[0] - a[0], b[1] - a[1]];
+    }
+
+    currentSide = to;
     updateSideToggle();
     setNavState({ side: currentSide });
     videoSideLoaded = null;   // force the video element onto the other half
+
+    if (shift) {
+        offsetX -= shift[0] * scale;
+        offsetY -= shift[1] * scale;
+    }
     gotoFrame(currentFrame, { force: true });
 }
 
@@ -2105,7 +1861,6 @@ function updateShortcuts() {
         ['&uarr; &darr;', 'previous / next labeled frame'],
         ['Space', 'play / pause'],
         ['E', 'switch camera'],
-        ['D', 'show / hide 3D'],
         ['R', 'reset zoom'],
         ['1 … 9', 'jump to trial'],
         ['Ctrl/&#8984; Z', 'undo'],
@@ -2217,7 +1972,6 @@ function onMouseUp() {
         pushUndo(`${currentFrame}_${currentSide}`, dragging, [dragOrigX, dragOrigY]);
         dirtyKeys.add(`${currentFrame}_${currentSide}`);
         scheduleSave();
-        update3d();
     }
     dragging = null;
     canvas.style.cursor = 'crosshair';
@@ -2277,7 +2031,6 @@ function onKeyDown(e) {
         }
         case ' ': e.preventDefault(); togglePlay(); break;
         case 'e': case 'E': toggleSide(); break;
-        case 'd': case 'D': toggle3d(); break;
         case 'r': case 'R': resetZoom(); break;
         case 't': case 'T':
             if (mode === 'refine') {
@@ -2321,7 +2074,6 @@ async function init() {
 
     el('playBtn').addEventListener('click', togglePlay);
     el('resetZoomBtn').addEventListener('click', resetZoom);
-    el('view3dBtn').addEventListener('click', () => toggle3d());
     el('sideToggle').addEventListener('click', toggleSide);
     el('frameDisplay').addEventListener('click', () => {
         frameDisplayMode = (frameDisplayMode + 1) % 3;
@@ -2391,7 +2143,7 @@ async function init() {
 
 document.addEventListener('DOMContentLoaded', init);
 
-return { gotoFrame, toggle3d, openSession };
+return { gotoFrame, openSession };
 
 })();
 

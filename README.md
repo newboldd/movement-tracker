@@ -186,13 +186,11 @@ saves to the trial (optionally seeding every trial that has no box of its
 own), and **Re-detect this trial** re-runs MediaPipe inside it — adjust,
 re-detect, see whether the frames that were failing come back.
 
-### 3D
+### Distances
 
-With a stereo calibration for the subject, every layer is triangulated:
-the MediaPipe hands as full skeletons, predictions and corrections as
-their labeled points, and this session's manual labels live as you drag
-them. Distances are reported in millimetres. Without a calibration the
-app works normally in 2D and reports distances in pixels.
+With a stereo calibration for the subject, the thumb-index aperture under
+the video is triangulated and reported in millimetres. Without one the app
+works normally and reports the distance in pixels.
 
 Point Settings at a calibration YAML, and map subjects to cameras with a
 `camera_assignments.yaml` in the data directory's `calibration/` folder.
@@ -268,7 +266,6 @@ the database being deleted.
 | `↑` `↓` | previous / next labeled frame |
 | `Space` | play / pause |
 | `E` | switch camera |
-| `D` | show / hide 3D |
 | `R` | reset zoom |
 | `1`–`9` | jump to a trial |
 | `T` | (Refine) tick this frame for training |

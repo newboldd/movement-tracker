@@ -22,7 +22,7 @@ from ..db import get_db_ctx
 from ..models import (
     CommitRequest, LabelBatchSave, SessionCreate, STAGE_INDEX,
 )
-from ..services.calibration import get_calibration_for_subject, triangulate_points
+from ..services.calibration import get_calibration_for_subject
 from ..services.discovery import _count_labeled_frames, _has_mediapipe
 from ..services.dlc_predictions import (
     _compute_dlc_distances,
@@ -466,17 +466,6 @@ def get_trial_mp(session_id: int, trial_idx: int,
             "OD": _f32(od_lm),
         }
 
-        # 3D for the whole trial, in one batched triangulation.
-        if calib is not None and os_lm is not None and od_lm is not None:
-            n, j = os_lm.shape[0], os_lm.shape[1]
-            try:
-                pts3d = triangulate_points(os_lm.reshape(-1, 2),
-                                           od_lm.reshape(-1, 2), calib)
-                entry["joints_3d"] = _f32(pts3d.reshape(n, j, 3))
-            except Exception as e:
-                logger.warning("Triangulation failed for %s/%s: %s",
-                               subject_name, spec["file"], e)
-
         if "distances" in data.files:
             entry["distances"] = _nan_list(data["distances"])
         if "distances_clean" in data.files:
@@ -502,7 +491,7 @@ def get_stage_data(
     """Labeled-bodypart coordinates for one layer, over the whole subject.
 
     Shape matches across layers — ``{camera: {bodypart: [[x,y]|null,
-    ...]}, distances: [...], joints_3d: {...}}`` — so the page draws any
+    ...]}, distances: [...]}`` — so the page draws any
     of them with the same code.
     """
     valid = ("mp", "labels", "dlc", "refine", "corrections")
@@ -527,7 +516,6 @@ def get_stage_data(
     if not data:
         return {}
 
-    data["joints_3d"] = _bodypart_3d(subject_name, data)
     return data
 
 
@@ -538,7 +526,6 @@ def get_dlc_predictions(session_id: int) -> dict:
     data = get_dlc_predictions_for_session(subj["name"])
     if not data:
         return {}
-    data["joints_3d"] = _bodypart_3d(subj["name"], data)
     return data
 
 
@@ -573,55 +560,6 @@ def get_committed_labels(session_id: int) -> List[dict]:
             lbl["keypoints"] = json.loads(lbl["keypoints"])
         result.append(lbl)
     return result
-
-
-def _bodypart_3d(subject_name: str, data: dict) -> dict | None:
-    """Triangulate a layer's labeled bodyparts to 3D.
-
-    Returns ``{bodypart: [[x,y,z]|null, ...]}`` in mm, or None when the
-    subject has no stereo calibration or only one camera's worth of
-    data — in which case the page shows 2D only rather than inventing
-    depth.
-    """
-    settings = get_settings()
-    cam_names = settings.camera_names
-    if len(cam_names) < 2:
-        return None
-
-    calib = get_calibration_for_subject(subject_name)
-    if calib is None:
-        return None
-
-    left = data.get(cam_names[0])
-    right = data.get(cam_names[1])
-    if not left or not right:
-        return None
-
-    out: dict[str, list] = {}
-    for bp in settings.bodyparts:
-        lseq, rseq = left.get(bp), right.get(bp)
-        if not lseq or not rseq:
-            continue
-        n = min(len(lseq), len(rseq))
-        pts_l = np.full((n, 2), np.nan)
-        pts_r = np.full((n, 2), np.nan)
-        for i in range(n):
-            if lseq[i] is not None:
-                pts_l[i] = lseq[i][:2]
-            if rseq[i] is not None:
-                pts_r[i] = rseq[i][:2]
-        try:
-            pts3d = triangulate_points(pts_l, pts_r, calib)
-        except Exception as e:
-            logger.warning("Triangulation failed for %s/%s: %s",
-                           subject_name, bp, e)
-            continue
-        out[bp] = [None if not np.isfinite(p).all()
-                   else [round(float(p[0]), 2), round(float(p[1]), 2),
-                         round(float(p[2]), 2)]
-                   for p in pts3d]
-
-    return out or None
 
 
 def _committed_labels_to_arrays(subj: dict) -> dict | None:
@@ -791,61 +729,6 @@ def delete_label(session_id: int, frame_num: int,
     _mirror_labels_into_package(subj["name"])
     return {"deleted": True}
 
-
-@router.post("/sessions/{session_id}/triangulate")
-def triangulate_frame(session_id: int, body: dict = Body(...)) -> dict:
-    """Triangulate one frame's 2D points to 3D.
-
-    Body: ``{"points": {bodypart: {camera: [x, y], ...}, ...}}``
-
-    The 3D view needs the points you are dragging right now, not the ones
-    last written to disk.  Doing it here rather than in the browser keeps
-    one implementation of undistort + triangulate — the same one that
-    produced every stored 3D coordinate — so the live marker and the
-    saved layer cannot disagree about where a point is.
-    """
-    _session, subj = _session_and_subject(session_id)
-    settings = get_settings()
-    cam_names = settings.camera_names
-    if len(cam_names) < 2:
-        return {"points": {}, "has_calibration": False}
-
-    calib = get_calibration_for_subject(subj["name"])
-    if calib is None:
-        return {"points": {}, "has_calibration": False}
-
-    points = body.get("points") or {}
-    names, pts_l, pts_r = [], [], []
-    for bp, cams in points.items():
-        left, right = cams.get(cam_names[0]), cams.get(cam_names[1])
-        if not left or not right or left[0] is None or right[0] is None:
-            continue
-        names.append(bp)
-        pts_l.append([float(left[0]), float(left[1])])
-        pts_r.append([float(right[0]), float(right[1])])
-
-    if not names:
-        return {"points": {}, "has_calibration": True}
-
-    pts3d = triangulate_points(np.array(pts_l), np.array(pts_r), calib)
-    out = {}
-    for bp, p in zip(names, pts3d):
-        out[bp] = (None if not np.isfinite(p).all()
-                   else [round(float(p[0]), 2), round(float(p[1]), 2),
-                         round(float(p[2]), 2)])
-
-    result = {"points": out, "has_calibration": True}
-    # The aperture is the measurement the whole pipeline exists to produce,
-    # so hand it back alongside the points rather than making the page
-    # recompute it from them.
-    finite = [v for v in out.values() if v is not None]
-    if len(finite) == 2:
-        a, b = np.array(finite[0]), np.array(finite[1])
-        result["distance"] = round(float(np.linalg.norm(a - b)), 2)
-    return result
-
-
-# ── Commit and corrections ─────────────────────────────────────────────
 
 @router.post("/sessions/{session_id}/save_corrections")
 def save_corrections(session_id: int) -> dict:

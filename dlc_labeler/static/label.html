@@ -36,13 +36,10 @@
             color: #1f0f3a; font-weight: 600;
         }
 
-        /* Layer grid: name, 2D toggle, 3D toggle. */
+        /* Layer grid: name, visibility toggle. */
         #layerGrid {
-            display: grid; grid-template-columns: 1fr 24px 24px;
+            display: grid; grid-template-columns: 1fr 24px;
             gap: 3px 4px; align-items: center; font-size: 12px;
-        }
-        #layerGrid .hdr {
-            font-size: 9px; color: var(--text-muted); text-align: center;
         }
         #layerGrid input { margin: 0; justify-self: center; cursor: pointer; }
         #layerGrid .lname { color: var(--text-muted); display: flex; align-items: center; gap: 5px; }
@@ -67,22 +64,9 @@
         .mini { font-size: 11px; color: var(--text-muted); line-height: 1.5; }
         .sb-btn { width: 100%; margin-top: 5px; }
 
-        /* Viewports: video canvas with the 3D view docked beside or over it. */
         .viewports { position: absolute; inset: 0; display: flex; }
         .vp-2d { position: relative; flex: 1; min-width: 0; }
         .vp-2d canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
-        .vp-3d {
-            position: relative; width: 38%; min-width: 260px;
-            border-left: 1px solid var(--border); background: #120822;
-            display: none;
-        }
-        .vp-3d.active { display: block; }
-        .vp-3d canvas { display: block; width: 100%; height: 100%; touch-action: none; }
-        .vp-3d-hint {
-            position: absolute; bottom: 6px; left: 8px; right: 8px;
-            font-size: 10px; color: var(--text-muted); pointer-events: none;
-        }
-
         .timeline-container { height: 74px; }
         .distance-trace-container { height: 110px; }
 
@@ -132,9 +116,7 @@
                 <div class="mini" id="calibNote"></div>
 
                 <div class="sb-section">Layers</div>
-                <div id="layerGrid">
-                    <span></span><span class="hdr">2D</span><span class="hdr">3D</span>
-                </div>
+                <div id="layerGrid"></div>
                 <div class="mini" id="layerNote" style="margin-top:6px;"></div>
 
                 <div class="sb-section">Hand joints <span style="text-transform:none;letter-spacing:0;">(MediaPipe)</span></div>
@@ -188,9 +170,6 @@
                     <div class="vp-2d" id="vp2d">
                         <canvas id="labelCanvas" tabindex="0"></canvas>
                     </div>
-                    <div class="vp-3d" id="vp3d">
-                        <div class="vp-3d-hint">drag to orbit · scroll to zoom · shift-drag to pan</div>
-                    </div>
                 </div>
                 <video id="videoPlayer" style="display:none;" muted preload="auto"></video>
             </div>
@@ -205,7 +184,6 @@
                       title="Click to switch between frame number, time, and both"
                       style="cursor:pointer;">Frame 0 / 0</span>
                 <span id="sideToggle" class="side-toggle os" title="Switch camera (E)">OS</span>
-                <button class="btn btn-sm" id="view3dBtn" title="Show the triangulated 3D view (D)">3D</button>
                 <button class="btn btn-sm" id="resetZoomBtn" title="Reset zoom (R)">Fit</button>
                 <span class="status-pill" id="savePill">saved</span>
                 <span id="labelInfo" style="font-size:12px;color:var(--text-muted);margin-left:auto;"></span>
@@ -222,14 +200,7 @@
         </div>
     </div>
 
-    <script type="importmap">
-    {
-        "imports": {
-            "three": "/static/vendor/three.module.js?v=1"
-        }
-    }
-    </script>
     <script src="/static/js/nav.js?v=1"></script>
-    <script src="/static/js/label.js?v=2" type="module"></script>
+    <script src="/static/js/label.js?v=3" type="module"></script>
 </body>
 </html>
