@@ -135,3 +135,7 @@ class CommitRequest(BaseModel):
     # Chosen on the page from the corrections-vs-predictions diff, so a
     # frame the model already gets right doesn't bloat the training set.
     train_frames: List[TrainFrame] = []
+    # Which labels an `initial` commit writes: every labeled frame, or
+    # only the k-means selection the guided grid shows.  Two different
+    # training sets, written to two different directories.
+    scope: str = "all"            # "all" | "selected"

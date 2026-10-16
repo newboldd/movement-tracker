@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -174,6 +175,8 @@ def commit_labels_to_dlc(
     session_labels: list[dict],
     iteration: int = 1,
     camera_mode: str | None = None,
+    training_name: str | None = None,
+    supersedes: list[str] | None = None,
 ):
     """Commit labeled frames: extract PNGs, write CSV/H5, create DLC structure.
 
@@ -182,14 +185,26 @@ def commit_labels_to_dlc(
         session_labels: list of dicts from frame_labels table (with keypoints JSON)
         iteration: labeling iteration (1 = initial, 2+ = refinement)
         camera_mode: Per-subject camera mode (falls back to global default)
+        training_name: labeled-data subdirectory; defaults to round{iteration}
+        supersedes: sibling directories to clear out, because DeepLabCut's
+            create_training_dataset merges every labeled-data subdirectory
+            that has a CollectedData CSV.  Two sets covering the same
+            frames would otherwise both be trained on, silently
+            double-weighting whatever they share.
 
     Returns:
         dict with paths and counts
     """
     settings = get_settings()
     dlc_path = settings.dlc_path / subject_name
-    training_name = f"round{iteration}"
+    training_name = training_name or f"round{iteration}"
     labeled_data_dir = dlc_path / "labeled-data" / training_name
+
+    for sibling in (supersedes or []):
+        sib_dir = dlc_path / "labeled-data" / sibling
+        if sib_dir.is_dir() and sib_dir != labeled_data_dir:
+            shutil.rmtree(sib_dir)
+            logger.info("Removed superseded training set %s", sib_dir)
 
     labeled_data_dir.mkdir(parents=True, exist_ok=True)
     qc_dir = labeled_data_dir / "qc"

@@ -202,6 +202,27 @@ def create_session(subject_id: int, req: SessionCreate) -> dict:
     return session
 
 
+def _bodypart_joints(bodyparts: list[str]) -> dict:
+    """Which MediaPipe landmark stands for each bodypart, where one does.
+
+    Guided labeling zooms to the point it is asking for, and MediaPipe's
+    guess at that point is the only thing available before anybody has
+    labeled it.  Matched by name rather than position so renaming or
+    reordering bodyparts cannot quietly point "thumb" at the index
+    finger; a bodypart with no obvious landmark simply gets no entry and
+    falls back to the whole-hand crop.
+    """
+    from ..services.mediapipe_prelabel import INDEX_TIP, THUMB_TIP
+
+    known = {"thumb": THUMB_TIP, "index": INDEX_TIP}
+    out = {}
+    for bp in bodyparts:
+        joint = known.get(bp.strip().lower())
+        if joint is not None:
+            out[bp] = joint
+    return out
+
+
 @router.get("/sessions/{session_id}/info")
 def get_session_info(session_id: int) -> dict:
     """Everything the page needs once, at load: trials, bodyparts, cameras."""
@@ -271,6 +292,7 @@ def get_session_info(session_id: int) -> dict:
         "crop_boxes": crop_boxes,
         "has_calibration": get_calibration_for_subject(subj["name"]) is not None,
         "mp_passes": MP_PASSES,
+        "bodypart_joints": _bodypart_joints(bodyparts),
         "package": package,
     }
 
@@ -834,13 +856,46 @@ def commit_session(session_id: int,
             iteration=round_iteration,
             camera_mode=subj.get("camera_mode"),
         )
+    elif (req is not None and req.scope == "selected"):
+        # The guided grid is showing, so commit only the frames the
+        # k-means picked.  They go to their own labeled-data directory,
+        # and the all-frames set for this round is cleared, because
+        # DeepLabCut merges every directory it finds and training on both
+        # would weight the selected frames twice.
+        from ..services.frameselect import load_selection
+
+        selection = load_selection(subj["name"])
+        if not selection:
+            raise HTTPException(
+                400, "This subject has no frame selection yet — run it from "
+                     "the Label page first")
+        wanted = {int(f["global_frame"]) for f in selection.get("frames", [])}
+        chosen = [l for l in labels if int(l["frame_num"]) in wanted]
+        if not chosen:
+            raise HTTPException(
+                400, "None of the selected frames are labeled yet")
+
+        iteration = session["iteration"]
+        result = commit_labels_to_dlc(
+            subject_name=subj["name"],
+            session_labels=chosen,
+            iteration=iteration,
+            camera_mode=subj.get("camera_mode"),
+            training_name=f"selected{iteration}",
+            supersedes=[f"round{iteration}"],
+        )
+        result["scope"] = "selected"
+        result["selected_frames"] = len(wanted)
     else:
+        iteration = session["iteration"]
         result = commit_labels_to_dlc(
             subject_name=subj["name"],
             session_labels=labels,
-            iteration=session["iteration"],
+            iteration=iteration,
             camera_mode=subj.get("camera_mode"),
+            supersedes=[f"selected{iteration}"],
         )
+        result["scope"] = "all"
 
     with get_db_ctx() as db:
         db.execute(
@@ -1149,3 +1204,133 @@ def rerun_mediapipe(session_id: int, body: dict = Body(...)) -> dict:
     threading.Thread(target=_run, daemon=True).start()
 
     return {"status": "ok", "job_id": job_id, "trial_idx": trial_idx}
+
+
+# ── Choosing the frames to label ───────────────────────────────────────
+
+
+@router.get("/{subject_id}/selection")
+def get_selection(subject_id: int) -> dict:
+    """The subject's chosen labeling frames, if the selection has run.
+
+    ``frames`` is in the order the page shows them, and each carries the
+    MediaPipe crop per camera so the grid can be drawn and each frame
+    framed on the hand before anybody has labeled it.
+    """
+    from ..services.frameselect import DEFAULT_N_PICK, load_selection
+
+    with get_db_ctx() as db:
+        subj = db.execute("SELECT name FROM subjects WHERE id = ?",
+                          (subject_id,)).fetchone()
+    if not subj:
+        raise HTTPException(404, "Subject not found")
+
+    payload = load_selection(subj["name"])
+    if payload is None:
+        return {"exists": False, "frames": [], "default_n": DEFAULT_N_PICK}
+    return {"exists": True, **payload}
+
+
+@router.post("/{subject_id}/selection")
+def run_selection(subject_id: int, body: dict = Body(default=None)) -> dict:
+    """Run the k-means frame selection for a subject, in the background.
+
+    Returns a job id straight away: the clustering decodes every trial,
+    which is a minute or two on a real subject and must not be a request
+    the browser sits waiting on.  Poll ``/api/jobs/{id}`` for progress,
+    then re-read the selection.
+
+    Runs in a thread rather than a subprocess because it needs nothing
+    this process does not already have — no DeepLabCut, no GPU, just
+    OpenCV and scikit-learn.
+    """
+    import threading
+
+    from ..services.frameselect import (
+        DEFAULT_N_PICK, save_selection, select_training_frames,
+    )
+    from ..services.jobs import registry
+
+    body = body or {}
+    with get_db_ctx() as db:
+        subj = db.execute("SELECT id, name, camera_mode FROM subjects WHERE id = ?",
+                          (subject_id,)).fetchone()
+    if not subj:
+        raise HTTPException(404, "Subject not found")
+
+    n_pick = int(body.get("n_pick") or DEFAULT_N_PICK)
+    if not 1 <= n_pick <= 500:
+        raise HTTPException(400, "n_pick must be between 1 and 500")
+    seed = body.get("seed")
+    step = body.get("step")
+
+    settings = get_settings()
+    subject_name = subj["name"]
+    camera_mode = _camera_mode(subj)
+
+    log_dir = settings.dlc_path / ".logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = str(log_dir / f"select_frames_{subject_name}.log")
+
+    with get_db_ctx() as db:
+        cur = db.execute(
+            """INSERT INTO jobs (subject_id, job_type, status, log_path, params_json)
+               VALUES (?, 'select-frames', 'pending', ?, ?)""",
+            (subj["id"], log_path, json.dumps({"n_pick": n_pick})),
+        )
+        job_id = cur.lastrowid
+
+    cancel_event = registry.register_cancel_event(job_id)
+
+    def _run():
+        try:
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status = 'running', "
+                    "started_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+
+            def progress_cb(pct):
+                if cancel_event.is_set():
+                    raise InterruptedError("Job cancelled")
+                with get_db_ctx() as db:
+                    db.execute("UPDATE jobs SET progress_pct = ? WHERE id = ?",
+                               (min(float(pct), 99.0), job_id))
+
+            selections, notes, meta = select_training_frames(
+                subject_name, n_pick, camera_mode=camera_mode,
+                step=int(step) if step else None,
+                seed=int(seed) if seed is not None else None,
+                progress=progress_cb)
+
+            if not selections:
+                raise RuntimeError(notes[0] if notes else
+                                   "No frames could be selected")
+            save_selection(subject_name, selections, notes, meta)
+
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status = 'completed', progress_pct = 100, "
+                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+        except InterruptedError:
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status = 'cancelled', "
+                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+        except Exception as e:
+            logger.exception("Frame selection failed for %s", subject_name)
+            with get_db_ctx() as db:
+                db.execute(
+                    "UPDATE jobs SET status = 'failed', error_msg = ?, "
+                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (str(e), job_id))
+        finally:
+            registry.unregister_cancel_event(job_id)
+            # In-thread, so the subprocess monitor never sees it.
+            try:
+                from ..services.job_history import finalize_job_record
+                finalize_job_record(job_id)
+            except Exception:
+                logger.exception("job_history flush failed for job %s", job_id)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "ok", "job_id": job_id, "n_pick": n_pick}

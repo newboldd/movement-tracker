@@ -147,8 +147,10 @@ also work; set the layout per subject.
    default zoom while you label, so labeling without it is slower.
 2. **Label** on the Label page. Click to place each bodypart, drag to
    adjust, right-click to remove. Label a spread of frames across every
-   trial, then **Save & commit** — that extracts the frames as training
+   trial, then **Save labels** — that extracts the frames as training
    images and writes the DeepLabCut `CollectedData` files.
+
+   For the first training set, use **Guided labeling** instead: see below.
 3. **Train** on the Jobs page. It creates the training dataset, trains,
    crops each trial into per-camera video, and analyzes it all into
    `labels_v1/`.
@@ -176,6 +178,46 @@ as two exist for a trial, a **Best per frame** layer is built: for each
 frame and each camera it picks the pass whose pairing triangulates to the
 most plausible thumb-index aperture, with a stereo Y-disparity check to
 reject pairings where the tips line up but the rest of the hand does not.
+
+### Guided labeling
+
+The first training set is 30 frames x 2 cameras x 2 bodyparts = 120
+points, and the slow part is not placing them — it is finding them:
+scrolling to the right frame, switching camera, zooming in. **Guided
+labeling** (the button above the timeline, or `G`) does that part.
+
+Pressing it the first time picks the frames. That runs DeepLabCut's own
+k-means frame selector — MiniBatchKMeans over mean-centred 30px
+greyscale frames, one random frame per cluster — but without DeepLabCut
+installed, over the whole subject rather than one video at a time, and
+on the MediaPipe hand crop from each camera rather than the whole frame.
+That last one matters: squeezed to 30px wide, a 1920px camera half
+leaves the hand about two pixels, so whole-frame clusters sort by arm
+position and lighting. Cropping to the hand first makes them sort by
+hand posture, which is what a labeling set should span. Where MediaPipe
+has nothing, the whole frame stands in. The result is saved to
+`dlc/{Subject}/selection.json`, so it only runs once.
+
+Then `N` takes you to the next point nobody has placed, on the right
+frame and camera, zoomed on MediaPipe's guess at that exact point —
+close enough that placing it is one click. Place it and it moves on by
+itself. The grid under the video is one row per point and one column per
+selected frame, so what is left is one glance; click any cell to jump
+there.
+
+You can still move around the whole video and label anything else while
+the mode is on. What the **Save labels** button writes follows what is
+on screen:
+
+| Showing | Button | Writes |
+|---|---|---|
+| The grid | **Save 30 frames** | only the selected frames, to `labeled-data/selected{N}/` |
+| The timeline | **Save all frames** | every labeled frame, to `labeled-data/round{N}/` |
+
+Saving one clears the other for that round, because
+`create_training_dataset` merges every `labeled-data` subdirectory it
+finds and training on both would weight the shared frames twice. Both
+are rebuilt from the labels in one click, so switching is cheap.
 
 ### The crop box
 
@@ -266,6 +308,8 @@ the database being deleted.
 | `↑` `↓` | previous / next labeled frame |
 | `Space` | play / pause |
 | `E` | switch camera |
+| `G` | guided labeling on / off |
+| `N` | (Guided) next unlabeled point |
 | `R` | reset zoom |
 | `1`–`9` | jump to a trial |
 | `T` | (Refine) tick this frame for training |

@@ -34,7 +34,7 @@ dlc_labeler/
 ├── db.py               # schema + migrations
 ├── models.py           # pydantic models, STAGES
 ├── routers/
-│   ├── labeling.py     # the Label page's entire API
+│   ├── labeling.py     # the Label page's API, incl. frame selection
 │   ├── subjects.py     # CRUD + filesystem discovery
 │   ├── queue.py        # the Jobs page's API
 │   ├── jobs.py         # job detail, log tail, SSE, cancel
@@ -44,7 +44,8 @@ dlc_labeler/
 │   ├── video.py              # trial maps, frame extraction, stereo split
 │   ├── mediapipe_prelabel.py # hand passes + best-per-frame fusion
 │   ├── labels.py             # commit to DLC, corrections CSVs
-│   ├── frameselect.py        # DLC's k-means, on MediaPipe crops
+│   ├── frameselect.py        # DLC's k-means on MediaPipe crops —
+│   │                         #   per camera (packages), per frame (guided)
 │   ├── labelpack.py          # export/read/import labeling packages
 │   ├── dlc_predictions.py    # read DLC CSVs back as layers
 │   ├── dlc_pipeline.py       # STANDALONE: train/refine/analyze subprocess
@@ -99,6 +100,27 @@ a `.params.json` sidecar recording how it was produced.
 
 `build_combined_mp_npz_for_trial` rebuilds the fusion automatically
 whenever a source pass is written and two or more exist.
+
+### Guided labeling
+`services/frameselect.py`'s `select_training_frames` picks N frames for
+a *subject* (not per trial per camera, as the package exporter does):
+one pick is one frame, labeled on every camera, so the clustering
+feature is both cameras' MediaPipe crops side by side. Saved to
+`dlc/{subject}/selection.json`; `POST /api/labeling/{id}/selection` runs
+it in a thread with a `jobs` row for progress, because it decodes every
+trial.
+
+The page walks the selection frame-major, then camera, then bodypart —
+so a frame is decoded twice rather than once per point. `guidedBusy`
+drops clicks while the view is moving to the next point; without it a
+click landing mid-seek is placed on the point you just finished.
+`bodypart_joints` in session info maps each bodypart to the MediaPipe
+landmark the zoom aims at, matched by name server-side.
+
+Commit scope follows what is on screen: `scope: "selected"` writes
+`labeled-data/selected{N}/`, `"all"` writes `round{N}/`, and each clears
+the other (`supersedes`) because DLC merges every labeled-data
+subdirectory it finds.
 
 ### Labeling packages
 A package is a folder under `DATA_DIR/packages/` holding frames to be
@@ -193,7 +215,12 @@ schema pass (which would otherwise be a silent no-op).
   process (exit code 42; the launchers loop on it).
 - **No CDNs.** These machines are often offline or firewalled, so every
   asset the pages need is served from `static/`. Vendor anything new.
-- **Cache busting**: bump `?v=N` in the HTML when changing a JS file.
+- **Cache busting**: bump `?v=N` in the HTML when changing a JS or CSS
+  file — and in *every* page that links it, for `main.css`.
+- **Stereo camera switching must not reload the video.** Both halves come
+  from one file, so only `multicam` changes file when the camera changes.
+  Reloading on every switch re-buffers and re-seeks, which guided
+  labeling does on every other point.
 - **macOS Gatekeeper**: a downloaded zip needs "Open Anyway" once under
   System Settings → Privacy & Security.
 - **Shared data directory**: pointing this app and the full Movement

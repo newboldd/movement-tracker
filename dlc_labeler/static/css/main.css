@@ -440,9 +440,12 @@ body {
 .detail-section .info-row .label { color: var(--text-muted); }
 
 /* ── Labeling page ──────────────────────────────────── */
+/* Fills whatever the header leaves, rather than guessing its height:
+   the nav is built in JS and its height moves with the font. */
 .labeling-layout {
     display: flex;
-    height: calc(100vh - 52px);
+    flex: 1;
+    min-height: 0;
 }
 
 .labeling-sidebar {

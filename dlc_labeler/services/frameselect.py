@@ -27,6 +27,7 @@ the same scale and the dataset carries no accidental zoom.
 """
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -438,3 +439,309 @@ def select_for_subject(subject_name: str, n_per_trial: int, *,
                 progress(100.0 * unit / total_units)
 
     return all_choices, notes
+
+
+# ── Picking frames to label, for the whole subject ─────────────────────
+#
+# Different question from the exporter above.  There the budget is per
+# trial and camera, because each image is labeled on its own.  Here one
+# pick is one *frame*, labeled on every camera — so a frame has to be
+# chosen on how it looks in both cameras at once, and the budget is for
+# the subject rather than the trial.
+
+SELECTION_SCHEMA = "dlc-labeler-selection/1"
+SELECTION_FILE = "selection.json"
+
+# Default number of frames to label.  DeepLabCut's own default is 20;
+# 30 is what this project labels.
+DEFAULT_N_PICK = 30
+
+# Cap on how many frames go into the clustering matrix.  DeepLabCut
+# considers every frame (``cluster_step=1``), which on a ten-minute trial
+# is 18,000 rows for no gain — neighbouring frames are near-duplicates
+# and land in the same cluster anyway.  Sampling to this many spreads the
+# same coverage over far less work; the step used is recorded.
+MAX_CLUSTER_FRAMES = 4000
+
+
+def _auto_step(total_usable: int, limit: int = MAX_CLUSTER_FRAMES) -> int:
+    """Frame stride that keeps the clustering matrix under ``limit`` rows."""
+    if total_usable <= limit:
+        return 1
+    return int(np.ceil(total_usable / limit))
+
+
+def _trial_camera_crops(subject_name: str, trial: dict, trial_idx: int,
+                        cam_names: list[str], camera_mode: str
+                        ) -> tuple[list, int, list[str]]:
+    """Crop geometry for every camera of one trial.
+
+    Returns ``(per_camera, frame_count, notes)`` where each per-camera
+    entry is ``TrialCrops`` or None.  None means MediaPipe has nothing
+    for that camera and the whole camera half stands in — which is what
+    DeepLabCut would have clustered on anyway.
+    """
+    frame_count = int(trial["frame_count"])
+    width = int(trial.get("width") or 0)
+    height = int(trial.get("height") or 0)
+    if camera_mode == "stereo":
+        width //= 2
+
+    per_camera: list[TrialCrops | None] = []
+    notes: list[str] = []
+    for camera_index, camera in enumerate(cam_names):
+        landmarks = load_trial_landmarks(subject_name, trial["trial_name"],
+                                         camera_index)
+        if landmarks is None or width <= 0 or height <= 0:
+            per_camera.append(None)
+            notes.append(f"{trial['trial_name']} {camera}: no MediaPipe "
+                         f"landmarks — clustering the whole frame instead")
+            continue
+        n = min(frame_count, landmarks.shape[0])
+        side, boxes = compute_trial_crops(landmarks[:n], width, height)
+        if side <= 0:
+            per_camera.append(None)
+            notes.append(f"{trial['trial_name']} {camera}: MediaPipe found no "
+                         f"hand — clustering the whole frame instead")
+            continue
+        boxes = boxes + [None] * (frame_count - len(boxes))
+        per_camera.append(TrialCrops(trial_idx=trial_idx,
+                                     trial_name=trial["trial_name"],
+                                     camera=camera, side=side, boxes=boxes))
+    return per_camera, frame_count, notes
+
+
+def _trial_candidates(per_camera: list, frame_count: int, step: int) -> list[int]:
+    """Local frames usable on every camera, at the given stride."""
+    out = []
+    for local in range(0, frame_count, step):
+        ok = True
+        for crops in per_camera:
+            if crops is None:
+                continue        # whole-frame fallback: always usable
+            if local >= len(crops.boxes) or crops.boxes[local] is None:
+                ok = False
+                break
+        if ok:
+            out.append(local)
+    return out
+
+
+def _read_frame_features(video_path: str, candidates: list[int],
+                         per_camera: list, camera_mode: str,
+                         resize_width: int,
+                         progress=None) -> np.ndarray | None:
+    """Decode a trial once and build one feature row per candidate frame.
+
+    A row is every camera's crop, downsampled and laid side by side, so
+    the clustering sees the frame the way the labeler will: both views of
+    the hand at the same instant.
+
+    Only candidate frames are retrieved.  ``grab`` advances the decoder
+    without converting and copying the image, which is most of the cost
+    per frame, so a stride makes this proportionally faster — where
+    DeepLabCut's own stride makes it *slower*, because it seeks.
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        logger.warning("Could not open %s", video_path)
+        return None
+
+    wanted = set(candidates)
+    order = {f: i for i, f in enumerate(candidates)}
+    n_cam = len(per_camera)
+    out = np.zeros((len(candidates), n_cam, resize_width, resize_width),
+                   dtype=float)
+    filled = np.zeros(len(candidates), dtype=bool)
+
+    last = max(wanted) if wanted else -1
+    local = 0
+    while local <= last:
+        if not cap.grab():
+            break
+        if local in wanted:
+            ok, frame = cap.retrieve()
+            if ok and frame is not None:
+                row = out[order[local]]
+                for camera_index, crops in enumerate(per_camera):
+                    half = _camera_half(frame, camera_index, camera_mode)
+                    if crops is not None and crops.boxes[local] is not None:
+                        x0, y0, _ = crops.boxes[local]
+                        patch = half[y0:y0 + crops.side, x0:x0 + crops.side]
+                    else:
+                        patch = half
+                    if patch.size:
+                        small = cv2.resize(patch, (resize_width, resize_width),
+                                           interpolation=cv2.INTER_NEAREST)
+                        # DLC greys by averaging channels, not by a luma
+                        # transform; matched so the numbers are the same.
+                        row[camera_index] = small.mean(axis=2)
+                filled[order[local]] = True
+        local += 1
+        if progress and local % 200 == 0:
+            progress(local / max(last + 1, 1))
+
+    cap.release()
+
+    if not filled.any():
+        return None
+    if not filled.all():
+        keep = np.where(filled)[0]
+        candidates[:] = [candidates[i] for i in keep]
+        out = out[keep]
+    return out
+
+
+def select_training_frames(subject_name: str, n_pick: int = DEFAULT_N_PICK, *,
+                           camera_mode: str | None = None,
+                           cameras: list[str] | None = None,
+                           step: int | None = None,
+                           seed: int | None = None,
+                           resize_width: int = DLC_RESIZE_WIDTH,
+                           progress=None) -> tuple[list[dict], list[str], dict]:
+    """Pick the frames to label for a subject, as DeepLabCut would.
+
+    Same algorithm as ``deeplabcut.extract_frames(algo='kmeans')`` —
+    MiniBatchKMeans over mean-centred, 30px-wide greyscale frames, one
+    random frame per cluster — with two differences, both deliberate:
+
+    - the clustering runs over the whole subject rather than one video,
+      because the 30 frames are a budget for the subject; and
+    - what it clusters is the MediaPipe hand crop from each camera rather
+      than the whole frame.  At 30px wide, a 1920px camera half leaves
+      the hand about two pixels, so whole-frame clusters sort by arm
+      position, lighting and background.  Cropping first makes them sort
+      by hand posture, which is what a labeling set should span.  Where
+      MediaPipe has nothing, the whole frame stands in.
+
+    Returns ``(selections, notes, meta)``.
+    """
+    settings = get_settings()
+    cam_names = cameras or settings.camera_names
+    mode = camera_mode or settings.default_camera_mode
+
+    trials = build_trial_map(subject_name, camera_mode=mode)
+    if not trials:
+        return [], [f"{subject_name}: no trials found"], {}
+
+    notes: list[str] = []
+    prepared = []
+    total_usable = 0
+    for trial_idx, trial in enumerate(trials):
+        per_camera, frame_count, trial_notes = _trial_camera_crops(
+            subject_name, trial, trial_idx, cam_names, mode)
+        notes.extend(trial_notes)
+        usable = len(_trial_candidates(per_camera, frame_count, 1))
+        total_usable += usable
+        prepared.append((trial, trial_idx, per_camera, frame_count, usable))
+
+    if not total_usable:
+        return [], notes + [f"{subject_name}: no usable frames"], {}
+
+    chosen_step = step if step and step > 0 else _auto_step(total_usable)
+
+    rows: list[np.ndarray] = []
+    index: list[tuple] = []        # (trial, trial_idx, per_camera, local)
+    done = 0
+    for trial, trial_idx, per_camera, frame_count, usable in prepared:
+        candidates = _trial_candidates(per_camera, frame_count, chosen_step)
+        if not candidates:
+            continue
+
+        def sub_progress(frac, _done=done, _usable=usable):
+            if progress:
+                progress(100.0 * (_done + frac * _usable) / max(total_usable, 1))
+
+        data = _read_frame_features(trial["video_path"], candidates,
+                                    per_camera, mode, resize_width,
+                                    progress=sub_progress)
+        done += usable
+        if data is None:
+            notes.append(f"{trial['trial_name']}: could not decode frames")
+            continue
+        rows.append(data)
+        for local in candidates:
+            index.append((trial, trial_idx, per_camera, local))
+        if progress:
+            progress(100.0 * done / max(total_usable, 1))
+
+    if not rows:
+        return [], notes + [f"{subject_name}: nothing could be decoded"], {}
+
+    matrix = np.concatenate(rows, axis=0)
+    picked = dlc_kmeans_pick(matrix, n_pick, seed=seed)
+
+    selections = []
+    for idx in sorted(picked):
+        trial, trial_idx, per_camera, local = index[idx]
+        crops = {}
+        for camera_index, camera in enumerate(cam_names):
+            tc = per_camera[camera_index] if camera_index < len(per_camera) else None
+            box = tc.boxes[local] if tc is not None else None
+            crops[camera] = (None if box is None else
+                             {"x0": int(box[0]), "y0": int(box[1]),
+                              "side": int(tc.side), "mp": bool(box[2])})
+        selections.append({
+            "global_frame": int(trial["start_frame"]) + local,
+            "local_frame": int(local),
+            "trial_idx": int(trial_idx),
+            "trial_name": trial["trial_name"],
+            "crops": crops,
+        })
+
+    meta = {
+        "n_pick": int(n_pick),
+        "step": int(chosen_step),
+        "seed": seed,
+        "frames_considered": int(matrix.shape[0]),
+        "frames_available": int(total_usable),
+        "resize_width": int(resize_width),
+        "cameras": list(cam_names),
+        "camera_mode": mode,
+        "method": "deeplabcut-kmeans-on-mediapipe-crop",
+    }
+    return selections, notes, meta
+
+
+def selection_path(subject_name: str) -> Path:
+    return get_settings().dlc_path / subject_name / SELECTION_FILE
+
+
+def save_selection(subject_name: str, selections: list[dict],
+                   notes: list[str], meta: dict) -> dict:
+    """Write the selection beside the subject's DLC project.
+
+    On disk rather than in the database because it is a property of the
+    videos, survives the database being rebuilt, and is the kind of thing
+    somebody will want to read, diff or hand to a collaborator.
+    """
+    from datetime import datetime, timezone
+
+    payload = {
+        "schema": SELECTION_SCHEMA,
+        "subject": subject_name,
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        **meta,
+        "notes": notes,
+        "frames": selections,
+    }
+    path = selection_path(subject_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=1))
+    logger.info("Wrote %d selected frames to %s", len(selections), path)
+    return payload
+
+
+def load_selection(subject_name: str) -> dict | None:
+    """The saved selection for a subject, or None when it has never run."""
+    path = selection_path(subject_name)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        logger.warning("Could not read %s: %s", path, e)
+        return None
+    if not str(payload.get("schema", "")).startswith("dlc-labeler-selection/"):
+        return None
+    return payload

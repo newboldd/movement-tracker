@@ -111,6 +111,14 @@ const refineSelected = new Set();
 let manualDistances = {};
 
 // Timeline / trace
+// Guided labeling: the k-means selection, and where we are in it.
+let guided = false;
+let selection = null;        // {frames:[{global_frame, trial_idx, crops}], ...}
+let bodypartJoints = {};     // bodypart -> MediaPipe landmark index
+let guidedTarget = null;     // {frameIdx, side, bp} — the point being asked for
+let guidedBusy = false;      // true while the view is moving to a point
+let offFrame = false;        // MediaPipe's guess for this point is out of frame
+
 let timelineCanvas, timelineCtx, traceCanvas, traceCtx;
 let frameDisplayMode = 0;    // 0 frame, 1 time, 2 both
 
@@ -320,6 +328,9 @@ async function openSession(newMode) {
     hasCalibration = !!info.has_calibration;
     cropBoxes = info.crop_boxes || {};
     mpPassSpecs = info.mp_passes || [];
+    bodypartJoints = info.bodypart_joints || {};
+    selection = null;
+    guidedTarget = null;
 
     if (!cameraNames.includes(currentSide)) currentSide = cameraNames[0];
     updateSideToggle();
@@ -506,8 +517,11 @@ function updateModeUi() {
     const isCorr = mode === 'corrections';
     el('saveCorrBtn').style.display = (isCorr || isRefine) ? '' : 'none';
     el('refinePanel').style.display = isRefine ? '' : 'none';
-    el('commitBtn').innerHTML = isRefine ? 'Commit selected → training'
-        : isCorr ? 'Save &amp; finish corrections' : 'Save &amp; commit';
+    // Guided labeling builds the first training set, so it belongs to
+    // Label mode; Correct and Refine work off the predictions instead.
+    el('guidedBtn').style.display = (isRefine || isCorr) ? 'none' : '';
+    if ((isRefine || isCorr) && guided) setGuided(false);
+    updateCommitButton();
     el('actionHelp').textContent = isRefine
         ? 'Commits the ticked frames as a new labeled-data round. Then run '
         + 'Refine on the Jobs page.'
@@ -564,8 +578,15 @@ async function renderVideoFrame(frame) {
     // decode, so don't ask for one and wait for the 404.
     if (trial.kind === 'frames') return false;
 
+    // A stereo file holds both cameras, so switching camera is a different
+    // crop of the same decode — reloading the element for it would throw
+    // away the buffered video and re-seek, which guided labeling does on
+    // every other point.  Only multicam has a different file per camera.
+    const needsNewFile = videoTrialLoaded !== trialIdx
+        || (cameraMode === 'multicam' && videoSideLoaded !== currentSide);
+
     let justLoaded = false;
-    if (videoTrialLoaded !== trialIdx || videoSideLoaded !== currentSide) {
+    if (needsNewFile) {
         videoEl.src = `/api/labeling/sessions/${sessionId}/video?trial=${trialIdx}`
             + `&side=${encodeURIComponent(currentSide)}&_=${Date.now()}`;
         videoTrialLoaded = trialIdx;
@@ -1101,9 +1122,16 @@ function placeLabel(ix, iy) {
 
     // Fill the next unplaced bodypart; once all are placed, move the
     // nearest one instead, so a stray click corrects rather than adds.
-    const nextBp = bodyparts.find(bp => !(lbl[bp] && lbl[bp][0] != null));
+    // In guided mode the point being asked for wins: the view is aimed
+    // at it, so a click there means that one, placed or not.
+    const onTarget = guided && guidedTarget && selection
+        && currentSide === guidedTarget.side
+        && currentFrame === (((selection.frames || [])[guidedTarget.frameIdx]
+                              || {}).global_frame);
+    const nextBp = onTarget ? guidedTarget.bp
+        : bodyparts.find(bp => !(lbl[bp] && lbl[bp][0] != null));
     if (nextBp) {
-        pushUndo(key, nextBp, null);
+        pushUndo(key, nextBp, lbl[nextBp] || null);
         setManual(nextBp, ix, iy);
         const left = bodyparts.filter(bp => {
             const c = manual.get(key)[bp];
@@ -1128,6 +1156,12 @@ function placeLabel(ix, iy) {
     render();
     updateLabelCount();
     scheduleSave();
+    if (guided) {
+        renderPointGrid();
+        // Placing the point that was asked for is the signal to move on;
+        // correcting some other point on the frame is not.
+        if (onTarget) goToNextPoint();
+    }
 }
 
 function removeLabel(bp) {
@@ -1147,6 +1181,7 @@ function removeLabel(bp) {
     render();
     updateLabelCount();
     scheduleSave();
+    if (guided) renderPointGrid();
 }
 
 function applyUndoEntry(entry, toStack) {
@@ -1331,16 +1366,29 @@ async function commit() {
 
     const n = manual.size;
     if (!n) { toast('Nothing to commit — place some labels first', 'err'); return; }
-    if (!confirm(`Commit ${n} labeled frame(s) as DLC training data?`)) return;
+
+    // What is on screen decides what gets written: the grid is the
+    // selection, the timeline is everything.
+    const scope = guided ? 'selected' : 'all';
+    const what = guided
+        ? `the ${(selection && selection.frames.length) || 0} selected frame(s)`
+        : `${n} labeled frame(s)`;
+    if (!confirm(`Commit ${what} as DLC training data?`
+        + (guided ? '\n\nThis replaces the all-frames set for this round.'
+                  : '\n\nThis replaces the selected-frames set for this round.')))
+        return;
     try {
         const r = await api(`/api/labeling/sessions/${sessionId}/commit`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ train_frames: [] }),
+            body: JSON.stringify({ train_frames: [], scope }),
         });
-        toast(`Committed ${r.frame_count} frame(s). Now run Train on the `
-            + `Jobs page.`, 'ok');
+        toast(`Committed ${r.frame_count} frame(s) to `
+            + `${(r.labeled_data_dir || '').split('/').slice(-2).join('/')}. `
+            + `Now run Train on the Jobs page.`, 'ok');
+        const wasGuided = guided;
         await openSession('initial');
+        if (wasGuided) await setGuided(true);
     } catch (e) {
         toast(`Commit failed: ${e.message}`, 'err');
     }
@@ -1452,7 +1500,8 @@ async function startPlayback() {
     const startTime = Math.max(0,
         (currentFrame - trial.start_frame - frameOffset + 0.5) / trial.fps);
 
-    if (videoTrialLoaded !== trialIdx || videoSideLoaded !== currentSide) {
+    if (videoTrialLoaded !== trialIdx
+        || (cameraMode === 'multicam' && videoSideLoaded !== currentSide)) {
         videoEl.src = `/api/labeling/sessions/${sessionId}/video?trial=${trialIdx}`
             + `&side=${encodeURIComponent(currentSide)}&_=${Date.now()}`;
         videoTrialLoaded = trialIdx;
@@ -1571,6 +1620,299 @@ function fallbackPlay(fpsOverride) {
             el('playBtn').innerHTML = '&#9654;';
         }
     })();
+}
+
+// ── Guided labeling ──────────────────────────────────────────────────────
+//
+// A labeling set is 30 frames x 2 cameras x 2 bodyparts = 120 points, and
+// the slow part is not placing them, it is finding them: scrolling to the
+// right frame, switching camera, zooming in. So the page does that part.
+// One key takes you to the next point nobody has placed, framed on
+// MediaPipe's guess at it, and the grid shows what is left.
+
+/* Every point to place, in the order the mode walks them.
+ *
+ * Frame-major, then camera, then bodypart: it finishes a frame before
+ * moving on, so each frame is decoded twice rather than once per point,
+ * and the two camera hops are the cheap ones now that the view carries
+ * across the switch. */
+function guidedPoints() {
+    if (!selection) return [];
+    const cams = cameraNames.slice(0, singleCamera() ? 1 : 2);
+    const out = [];
+    selection.frames.forEach((f, frameIdx) => {
+        for (const side of cams) {
+            for (const bp of bodyparts) out.push({ frameIdx, side, bp, frame: f });
+        }
+    });
+    return out;
+}
+
+function pointDone(pt) {
+    const c = manualAt(pt.frame.global_frame, pt.side, pt.bp);
+    return !!(c && c[0] != null);
+}
+
+function guidedRows() {
+    const cams = cameraNames.slice(0, singleCamera() ? 1 : 2);
+    const rows = [];
+    for (const side of cams) for (const bp of bodyparts) rows.push({ side, bp });
+    return rows;
+}
+
+/* MediaPipe's guess at one bodypart on one frame and camera. */
+function mpTargetFor(frame, side, bp) {
+    const joint = bodypartJoints[bp];
+    if (joint == null) return null;
+    const lm = mpFrame2d('best', frame, side) || bestMpLandmarks(frame, side);
+    if (!lm || lm.length < (joint + 1) * 2) return null;
+    const x = lm[joint * 2], y = lm[joint * 2 + 1];
+    return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : null;
+}
+
+function bestMpLandmarks(frame, side) {
+    for (const spec of mpPassSpecs) {
+        const lm = mpFrame2d(spec.key, frame, side);
+        if (lm) return lm;
+    }
+    return null;
+}
+
+/* Frame the view on the point being asked for.
+ *
+ * Tight enough that placing it is a single click rather than a zoom and
+ * a click, wide enough to see which finger you are looking at. Falls
+ * back to the stored crop, then to the usual auto-zoom, so a frame
+ * MediaPipe missed is still labelable — just not pre-aimed. */
+function zoomToPoint(pt) {
+    const raw = mpTargetFor(pt.frame.global_frame, pt.side, pt.bp);
+    if (raw) {
+        // MediaPipe extrapolates tips it cannot see, so its guess can sit
+        // outside the frame.  Centring there would put the whole image
+        // off-screen and silently reject every click, since a label
+        // outside the frame is not a label.  Clamp into the image and say
+        // so, because "the hand is leaving frame" is worth knowing.
+        const inset = 4;
+        const target = [
+            Math.min(Math.max(raw[0], inset), Math.max(imgW - inset, inset)),
+            Math.min(Math.max(raw[1], inset), Math.max(imgH - inset, inset)),
+        ];
+        offFrame = Math.hypot(target[0] - raw[0], target[1] - raw[1]) > 1;
+        const box = (pt.frame.crops || {})[pt.side];
+        const span = box ? Math.max(box.side * 0.28, 60) : 90;
+        zoomToBox(target[0] - span, target[1] - span,
+                  target[0] + span, target[1] + span, 0);
+        hasUserZoom = true;
+        return true;
+    }
+    offFrame = false;
+    const box = (pt.frame.crops || {})[pt.side];
+    if (box) {
+        zoomToBox(box.x0, box.y0, box.x0 + box.side, box.y0 + box.side, 10);
+        hasUserZoom = true;
+        return true;
+    }
+    return false;
+}
+
+async function goToPoint(pt) {
+    if (!pt) return;
+    // Clicks are ignored until the new frame is up and aimed.  Without
+    // this, a click that lands mid-seek is placed on the point we were
+    // just on — which at labeling speed means quietly overwriting the
+    // point you only just finished.
+    guidedBusy = true;
+    try {
+        guidedTarget = { frameIdx: pt.frameIdx, side: pt.side, bp: pt.bp };
+        if (pt.side !== currentSide) {
+            currentSide = pt.side;
+            updateSideToggle();
+            if (cameraMode === 'multicam') videoSideLoaded = null;
+        }
+        hasUserZoom = false;          // let gotoFrame load, then aim
+        await gotoFrame(pt.frame.global_frame, { force: true });
+        if (zoomToPoint(pt)) render();
+        renderPointGrid();
+        setLabelInfo(`Place ${pt.bp} (${pt.side}) — frame ${pt.frame.global_frame}`
+            + (offFrame ? ' · MediaPipe puts it outside the frame; place it '
+                        + 'where you see it, or press N to skip' : ''));
+    } catch (e) {
+        // Never leave the guard latched: a stuck guard silently swallows
+        // every later click, which looks exactly like the page freezing.
+        console.error('Could not move to the next point', e);
+        setLabelInfo('Could not load that frame — N tries the next one.');
+    } finally {
+        guidedBusy = false;
+    }
+}
+
+function nextUnlabeledPoint(fromIdx) {
+    const pts = guidedPoints();
+    if (!pts.length) return null;
+    const start = (fromIdx == null ? -1 : fromIdx) + 1;
+    for (let i = start; i < pts.length; i++) if (!pointDone(pts[i])) return pts[i];
+    // Wrap, so finishing the last point lands on whatever was skipped.
+    for (let i = 0; i < Math.max(start, 0); i++) if (!pointDone(pts[i])) return pts[i];
+    return null;
+}
+
+function currentPointIndex() {
+    if (!guidedTarget) return null;
+    const pts = guidedPoints();
+    const i = pts.findIndex(p => p.frameIdx === guidedTarget.frameIdx
+        && p.side === guidedTarget.side && p.bp === guidedTarget.bp);
+    return i < 0 ? null : i;
+}
+
+async function goToNextPoint() {
+    const pt = nextUnlabeledPoint(currentPointIndex());
+    if (!pt) {
+        setLabelInfo('Every point in the selection is placed.');
+        toast('Every point in the selection is placed — Save when ready.', 'ok');
+        return;
+    }
+    await goToPoint(pt);
+}
+
+function renderPointGrid() {
+    const host = el('pointGrid');
+    if (!host || !guided) return;
+    const rows = guidedRows();
+    const frames = (selection && selection.frames) || [];
+    host.style.gridTemplateColumns = `auto repeat(${frames.length}, 15px)`;
+
+    const cells = ['<span></span>'];
+    frames.forEach((f, i) => cells.push(
+        `<span class="chdr" title="frame ${f.global_frame}">${i + 1}</span>`));
+
+    const curIdx = currentPointIndex();
+    const pts = guidedPoints();
+    for (const row of rows) {
+        cells.push(`<span class="rlabel">${row.side} ${row.bp}</span>`);
+        frames.forEach((f, frameIdx) => {
+            const pt = { frameIdx, side: row.side, bp: row.bp, frame: f };
+            const i = pts.findIndex(p => p.frameIdx === frameIdx
+                && p.side === row.side && p.bp === row.bp);
+            const done = pointDone(pt);
+            cells.push(`<span class="cell${done ? ' done' : ''}`
+                + `${i === curIdx ? ' current' : ''}" data-pt="${i}"`
+                + ` title="frame ${f.global_frame} · ${row.side} ${row.bp}`
+                + `${done ? ' · placed' : ''}"></span>`);
+        });
+    }
+    host.innerHTML = cells.join('');
+    host.querySelectorAll('[data-pt]').forEach(c =>
+        c.addEventListener('click', () => {
+            const pt = guidedPoints()[parseInt(c.dataset.pt, 10)];
+            if (pt) goToPoint(pt);
+        }));
+
+    const total = pts.length;
+    const done = pts.filter(pointDone).length;
+    el('guidedStatus').textContent =
+        `${done} / ${total} points placed · ${frames.length} frames selected`;
+}
+
+async function loadSelection() {
+    try {
+        const d = await api(`/api/labeling/${subjectId}/selection`);
+        selection = d.exists ? d : null;
+    } catch (e) {
+        selection = null;
+    }
+    return selection;
+}
+
+async function runSelection() {
+    const n = parseInt(prompt(
+        'How many frames should k-means pick for this subject?', '30') || '', 10);
+    if (!Number.isFinite(n) || n < 1) return;
+    el('guidedStatus').textContent = 'Selecting frames…';
+    try {
+        const r = await api(`/api/labeling/${subjectId}/selection`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ n_pick: n }),
+        });
+        await new Promise(resolve => watchJob(r.job_id, (job) => {
+            el('guidedStatus').textContent =
+                `Selecting frames… ${Math.round(job.progress_pct || 0)}%`;
+            if (['completed', 'failed', 'cancelled'].includes(job.status)) resolve(job);
+        }));
+    } catch (e) {
+        el('guidedStatus').textContent = '';
+        toast(`Frame selection failed: ${e.message}`, 'err');
+        return;
+    }
+    await loadSelection();
+    if (!selection) {
+        el('guidedStatus').textContent = '';
+        toast('Frame selection produced nothing — has MediaPipe run?', 'err');
+        return;
+    }
+    toast(`Selected ${selection.frames.length} frames`, 'ok');
+}
+
+async function setGuided(on) {
+    if (on && !selection) {
+        await loadSelection();
+        if (!selection) {
+            if (!confirm('No frames have been selected for this subject yet.\n\n'
+                       + 'Run the k-means selection now? It reads every trial '
+                       + 'once, so it takes a minute or two.')) return;
+            await runSelection();
+            if (!selection) return;
+        }
+    }
+
+    guided = on;
+    el('guidedBtn').classList.toggle('active', guided);
+    el('nextPointBtn').style.display = guided ? '' : 'none';
+    el('timelineContainer').style.display = guided ? 'none' : '';
+    el('gridContainer').style.display = guided ? '' : 'none';
+    el('traceContainer').style.display = guided ? 'none' : '';
+    updateCommitButton();
+
+    if (guided) {
+        renderPointGrid();
+        await goToNextPoint();
+    } else {
+        guidedTarget = null;
+        guidedBusy = false;
+        el('guidedStatus').textContent = '';
+        setLabelInfo('');
+        renderTimeline();
+        renderTrace();
+    }
+    updateShortcuts();
+}
+
+/* The save button says what it will actually write.
+ *
+ * Which labels get committed follows what is on screen: the grid is the
+ * selection, so saving from the grid saves the selection, and saving
+ * from the timeline saves everything. */
+function updateCommitButton() {
+    const btn = el('commitBtn');
+    if (!btn) return;
+    if (mode === 'refine') {
+        btn.textContent = 'Commit selected → training';
+        btn.title = 'Add the ticked frames to the training set as a new round';
+        return;
+    }
+    if (mode === 'corrections') {
+        btn.textContent = 'Save corrections';
+        btn.title = 'Write the reviewed labels to corrections/';
+        return;
+    }
+    if (guided) {
+        const n = (selection && selection.frames.length) || 0;
+        btn.textContent = `Save ${n} frames`;
+        btn.title = `Commit the ${n} selected frames as their own training set`;
+    } else {
+        btn.textContent = 'Save all frames';
+        btn.title = 'Commit every labeled frame as the training set';
+    }
 }
 
 // ── Timeline ─────────────────────────────────────────────────────────────
@@ -1845,7 +2187,7 @@ function toggleSide() {
     currentSide = to;
     updateSideToggle();
     setNavState({ side: currentSide });
-    videoSideLoaded = null;   // force the video element onto the other half
+    if (cameraMode === 'multicam') videoSideLoaded = null;
 
     if (shift) {
         offsetX -= shift[0] * scale;
@@ -1861,6 +2203,8 @@ function updateShortcuts() {
         ['&uarr; &darr;', 'previous / next labeled frame'],
         ['Space', 'play / pause'],
         ['E', 'switch camera'],
+        ['G', 'guided labeling on / off'],
+        ...(guided ? [['N', 'next unlabeled point']] : []),
         ['R', 'reset zoom'],
         ['1 … 9', 'jump to trial'],
         ['Ctrl/&#8984; Z', 'undo'],
@@ -1963,7 +2307,8 @@ function onMouseUp() {
     }
     if (dragging === 'pending') {
         const img = screenToImage(dragStartX, dragStartY);
-        if (!boxMode && img.x >= 0 && img.x < imgW && img.y >= 0 && img.y < imgH) {
+        if (!boxMode && !guidedBusy
+            && img.x >= 0 && img.x < imgW && img.y >= 0 && img.y < imgH) {
             placeLabel(img.x, img.y);
         }
     } else if (dragging === 'pan') {
@@ -2031,6 +2376,10 @@ function onKeyDown(e) {
         }
         case ' ': e.preventDefault(); togglePlay(); break;
         case 'e': case 'E': toggleSide(); break;
+        case 'n': case 'N': if (guided) goToNextPoint(); break;
+        case 'g': case 'G':
+            if (mode === 'initial') setGuided(!guided);
+            break;
         case 'r': case 'R': resetZoom(); break;
         case 't': case 'T':
             if (mode === 'refine') {
@@ -2093,6 +2442,8 @@ async function init() {
     el('saveBoxBtn').addEventListener('click', saveBox);
     el('redetectBtn').addEventListener('click', redetectTrial);
     el('commitBtn').addEventListener('click', commit);
+    el('guidedBtn').addEventListener('click', () => setGuided(!guided));
+    el('nextPointBtn').addEventListener('click', goToNextPoint);
     el('saveCorrBtn').addEventListener('click', saveCorrections);
     el('refineAllBtn').addEventListener('click', () => {
         correctedFrames().forEach(r => refineSelected.add(`${r.frame}_${r.side}`));
