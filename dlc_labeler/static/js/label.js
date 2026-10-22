@@ -118,6 +118,7 @@ let bodypartJoints = {};     // bodypart -> MediaPipe landmark index
 let guidedTarget = null;     // {frameIdx, side, bp} — the point being asked for
 let guidedBusy = false;      // true while the view is moving to a point
 let offFrame = false;        // MediaPipe's guess for this point is out of frame
+let autoAdvance = false;     // move to the next point as soon as one is placed
 
 let timelineCanvas, timelineCtx, traceCanvas, traceCtx;
 let frameDisplayMode = 0;    // 0 frame, 1 time, 2 both
@@ -249,23 +250,38 @@ function mpPointsFor(frame, side) {
     return [];
 }
 
-/* Where the hand is on one frame and camera, as a single point.
- *
- * Labels first, then whatever prediction layer has it, then MediaPipe.
- * The fallback is the point of this: on a frame nobody has labeled yet
- * — which is every frame you are about to label — MediaPipe is the only
- * thing that knows where the hand is. */
-function handCentroid(frame, side) {
-    let pts = [];
-    for (const bp of bodyparts) {
-        const c = manualAt(frame, side, bp) || (ghostAt(frame, side, bp) || {}).coords;
-        if (c) pts.push(c);
-    }
-    if (!pts.length) pts = mpPointsFor(frame, side);
+function centroid(pts) {
     if (!pts.length) return null;
     let sx = 0, sy = 0;
     for (const [x, y] of pts) { sx += x; sy += y; }
     return [sx / pts.length, sy / pts.length];
+}
+
+/* How far the hand moves between the two cameras on this frame.
+ *
+ * Both ends have to be measured the same way or the "disparity" is really
+ * the difference between two definitions of where the hand is.  That is
+ * what breaks the moment you label one camera: a single thumb label on
+ * OS against a 21-landmark MediaPipe centroid on OD is a comparison of a
+ * fingertip with the middle of a palm, and the view jumps.
+ *
+ * So: use labels only for the bodyparts that exist on *both* cameras,
+ * and otherwise use MediaPipe on both.  Returns [dx, dy] or null. */
+function cameraShift(frame, from, to) {
+    const paired = [];
+    for (const bp of bodyparts) {
+        const a = manualAt(frame, from, bp) || (ghostAt(frame, from, bp) || {}).coords;
+        const b = manualAt(frame, to, bp) || (ghostAt(frame, to, bp) || {}).coords;
+        if (a && b) paired.push([a, b]);
+    }
+    if (paired.length) {
+        const a = centroid(paired.map(p => p[0]));
+        const b = centroid(paired.map(p => p[1]));
+        return [b[0] - a[0], b[1] - a[1]];
+    }
+    const a = centroid(mpPointsFor(frame, from));
+    const b = centroid(mpPointsFor(frame, to));
+    return (a && b) ? [b[0] - a[0], b[1] - a[1]] : null;
 }
 
 function vis(key) {
@@ -686,7 +702,8 @@ async function gotoFrame(frame, opts = {}) {
     }
 
     updateFrameDisplay();
-    renderTimeline();
+    if (guided) { renderPointGrid(); updateTargetBanner(); }
+    else renderTimeline();
     renderTrace();
 }
 
@@ -1133,13 +1150,24 @@ function placeLabel(ix, iy) {
     if (nextBp) {
         pushUndo(key, nextBp, lbl[nextBp] || null);
         setManual(nextBp, ix, iy);
-        const left = bodyparts.filter(bp => {
-            const c = manual.get(key)[bp];
-            return !(c && c[0] != null);
-        });
-        setLabelInfo(left.length
-            ? `${nextBp} placed — click to place ${left[0]}.`
-            : 'All keypoints placed on this frame.');
+        if (onTarget && !autoAdvance) {
+            // The guided walk's next point is often the same bodypart on
+            // the other camera, so "click to place index" would send
+            // someone to the wrong one.  Name what is actually next.
+            const next = nextUnlabeledPoint(currentPointIndex());
+            setLabelInfo(`${nextBp} (${currentSide}) placed`
+                + (next ? ` — N for ${next.bp} (${next.side})`
+                          + `, frame ${next.frame.global_frame}`
+                        : ' — that was the last one'));
+        } else {
+            const left = bodyparts.filter(bp => {
+                const c = manual.get(key)[bp];
+                return !(c && c[0] != null);
+            });
+            setLabelInfo(left.length
+                ? `${nextBp} placed — click to place ${left[0]}.`
+                : 'All keypoints placed on this frame.');
+        }
     } else {
         let closest = null, best = Infinity;
         for (const bp of bodyparts) {
@@ -1159,8 +1187,10 @@ function placeLabel(ix, iy) {
     if (guided) {
         renderPointGrid();
         // Placing the point that was asked for is the signal to move on;
-        // correcting some other point on the frame is not.
-        if (onTarget) goToNextPoint();
+        // correcting some other point on the frame is not.  Whether that
+        // signal actually moves you is the labeler's call: some want to
+        // look at what they just placed before leaving it.
+        if (onTarget && autoAdvance) goToNextPoint();
     }
 }
 
@@ -1221,14 +1251,20 @@ function applyUndoEntry(entry, toStack) {
     scheduleSave();
 }
 
+function afterUndoRedo() {
+    if (guided) { renderPointGrid(); updateTargetBanner(); }
+}
+
 function undo() {
     const e = undoStack.pop();
     if (e) applyUndoEntry(e, redoStack);
+    afterUndoRedo();
 }
 
 function redo() {
     const e = redoStack.pop();
     if (e) applyUndoEntry(e, undoStack);
+    afterUndoRedo();
 }
 
 // ── Saving ───────────────────────────────────────────────────────────────
@@ -1638,11 +1674,10 @@ function fallbackPlay(fpsOverride) {
  * across the switch. */
 function guidedPoints() {
     if (!selection) return [];
-    const cams = cameraNames.slice(0, singleCamera() ? 1 : 2);
     const out = [];
     selection.frames.forEach((f, frameIdx) => {
-        for (const side of cams) {
-            for (const bp of bodyparts) out.push({ frameIdx, side, bp, frame: f });
+        for (const row of guidedRows()) {
+            out.push({ frameIdx, side: row.side, bp: row.bp, frame: f });
         }
     });
     return out;
@@ -1653,10 +1688,15 @@ function pointDone(pt) {
     return !!(c && c[0] != null);
 }
 
+/* The points of one frame, in the order the mode asks for them.
+ *
+ * Bodypart first, then camera: placing the same landmark on both cameras
+ * back to back is the pairing you can actually check by eye, and it is
+ * the one the camera-switch alignment is built for. */
 function guidedRows() {
     const cams = cameraNames.slice(0, singleCamera() ? 1 : 2);
     const rows = [];
-    for (const side of cams) for (const bp of bodyparts) rows.push({ side, bp });
+    for (const bp of bodyparts) for (const side of cams) rows.push({ side, bp });
     return rows;
 }
 
@@ -1699,7 +1739,7 @@ function zoomToPoint(pt) {
         ];
         offFrame = Math.hypot(target[0] - raw[0], target[1] - raw[1]) > 1;
         const box = (pt.frame.crops || {})[pt.side];
-        const span = box ? Math.max(box.side * 0.28, 60) : 90;
+        const span = box ? Math.max(box.side * 0.14, 30) : 45;
         zoomToBox(target[0] - span, target[1] - span,
                   target[0] + span, target[1] + span, 0);
         hasUserZoom = true;
@@ -1736,6 +1776,7 @@ async function goToPoint(pt) {
         setLabelInfo(`Place ${pt.bp} (${pt.side}) — frame ${pt.frame.global_frame}`
             + (offFrame ? ' · MediaPipe puts it outside the frame; place it '
                         + 'where you see it, or press N to skip' : ''));
+        updateTargetBanner();
     } catch (e) {
         // Never leave the guard latched: a stuck guard silently swallows
         // every later click, which looks exactly like the page freezing.
@@ -1744,6 +1785,52 @@ async function goToPoint(pt) {
     } finally {
         guidedBusy = false;
     }
+}
+
+/* The frame the mode is currently asking about, or null. */
+function targetFrame() {
+    if (!guided || !guidedTarget || !selection) return null;
+    const f = (selection.frames || [])[guidedTarget.frameIdx];
+    return f ? f.global_frame : null;
+}
+
+function onTargetFrame() {
+    const t = targetFrame();
+    return t == null || currentFrame === t;
+}
+
+/* Show whether what is on screen is the frame being asked about.
+ *
+ * Stepping away to watch how the point moves either side of the target is
+ * a real part of judging where it goes, so it has to be allowed — but
+ * labeling the neighbour by mistake is then one click away, and the only
+ * thing standing between the two is knowing which frame you are on. */
+function updateTargetBanner() {
+    const away = guided && !onTargetFrame();
+    el('backToTargetBtn').style.display = away ? '' : 'none';
+    el('vp2d').classList.toggle('off-target', away);
+    const t = targetFrame();
+    el('backToTargetBtn').textContent = `Back to frame ${t} (B)`;
+}
+
+/* Return to the target frame without disturbing the view.
+ *
+ * Deliberately keeps zoom and pan: you went looking at a neighbouring
+ * frame to see the same patch of image, and re-aiming on the way back
+ * would undo the comparison you just made. */
+async function backToTarget() {
+    const t = targetFrame();
+    if (t == null || currentFrame === t) return;
+    const pt = guidedPoints()[currentPointIndex()];
+    if (pt && pt.side !== currentSide) {
+        const shift = cameraShift(currentFrame, currentSide, pt.side);
+        currentSide = pt.side;
+        updateSideToggle();
+        if (cameraMode === 'multicam') videoSideLoaded = null;
+        if (shift) { offsetX -= shift[0] * scale; offsetY -= shift[1] * scale; }
+    }
+    hasUserZoom = true;               // hold the view exactly as it is
+    await gotoFrame(t, { force: true });
 }
 
 function nextUnlabeledPoint(fromIdx) {
@@ -1835,8 +1922,14 @@ async function runSelection() {
             body: JSON.stringify({ n_pick: n }),
         });
         await new Promise(resolve => watchJob(r.job_id, (job) => {
+            // The phase matters more than the number: the clustering is
+            // ten seconds with nothing to tick, and a percentage sitting
+            // still reads as a hang.
+            let phase = '';
+            try { phase = (JSON.parse(job.epoch_info || '{}') || {}).phase || ''; }
+            catch (e) { /* not JSON */ }
             el('guidedStatus').textContent =
-                `Selecting frames… ${Math.round(job.progress_pct || 0)}%`;
+                `${phase || 'Selecting frames'} · ${Math.round(job.progress_pct || 0)}%`;
             if (['completed', 'failed', 'cancelled'].includes(job.status)) resolve(job);
         }));
     } catch (e) {
@@ -1870,7 +1963,10 @@ async function setGuided(on) {
     el('nextPointBtn').style.display = guided ? '' : 'none';
     el('timelineContainer').style.display = guided ? 'none' : '';
     el('gridContainer').style.display = guided ? '' : 'none';
-    el('traceContainer').style.display = guided ? 'none' : '';
+    el('autoAdvanceWrap').style.display = guided ? '' : 'none';
+    // The trace stays: the thumb-index aperture over time is how you tell
+    // a frame worth labeling from one where the hand is mid-blur, and the
+    // grid replaces the timeline, not the trace.
     updateCommitButton();
 
     if (guided) {
@@ -1880,10 +1976,12 @@ async function setGuided(on) {
         guidedTarget = null;
         guidedBusy = false;
         el('guidedStatus').textContent = '';
+        el('backToTargetBtn').style.display = 'none';
+        el('vp2d').classList.remove('off-target');
         setLabelInfo('');
         renderTimeline();
-        renderTrace();
     }
+    renderTrace();
     updateShortcuts();
 }
 
@@ -2178,11 +2276,7 @@ function toggleSide() {
     if (singleCamera()) return;
     const from = currentSide, to = otherSide();
     let shift = null;
-    if (hasUserZoom && !boxMode) {
-        const a = handCentroid(currentFrame, from);
-        const b = handCentroid(currentFrame, to);
-        if (a && b) shift = [b[0] - a[0], b[1] - a[1]];
-    }
+    if (hasUserZoom && !boxMode) shift = cameraShift(currentFrame, from, to);
 
     currentSide = to;
     updateSideToggle();
@@ -2204,7 +2298,8 @@ function updateShortcuts() {
         ['Space', 'play / pause'],
         ['E', 'switch camera'],
         ['G', 'guided labeling on / off'],
-        ...(guided ? [['N', 'next unlabeled point']] : []),
+        ...(guided ? [['N', 'next unlabeled point'],
+                      ['B', 'back to the target frame']] : []),
         ['R', 'reset zoom'],
         ['1 … 9', 'jump to trial'],
         ['Ctrl/&#8984; Z', 'undo'],
@@ -2377,6 +2472,7 @@ function onKeyDown(e) {
         case ' ': e.preventDefault(); togglePlay(); break;
         case 'e': case 'E': toggleSide(); break;
         case 'n': case 'N': if (guided) goToNextPoint(); break;
+        case 'b': case 'B': if (guided) backToTarget(); break;
         case 'g': case 'G':
             if (mode === 'initial') setGuided(!guided);
             break;
@@ -2444,6 +2540,17 @@ async function init() {
     el('commitBtn').addEventListener('click', commit);
     el('guidedBtn').addEventListener('click', () => setGuided(!guided));
     el('nextPointBtn').addEventListener('click', goToNextPoint);
+    el('backToTargetBtn').addEventListener('click', backToTarget);
+    const advCb = el('autoAdvanceCb');
+    // Remembered per browser: it is a working habit, not a project setting.
+    try { autoAdvance = localStorage.getItem('dlcAutoAdvance') === '1'; }
+    catch (e) { /* private window */ }
+    advCb.checked = autoAdvance;
+    advCb.addEventListener('change', () => {
+        autoAdvance = advCb.checked;
+        try { localStorage.setItem('dlcAutoAdvance', autoAdvance ? '1' : '0'); }
+        catch (e) { /* private window */ }
+    });
     el('saveCorrBtn').addEventListener('click', saveCorrections);
     el('refineAllBtn').addEventListener('click', () => {
         correctedFrames().forEach(r => refineSelected.add(`${r.frame}_${r.side}`));

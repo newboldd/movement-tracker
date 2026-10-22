@@ -1289,12 +1289,24 @@ def run_selection(subject_id: int, body: dict = Body(default=None)) -> dict:
                     "UPDATE jobs SET status = 'running', "
                     "started_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
 
-            def progress_cb(pct):
+            last = [0.0, ""]
+
+            def progress_cb(pct, phase=""):
                 if cancel_event.is_set():
                     raise InterruptedError("Job cancelled")
+                pct = min(float(pct), 99.0)
+                # One UPDATE per decoded chunk is plenty; writing on every
+                # callback would have the selection spending its time on
+                # SQLite rather than on frames.
+                if abs(pct - last[0]) < 0.5 and phase == last[1]:
+                    return
+                last[0], last[1] = pct, phase
                 with get_db_ctx() as db:
-                    db.execute("UPDATE jobs SET progress_pct = ? WHERE id = ?",
-                               (min(float(pct), 99.0), job_id))
+                    db.execute(
+                        "UPDATE jobs SET progress_pct = ?, epoch_info = ? "
+                        "WHERE id = ?",
+                        (pct, json.dumps({"phase": phase}) if phase else None,
+                         job_id))
 
             selections, notes, meta = select_training_frames(
                 subject_name, n_pick, camera_mode=camera_mode,
@@ -1310,7 +1322,8 @@ def run_selection(subject_id: int, body: dict = Body(default=None)) -> dict:
             with get_db_ctx() as db:
                 db.execute(
                     "UPDATE jobs SET status = 'completed', progress_pct = 100, "
-                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+                    "epoch_info = NULL, finished_at = CURRENT_TIMESTAMP "
+                    "WHERE id = ?", (job_id,))
         except InterruptedError:
             with get_db_ctx() as db:
                 db.execute(

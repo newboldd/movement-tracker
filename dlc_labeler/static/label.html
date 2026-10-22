@@ -78,6 +78,17 @@
             padding: 5px 10px; border-top: 1px solid var(--border);
             background: var(--bg-card);
         }
+        .btn-warn {
+            background: var(--orange); border-color: var(--orange);
+            color: #2b1200; font-weight: 600;
+        }
+
+        /* Looking at a neighbouring frame is allowed and useful, but it
+           must never be mistakable for the frame being labeled. */
+        .vp-2d.off-target::after {
+            content: ''; position: absolute; inset: 0; pointer-events: none;
+            border: 3px solid var(--orange); border-radius: 2px;
+        }
 
         .timeline-container { height: 74px; }
 
@@ -231,6 +242,12 @@
                         title="Label the k-means selection point by point, zoomed on each MediaPipe target (G)">Guided labeling</button>
                 <button class="btn btn-sm" id="nextPointBtn" style="display:none;"
                         title="Jump to the next point nobody has placed yet (N)">Next point (N)</button>
+                <button class="btn btn-sm btn-warn" id="backToTargetBtn" style="display:none;"
+                        title="Return to the frame being labeled, keeping your zoom (B)">Back to target (B)</button>
+                <label class="mini" id="autoAdvanceWrap" style="display:none;align-items:center;gap:4px;cursor:pointer;"
+                       title="Move to the next point as soon as you place one, instead of waiting for N">
+                    <input type="checkbox" id="autoAdvanceCb"> advance automatically
+                </label>
                 <span class="mini" id="guidedStatus"></span>
                 <button class="btn btn-sm btn-success" id="commitBtn"
                         style="margin-left:auto;">Save labels</button>
@@ -252,6 +269,6 @@
     </div>
 
     <script src="/static/js/nav.js?v=1"></script>
-    <script src="/static/js/label.js?v=7" type="module"></script>
+    <script src="/static/js/label.js?v=9" type="module"></script>
 </body>
 </html>

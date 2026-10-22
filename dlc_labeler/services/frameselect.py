@@ -463,6 +463,32 @@ DEFAULT_N_PICK = 30
 # same coverage over far less work; the step used is recorded.
 MAX_CLUSTER_FRAMES = 4000
 
+# How the progress bar is divided between the phases.  Decoding dominates,
+# but the clustering is ten seconds of real work on a big matrix and
+# reporting it as "99%" makes the app look hung.
+PCT_SCAN, PCT_DECODE, PCT_CLUSTER = 4.0, 80.0, 97.0
+
+
+def _warm_kmeans():
+    """Import scikit-learn in the background, during the decode.
+
+    The import costs well over a second — more than the fit itself on
+    anything but a huge matrix — and it used to land at the start of the
+    clustering phase, where there is nothing to report and the bar sits
+    still.  Decoding has to happen anyway, so the import rides along with
+    it and the clustering phase is just the clustering.
+    """
+    import threading
+
+    def _load():
+        try:
+            from sklearn.cluster import MiniBatchKMeans  # noqa: F401
+        except Exception:
+            pass    # dlc_kmeans_pick imports it again and raises properly
+    t = threading.Thread(target=_load, daemon=True)
+    t.start()
+    return t
+
 
 def _auto_step(total_usable: int, limit: int = MAX_CLUSTER_FRAMES) -> int:
     """Frame stride that keeps the clustering matrix under ``limit`` rows."""
@@ -578,7 +604,7 @@ def _read_frame_features(video_path: str, candidates: list[int],
                         row[camera_index] = small.mean(axis=2)
                 filled[order[local]] = True
         local += 1
-        if progress and local % 200 == 0:
+        if progress and local % 25 == 0:
             progress(local / max(last + 1, 1))
 
     cap.release()
@@ -624,10 +650,17 @@ def select_training_frames(subject_name: str, n_pick: int = DEFAULT_N_PICK, *,
     if not trials:
         return [], [f"{subject_name}: no trials found"], {}
 
+    def report(pct, phase):
+        if progress:
+            progress(float(pct), phase)
+
+    warming = _warm_kmeans()
     notes: list[str] = []
     prepared = []
     total_usable = 0
     for trial_idx, trial in enumerate(trials):
+        report(PCT_SCAN * trial_idx / max(len(trials), 1),
+               f"Reading MediaPipe · trial {trial_idx + 1} of {len(trials)}")
         per_camera, frame_count, trial_notes = _trial_camera_crops(
             subject_name, trial, trial_idx, cam_names, mode)
         notes.extend(trial_notes)
@@ -640,17 +673,21 @@ def select_training_frames(subject_name: str, n_pick: int = DEFAULT_N_PICK, *,
 
     chosen_step = step if step and step > 0 else _auto_step(total_usable)
 
+    span = PCT_DECODE - PCT_SCAN
     rows: list[np.ndarray] = []
     index: list[tuple] = []        # (trial, trial_idx, per_camera, local)
     done = 0
-    for trial, trial_idx, per_camera, frame_count, usable in prepared:
+    for n_trial, (trial, trial_idx, per_camera, frame_count, usable) in \
+            enumerate(prepared):
         candidates = _trial_candidates(per_camera, frame_count, chosen_step)
         if not candidates:
             continue
+        label = (f"Reading frames · trial {n_trial + 1} of {len(prepared)}"
+                 if len(prepared) > 1 else "Reading frames")
 
-        def sub_progress(frac, _done=done, _usable=usable):
-            if progress:
-                progress(100.0 * (_done + frac * _usable) / max(total_usable, 1))
+        def sub_progress(frac, _done=done, _usable=usable, _label=label):
+            report(PCT_SCAN + span * (_done + frac * _usable)
+                   / max(total_usable, 1), _label)
 
         data = _read_frame_features(trial["video_path"], candidates,
                                     per_camera, mode, resize_width,
@@ -662,14 +699,21 @@ def select_training_frames(subject_name: str, n_pick: int = DEFAULT_N_PICK, *,
         rows.append(data)
         for local in candidates:
             index.append((trial, trial_idx, per_camera, local))
-        if progress:
-            progress(100.0 * done / max(total_usable, 1))
+        report(PCT_SCAN + span * done / max(total_usable, 1), label)
 
     if not rows:
         return [], notes + [f"{subject_name}: nothing could be decoded"], {}
 
+    n_rows = sum(r.shape[0] for r in rows)
+    # MiniBatchKMeans gives no callback, so this band cannot tick — but
+    # naming the phase and the size explains the pause, which a stalled
+    # percentage does not.  The concatenate is part of that wait, so it
+    # goes inside the label rather than before it.
+    report(PCT_DECODE, f"Clustering {n_rows} frames into {n_pick} groups…")
     matrix = np.concatenate(rows, axis=0)
+    warming.join(timeout=60)
     picked = dlc_kmeans_pick(matrix, n_pick, seed=seed)
+    report(PCT_CLUSTER, "Writing the selection")
 
     selections = []
     for idx in sorted(picked):

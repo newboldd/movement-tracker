@@ -200,10 +200,23 @@ has nothing, the whole frame stands in. The result is saved to
 
 Then `N` takes you to the next point nobody has placed, on the right
 frame and camera, zoomed on MediaPipe's guess at that exact point —
-close enough that placing it is one click. Place it and it moves on by
-itself. The grid under the video is one row per point and one column per
+close enough that placing it is one click. Points go thumb then index,
+each on both cameras in turn, so the pairing you can check by eye comes
+back to back.
+
+Placing a point does not move you on, so you can look at what you just
+placed. Tick **advance automatically** if you would rather it did; the
+choice is remembered.
+
+The grid under the video is one row per point and one column per
 selected frame, so what is left is one glance; click any cell to jump
-there.
+there. The thumb-index trace stays visible, because whether a frame is
+worth labeling often shows up there first.
+
+Stepping to neighbouring frames to see how the point moves is expected:
+the view gets an orange border and a **Back to target** button (`B`)
+whenever you are not on the frame being asked about, and going back
+keeps your zoom and pan so the comparison survives the trip.
 
 You can still move around the whole video and label anything else while
 the mode is on. What the **Save labels** button writes follows what is
@@ -310,6 +323,7 @@ the database being deleted.
 | `E` | switch camera |
 | `G` | guided labeling on / off |
 | `N` | (Guided) next unlabeled point |
+| `B` | (Guided) back to the target frame |
 | `R` | reset zoom |
 | `1`–`9` | jump to a trial |
 | `T` | (Refine) tick this frame for training |

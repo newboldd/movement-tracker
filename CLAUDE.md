@@ -110,12 +110,20 @@ feature is both cameras' MediaPipe crops side by side. Saved to
 it in a thread with a `jobs` row for progress, because it decodes every
 trial.
 
-The page walks the selection frame-major, then camera, then bodypart —
-so a frame is decoded twice rather than once per point. `guidedBusy`
-drops clicks while the view is moving to the next point; without it a
-click landing mid-seek is placed on the point you just finished.
-`bodypart_joints` in session info maps each bodypart to the MediaPipe
-landmark the zoom aims at, matched by name server-side.
+The page walks the selection frame-major, then bodypart, then camera
+(thumb OS, thumb OD, index OS, index OD) — `guidedRows()` defines that
+order and the grid rows reuse it, so the grid reads in walk order.
+`guidedBusy` drops clicks while the view is moving to the next point;
+without it a click landing mid-seek is placed on the point you just
+finished. `bodypart_joints` in session info maps each bodypart to the
+MediaPipe landmark the zoom aims at, matched by name server-side.
+Auto-advance is off by default and remembered in `localStorage`.
+
+Progress has named phases (`PCT_SCAN`/`PCT_DECODE`/`PCT_CLUSTER`), written
+into the job row's `epoch_info`. MiniBatchKMeans offers no callback, so
+the clustering band cannot tick — naming it is what stops it reading as a
+hang. scikit-learn's import costs more than the fit on anything but a
+huge matrix, so `_warm_kmeans` loads it in a thread during the decode.
 
 Commit scope follows what is on screen: `scope: "selected"` writes
 `labeled-data/selected{N}/`, `"all"` writes `round{N}/`, and each clears
@@ -217,6 +225,11 @@ schema pass (which would otherwise be a silent no-op).
   asset the pages need is served from `static/`. Vendor anything new.
 - **Cache busting**: bump `?v=N` in the HTML when changing a JS or CSS
   file — and in *every* page that links it, for `main.css`.
+- **Camera-switch alignment must measure both sides the same way.**
+  `cameraShift` uses labels only for bodyparts present on *both* cameras,
+  and MediaPipe for both otherwise. Mixing them — one thumb label on OS
+  against a 21-landmark centroid on OD — compares a fingertip with the
+  middle of a palm, and the view jumps the moment you label one camera.
 - **Stereo camera switching must not reload the video.** Both halves come
   from one file, so only `multicam` changes file when the camera changes.
   Reloading on every switch re-buffers and re-seeks, which guided
