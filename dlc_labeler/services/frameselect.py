@@ -36,7 +36,7 @@ import cv2
 import numpy as np
 
 from ..config import get_settings
-from .mediapipe_prelabel import N_JOINTS
+from .mediapipe_data import N_JOINTS
 from .video import build_trial_map, get_subject_videos
 
 logger = logging.getLogger(__name__)
@@ -202,69 +202,6 @@ def compute_trial_crops(landmarks: np.ndarray, frame_width: int,
     return side, boxes
 
 
-def _read_crops(video_path: str, crops: TrialCrops, candidates: list[int],
-                camera_index: int, camera_mode: str,
-                resize_width: int,
-                progress: callable | None = None) -> np.ndarray | None:
-    """Decode the trial once and return the downsampled crop of each candidate.
-
-    Returns (len(candidates), resize_width, resize_width) greyscale, the
-    input DeepLabCut's clustering expects — except square, because the
-    crops are square, so every frame contributes the same number of
-    pixels regardless of where the hand was.
-    """
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        logger.warning("Could not open %s", video_path)
-        return None
-
-    wanted = set(candidates)
-    order = {f: i for i, f in enumerate(candidates)}
-    out = np.zeros((len(candidates), resize_width, resize_width), dtype=float)
-    filled = np.zeros(len(candidates), dtype=bool)
-
-    # Read straight through rather than seeking per frame: seeking is what
-    # makes DeepLabCut's own extraction slow on long videos, and we want
-    # most frames anyway.
-    local = 0
-    last = max(wanted) if wanted else -1
-    while local <= last:
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            break
-        if local in wanted:
-            box = crops.boxes[local]
-            if box is not None:
-                x0, y0, _ = box
-                half = _camera_half(frame, camera_index, camera_mode)
-                patch = half[y0:y0 + crops.side, x0:x0 + crops.side]
-                if patch.size:
-                    small = cv2.resize(patch, (resize_width, resize_width),
-                                       interpolation=cv2.INTER_NEAREST)
-                    # DLC greys by averaging the channels rather than using
-                    # a luma transform; matched here so the clustering sees
-                    # the same numbers it would there.
-                    out[order[local]] = small.mean(axis=2)
-                    filled[order[local]] = True
-        local += 1
-        if progress and local % 100 == 0:
-            progress(local / max(last + 1, 1))
-
-    cap.release()
-
-    if not filled.any():
-        return None
-    if not filled.all():
-        # Frames the decoder could not produce (a truncated file) would
-        # otherwise cluster as identical black images and win a cluster
-        # each.  Drop them from the matrix and from the candidate list.
-        keep = np.where(filled)[0]
-        candidates[:] = [candidates[i] for i in keep]
-        out = out[keep]
-
-    return out
-
-
 def _camera_half(frame: np.ndarray, camera_index: int,
                  camera_mode: str) -> np.ndarray:
     """The pixels belonging to one camera, for the subject's layout."""
@@ -321,124 +258,6 @@ def dlc_kmeans_pick(data: np.ndarray, n_pick: int, *,
         if len(members):
             picks.append(int(members[rng.integers(len(members))]))
     return picks
-
-
-def select_for_trial(subject_name: str, trial: dict, trial_idx: int,
-                     camera: str, camera_index: int, camera_mode: str,
-                     n_pick: int, *,
-                     step: int = 1,
-                     resize_width: int = DLC_RESIZE_WIDTH,
-                     seed: int | None = None,
-                     progress: callable | None = None
-                     ) -> tuple[list[FrameChoice], str | None]:
-    """Choose ``n_pick`` frames from one trial and camera.
-
-    Returns ``(choices, reason_skipped)`` — the reason is a short sentence
-    for the log when nothing could be selected.
-    """
-    landmarks = load_trial_landmarks(subject_name, trial["trial_name"],
-                                     camera_index)
-    if landmarks is None:
-        return [], (f"{trial['trial_name']} {camera}: no MediaPipe landmarks "
-                    f"— run MediaPipe on this subject first")
-
-    frame_count = int(trial["frame_count"])
-    if landmarks.shape[0] < frame_count:
-        # A pass run before the video was re-trimmed; use what overlaps.
-        frame_count = landmarks.shape[0]
-
-    width = int(trial.get("width") or 0)
-    height = int(trial.get("height") or 0)
-    if camera_mode == "stereo":
-        width //= 2
-    if width <= 0 or height <= 0:
-        return [], f"{trial['trial_name']} {camera}: unknown frame size"
-
-    side, boxes = compute_trial_crops(landmarks[:frame_count], width, height)
-    if side <= 0:
-        return [], (f"{trial['trial_name']} {camera}: MediaPipe found no hand "
-                    f"in any frame")
-
-    crops = TrialCrops(trial_idx=trial_idx, trial_name=trial["trial_name"],
-                       camera=camera, side=side, boxes=boxes)
-
-    candidates = [i for i in crops.usable if i % step == 0]
-    if not candidates:
-        return [], f"{trial['trial_name']} {camera}: no usable frames"
-
-    data = _read_crops(trial["video_path"], crops, candidates, camera_index,
-                       camera_mode, resize_width, progress=progress)
-    if data is None:
-        return [], f"{trial['trial_name']} {camera}: could not decode frames"
-
-    picked = dlc_kmeans_pick(data, n_pick, seed=seed)
-
-    choices = []
-    for idx in sorted(picked):
-        local = candidates[idx]
-        x0, y0, mp_available = crops.boxes[local]
-        choices.append(FrameChoice(
-            global_frame=int(trial["start_frame"]) + local,
-            local_frame=local,
-            trial_name=trial["trial_name"],
-            trial_idx=trial_idx,
-            camera=camera,
-            x0=x0, y0=y0, side=side,
-            mp_available=mp_available,
-        ))
-    return choices, None
-
-
-def select_for_subject(subject_name: str, n_per_trial: int, *,
-                       cameras: list[str] | None = None,
-                       camera_mode: str | None = None,
-                       step: int = 1,
-                       seed: int | None = None,
-                       progress: callable | None = None
-                       ) -> tuple[list[FrameChoice], list[str]]:
-    """Choose frames across every trial and camera of a subject.
-
-    The budget is per trial and camera, which is how DeepLabCut thinks
-    about it (it extracts per video) and what keeps one long trial from
-    crowding out the rest.
-
-    Returns ``(choices, notes)``; notes are the human-readable reasons any
-    trial produced nothing.
-    """
-    settings = get_settings()
-    cam_names = cameras or settings.camera_names
-    mode = camera_mode or settings.default_camera_mode
-
-    if not get_subject_videos(subject_name):
-        return [], [f"{subject_name}: no videos found"]
-
-    trials = build_trial_map(subject_name, camera_mode=mode)
-    if not trials:
-        return [], [f"{subject_name}: no trials found"]
-
-    total_units = max(len(trials) * len(cam_names), 1)
-    all_choices: list[FrameChoice] = []
-    notes: list[str] = []
-
-    unit = 0
-    for trial_idx, trial in enumerate(trials):
-        for camera_index, camera in enumerate(cam_names):
-            def sub_progress(frac, _unit=unit):
-                if progress:
-                    progress(100.0 * (_unit + frac) / total_units)
-
-            choices, reason = select_for_trial(
-                subject_name, trial, trial_idx, camera, camera_index, mode,
-                n_per_trial, step=step, seed=seed, progress=sub_progress)
-            if reason:
-                notes.append(reason)
-                logger.info("%s", reason)
-            all_choices.extend(choices)
-            unit += 1
-            if progress:
-                progress(100.0 * unit / total_units)
-
-    return all_choices, notes
 
 
 # ── Picking frames to label, for the whole subject ─────────────────────

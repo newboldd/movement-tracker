@@ -4,7 +4,6 @@ setlocal enabledelayedexpansion
 :: DLC Labeler — one-click setup and launch for Windows.
 ::
 ::   run.bat               install what labeling needs, then start
-::   run.bat --with-dlc    also install DeepLabCut, for training
 ::
 :: Written for locked-down machines.  On a managed laptop the usual
 :: failure is not a missing Python but Group Policy refusing to run one:
@@ -14,8 +13,6 @@ setlocal enabledelayedexpansion
 
 cd /d "%~dp0"
 
-set "WITH_DLC="
-if /i "%~1"=="--with-dlc" set "WITH_DLC=1"
 
 :: ── First run: make a shortcut with the app icon ───────────────
 if exist "icon.ico" if not exist "DLC Labeler.lnk" (
@@ -212,7 +209,7 @@ if exist "%~dp0.python\pip.pyz" set "PIP_PYZ=%~dp0.python\pip.pyz"
 
 :: ── Base dependencies ──────────────────────────────────────────
 echo Checking dependencies...
-%PYTHON% -c "import uvicorn, fastapi, cv2, numpy, yaml, mediapipe" 2>nul
+%PYTHON% -c "import uvicorn, fastapi, cv2, numpy, yaml, sklearn" 2>nul
 if errorlevel 1 (
     echo Installing dependencies ^(a few minutes^)...
 
@@ -261,28 +258,6 @@ if errorlevel 1 (
 )
 :deps_ok
 
-:: ── DeepLabCut (second tier) ───────────────────────────────────
-if defined WITH_DLC (
-    %PYTHON% -c "import deeplabcut" 2>nul
-    if errorlevel 1 (
-        echo.
-        echo Installing DeepLabCut ^(several GB — the slow part, once^)...
-        if defined PIP_PYZ (
-            %PYTHON% "%PIP_PYZ%" install -r requirements-dlc.txt
-        ) else (
-            %PYTHON% -m pip install -r requirements-dlc.txt
-        )
-        if errorlevel 1 (
-            echo.
-            echo DeepLabCut did not install. Labeling still works; you can
-            echo retry from the Jobs page.
-            echo.
-        )
-    ) else (
-        echo DeepLabCut is already installed.
-    )
-)
-
 :: ── Data directory ─────────────────────────────────────────────
 if not exist "%DLC_DATA_DIR%" mkdir "%DLC_DATA_DIR%" 2>nul
 if not exist "%DLC_DATA_DIR%\dlc" mkdir "%DLC_DATA_DIR%\dlc" 2>nul
@@ -326,12 +301,6 @@ if !PORT_TRIES! GTR 0 (
 echo.
 echo Starting DLC Labeler at http://localhost:%DLC_PORT%
 echo Data directory: %DLC_DATA_DIR%
-%PYTHON% -c "import deeplabcut" 2>nul
-if errorlevel 1 (
-    echo.
-    echo DeepLabCut is not installed, so training and analysis are off.
-    echo Add it with:  run.bat --with-dlc
-)
 echo.
 
 :: Open the browser only once the server answers, and only on the port it

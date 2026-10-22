@@ -1,44 +1,40 @@
 # DLC Labeler
 
-A web app for labeling stereo video for DeepLabCut, and for running the
-standard DeepLabCut loop over it: label → train → analyze → correct →
-refine. One page to do the labeling on, one page to run the jobs from.
+A web app for labeling stereo video for DeepLabCut.
 
-It is a stripped-down fork of
-[Movement Tracker](https://github.com/newboldd/movement-tracker), keeping
-the parts that serve DeepLabCut work and dropping the rest. No automatic
-editing, no model fitting, no event detection — the goal is field-standard
-DeepLabCut analysis, made fast, precise and reproducible.
+**It labels frames and nothing else.** It does not run MediaPipe and it
+does not run DeepLabCut. It reads the MediaPipe landmarks
+[Movement Tracker](https://github.com/newboldd/movement-tracker) already
+wrote, uses them to put every point you need to place under your cursor,
+and writes a DeepLabCut training set. Training, inference, correcting
+predictions and refining happen elsewhere, against the project it
+produces.
+
+That narrowness is the point: the install is small, there is one page to
+learn, and the slow part of making a training set — finding the frames
+and the points — is what the app is for.
 
 ## Install
 
 **macOS / Linux**
 
 ```bash
-./setup.sh                 # labeling, MediaPipe, viewing predictions
-./setup.sh --with-dlc      # also install DeepLabCut, for training
+./setup.sh
 ```
 
 **Windows**
 
 ```bat
 run.bat
-run.bat --with-dlc
 ```
 
 Either one installs what it needs on first run and opens
 <http://localhost:8080>. On macOS you can also double-click
 **DLC Labeler.command** or **DLC Labeler.app**.
 
-The install is two-tier on purpose. The base tier is small and fast, and
-covers labeling, MediaPipe and reviewing predictions. DeepLabCut and
-torch are several gigabytes and only matter on a machine that will train,
-so they are opt-in — with `--with-dlc`, or the **Install DeepLabCut**
-button on the Jobs page, whenever a machine first needs them.
-
 ### Where the data goes
 
-Videos, DLC projects, the database and the job history live in a data
+Videos, DLC projects, the database and labeling packages live in a data
 directory outside the code, so updating the app never touches the data.
 It defaults to `data/` next to the app; point it somewhere else with a
 `.env` file:
@@ -54,9 +50,8 @@ data with no reconfiguration — the two apps share the layout and the
 
 ```
 ~/data/dlc-labeler/
-├── dlc_app.db              # subjects, sessions, labels, job queue
+├── dlc_app.db              # subjects, sessions, labels
 ├── settings.json
-├── job_history.jsonl       # every job ever run, with the app version
 ├── videos/                 # {Subject}_{Trial}.mp4
 │   └── deidentified/       # face-blurred copies, used when present
 ├── calibration/            # stereo calibration YAML + camera_assignments
@@ -64,69 +59,37 @@ data with no reconfiguration — the two apps share the layout and the
 └── dlc/
     └── {Subject}/
         ├── config.yaml
-        ├── labeled-data/round1/     # training images + CollectedData
-        ├── labels_v1/               # predictions from the first model
-        ├── labels_v2/               # predictions after refinement
-        ├── corrections/             # reviewed labels, as DLC CSVs
-        └── {Subject}_{Trial}/       # MediaPipe passes, one npz per pass
+        ├── selection.json          # the frames k-means chose
+        ├── labeled-data/round1/    # training images + CollectedData
+        └── {Subject}_{Trial}/      # MediaPipe landmarks, read not written
 ```
 
 ## Running alongside Movement Tracker
 
-The two apps are built to coexist. Install this one in its own folder —
-a separate clone or unzip — and it gets its own `.venv`. The Python
-package is `dlc_labeler`, not `movement_tracker`, so nothing collides
-even if you do put them in one environment.
+The two apps are built to coexist, and this one depends on the other
+having run: MediaPipe landmarks come from Movement Tracker.
 
-That leaves two things to decide.
+Install this one in its own folder — a separate clone or unzip — and it
+gets its own `.venv`. The Python package is `dlc_labeler`, not
+`movement_tracker`, so nothing collides.
 
 **Which data directory.** By default this app reuses Movement Tracker's:
 it reads `MT_DATA_DIR` and `~/.movement_tracker/data_dir` as fallbacks,
-so it opens the same subjects, videos and DLC projects with no setup.
-That is usually what you want — label here, and the work shows up there.
-To keep them apart instead, put a `.env` next to `setup.sh`:
+so it opens the same subjects, videos and MediaPipe output with no
+setup. That is usually what you want. To keep them apart, put a `.env`
+next to `setup.sh`, or set it from **Settings → Data directory**.
 
-```
-DLC_DATA_DIR=~/data/dlc-labeler
-```
+**Whether they run at the same time.** They can. This app has no job
+queue and runs nothing in the background except its own frame selection,
+so it will never pick up or interfere with Movement Tracker's work. It
+shares `frame_labels`, `labeled-data/` and `settings.json`, so a frame
+labeled here is a frame labeled there, and changing camera names or
+bodyparts in one changes them in the other.
 
-or set it from **Settings → Data directory**, which writes
-`~/.dlc_labeler/data_dir` and takes precedence over Movement Tracker's.
-
-**Whether they run at the same time.** They can, on separate data
-directories. On a *shared* data directory, run one at a time. SQLite
-handles the concurrent reads, and each app ignores the other's jobs — but
-two servers writing the same database while both drain a job queue is
-more coordination than either was built for, and `settings.json` is
-shared, so changing camera names or bodyparts in one changes them in the
-other.
-
-Specifically, when the data directory is shared:
-
-- **Jobs stay separate.** This app only ever picks up the job types it
-  owns (`mediapipe`, `export-frames`, `train`, `refine`, `analyze`,
-  `install-dlc`). It
-  will not claim, run, show or fail a Movement Tracker job — HRnet,
-  skeleton fits, deidentify and preproc are invisible to it, and left
-  alone.
-- **Labels are shared, deliberately.** Both apps read the same
-  `frame_labels`, `labeled-data/` and `corrections/`. A frame labeled
-  here is a frame labeled there.
-- **The database schema is shared.** This app adds one column Movement
-  Tracker does not have (`subjects.notes`) and creates no tables of its
-  own beyond the ones they both use. Opening the same database with
-  either app is safe in both directions.
-
-**The port.** Both default to 8080. Neither launcher will kill the other:
-if the port is held by anything that is not this app, it moves up to the
-next free one, says so, and opens the browser on the port it actually
-started on. Pin a port with `DLC_PORT=8081` in `.env` if you would rather
-it be predictable.
-
-If Movement Tracker's interface appears when you launch this, you are
-looking at Movement Tracker on port 8080, not at this app — check the
-port in the address bar against the `Starting DLC Labeler at …` line the
-launcher prints.
+**The port.** Both default to 8080. Neither launcher will kill the
+other: if the port is held by anything that is not this app, it moves up
+to the next free one, says so, and opens the browser on the port it
+actually started on. Pin a port with `DLC_PORT=8081` in `.env`.
 
 ## Getting a subject onto the screen
 
@@ -140,140 +103,73 @@ midline into the two cameras (OS first, OD second, configurable in
 Settings). One file per camera (`multicam`) and single-camera recordings
 also work; set the layout per subject.
 
-## The loop
+## Labeling
 
-1. **MediaPipe** on the Jobs page. It finds the hand in all 21 landmarks
-   per camera. You do not have to run it, but it is what frames the
-   default zoom while you label, so labeling without it is slower.
-2. **Label** on the Label page. Click to place each bodypart, drag to
-   adjust, right-click to remove. Label a spread of frames across every
-   trial, then **Save labels** — that extracts the frames as training
-   images and writes the DeepLabCut `CollectedData` files.
+Open a subject on the Label page. The first time, it picks the frames.
 
-   For the first training set, use **Guided labeling** instead: see below.
-3. **Train** on the Jobs page. It creates the training dataset, trains,
-   crops each trial into per-camera video, and analyzes it all into
-   `labels_v1/`.
-4. **Correct** on the Label page. Predictions appear as ghosts; click one
-   to take it over and drag it right. Saving writes `corrections/`.
-5. **Refine**. The page lists the frames whose correction actually moved
-   the model's prediction, largest first — those are the frames worth
-   retraining on. Tick them, commit, and run **Refine** from Jobs.
-
-Repeat 4–5 until the predictions are good enough. `labels_v2/` holds the
-refined model's output.
-
-### MediaPipe passes
-
-MediaPipe can be run three ways, and each wins on different frames:
-
-- **Forward** — the normal pass, with the between-frame tracker.
-- **Backwards** — frames fed in descending order, so the tracker enters a
-  hard frame already locked on instead of cold.
-- **Frame-by-frame** — the full palm detector on every frame, no tracker.
-  Slower, but recovers poses the tracker loses entirely.
-
-They are stored side by side rather than overwriting each other. As soon
-as two exist for a trial, a **Best per frame** layer is built: for each
-frame and each camera it picks the pass whose pairing triangulates to the
-most plausible thumb-index aperture, with a stereo Y-disparity check to
-reject pairings where the tips line up but the rest of the hand does not.
-
-### Guided labeling
-
-The first training set is 30 frames x 2 cameras x 2 bodyparts = 120
-points, and the slow part is not placing them — it is finding them:
-scrolling to the right frame, switching camera, zooming in. **Guided
-labeling** (the button above the timeline, or `G`) does that part.
-
-Pressing it the first time picks the frames. That runs DeepLabCut's own
-k-means frame selector — MiniBatchKMeans over mean-centred 30px
-greyscale frames, one random frame per cluster — but without DeepLabCut
-installed, over the whole subject rather than one video at a time, and
-on the MediaPipe hand crop from each camera rather than the whole frame.
-That last one matters: squeezed to 30px wide, a 1920px camera half
-leaves the hand about two pixels, so whole-frame clusters sort by arm
-position and lighting. Cropping to the hand first makes them sort by
-hand posture, which is what a labeling set should span. Where MediaPipe
-has nothing, the whole frame stands in. The result is saved to
+**Choosing the frames.** This runs DeepLabCut's own k-means frame
+selector — MiniBatchKMeans over mean-centred 30px greyscale frames, one
+random frame per cluster — but without DeepLabCut installed, over the
+whole subject rather than one video at a time, and on the MediaPipe hand
+crop from each camera rather than the whole frame. That last one
+matters: squeezed to 30px wide, a 1920px camera half leaves the hand
+about two pixels, so whole-frame clusters sort by arm position and
+lighting. Cropping to the hand first makes them sort by hand posture,
+which is what a labeling set should span. Where MediaPipe has nothing,
+the whole frame stands in. The result is saved to
 `dlc/{Subject}/selection.json`, so it only runs once.
 
-Then `N` takes you to the next point nobody has placed, on the right
-frame and camera, zoomed on MediaPipe's guess at that exact point —
-close enough that placing it is one click. Points go thumb then index,
-each on both cameras in turn, so the pairing you can check by eye comes
-back to back.
+**Placing the points.** `N` takes you to the next point nobody has
+placed, on the right frame and camera, zoomed on MediaPipe's guess at
+that exact point — close enough that placing it is one click. Points go
+thumb then index, each on both cameras in turn, so the pairing you can
+check by eye comes back to back.
 
 Placing a point does not move you on, so you can look at what you just
 placed. Tick **advance automatically** if you would rather it did; the
 choice is remembered.
 
+Only the point being asked for can be placed. Every labeled frame is one
+of the k-means picks, so a label dropped on a neighbouring frame would
+never be saved but would still look placed — refusing it is clearer.
+Stepping to neighbouring frames to see how the point moves is still
+expected: the view gets an orange border and a **Back to target** button
+(`B`) whenever you are not on the frame being asked about, and going
+back keeps your zoom and pan so the comparison survives the trip.
+
 The grid under the video is one row per point and one column per
 selected frame, so what is left is one glance; click any cell to jump
 there. The thumb-index trace stays visible, because whether a frame is
-worth labeling often shows up there first.
+worth labeling often shows up there first. **MediaPipe landmarks** in
+the sidebar draws the hand over the frame; the zoom uses the landmarks
+either way.
 
-Stepping to neighbouring frames to see how the point moves is expected:
-the view gets an orange border and a **Back to target** button (`B`)
-whenever you are not on the frame being asked about, and going back
-keeps your zoom and pan so the comparison survives the trip.
-
-You can still move around the whole video and label anything else while
-the mode is on. What the **Save labels** button writes follows what is
-on screen:
-
-| Showing | Button | Writes |
-|---|---|---|
-| The grid | **Save 30 frames** | only the selected frames, to `labeled-data/selected{N}/` |
-| The timeline | **Save all frames** | every labeled frame, to `labeled-data/round{N}/` |
-
-Saving one clears the other for that round, because
-`create_training_dataset` merges every `labeled-data` subdirectory it
-finds and training on both would weight the shared frames twice. Both
-are rebuilt from the labels in one click, so switching is cheap.
-
-### The crop box
-
-Each trial has one crop box per camera. It does two jobs: it frames the
-default zoom when a frame loads, and it is the region MediaPipe crops to.
-**Edit crop box** on the Label page starts from the landmark extent,
-saves to the trial (optionally seeding every trial that has no box of its
-own), and **Re-detect this trial** re-runs MediaPipe inside it — adjust,
-re-detect, see whether the frames that were failing come back.
+**Save labels** writes every labeled frame into
+`labeled-data/round{N}/` with a CollectedData CSV and a `config.yaml`,
+which is a valid DeepLabCut project. Point DeepLabCut at it to train.
 
 ### Distances
 
-With a stereo calibration for the subject, the thumb-index aperture under
-the video is triangulated and reported in millimetres. Without one the app
-works normally and reports the distance in pixels.
+With a stereo calibration for the subject, the thumb-index aperture
+under the video is triangulated and reported in millimetres. Without one
+the app reports the distance in pixels. The camera you have not labeled
+yet falls back to MediaPipe, so the number means something before a
+frame is finished.
 
 Point Settings at a calibration YAML, and map subjects to cameras with a
 `camera_assignments.yaml` in the data directory's `calibration/` folder.
 
 ## Sending frames out to be labeled
 
-Labeling is the slow part, and it parallelises across people. **Export
-frames to label** on the Jobs page picks a spread of frames and writes
-them as a self-contained folder — a *package* — that someone else can
-label without the videos, without DeepLabCut, and without access to this
-data directory.
+Labeling parallelises across people. **Export for labeling** writes the
+frames this subject already selected as a self-contained folder — a
+*package* — that someone else can label without the videos and without
+MediaPipe.
 
-Frames are picked with DeepLabCut's own k-means frame selector, but
-applied to per-frame crops around the MediaPipe hand rather than to whole
-frames. That matters more than it sounds: the selector squeezes each
-frame to 30 pixels wide before clustering, so on a 1920-pixel camera half
-the hand is about two pixels and the clusters end up sorting by arm
-position, lighting and background. Cropping to the hand first means the
-clusters are hand postures, which is what you want a spread of.
-
-The crop box is a constant size per trial (the 95th percentile of the
-hand's extent, times 1.6, so one bad detection cannot inflate it) and
-recentres on every frame. Frames MediaPipe lost borrow the nearest good
-centre and are flagged in `frames.csv` — those are often the frames most
-worth labeling, so dropping them would bias the training set towards the
-easy ones. If a face-blurred render exists, the frames are cut from that.
-
-A package looks like this:
+It exports the same frames the page would have shown you, read back from
+`selection.json`, so what a collaborator labels is exactly the set you
+would have labeled and their labels drop straight back onto the same
+frames. If a face-blurred render exists, the frames are cut from that.
 
 ```
 Con01_label_20260408/
@@ -295,69 +191,46 @@ whole folder back is all there is to it.
 **To bring one home**, drop the returned folder into `packages/`, press
 Sync, and press **Import labels** on its row. Each image's labels are
 mapped back through its crop offset onto the original video frame and
-merged into the subject's labeling session, ready to review and commit.
-It always runs a dry pass first and tells you how many frames will land,
-how many images never came back, and which frames are already labeled
-differently — those are left alone unless you say otherwise. Importing
-the same package twice does nothing the second time.
+merged into the subject's labeling session. It always runs a dry pass
+first and tells you how many frames will land, how many images never
+came back, and which frames are already labeled differently — those are
+left alone unless you say otherwise. Importing the same package twice
+does nothing the second time.
 
 ## Updating
 
-The **Update** button in the header pulls the latest version and restarts
-the app if the code changed. It only appears on a git checkout with a
-remote — if you installed by downloading a zip, download it again to
-update.
+The **Update** button in the header pulls the latest version and
+restarts the app if the code changed. It only appears on a git checkout
+with a remote — if you installed by downloading a zip, download it again
+to update.
 
-It is deliberately narrow about what it will do. It fast-forwards and
-nothing else: it never merges, never rewrites history, and never
-discards local work. Uncommitted changes to the app's own files stop it,
-with the files named. A copy with commits the remote does not have is
-reported rather than merged.
+It fast-forwards and nothing else: it never merges, never rewrites
+history, and never discards local work. Uncommitted changes to the app's
+own files stop it, with the files named. A copy with commits the remote
+does not have is reported rather than merged.
 
 If the update only touches pages or styles the browser just reloads. If
-it touches Python, the server restarts — jobs running as their own
-process (MediaPipe passes, training) are picked back up afterwards, and
-you are warned first about anything running inside the app itself. When
-an update changes `requirements.txt`, it says so: close the app and run
-`setup.sh` (or `run.bat`) once to install the new packages.
-
-## Jobs
-
-Two lanes run at once — CPU for MediaPipe, GPU for DeepLabCut — and jobs
-inside a lane run one at a time. Every job runs as a subprocess with its
-PID recorded, so closing the browser, or the app restarting, does not
-kill a training run in progress; it is picked back up on the next start.
-
-Every run is also appended to `job_history.jsonl` with the app's git
-version and its stage timings. The jobs table is a working view and gets
-pruned; that file is the record of what was actually run, and it survives
-the database being deleted.
+it touches Python, the server restarts.
 
 ## Keyboard
 
 | | |
 |---|---|
+| `N` | next unlabeled point |
+| `B` | back to the target frame |
 | `←` `→` | previous / next frame (`Shift` for 10) |
-| `↑` `↓` | previous / next labeled frame |
 | `Space` | play / pause |
 | `E` | switch camera |
-| `G` | guided labeling on / off |
-| `N` | (Guided) next unlabeled point |
-| `B` | (Guided) back to the target frame |
 | `R` | reset zoom |
 | `1`–`9` | jump to a trial |
-| `T` | (Refine) tick this frame for training |
 | `Ctrl/⌘ Z` | undo — jumps to the frame it changed |
 
 ## Requirements
 
-Python 3.9–3.12. MediaPipe publishes no wheels for 3.13+, and the version
-pinned here (`<0.10.19`, the last with the `mediapipe.solutions` API this
-uses) stops at 3.12. Everything except hand detection works on newer
-Pythons.
+Python 3.9 or newer. Nothing here caps the upper end: this app does not
+import `mediapipe`, which is what used to hold it at 3.12.
 
-A CUDA GPU makes training practical but is not required; without one DLC
-runs on the CPU.
+No GPU, and no DeepLabCut.
 
 ## License
 

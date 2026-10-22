@@ -1,10 +1,9 @@
-# DLC Labeler — base install.
+# DLC Labeler.
 #
-# Everything here is needed to label frames, run MediaPipe, view
-# predictions in 2D and 3D, and commit a DeepLabCut training set.
-# Training and inference need DeepLabCut itself, which is several GB and
-# lives in requirements-dlc.txt — install it with `./setup.sh --with-dlc`
-# or the button on the Jobs page, once a machine actually needs to train.
+# This app labels frames and writes DeepLabCut training sets. It does not
+# run MediaPipe and it does not run DeepLabCut, so neither is a
+# dependency — which is why the install is small and why it is not
+# capped at Python 3.12 the way anything importing mediapipe is.
 
 # Web app
 fastapi>=0.100.0
@@ -20,19 +19,7 @@ pyyaml>=5.0
 # Bundled ffmpeg, so nothing has to be installed system-wide
 imageio-ffmpeg>=0.4.9
 
-# Hand landmarks.
-#
-# Pinned below 0.10.19: that release removed the `mediapipe.solutions`
-# API this app detects hands with.  Lifting the pin means rewriting
-# services/mediapipe_prelabel.py against the Tasks API, not just
-# bumping a number.
-mediapipe>=0.10.0,<0.10.19
-protobuf>=3.20,<5
-
-# Frame selection.
-#
-# DeepLabCut's own k-means frame picker is MiniBatchKMeans from
-# scikit-learn.  It is in the base tier because selecting frames to
-# label (and to send out for labeling) has to work on a machine that
-# will never train.
+# Frame selection: DeepLabCut's own k-means frame picker is
+# MiniBatchKMeans from scikit-learn, so this app can reproduce the
+# selection without DeepLabCut installed.
 scikit-learn>=1.0

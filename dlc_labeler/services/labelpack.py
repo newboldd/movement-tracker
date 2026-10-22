@@ -33,14 +33,41 @@ import cv2
 from ..config import get_settings
 from .frameselect import (
     CROP_PADDING, CROP_SIDE_PERCENTILE, DLC_RESIZE_WIDTH, FrameChoice,
-    select_for_subject,
 )
-from .job_history import git_version
 from .video import (
     _deidentified_path, _get_no_face_videos, build_trial_map,
 )
 
 logger = logging.getLogger(__name__)
+
+_version_memo: str | None | tuple = ()
+
+
+def _git_version() -> str | None:
+    """The commit this app is running, or None outside a checkout.
+
+    Recorded in every package so a selection can be traced back to the
+    code that made it.  Memoised: it cannot change while the process runs.
+    """
+    global _version_memo
+    if _version_memo != ():
+        return _version_memo  # type: ignore[return-value]
+
+    import subprocess
+
+    from ..config import PROJECT_DIR
+
+    version = None
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(PROJECT_DIR), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5)
+        if out.returncode == 0:
+            version = out.stdout.strip() or None
+    except Exception:
+        version = None
+    _version_memo = version
+    return version
 
 PACKAGE_SCHEMA = "dlc-labeler-package/1"
 MANIFEST_NAME = "package.json"
@@ -193,23 +220,34 @@ def _write_images(subject_name: str, trial: dict, choices: list[FrameChoice],
 
 
 def export_package(subject_name: str, dest_dir: str | Path, *,
-                   n_per_trial: int = 20,
                    cameras: list[str] | None = None,
-                   step: int = 1,
                    seed: int | None = None,
                    package_name: str | None = None,
                    progress=None) -> dict:
-    """Select frames for a subject and write them as a labeling package.
+    """Write the subject's selected frames as a package to send out.
 
-    Returns a summary dict: where it went, how many images, and any
-    trials that produced nothing and why.
+    The frames are the ones the Label page already chose, read back from
+    ``selection.json`` rather than clustered again — so what a
+    collaborator labels is exactly the set you would have labeled, and
+    their labels drop straight back onto the same frames.
+
+    Returns a summary: where it went, how many images, and any trial
+    that produced nothing.
     """
+    from .frameselect import load_selection
+
     settings = get_settings()
     cam_names = cameras or settings.camera_names
     camera_index_of = {name: i for i, name in enumerate(settings.camera_names)}
     for name in cam_names:
         if name not in camera_index_of:
             raise ValueError(f"Unknown camera: {name}")
+
+    selection = load_selection(subject_name)
+    if not selection or not selection.get("frames"):
+        raise RuntimeError(
+            f"{subject_name} has no frame selection yet — open it on the "
+            f"Label page and pick frames first.")
 
     from ..db import get_db_ctx
     with get_db_ctx() as db:
@@ -224,27 +262,29 @@ def export_package(subject_name: str, dest_dir: str | Path, *,
     frames_root.mkdir(parents=True, exist_ok=True)
     (root / "labels").mkdir(exist_ok=True)
 
-    # Selection decodes each trial once; writing seeks to the chosen
-    # frames.  Report the first 80% of progress against selection, which
-    # is where nearly all the time goes.
-    def select_progress(pct):
-        if progress:
-            progress(min(pct * 0.8, 80.0))
-
-    choices, notes = select_for_subject(
-        subject_name, n_per_trial, cameras=cam_names,
-        camera_mode=camera_mode, step=step, seed=seed,
-        progress=select_progress)
-
-    if not choices:
-        raise RuntimeError(
-            "No frames could be selected. "
-            + (notes[0] if notes else "No MediaPipe output for this subject?"))
-
     trials = build_trial_map(subject_name, camera_mode=camera_mode)
+    notes: list[str] = list(selection.get("notes") or [])
+
+    # One FrameChoice per selected frame per camera: the crop the page
+    # already worked out, so the images match what it shows.
     by_trial: dict[int, list[FrameChoice]] = {}
-    for choice in choices:
-        by_trial.setdefault(choice.trial_idx, []).append(choice)
+    for entry in selection["frames"]:
+        trial_idx = int(entry["trial_idx"])
+        for camera in cam_names:
+            crop = (entry.get("crops") or {}).get(camera)
+            if not crop:
+                notes.append(f"frame {entry['global_frame']} {camera}: "
+                             f"no crop, skipped")
+                continue
+            by_trial.setdefault(trial_idx, []).append(FrameChoice(
+                global_frame=int(entry["global_frame"]),
+                local_frame=int(entry["local_frame"]),
+                trial_name=entry["trial_name"],
+                trial_idx=trial_idx,
+                camera=camera,
+                x0=int(crop["x0"]), y0=int(crop["y0"]), side=int(crop["side"]),
+                mp_available=bool(crop.get("mp", True)),
+            ))
 
     rows: list[dict] = []
     for i, (trial_idx, trial_choices) in enumerate(sorted(by_trial.items())):
@@ -254,7 +294,7 @@ def export_package(subject_name: str, dest_dir: str | Path, *,
                                   trial_choices, camera_index_of, camera_mode,
                                   frames_root))
         if progress:
-            progress(80.0 + 18.0 * (i + 1) / max(len(by_trial), 1))
+            progress(98.0 * (i + 1) / max(len(by_trial), 1), "Writing frames")
 
     if not rows:
         raise RuntimeError("Frames were selected but none could be written — "
@@ -270,7 +310,7 @@ def export_package(subject_name: str, dest_dir: str | Path, *,
         "schema": PACKAGE_SCHEMA,
         "name": name,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "app_version": git_version(),
+        "app_version": _git_version(),
         "subject": subject_name,
         "camera_mode": camera_mode,
         "cameras": cam_names,
@@ -278,22 +318,17 @@ def export_package(subject_name: str, dest_dir: str | Path, *,
         "image_count": len(rows),
         "directories": sorted({r["image"].split("/")[1] for r in rows}),
         "selection": {
-            # Recorded in full so a selection can be explained, repeated or
-            # argued with later.
-            "method": "deeplabcut-kmeans-on-mediapipe-crop",
-            "description": (
-                "DeepLabCut's KmeansbasedFrameselectioncv2 (MiniBatchKMeans, "
-                "tol=1e-3, batch_size=100, max_iter=50, mean-centred "
-                "greyscale, one random frame per cluster), applied to "
-                "per-frame crops around the MediaPipe hand rather than to "
-                "whole frames."
-            ),
-            "frames_per_trial_per_camera": n_per_trial,
-            "step": step,
-            "seed": seed,
-            "resize_width": DLC_RESIZE_WIDTH,
+            # The selection this package was cut from, copied so it can be
+            # explained or argued with without the project beside it.
+            "method": (selection.get("method")
+                       or "deeplabcut-kmeans-on-mediapipe-crop"),
+            "frames_selected": len(selection["frames"]),
+            "step": selection.get("step"),
+            "seed": selection.get("seed"),
+            "resize_width": selection.get("resize_width", DLC_RESIZE_WIDTH),
             "crop_padding": CROP_PADDING,
             "crop_side_percentile": CROP_SIDE_PERCENTILE,
+            "selected_at": selection.get("created_at"),
         },
         "notes": notes,
     }

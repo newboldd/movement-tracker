@@ -2,19 +2,20 @@
 
 A web app for DeepLabCut keypoint labeling on stereo video, for clinical
 researchers with no programming background. FastAPI + vanilla JS, no build
-step. A stripped-down fork of Movement Tracker: it keeps the labeling,
-MediaPipe and DeepLabCut paths and drops everything else (skeleton fitting,
-HRnet, event detection, deidentification, group analysis, remote execution).
+step.
+
+**It labels frames. It runs nothing.** No MediaPipe, no DeepLabCut, no job
+queue. It reads the MediaPipe landmarks Movement Tracker left on disk, uses
+them to aim the labeling, and writes a DeepLabCut training set. Training,
+inference, corrections and refinement happen elsewhere.
 
 ## Quick start
 
 ```bash
-./setup.sh                 # base install (labeling + MediaPipe), then run
-./setup.sh --with-dlc      # also install DeepLabCut
+./setup.sh                 # install and run
 ./setup.sh --reinstall     # rebuild .venv from scratch
 
-run.bat                    # Windows equivalents
-run.bat --with-dlc
+run.bat                    # Windows equivalent
 ```
 
 Opens at http://localhost:8080. `.env` holds local config
@@ -22,8 +23,10 @@ Opens at http://localhost:8080. `.env` holds local config
 
 ## Architecture
 
-**Backend**: FastAPI, SQLite, OpenCV, MediaPipe, scikit-learn (k-means
-frame selection), ffmpeg (via imageio-ffmpeg)
+**Backend**: FastAPI, SQLite, OpenCV, scikit-learn (k-means frame
+selection), ffmpeg (via imageio-ffmpeg). Note what is *not* here:
+`mediapipe` is not a dependency, which is also why Python is not capped
+at 3.12.
 **Frontend**: vanilla JS, HTML5 Canvas for video and labeling
 **No build step** — static files are served directly.
 
@@ -34,35 +37,22 @@ dlc_labeler/
 ├── db.py               # schema + migrations
 ├── models.py           # pydantic models, STAGES
 ├── routers/
-│   ├── labeling.py     # the Label page's API, incl. frame selection
+│   ├── labeling.py     # the Label page's API: sessions, frames, labels,
+│   │                   #   frame selection, commit to DLC
 │   ├── subjects.py     # CRUD + filesystem discovery
-│   ├── queue.py        # the Jobs page's API
-│   ├── jobs.py         # job detail, log tail, SSE, cancel
-│   ├── packages.py     # list packages, import returned labels
-│   │                   #   (settings.py also holds self-update + restart)
-│   └── settings.py     # settings, status, data directory
+│   ├── packages.py     # labeling packages: list, export, import
+│   └── settings.py     # settings, status, data directory, self-update
 ├── services/
-│   ├── video.py              # trial maps, frame extraction, stereo split
-│   ├── mediapipe_prelabel.py # hand passes + best-per-frame fusion
-│   ├── labels.py             # commit to DLC, corrections CSVs
-│   ├── frameselect.py        # DLC's k-means on MediaPipe crops —
-│   │                         #   per camera (packages), per frame (guided)
-│   ├── labelpack.py          # export/read/import labeling packages
-│   ├── dlc_predictions.py    # read DLC CSVs back as layers
-│   ├── dlc_pipeline.py       # STANDALONE: train/refine/analyze subprocess
-│   ├── dlc_wrapper.py        # config.yaml repair
-│   ├── calibration.py        # stereo calibration + triangulation
-│   ├── queue_manager.py      # CPU and GPU lanes
-│   ├── local_executor.py     # launches jobs as subprocesses
-│   ├── worker.py             # STANDALONE: MediaPipe subprocess entry point
-│   ├── jobs.py               # subprocess registry, progress, cancel
-│   ├── job_history.py        # append-only lifetime log
-│   ├── discovery.py          # infer stage from the filesystem
-│   ├── trace.py              # distance-trace spike filter
-│   └── ffmpeg.py             # find ffmpeg (PATH → imageio-ffmpeg)
+│   ├── video.py           # trial maps, frame extraction, stereo split
+│   ├── mediapipe_data.py  # READ the npz Movement Tracker wrote
+│   ├── frameselect.py     # DLC's k-means on MediaPipe crops
+│   ├── labelpack.py       # export / read / import labeling packages
+│   ├── labels.py          # write the DLC training set
+│   ├── calibration.py     # stereo calibration + triangulation
+│   ├── discovery.py       # infer stage from the filesystem
+│   └── ffmpeg.py          # find ffmpeg (PATH → imageio-ffmpeg)
 └── static/
-    ├── label.html / js/label.js       # the one labeling page (~2.4k lines)
-    ├── jobs.html  / js/jobs.js
+    ├── label.html / js/label.js       # the labeling page
     ├── index.html / js/subjects.js
     ├── settings.html / js/settings.js
     └── js/nav.js                      # shared header, built in JS
@@ -91,45 +81,36 @@ on purpose: pointing both apps at one data directory is supported.
 - `frame_offset` handles videos whose container exposes negative-PTS
   pre-roll frames to OpenCV that browsers skip.
 
-### MediaPipe passes
-Per trial, under `dlc/{subject}/{trial}/`:
-`mediapipe.npz` (forward), `mediapipe_reverse.npz`,
-`mediapipe_static.npz` (frame-by-frame), `mediapipe_cropped.npz`
-(forward with a crop box), `mediapipe_combined.npz` (best per frame).
-Arrays are trial-local `(n, 21, 2)` with a `start_frame` offset. Each has
-a `.params.json` sidecar recording how it was produced.
-
-`build_combined_mp_npz_for_trial` rebuilds the fusion automatically
-whenever a source pass is written and two or more exist.
+### MediaPipe landmarks
+Read, never written. `dlc/{subject}/{trial}/mediapipe.npz` holds
+trial-local `(n, 21, 2)` arrays per camera with a `start_frame` offset;
+`services/mediapipe_data.py` is the only thing that reads them and it
+imports nothing from the `mediapipe` package. A subject with no npz
+still labels — it is simply not pre-aimed.
 
 ### Guided labeling
-`services/frameselect.py`'s `select_training_frames` picks N frames for
-a *subject* (not per trial per camera, as the package exporter does):
-one pick is one frame, labeled on every camera, so the clustering
-feature is both cameras' MediaPipe crops side by side. Saved to
-`dlc/{subject}/selection.json`; `POST /api/labeling/{id}/selection` runs
-it in a thread with a `jobs` row for progress, because it decodes every
-trial.
+The whole Label page. There is no other mode: `select_training_frames`
+picks N frames per *subject* (one pick is one frame, labeled on every
+camera, so the clustering feature is both cameras' MediaPipe crops side
+by side), saved to `dlc/{subject}/selection.json`.
 
-The page walks the selection frame-major, then bodypart, then camera
-(thumb OS, thumb OD, index OS, index OD) — `guidedRows()` defines that
-order and the grid rows reuse it, so the grid reads in walk order.
-`guidedBusy` drops clicks while the view is moving to the next point;
-without it a click landing mid-seek is placed on the point you just
-finished. `bodypart_joints` in session info maps each bodypart to the
-MediaPipe landmark the zoom aims at, matched by name server-side.
-Auto-advance is off by default and remembered in `localStorage`.
+The page walks them frame-major, then bodypart, then camera (thumb OS,
+thumb OD, index OS, index OD) — `guidedRows()` defines that order and
+the grid rows reuse it. Only the point being asked for can be placed:
+every labeled frame is a k-means pick, so a label on a neighbouring
+frame would never be saved but would still look placed. `guidedBusy`
+drops clicks while the view is moving. `bodypart_joints` in session info
+maps each bodypart to the landmark the zoom aims at, matched by name
+server-side. Auto-advance is off by default, remembered in
+`localStorage`.
 
-Progress has named phases (`PCT_SCAN`/`PCT_DECODE`/`PCT_CLUSTER`), written
-into the job row's `epoch_info`. MiniBatchKMeans offers no callback, so
-the clustering band cannot tick — naming it is what stops it reading as a
+`POST /{id}/selection` runs on a thread and reports into
+`_selection_progress`, polled at `/selection/progress` — in memory
+because it is live state of this process, meaningless after a restart.
+Progress has named phases; MiniBatchKMeans offers no callback, so the
+clustering band cannot tick and naming it is what stops it reading as a
 hang. scikit-learn's import costs more than the fit on anything but a
-huge matrix, so `_warm_kmeans` loads it in a thread during the decode.
-
-Commit scope follows what is on screen: `scope: "selected"` writes
-`labeled-data/selected{N}/`, `"all"` writes `round{N}/`, and each clears
-the other (`supersedes`) because DLC merges every labeled-data
-subdirectory it finds.
+huge matrix, so `_warm_kmeans` loads it during the decode.
 
 ### Labeling packages
 A package is a folder under `DATA_DIR/packages/` holding frames to be
@@ -155,25 +136,20 @@ frame**, not by the global frame number the package recorded — global
 numbering shifts if a trial is added. Crop offsets turn the crop's
 coordinates back into camera-half coordinates.
 
-### Layers
-Everything the Label page draws is a layer with one shape. Bodypart
-layers (`dlc`, `refine`, `corrections`, `committed`) are subject-wide
-`{camera: {bodypart: [[x,y]|null, ...]}}`; MediaPipe layers are per trial
-with all 21 joints, shipped as base64 float32 (`_f32` / `decodeF32`)
-because JSON for a trial's landmark arrays is megabytes of text.
+### What the page draws
+Two things: this session's labels, always, and the MediaPipe landmarks
+behind one checkbox. The landmarks arrive per trial as base64 float32
+(`_f32` / `decodeF32`) because JSON for a trial's arrays is megabytes of
+text. The trace under the video plots the MediaPipe aperture always —
+it is how you tell a frame worth labeling from one where the hand is
+mid-blur, which you want before deciding to look at the landmarks.
 
-### The DeepLabCut loop
-`initial` session → commit → `labeled-data/round{N}/` → **train** →
-`labels_v1/` → `corrections` session → `corrections/` → `refine` session
-(pick frames) → commit → `labeled-data/round{N+1}/` → **refine** →
-`labels_v2/`.
-
-`services/dlc_pipeline.py` runs train/refine/analyze as one subprocess and
-has **no `dlc_labeler` imports on purpose** — the interpreter with
-DeepLabCut may be a different venv or conda env (Settings → Python
-executable). Same for `services/worker.py`, which puts PROJECT_DIR on
-`sys.path` itself so absolute-path invocation works under Windows
-portable Python.
+### The DeepLabCut output
+`initial` session → **Save labels** → `labeled-data/round{N}/` with a
+CollectedData CSV, plus a `config.yaml` so the directory is a valid DLC
+project. That is where this app stops. Training, inference, corrections
+and refinement are somebody else's job — run DeepLabCut against the
+project it writes.
 
 ## Patterns
 
@@ -209,17 +185,9 @@ schema pass (which would otherwise be a silent no-op).
 
 ## Gotchas
 
-- **MediaPipe version**: pinned `<0.10.19`; newer releases removed the
-  `mediapipe.solutions` API this uses. That also caps Python at 3.12.
 - **Frame seeking**: OpenCV's `POS_FRAMES` is off by one on many H.264
   files. The browser's decoder is the ground truth, so the page draws
   from `<video>` whenever it can and falls back to server JPEGs.
-- **ON CONFLICT targets** must match a real UNIQUE constraint.
-  `mp_crop_boxes` is unique on `(subject_id, trial_idx, camera_name,
-  model_name)` — all four.
-- **One crop box model name**: `BBOX_MODEL = "run-mediapipe"` in
-  `routers/labeling.py`. The box you drag and the box MediaPipe crops to
-  must be the same row.
 - **DATA_DIR is resolved at import time**, so changing it re-execs the
   process (exit code 42; the launchers loop on it).
 - **No CDNs.** These machines are often offline or firewalled, so every
@@ -237,14 +205,6 @@ schema pass (which would otherwise be a silent no-op).
   labeling does on every other point.
 - **macOS Gatekeeper**: a downloaded zip needs "Open Anyway" once under
   System Settings → Privacy & Security.
-- **Shared data directory**: pointing this app and the full Movement
-  Tracker at one data directory is supported, so anything touching the
-  shared tables must stay in its own lane. The queue manager filters
-  every read by `RESOURCE_MAP`'s job types — add a job type there and to
-  `_run_job` together (and to `STEP_DEFINITIONS` and `worker.py`'s
-  `JOB_DISPATCH` to make it reachable), or it will be queued and never
-  drained. Settings
-  keys this app does not model are preserved on save (`Settings._foreign`).
 - **Restarting the process** (`_schedule_restart` in `routers/settings.py`,
   used by the data-directory change and the Update button): prefer exit
   code 42, which the launchers loop on — they know how the app was

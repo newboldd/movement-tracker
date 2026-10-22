@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import List
 
@@ -24,54 +25,25 @@ from ..models import (
 )
 from ..services.calibration import get_calibration_for_subject
 from ..services.discovery import _count_labeled_frames, _has_mediapipe
-from ..services.dlc_predictions import (
-    _compute_dlc_distances,
-    get_corrections_with_dlc_fallback,
-    get_dlc_predictions_for_session,
-    get_dlc_predictions_for_stage,
-    get_stage_csv_files,
-)
-from ..services.labels import commit_labels_to_dlc, save_corrections_to_csv
-from ..services.mediapipe_prelabel import (
-    compute_default_bbox,
-    get_mediapipe_for_session,
-    recompute_distance_for_frame,
-    run_mediapipe_cropped,
-)
+from ..services.labels import commit_labels_to_dlc
+from ..services.mediapipe_data import recompute_distance_for_frame
 from ..services.video import (
     _deidentified_path, _get_no_face_videos, build_trial_map, extract_frame,
 )
 
 logger = logging.getLogger(__name__)
 
+# Frame selection runs on a thread and reports here; the page polls it.
+# In memory on purpose — it is live state of this process, meaningless
+# after a restart, and not worth a table.
+_selection_lock = threading.Lock()
+_selection_progress: dict[str, dict] = {}
+
 router = APIRouter(prefix="/api/labeling", tags=["labeling"])
 
-# The crop box every consumer agrees on.  One box per (subject, trial,
-# camera): what you drag on the page is exactly what the next MediaPipe
-# run crops to.  The table keeps a model_name column from the upstream
-# app's multi-detector days; pinning it to one value here is what makes
-# "the box I drew" and "the box MediaPipe used" the same box.
-BBOX_MODEL = "run-mediapipe"
-
-# MediaPipe passes the page can display, in the order they are offered.
-# Each is a separate npz under <dlc>/<subject>/<trial>/ because each
-# wins on different frames — see services/mediapipe_prelabel.
-MP_PASSES = [
-    {"key": "forward", "file": "mediapipe.npz", "label": "Forward",
-     "color": "#00cccc"},
-    {"key": "reverse", "file": "mediapipe_reverse.npz", "label": "Reverse",
-     "color": "#e040fb"},
-    {"key": "static", "file": "mediapipe_static.npz", "label": "Frame-by-frame",
-     "color": "#26c6da"},
-    {"key": "cropped", "file": "mediapipe_cropped.npz", "label": "Cropped",
-     "color": "#7cb342"},
-    {"key": "best", "file": "mediapipe_combined.npz", "label": "Best per frame",
-     "color": "#ffa726"},
-]
-
-# Which pass contributed each frame of the "best per frame" fusion.
-# Mirrors COMBINED_SRC_* in services/mediapipe_prelabel.
-MP_SOURCE_NAMES = {0: None, 1: "forward", 2: "cropped", 3: "reverse", 4: "static"}
+# The one MediaPipe file this app reads.  It does not run MediaPipe —
+# Movement Tracker produces these, and this app labels against them.
+MEDIAPIPE_NPZ = "mediapipe.npz"
 
 
 # ── Encoding helpers ───────────────────────────────────────────────────
@@ -212,7 +184,7 @@ def _bodypart_joints(bodyparts: list[str]) -> dict:
     finger; a bodypart with no obvious landmark simply gets no entry and
     falls back to the whole-hand crop.
     """
-    from ..services.mediapipe_prelabel import INDEX_TIP, THUMB_TIP
+    from ..services.mediapipe_data import INDEX_TIP, THUMB_TIP
 
     known = {"thumb": THUMB_TIP, "index": INDEX_TIP}
     out = {}
@@ -268,18 +240,6 @@ def get_session_info(session_id: int) -> dict:
     if dlc_path.exists():
         committed_frame_count = _count_labeled_frames(dlc_path)
 
-    with get_db_ctx() as db:
-        rows = db.execute(
-            "SELECT trial_idx, camera_name, x1, y1, x2, y2 FROM mp_crop_boxes "
-            "WHERE subject_id = ? AND model_name = ?",
-            (subj["id"], BBOX_MODEL),
-        ).fetchall()
-    crop_boxes: dict[int, dict] = {}
-    for r in rows:
-        crop_boxes.setdefault(r["trial_idx"], {})[r["camera_name"]] = {
-            "x1": r["x1"], "y1": r["y1"], "x2": r["x2"], "y2": r["y2"],
-        }
-
     return {
         "session": session,
         "subject": subj,
@@ -289,9 +249,7 @@ def get_session_info(session_id: int) -> dict:
         "camera_names": settings.camera_names,
         "camera_mode": camera_mode,
         "committed_frame_count": committed_frame_count,
-        "crop_boxes": crop_boxes,
         "has_calibration": get_calibration_for_subject(subj["name"]) is not None,
-        "mp_passes": MP_PASSES,
         "bodypart_joints": _bodypart_joints(bodyparts),
         "package": package,
     }
@@ -373,73 +331,18 @@ def get_video(
 
 # ── Label layers ───────────────────────────────────────────────────────
 
-@router.get("/sessions/{session_id}/layers")
-def get_layers(session_id: int) -> dict:
-    """Report which label layers actually have data for this subject.
-
-    The page builds its layer list from this, so a student is never
-    offered a checkbox that turns on nothing.
-    """
-    settings = get_settings()
-    _session, subj = _session_and_subject(session_id)
-    subject_name = subj["name"]
-    dlc_path = settings.dlc_path / subject_name
-
-    trials = build_trial_map(subject_name, camera_mode=_camera_mode(subj))
-
-    # MediaPipe passes are per trial, so report per trial: a subject can
-    # have the reverse pass on one trial and not another.
-    mp_by_trial: dict[int, list[str]] = {}
-    for ti, t in enumerate(trials):
-        trial_dir = dlc_path / t["trial_name"]
-        present = [p["key"] for p in MP_PASSES
-                   if (trial_dir / p["file"]).exists()]
-        if present:
-            mp_by_trial[ti] = present
-    # Fall back to the subject-wide npz written by older runs.
-    if not mp_by_trial and _has_mediapipe(dlc_path):
-        mp_by_trial = {ti: ["forward"] for ti in range(len(trials))}
-
-    with get_db_ctx() as db:
-        committed = db.execute(
-            """SELECT COUNT(*) AS cnt FROM frame_labels fl
-               JOIN label_sessions ls ON ls.id = fl.session_id
-               WHERE ls.subject_id = ? AND ls.status = 'committed'
-                 AND ls.session_type != 'corrections'""",
-            (subj["id"],),
-        ).fetchone()
-
-    stage_files = {}
-    stages = []
-    for stage in ("dlc", "refine", "corrections"):
-        csv_files = get_stage_csv_files(subject_name, stage)
-        if csv_files:
-            stages.append(stage)
-            stage_files[stage] = csv_files
-
-    return {
-        "mp_passes": MP_PASSES,
-        "mp_by_trial": mp_by_trial,
-        "stages": stages,
-        "stage_files": stage_files,
-        "has_committed_labels": bool(committed and committed["cnt"] > 0),
-    }
-
-
 @router.get("/sessions/{session_id}/trial/{trial_idx}/mp")
-def get_trial_mp(session_id: int, trial_idx: int,
-                 passes: str = Query("", description="Comma-separated pass keys")
-                 ) -> dict:
-    """Full 21-joint MediaPipe landmarks for one trial, in 2D and 3D.
+def get_trial_mp(session_id: int, trial_idx: int) -> dict:
+    """The MediaPipe forward pass for one trial: 21 joints, both cameras.
 
-    One payload per trial rather than per frame: the page needs the
-    whole trial to draw motion context and to keep frame stepping
-    instant, and triangulating the trial once is far cheaper than
-    triangulating the current frame on every arrow-key press.
+    One payload per trial rather than per frame, so stepping frames stays
+    instant.  All 21 joints, not just the labeled bodyparts, because the
+    guided zoom aims at a named landmark and the overlay is only readable
+    as a hand when the whole hand is there.
 
-    Landmarks are the hand's full 21 joints, not just the labeled
-    bodyparts — that is what makes the 3D view readable as a hand and
-    what the default zoom is computed from.
+    This app does not run MediaPipe; it reads what Movement Tracker left
+    behind.  A trial with no npz simply has no landmarks, which the page
+    copes with — labeling still works, it is just not pre-aimed.
     """
     settings = get_settings()
     _session, subj = _session_and_subject(session_id)
@@ -449,200 +352,37 @@ def get_trial_mp(session_id: int, trial_idx: int,
     if trial_idx < 0 or trial_idx >= len(trials):
         raise HTTPException(404, f"Trial index {trial_idx} out of range")
     trial = trials[trial_idx]
-    trial_dir = settings.dlc_path / subject_name / trial["trial_name"]
-
-    wanted = {p.strip() for p in passes.split(",") if p.strip()} or None
-    calib = get_calibration_for_subject(subject_name)
 
     out: dict = {
         "trial_idx": trial_idx,
         "trial_name": trial["trial_name"],
         "start_frame": trial["start_frame"],
         "frame_count": trial["frame_count"],
-        "has_calibration": calib is not None,
-        "passes": {},
+        "OS": None,
+        "OD": None,
+        "distances": None,
     }
 
-    for spec in MP_PASSES:
-        key = spec["key"]
-        if wanted is not None and key not in wanted:
-            continue
-        npz_path = trial_dir / spec["file"]
-        if not npz_path.exists():
-            continue
-        try:
-            data = np.load(str(npz_path))
-        except (OSError, ValueError) as e:
-            logger.warning("Could not read %s: %s", npz_path, e)
-            continue
+    npz_path = (settings.dlc_path / subject_name / trial["trial_name"]
+                / MEDIAPIPE_NPZ)
+    if not npz_path.exists():
+        return out
+    try:
+        data = np.load(str(npz_path))
+    except (OSError, ValueError) as e:
+        logger.warning("Could not read %s: %s", npz_path, e)
+        return out
 
-        os_lm = data["OS_landmarks"] if "OS_landmarks" in data.files else None
-        od_lm = data["OD_landmarks"] if "OD_landmarks" in data.files else None
-        if os_lm is None and od_lm is None:
-            continue
-
-        entry: dict = {
-            "label": spec["label"],
-            "color": spec["color"],
-            "OS": _f32(os_lm),
-            "OD": _f32(od_lm),
-        }
-
-        if "distances" in data.files:
-            entry["distances"] = _nan_list(data["distances"])
-        if "distances_clean" in data.files:
-            entry["distances_clean"] = _nan_list(data["distances_clean"])
-        # Which pass won each frame of the fusion — shown in the UI so a
-        # surprising "best" frame can be traced back to its source.
-        for side_key, npz_key in (("source_OS", "source_OS"),
-                                  ("source_OD", "source_OD")):
-            if npz_key in data.files:
-                entry[side_key] = [MP_SOURCE_NAMES.get(int(v))
-                                   for v in data[npz_key]]
-
-        out["passes"][key] = entry
-
+    if "OS_landmarks" in data.files:
+        out["OS"] = _f32(data["OS_landmarks"])
+    if "OD_landmarks" in data.files:
+        out["OD"] = _f32(data["OD_landmarks"])
+    for key in ("distances_clean", "distances"):
+        if key in data.files:
+            out["distances"] = _nan_list(data[key])
+            break
     return out
 
-
-@router.get("/sessions/{session_id}/stage")
-def get_stage_data(
-    session_id: int,
-    stage: str = Query(..., description="mp | labels | dlc | refine | corrections"),
-) -> dict:
-    """Labeled-bodypart coordinates for one layer, over the whole subject.
-
-    Shape matches across layers — ``{camera: {bodypart: [[x,y]|null,
-    ...]}, distances: [...]}`` — so the page draws any
-    of them with the same code.
-    """
-    valid = ("mp", "labels", "dlc", "refine", "corrections")
-    if stage not in valid:
-        raise HTTPException(400, f"stage must be one of {valid}")
-
-    _session, subj = _session_and_subject(session_id)
-    subject_name = subj["name"]
-
-    if stage == "mp":
-        # The fused "best per frame" pass when it exists, else forward.
-        data = get_mediapipe_for_session(subject_name, prefer_combined=True)
-    elif stage == "labels":
-        data = _committed_labels_to_arrays(subj)
-    elif stage == "corrections":
-        # Corrections where they exist, predictions for untouched trials,
-        # so the layer always covers the whole subject.
-        data = get_corrections_with_dlc_fallback(subject_name)
-    else:
-        data = get_dlc_predictions_for_stage(subject_name, stage)
-
-    if not data:
-        return {}
-
-    return data
-
-
-@router.get("/sessions/{session_id}/dlc_predictions")
-def get_dlc_predictions(session_id: int) -> dict:
-    """Best available predictions: corrections > labels_v2 > labels_v1."""
-    _session, subj = _session_and_subject(session_id)
-    data = get_dlc_predictions_for_session(subj["name"])
-    if not data:
-        return {}
-    return data
-
-
-@router.get("/sessions/{session_id}/committed_labels")
-def get_committed_labels(session_id: int) -> List[dict]:
-    """Manual labels from this subject's committed sessions.
-
-    Shown underneath the current session so hand-placed labels from
-    earlier rounds stay visible and are never silently overwritten by a
-    model prediction.
-    """
-    session, _subj = _session_and_subject(session_id)
-
-    with get_db_ctx() as db:
-        labels = db.execute(
-            """SELECT fl.frame_num, fl.trial_idx, fl.side, fl.keypoints
-               FROM frame_labels fl
-               JOIN label_sessions ls ON ls.id = fl.session_id
-               WHERE ls.subject_id = ? AND ls.status = 'committed'
-               ORDER BY ls.committed_at DESC, fl.frame_num""",
-            (session["subject_id"],),
-        ).fetchall()
-
-    seen = set()
-    result = []
-    for lbl in labels:
-        key = (lbl["frame_num"], lbl["side"])
-        if key in seen:
-            continue
-        seen.add(key)
-        if isinstance(lbl["keypoints"], str):
-            lbl["keypoints"] = json.loads(lbl["keypoints"])
-        result.append(lbl)
-    return result
-
-
-def _committed_labels_to_arrays(subj: dict) -> dict | None:
-    """Committed manual labels in the same array shape as the other layers."""
-    settings = get_settings()
-    subject_name = subj["name"]
-    cam_names = settings.camera_names
-
-    trials = build_trial_map(subject_name)
-    if not trials:
-        return None
-    total_frames = trials[-1]["end_frame"] + 1
-
-    with get_db_ctx() as db:
-        rows = db.execute(
-            """SELECT fl.frame_num, fl.side, fl.keypoints
-               FROM frame_labels fl
-               JOIN label_sessions ls ON ls.id = fl.session_id
-               WHERE ls.subject_id = ? AND ls.status = 'committed'
-                 AND ls.session_type != 'corrections'
-               ORDER BY ls.committed_at DESC""",
-            (subj["id"],),
-        ).fetchall()
-    if not rows:
-        return None
-
-    result: dict = {cam: {bp: [None] * total_frames
-                          for bp in settings.bodyparts}
-                    for cam in cam_names}
-
-    seen = set()
-    for row in rows:
-        key = (row["frame_num"], row["side"])
-        if key in seen:
-            continue
-        seen.add(key)
-        if row["side"] not in cam_names or row["frame_num"] >= total_frames:
-            continue
-        kp = row["keypoints"]
-        if isinstance(kp, str):
-            kp = json.loads(kp)
-        for bp in settings.bodyparts:
-            coords = kp.get(bp)
-            if coords and coords[0] is not None:
-                result[row["side"]][bp][row["frame_num"]] = coords
-
-    has_data = any(c is not None
-                   for cam in cam_names
-                   for bp in settings.bodyparts
-                   for c in result[cam][bp])
-    if not has_data:
-        return None
-
-    distances = _compute_dlc_distances(result, cam_names, subject_name,
-                                       total_frames)
-    if distances is not None:
-        result["distances"] = distances
-    return result
-
-
-# ── Label CRUD ─────────────────────────────────────────────────────────
 
 @router.get("/sessions/{session_id}/labels")
 def get_labels(session_id: int) -> List[dict]:
@@ -720,17 +460,12 @@ def save_labels(session_id: int, req: LabelBatchSave) -> dict:
                 sides[row["side"]] = json.loads(kp) if isinstance(kp, str) else kp
             frame_labels[frame_num] = sides
 
-    # For the camera the user did not touch, use the same coordinates the
-    # displayed layer uses, so the number under the video matches what is
-    # drawn on it.
-    stage_data = None
-    if session["session_type"] in ("corrections", "refine", "initial"):
-        stage_data = get_corrections_with_dlc_fallback(subj["name"])
-
+    # The camera you have not labeled yet falls back to MediaPipe inside
+    # recompute_distance_for_frame, so the number under the video means
+    # something before a frame is finished.
     updated_distances = {}
     for frame_num, sides in frame_labels.items():
-        dist = recompute_distance_for_frame(subj["name"], frame_num, sides,
-                                            stage_data=stage_data)
+        dist = recompute_distance_for_frame(subj["name"], frame_num, sides)
         if dist is not None:
             updated_distances[str(frame_num)] = dist
 
@@ -752,13 +487,16 @@ def delete_label(session_id: int, frame_num: int,
     return {"deleted": True}
 
 
-@router.post("/sessions/{session_id}/save_corrections")
-def save_corrections(session_id: int) -> dict:
-    """Write this session's edits to the corrections CSVs.
+@router.post("/sessions/{session_id}/commit")
+def commit_session(session_id: int,
+                   req: CommitRequest = Body(default=None)) -> dict:
+    """Write this session's labels into the subject's DeepLabCut project.
 
-    Separate from commit so edits can be saved mid-session without
-    touching the DLC training set — the common case while reviewing a
-    long trial.
+    Every labeled frame becomes a training image — a PNG under
+    ``labeled-data/round{iteration}/`` with a CollectedData CSV and H5
+    beside it, which is the directory DeepLabCut's
+    ``create_training_dataset`` reads.  That project is this app's
+    output; the app does not train on it.
     """
     session, subj = _session_and_subject(session_id)
 
@@ -772,438 +510,23 @@ def save_corrections(session_id: int) -> dict:
     if not labels:
         raise HTTPException(400, "No labels to save")
 
-    return save_corrections_to_csv(subject_name=subj["name"],
-                                   session_labels=labels)
-
-
-@router.post("/sessions/{session_id}/commit")
-def commit_session(session_id: int,
-                   req: CommitRequest = Body(default=None)) -> dict:
-    """Commit the session into the subject's DLC project.
-
-    What that means depends on the session type:
-
-    - ``initial``: every labeled frame becomes a training image —
-      extracted as a PNG into ``labeled-data/round{iteration}/`` with a
-      CollectedData CSV and H5 beside it.  That is the directory DLC's
-      ``create_training_dataset`` reads.
-    - ``corrections``: edits are written to ``corrections/`` as DLC-format
-      CSVs.  No training data changes; this is the reviewed output.
-    - ``refine``: the corrections are saved, and the frames named in
-      ``train_frames`` are added to the training set as a new round.
-      Only the chosen frames, because adding frames the model already
-      gets right costs training time and teaches it nothing.
-    """
-    session, subj = _session_and_subject(session_id)
-
-    with get_db_ctx() as db:
-        labels = db.execute(
-            """SELECT frame_num, trial_idx, side, keypoints
-               FROM frame_labels WHERE session_id = ?""",
-            (session_id,),
-        ).fetchall()
-
-    session_type = session["session_type"]
-    train_frames = list(req.train_frames) if req is not None else []
-    is_refine = session_type == "refine" or (
-        session_type == "corrections" and bool(train_frames))
-
-    if not labels and not is_refine:
-        raise HTTPException(400, "No labels to commit")
-
-    # Pure corrections: write the reviewed CSVs and stop.
-    if session_type == "corrections" and not is_refine:
-        result = save_corrections_to_csv(subject_name=subj["name"],
-                                         session_labels=labels)
-        with get_db_ctx() as db:
-            db.execute(
-                "UPDATE label_sessions SET status = 'committed', "
-                "committed_at = CURRENT_TIMESTAMP WHERE id = ?", (session_id,))
-            db.execute(
-                "UPDATE subjects SET stage = 'corrected', "
-                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (session["subject_id"],))
-        return result
-
-    if is_refine:
-        if not train_frames:
-            raise HTTPException(400, "No training frames selected")
-
-        # Persist the edits first, so the corrections CSVs are the
-        # source of truth for what goes into training.
-        if labels:
-            save_corrections_to_csv(subject_name=subj["name"],
-                                    session_labels=labels)
-
-        training_labels = _training_labels_from_corrections(
-            subj, train_frames)
-        if not training_labels:
-            raise HTTPException(
-                400, "No usable labels found in the corrections for the "
-                     "selected frames")
-
-        # A refinement always goes into a NEW labeled-data round.
-        # commit_labels_to_dlc clears the round directory it writes to, so
-        # reusing the current round would delete the frames the first model
-        # was trained on.  A "refine" session already carries the bumped
-        # iteration; a "corrections" session being used to refine does not.
-        round_iteration = (session["iteration"] if session_type == "refine"
-                           else subj["iteration"] + 1)
-
-        result = commit_labels_to_dlc(
-            subject_name=subj["name"],
-            session_labels=training_labels,
-            iteration=round_iteration,
-            camera_mode=subj.get("camera_mode"),
-        )
-    elif (req is not None and req.scope == "selected"):
-        # The guided grid is showing, so commit only the frames the
-        # k-means picked.  They go to their own labeled-data directory,
-        # and the all-frames set for this round is cleared, because
-        # DeepLabCut merges every directory it finds and training on both
-        # would weight the selected frames twice.
-        from ..services.frameselect import load_selection
-
-        selection = load_selection(subj["name"])
-        if not selection:
-            raise HTTPException(
-                400, "This subject has no frame selection yet — run it from "
-                     "the Label page first")
-        wanted = {int(f["global_frame"]) for f in selection.get("frames", [])}
-        chosen = [l for l in labels if int(l["frame_num"]) in wanted]
-        if not chosen:
-            raise HTTPException(
-                400, "None of the selected frames are labeled yet")
-
-        iteration = session["iteration"]
-        result = commit_labels_to_dlc(
-            subject_name=subj["name"],
-            session_labels=chosen,
-            iteration=iteration,
-            camera_mode=subj.get("camera_mode"),
-            training_name=f"selected{iteration}",
-            supersedes=[f"round{iteration}"],
-        )
-        result["scope"] = "selected"
-        result["selected_frames"] = len(wanted)
-    else:
-        iteration = session["iteration"]
-        result = commit_labels_to_dlc(
-            subject_name=subj["name"],
-            session_labels=labels,
-            iteration=iteration,
-            camera_mode=subj.get("camera_mode"),
-            supersedes=[f"selected{iteration}"],
-        )
-        result["scope"] = "all"
+    result = commit_labels_to_dlc(
+        subject_name=subj["name"],
+        session_labels=labels,
+        iteration=session["iteration"],
+        camera_mode=subj.get("camera_mode"),
+    )
 
     with get_db_ctx() as db:
         db.execute(
             "UPDATE label_sessions SET status = 'committed', "
             "committed_at = CURRENT_TIMESTAMP WHERE id = ?", (session_id,))
-        if is_refine:
-            db.execute(
-                "UPDATE subjects SET iteration = ?, "
-                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (round_iteration, session["subject_id"]))
-        else:
-            db.execute(
-                "UPDATE subjects SET stage = 'committed', "
-                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (session["subject_id"],))
+        db.execute(
+            "UPDATE subjects SET stage = 'committed', "
+            "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (session["subject_id"],))
 
     return result
-
-
-def _training_labels_from_corrections(subj: dict, train_frames: list) -> list[dict]:
-    """Build training rows for the chosen frames from the corrections CSVs.
-
-    The corrections CSVs — not the session's sparse edits — are the
-    source: a frame may be worth training on because the prediction was
-    already right there, with no manual edit of its own.
-    """
-    settings = get_settings()
-    subject_name = subj["name"]
-
-    corr_data = get_dlc_predictions_for_stage(subject_name, "corrections")
-    if not corr_data:
-        raise HTTPException(400, "No corrections found for this subject — "
-                                 "save corrections before refining")
-
-    trials = build_trial_map(subject_name,
-                             camera_mode=subj.get("camera_mode"))
-    frame_to_trial = {}
-    for ti, t in enumerate(trials):
-        for f in range(t["start_frame"], t["end_frame"] + 1):
-            frame_to_trial[f] = ti
-
-    out = []
-    for vf in train_frames:
-        if vf.side not in settings.camera_names:
-            continue
-        cam_data = corr_data.get(vf.side, {})
-        kp = {}
-        for bp in settings.bodyparts:
-            arr = cam_data.get(bp)
-            if arr and vf.frame_num < len(arr) and arr[vf.frame_num] is not None:
-                kp[bp] = arr[vf.frame_num]
-        if not kp:
-            continue
-        out.append({
-            "frame_num": vf.frame_num,
-            "trial_idx": frame_to_trial.get(vf.frame_num, 0),
-            "side": vf.side,
-            "keypoints": kp,
-        })
-    return out
-
-
-# ── Crop boxes (the default zoom while labeling) ───────────────────────
-
-@router.get("/sessions/{session_id}/bbox")
-def get_bbox(session_id: int, trial_idx: int = Query(..., ge=0)) -> dict:
-    """The trial's crop box per camera, computed from MediaPipe if unsaved.
-
-    This box does two jobs: it frames the default zoom when a frame
-    loads, so the hand fills the canvas without anyone panning, and it
-    is the region the next MediaPipe run crops to.
-    """
-    settings = get_settings()
-    _session, subj = _session_and_subject(session_id)
-    cam_names = settings.camera_names
-
-    with get_db_ctx() as db:
-        rows = db.execute(
-            "SELECT camera_name, x1, y1, x2, y2 FROM mp_crop_boxes "
-            "WHERE subject_id = ? AND trial_idx = ? AND model_name = ?",
-            (subj["id"], trial_idx, BBOX_MODEL),
-        ).fetchall()
-    if rows:
-        boxes = {r["camera_name"]: [r["x1"], r["y1"], r["x2"], r["y2"]]
-                 for r in rows}
-        return {"boxes": boxes, "saved": True}
-
-    # Nothing saved — derive one from this trial's landmarks.
-    from ..services.mediapipe_prelabel import load_mediapipe_prelabels
-    mp_data = load_mediapipe_prelabels(subj["name"])
-    if mp_data is None:
-        return {"boxes": {}, "saved": False}
-
-    trials = build_trial_map(subj["name"], camera_mode=_camera_mode(subj))
-    if trial_idx >= len(trials):
-        raise HTTPException(404, f"Trial index {trial_idx} out of range")
-    trial = trials[trial_idx]
-    start = trial["start_frame"]
-    end = start + trial["frame_count"]
-
-    boxes = {}
-    for cam, npz_key in zip(cam_names, ("OS_landmarks", "OD_landmarks")):
-        lm = mp_data.get(npz_key)
-        if lm is None:
-            continue
-        window = lm[start:min(end, lm.shape[0])]
-        if window.size:
-            boxes[cam] = compute_default_bbox(window)
-
-    return {"boxes": boxes, "saved": False}
-
-
-@router.post("/sessions/{session_id}/bbox")
-def save_bbox(session_id: int, body: dict = Body(...)) -> dict:
-    """Save crop boxes for a trial, optionally seeding the untouched trials.
-
-    Body: ``{trial_idx, boxes: {cam: {x1,y1,x2,y2}}, apply_to_all}``
-
-    ``apply_to_all`` only fills trials with no box of their own, so it
-    never overwrites a box someone already adjusted.
-    """
-    _session, subj = _session_and_subject(session_id)
-
-    trial_idx = int(body.get("trial_idx", 0))
-    boxes = body.get("boxes") or {}
-    apply_to_all = bool(body.get("apply_to_all"))
-    if not boxes:
-        raise HTTPException(400, "boxes must be a non-empty object")
-
-    def _coords(c):
-        return (float(c["x1"]), float(c["y1"]), float(c["x2"]), float(c["y2"]))
-
-    applied = [trial_idx]
-    with get_db_ctx() as db:
-        for cam, coords in boxes.items():
-            try:
-                x1, y1, x2, y2 = _coords(coords)
-            except (KeyError, TypeError, ValueError):
-                raise HTTPException(400, f"Bad box for camera {cam}")
-            db.execute(
-                """INSERT INTO mp_crop_boxes
-                       (subject_id, trial_idx, camera_name, model_name,
-                        x1, y1, x2, y2)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(subject_id, trial_idx, camera_name, model_name)
-                   DO UPDATE SET x1 = excluded.x1, y1 = excluded.y1,
-                                 x2 = excluded.x2, y2 = excluded.y2,
-                                 updated_at = CURRENT_TIMESTAMP""",
-                (subj["id"], trial_idx, cam, BBOX_MODEL, x1, y1, x2, y2),
-            )
-
-        if apply_to_all:
-            trials = build_trial_map(subj["name"],
-                                     camera_mode=_camera_mode(subj))
-            for ti in range(len(trials)):
-                if ti == trial_idx:
-                    continue
-                existing = db.execute(
-                    "SELECT COUNT(*) AS cnt FROM mp_crop_boxes "
-                    "WHERE subject_id = ? AND trial_idx = ? AND model_name = ?",
-                    (subj["id"], ti, BBOX_MODEL),
-                ).fetchone()
-                if existing["cnt"]:
-                    continue
-                for cam, coords in boxes.items():
-                    x1, y1, x2, y2 = _coords(coords)
-                    db.execute(
-                        """INSERT OR IGNORE INTO mp_crop_boxes
-                               (subject_id, trial_idx, camera_name, model_name,
-                                x1, y1, x2, y2)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (subj["id"], ti, cam, BBOX_MODEL, x1, y1, x2, y2),
-                    )
-                applied.append(ti)
-
-    return {"status": "ok", "applied_trials": applied}
-
-
-@router.post("/sessions/{session_id}/rerun-mediapipe")
-def rerun_mediapipe(session_id: int, body: dict = Body(...)) -> dict:
-    """Re-run MediaPipe on one trial inside the given crop boxes.
-
-    Body: ``{trial_idx, crops: {cam: {x1,y1,x2,y2}}}``
-
-    This is the tight loop while labeling: adjust the box, re-detect
-    this trial, see whether the hand is picked up on the frames that
-    were failing.  Whole-subject passes go through the Jobs page.
-    """
-    import threading
-    from ..services.jobs import registry
-
-    _session, subj = _session_and_subject(session_id)
-
-    trial_idx = int(body.get("trial_idx", 0))
-    crops = body.get("crops") or {}
-    if not crops:
-        raise HTTPException(400, "crops must be a non-empty object")
-
-    subject_name = subj["name"]
-    camera_mode = _camera_mode(subj)
-    trials = build_trial_map(subject_name, camera_mode=camera_mode)
-    if trial_idx < 0 or trial_idx >= len(trials):
-        raise HTTPException(400, f"Invalid trial_idx {trial_idx}")
-
-    trial = trials[trial_idx]
-    settings = get_settings()
-    global_cams = settings.camera_names
-    is_stereo_video = camera_mode == "stereo"
-
-    cam_jobs = []
-    for side, crop in crops.items():
-        video_path = trial["video_path"]
-        camera_key = side if side in global_cams else (
-            global_cams[0] if global_cams else "OS")
-
-        if camera_mode == "multicam":
-            for cam in trial.get("cameras", []):
-                if cam["name"] == side:
-                    video_path = cam["path"]
-                    break
-            subject_cams = [c["name"] for c in trials[0].get("cameras", [])]
-            if side in subject_cams:
-                cam_idx = subject_cams.index(side)
-                camera_key = (global_cams[cam_idx]
-                              if cam_idx < len(global_cams) else side)
-
-        cam_jobs.append({"side": side, "crop": crop,
-                         "video_path": video_path, "camera_key": camera_key})
-
-    log_dir = settings.dlc_path / ".logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = str(log_dir / f"mediapipe_crop_{subj['id']}_{trial_idx}.log")
-
-    with get_db_ctx() as db:
-        cur = db.execute(
-            """INSERT INTO jobs (subject_id, job_type, status, log_path, params_json)
-               VALUES (?, 'mediapipe', 'pending', ?, ?)""",
-            (subj["id"], log_path,
-             json.dumps({"trial_idx": trial_idx,
-                         "trial_name": trial["trial_name"],
-                         "cropped": True})),
-        )
-        job_id = cur.lastrowid
-
-    cancel_event = registry.register_cancel_event(job_id)
-    n_cams = len(cam_jobs)
-
-    def _run():
-        try:
-            with get_db_ctx() as db:
-                db.execute(
-                    "UPDATE jobs SET status = 'running', "
-                    "started_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
-
-            for ci, cj in enumerate(cam_jobs):
-                base_pct = ci * (100.0 / n_cams)
-                span = 100.0 / n_cams
-
-                def progress_cb(pct, _base=base_pct, _span=span):
-                    if cancel_event.is_set():
-                        raise InterruptedError("Job cancelled")
-                    with get_db_ctx() as db:
-                        db.execute(
-                            "UPDATE jobs SET progress_pct = ? WHERE id = ?",
-                            (_base + (pct / 100.0) * _span, job_id))
-
-                run_mediapipe_cropped(
-                    subject_name=subject_name,
-                    video_path=cj["video_path"],
-                    start_frame=trial["start_frame"],
-                    frame_count=trial["frame_count"],
-                    crop=cj["crop"],
-                    camera_key=cj["camera_key"],
-                    is_stereo_video=is_stereo_video,
-                    stereo_side=cj["side"],
-                    progress_callback=progress_cb,
-                )
-
-            with get_db_ctx() as db:
-                db.execute(
-                    "UPDATE jobs SET status = 'completed', progress_pct = 100, "
-                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
-        except InterruptedError:
-            with get_db_ctx() as db:
-                db.execute(
-                    "UPDATE jobs SET status = 'cancelled', "
-                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
-        except Exception as e:
-            logger.exception("Cropped MediaPipe failed for %s trial %s",
-                             subject_name, trial_idx)
-            with get_db_ctx() as db:
-                db.execute(
-                    "UPDATE jobs SET status = 'failed', error_msg = ?, "
-                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (str(e), job_id))
-        finally:
-            registry.unregister_cancel_event(job_id)
-            # This job runs in-thread rather than as a subprocess, so the
-            # registry monitor never sees it — record it here instead.
-            try:
-                from ..services.job_history import finalize_job_record
-                finalize_job_record(job_id)
-            except Exception:
-                logger.exception("job_history flush failed for job %s", job_id)
-
-    threading.Thread(target=_run, daemon=True).start()
-
-    return {"status": "ok", "job_id": job_id, "trial_idx": trial_idx}
 
 
 # ── Choosing the frames to label ───────────────────────────────────────
@@ -1233,23 +556,20 @@ def get_selection(subject_id: int) -> dict:
 
 @router.post("/{subject_id}/selection")
 def run_selection(subject_id: int, body: dict = Body(default=None)) -> dict:
-    """Run the k-means frame selection for a subject, in the background.
+    """Start the k-means frame selection for a subject, in the background.
 
-    Returns a job id straight away: the clustering decodes every trial,
-    which is a minute or two on a real subject and must not be a request
-    the browser sits waiting on.  Poll ``/api/jobs/{id}`` for progress,
-    then re-read the selection.
+    Returns immediately: the clustering decodes every trial, which is a
+    minute or two on a real subject and must not be a request the browser
+    sits waiting on.  The page polls ``/selection/progress``.
 
-    Runs in a thread rather than a subprocess because it needs nothing
-    this process does not already have — no DeepLabCut, no GPU, just
-    OpenCV and scikit-learn.
+    A thread, not a subprocess: it needs nothing this process does not
+    already have — OpenCV and scikit-learn, no DeepLabCut, no GPU.
     """
     import threading
 
     from ..services.frameselect import (
         DEFAULT_N_PICK, save_selection, select_training_frames,
     )
-    from ..services.jobs import registry
 
     body = body or {}
     with get_db_ctx() as db:
@@ -1264,49 +584,25 @@ def run_selection(subject_id: int, body: dict = Body(default=None)) -> dict:
     seed = body.get("seed")
     step = body.get("step")
 
-    settings = get_settings()
     subject_name = subj["name"]
     camera_mode = _camera_mode(subj)
 
-    log_dir = settings.dlc_path / ".logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = str(log_dir / f"select_frames_{subject_name}.log")
+    with _selection_lock:
+        running = _selection_progress.get(subject_name)
+        if running and running.get("status") == "running":
+            return {"status": "already-running", **running}
+        _selection_progress[subject_name] = {
+            "status": "running", "pct": 0.0, "phase": "Starting", "error": None,
+        }
 
-    with get_db_ctx() as db:
-        cur = db.execute(
-            """INSERT INTO jobs (subject_id, job_type, status, log_path, params_json)
-               VALUES (?, 'select-frames', 'pending', ?, ?)""",
-            (subj["id"], log_path, json.dumps({"n_pick": n_pick})),
-        )
-        job_id = cur.lastrowid
-
-    cancel_event = registry.register_cancel_event(job_id)
+    def _set(**kw):
+        with _selection_lock:
+            _selection_progress.setdefault(subject_name, {}).update(kw)
 
     def _run():
         try:
-            with get_db_ctx() as db:
-                db.execute(
-                    "UPDATE jobs SET status = 'running', "
-                    "started_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
-
-            last = [0.0, ""]
-
             def progress_cb(pct, phase=""):
-                if cancel_event.is_set():
-                    raise InterruptedError("Job cancelled")
-                pct = min(float(pct), 99.0)
-                # One UPDATE per decoded chunk is plenty; writing on every
-                # callback would have the selection spending its time on
-                # SQLite rather than on frames.
-                if abs(pct - last[0]) < 0.5 and phase == last[1]:
-                    return
-                last[0], last[1] = pct, phase
-                with get_db_ctx() as db:
-                    db.execute(
-                        "UPDATE jobs SET progress_pct = ?, epoch_info = ? "
-                        "WHERE id = ?",
-                        (pct, json.dumps({"phase": phase}) if phase else None,
-                         job_id))
+                _set(pct=min(float(pct), 99.0), phase=phase)
 
             selections, notes, meta = select_training_frames(
                 subject_name, n_pick, camera_mode=camera_mode,
@@ -1318,32 +614,23 @@ def run_selection(subject_id: int, body: dict = Body(default=None)) -> dict:
                 raise RuntimeError(notes[0] if notes else
                                    "No frames could be selected")
             save_selection(subject_name, selections, notes, meta)
-
-            with get_db_ctx() as db:
-                db.execute(
-                    "UPDATE jobs SET status = 'completed', progress_pct = 100, "
-                    "epoch_info = NULL, finished_at = CURRENT_TIMESTAMP "
-                    "WHERE id = ?", (job_id,))
-        except InterruptedError:
-            with get_db_ctx() as db:
-                db.execute(
-                    "UPDATE jobs SET status = 'cancelled', "
-                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+            _set(status="done", pct=100.0, phase="Done", error=None)
         except Exception as e:
             logger.exception("Frame selection failed for %s", subject_name)
-            with get_db_ctx() as db:
-                db.execute(
-                    "UPDATE jobs SET status = 'failed', error_msg = ?, "
-                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (str(e), job_id))
-        finally:
-            registry.unregister_cancel_event(job_id)
-            # In-thread, so the subprocess monitor never sees it.
-            try:
-                from ..services.job_history import finalize_job_record
-                finalize_job_record(job_id)
-            except Exception:
-                logger.exception("job_history flush failed for job %s", job_id)
+            _set(status="failed", phase="Failed", error=str(e))
 
     threading.Thread(target=_run, daemon=True).start()
-    return {"status": "ok", "job_id": job_id, "n_pick": n_pick}
+    return {"status": "running", "n_pick": n_pick}
+
+
+@router.get("/{subject_id}/selection/progress")
+def selection_progress(subject_id: int) -> dict:
+    """How far the running selection has got, for the page to poll."""
+    with get_db_ctx() as db:
+        subj = db.execute("SELECT name FROM subjects WHERE id = ?",
+                          (subject_id,)).fetchone()
+    if not subj:
+        raise HTTPException(404, "Subject not found")
+    with _selection_lock:
+        state = _selection_progress.get(subj["name"])
+    return state or {"status": "idle", "pct": 0.0, "phase": "", "error": None}

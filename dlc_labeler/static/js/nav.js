@@ -8,7 +8,6 @@
 const NAV_LINKS = [
     { href: '/subjects', label: 'Subjects' },
     { href: '/label', label: 'Label' },
-    { href: '/jobs', label: 'Jobs' },
     { href: '/settings', label: 'Settings' },
 ];
 
@@ -123,23 +122,6 @@ async function initUpdateButton() {
 }
 
 async function runUpdate(btn) {
-    // Re-read rather than trusting what the header saw on page load: what
-    // is running now is what a restart would interrupt.
-    let state = {};
-    try { state = await (await fetch('/api/settings/update/status')).json(); }
-    catch (e) { /* the POST will report it properly */ }
-
-    const interrupts = state.interrupts || [];
-    const warning = interrupts.length
-        ? `\n\nThis would interrupt work running inside the app right now `
-          + `(${interrupts.join(', ')}). Jobs running as their own process — `
-          + `MediaPipe passes, training — are picked back up afterwards.`
-        : '';
-    if (!confirm('Update the app to the latest version?\n\n'
-               + 'This pulls the newest code and restarts the server if it '
-               + 'changed. Labels are saved as you go, so none are lost.'
-               + warning)) return;
-
     const original = btn.textContent;
     btn.disabled = true;
     btn.textContent = 'Updating…';
@@ -268,29 +250,4 @@ function renderTrialButtons(trials, activeIdx, onPick) {
     });
 }
 
-/* Poll the queue and show a dot on the Jobs link while work is running. */
-function startJobDot() {
-    const link = document.querySelector('nav a[href="/jobs"]');
-    if (!link) return;
-    const dot = document.createElement('span');
-    dot.className = 'nav-job-dot';
-    dot.style.display = 'none';
-    link.prepend(dot);
-
-    async function poll() {
-        try {
-            const st = await (await fetch('/api/queue/state')).json();
-            const n = (st.running || []).length;
-            const q = (st.cpu_queue || []).length + (st.gpu_queue || []).length;
-            dot.style.display = (n || q) ? 'inline-block' : 'none';
-            dot.title = n ? `${n} running, ${q} queued` : `${q} queued`;
-        } catch (e) { /* server restarting — try again next tick */ }
-    }
-    poll();
-    setInterval(poll, 4000);
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-    buildHeader();
-    startJobDot();
-});
+document.addEventListener('DOMContentLoaded', buildHeader);

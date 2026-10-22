@@ -261,28 +261,6 @@ def _git_state() -> dict:
     }
 
 
-def _work_at_risk() -> list[str]:
-    """Running jobs a restart would kill, described for the person.
-
-    A job with a live PID is a subprocess: it keeps running and the queue
-    re-attaches to it on the way back up.  A running job without one is
-    on a thread inside this process — the frame selection, a cropped
-    MediaPipe re-detect — and a restart ends it.  Worth saying before
-    somebody loses twenty minutes of decoding to a one-line fix.
-    """
-    from ..app import _pid_alive
-    from ..db import get_db_ctx
-
-    try:
-        with get_db_ctx() as db:
-            rows = db.execute(
-                "SELECT job_type, pid FROM jobs WHERE status = 'running'"
-            ).fetchall()
-    except Exception:
-        return []
-    return sorted({r["job_type"] for r in rows if not _pid_alive(r.get("pid"))})
-
-
 @router.get("/update/status")
 def update_status() -> dict:
     """Whether this install can update itself, and what it is running.
@@ -291,10 +269,7 @@ def update_status() -> dict:
     network round trip there would stall the header on a machine that is
     offline, which these often are.
     """
-    state = _git_state()
-    if state.get("available"):
-        state["interrupts"] = _work_at_risk()
-    return state
+    return _git_state()
 
 
 @router.post("/update")

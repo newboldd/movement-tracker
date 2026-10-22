@@ -2,15 +2,12 @@
 # One-command setup and launch for DLC Labeler (macOS / Linux).
 #
 # Usage:
-#   ./setup.sh                 install what labeling needs, then start
-#   ./setup.sh --with-dlc      also install DeepLabCut, for training
+#   ./setup.sh                 install what it needs, then start
 #   ./setup.sh --reinstall     rebuild the virtual environment from scratch
 #
-# The install is deliberately two-tier.  The base tier is small and fast
-# and is all you need to label frames, run MediaPipe and review
-# predictions.  DeepLabCut and torch are several GB and only matter on a
-# machine that will actually train, so they are opt-in — via --with-dlc
-# here, or the button on the Jobs page later.
+# The install is small: this app labels frames and writes DeepLabCut
+# training sets, but runs neither MediaPipe nor DeepLabCut, so neither is
+# installed.
 #
 # Data (videos, DLC projects, the database) lives outside the code, in
 # DLC_DATA_DIR.  Set it in a .env file next to this script:
@@ -21,14 +18,11 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$PROJECT_DIR/.venv"
 REQUIREMENTS="$PROJECT_DIR/requirements.txt"
-REQUIREMENTS_DLC="$PROJECT_DIR/requirements-dlc.txt"
 PORT="${DLC_PORT:-8080}"
 
-WITH_DLC=0
 REINSTALL=0
 for arg in "$@"; do
     case "$arg" in
-        --with-dlc)  WITH_DLC=1 ;;
         --reinstall) REINSTALL=1 ;;
         -h|--help)   sed -n '2,20p' "$0"; exit 0 ;;
         *) echo "Unknown option: $arg (try --help)"; exit 1 ;;
@@ -54,9 +48,8 @@ print_header() { echo ""; echo "── $1 ────────────�
 # ── Python ────────────────────────────────────────────────────────────────
 
 find_python() {
-    # 3.9 is the floor FastAPI and the type hints here need; mediapipe
-    # wheels below 0.10.19 stop at 3.12, so prefer 3.11/3.12 and warn
-    # rather than fail on anything newer.
+    # 3.9 is the floor FastAPI and the type hints here need.  Nothing
+    # here caps the upper end any more, so a newer Python is fine.
     for cmd in python3.12 python3.11 python3.10 python3.9 python3 python; do
         if command -v "$cmd" &>/dev/null; then
             version=$("$cmd" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null) || continue
@@ -113,16 +106,6 @@ PYTHON=$(find_python) || {
 PY_VERSION=$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 echo "Using Python: $PYTHON ($($PYTHON --version 2>&1))"
 
-case "$PY_VERSION" in
-    3.13|3.14|3.15)
-        echo ""
-        echo "WARNING: MediaPipe does not publish wheels for Python $PY_VERSION."
-        echo "         Hand detection will not install. Everything else works."
-        echo "         Install Python 3.11 or 3.12 and re-run to get MediaPipe."
-        echo ""
-        ;;
-esac
-
 # ── ffmpeg ────────────────────────────────────────────────────────────────
 # imageio-ffmpeg bundles a binary, so a system ffmpeg is a nicety, not a
 # requirement.  Don't make a missing one look like a failure.
@@ -153,8 +136,7 @@ if [ ! -f "$VENV_DIR/.installed" ] || [ "$REQUIREMENTS" -nt "$VENV_DIR/.installe
     if ! "$VENV_PY" -m pip install -r "$REQUIREMENTS"; then
         echo ""
         echo "Dependency install failed."
-        echo "If it was MediaPipe, check that this Python is 3.9-3.12:"
-        echo "  $("$VENV_PY" --version 2>&1)"
+        echo "Python in use: $("$VENV_PY" --version 2>&1)"
         exit 1
     fi
     touch "$VENV_DIR/.installed"
@@ -162,28 +144,13 @@ if [ ! -f "$VENV_DIR/.installed" ] || [ "$REQUIREMENTS" -nt "$VENV_DIR/.installe
     echo "Dependencies installed."
 fi
 
-# ── DeepLabCut (second tier) ──────────────────────────────────────────────
-
-if [ "$WITH_DLC" = "1" ]; then
-    if "$VENV_PY" -c "import deeplabcut" 2>/dev/null; then
-        echo "DeepLabCut is already installed."
-    else
-        print_header "Installing DeepLabCut"
-        echo "Several GB — this is the slow part. It only has to happen once."
-        echo ""
-        "$VENV_PY" -m pip install -r "$REQUIREMENTS_DLC"
-        echo ""
-        echo "DeepLabCut installed."
-    fi
-fi
-
 # ── Data directory ────────────────────────────────────────────────────────
 
 mkdir -p "$DLC_DATA_DIR/dlc" "$DLC_DATA_DIR/videos" \
          "$DLC_DATA_DIR/calibration" "$DLC_DATA_DIR/packages"
 
-# Ship the bundled calibration so a stereo rig that matches it gets 3D
-# straight away.  Never overwrite one that is already there.
+# Ship the bundled calibration so a stereo rig that matches it reports
+# distances in mm straight away.  Never overwrite one that is already there.
 if [ -d "$PROJECT_DIR/calibration" ]; then
     for f in "$PROJECT_DIR"/calibration/*; do
         [ -f "$f" ] || continue
@@ -266,11 +233,6 @@ fi
 echo ""
 echo "Starting DLC Labeler at http://localhost:$PORT"
 echo "Data directory: $DLC_DATA_DIR"
-if ! "$VENV_PY" -c "import deeplabcut" 2>/dev/null; then
-    echo ""
-    echo "DeepLabCut is not installed, so training and analysis are off."
-    echo "Add it any time with:  ./setup.sh --with-dlc"
-fi
 echo ""
 echo "Press Ctrl+C to stop."
 echo ""

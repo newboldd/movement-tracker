@@ -121,7 +121,7 @@ def _has_labels_v1(dlc_path: Path) -> bool:
 
 
 def _has_mediapipe(dlc_path: Path) -> bool:
-    """Check if MediaPipe prelabels exist for this subject."""
+    """True when any trial has MediaPipe landmarks on disk."""
     # Per-trial layout: any <subject>/<trial>/mediapipe.npz counts.
     try:
         for trial_dir in dlc_path.iterdir():
@@ -129,7 +129,7 @@ def _has_mediapipe(dlc_path: Path) -> bool:
                 return True
     except OSError:
         pass
-    return (dlc_path / "mediapipe_prelabels.npz").exists()
+    return False
 
 
 def _has_labels_v2(dlc_path: Path) -> bool:

@@ -21,15 +21,6 @@ const DRAG_THRESHOLD = 4;       // px — below this a mousedown+up is a click, 
 const PREFETCH_AHEAD = 4;       // frames to warm the JPEG cache with
 const SPEED_PRESETS = [0.05, 0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 4, 8];
 
-// MediaPipe's 21 hand landmarks, grouped so a finger can be hidden as a unit.
-const FINGERS = {
-    wrist:  { label: 'Wrist',  joints: [0] },
-    thumb:  { label: 'Thumb',  joints: [1, 2, 3, 4] },
-    index:  { label: 'Index',  joints: [5, 6, 7, 8] },
-    middle: { label: 'Middle', joints: [9, 10, 11, 12] },
-    ring:   { label: 'Ring',   joints: [13, 14, 15, 16] },
-    pinky:  { label: 'Pinky',  joints: [17, 18, 19, 20] },
-};
 const HAND_BONES = [
     [0, 1], [1, 2], [2, 3], [3, 4],
     [0, 5], [5, 6], [6, 7], [7, 8],
@@ -39,28 +30,12 @@ const HAND_BONES = [
     [0, 17],
 ];
 
-// Bodypart layers: one coordinate per labeled bodypart per frame.
-// Ordered as drawn, most authoritative last.
-const BP_LAYERS = [
-    { key: 'dlc',         label: 'Predictions (v1)', color: '#f44336', stage: 'dlc' },
-    { key: 'refine',      label: 'Predictions (v2)', color: '#ff8a65', stage: 'refine' },
-    { key: 'corrections', label: 'Corrections',      color: '#ffd54f', stage: 'corrections' },
-    { key: 'committed',   label: 'Committed labels', color: '#80deea', stage: 'labels' },
-];
 const MANUAL_COLOR = '#ffffff';
-
-const MODE_HELP = {
-    initial: 'Click to place each keypoint, drag to adjust, right-click to remove. '
-           + 'Label a spread of frames across every trial, then commit.',
-    corrections: 'Predictions are shown as ghosts. Click one to take it over, then '
-               + 'drag it into place. Save when the trial reads correctly.',
-    refine: 'Tick the corrected frames worth training on — the ones the model got '
-          + 'wrong. Committing adds just those as a new training round.',
-};
+const MP_COLOR = '#00cccc';
 
 // ── State ────────────────────────────────────────────────────────────────
 
-let subjectId = null, sessionId = null, mode = 'initial';
+let subjectId = null, sessionId = null;
 let subject = null, trials = [], totalFrames = 0;
 let bodyparts = [], cameraNames = ['OS', 'OD'], cameraMode = 'stereo';
 let hasCalibration = false;
@@ -73,18 +48,10 @@ let manual = new Map();
 const dirtyKeys = new Set();
 const deletedKeys = new Set();
 
-// Layer data. Bodypart layers hold subject-wide arrays; MediaPipe layers
-// hold one trial's typed arrays and are refetched when the trial changes.
-const bpData = {};          // key -> {cam: {bp: [...]}, distances: [...]}
-let mpTrial = null;         // {trial_idx, start_frame, passes: {key: {...}}}
-let mpPassSpecs = [];       // from the server: key, label, colour
-let availableMp = {};       // trial_idx -> [pass keys]
-let availableStages = [];   // which bodypart stages have data
-let hasCommittedLabels = false;
-
-// Layer visibility: key -> {d2: bool}
-const layerVis = new Map();
-const visibleJoints = new Set([...Array(21).keys()]);
+// The MediaPipe forward pass for the loaded trial.  One pass, because
+// one is what the app runs.
+let mpTrial = null;          // {trial_idx, start_frame, os, od, distances}
+let showMp = false;          // draw the landmarks; the zoom uses them regardless
 
 // Canvas / view
 let canvas, ctx, containerEl, vp2d, videoEl;
@@ -101,18 +68,11 @@ const undoStack = [], redoStack = [];
 let playing = false, videoPlaying = false, playbackRate = 1;
 
 // Crop box editing
-let boxMode = false, editBox = null, boxDragHandle = null, boxDragStart = null;
-let cropBoxes = {};         // trial_idx -> {cam: {x1,y1,x2,y2}}
 
-// Refine selection: "frame_side" of frames to add to the training set
-const refineSelected = new Set();
-
-// Distances the server recomputed for frames edited in this session.
+// Distances for this session's labels, returned by the save endpoint.
 let manualDistances = {};
 
-// Timeline / trace
 // Guided labeling: the k-means selection, and where we are in it.
-let guided = false;
 let selection = null;        // {frames:[{global_frame, trial_idx, crops}], ...}
 let bodypartJoints = {};     // bodypart -> MediaPipe landmark index
 let guidedTarget = null;     // {frameIdx, side, bp} — the point being asked for
@@ -120,7 +80,7 @@ let guidedBusy = false;      // true while the view is moving to a point
 let offFrame = false;        // MediaPipe's guess for this point is out of frame
 let autoAdvance = false;     // move to the next point as soon as one is placed
 
-let timelineCanvas, timelineCtx, traceCanvas, traceCtx;
+let traceCanvas, traceCtx;
 let frameDisplayMode = 0;    // 0 frame, 1 time, 2 both
 
 // ── Small helpers ────────────────────────────────────────────────────────
@@ -188,42 +148,10 @@ function manualAt(frame, side, bp) {
     return (c && c[0] != null) ? c : null;
 }
 
-/* Bodypart-layer coordinate, or null. */
-function bpAt(layerKey, frame, side, bp) {
-    const d = bpData[layerKey];
-    if (!d) return null;
-    const cam = d[side];
-    const seq = cam && cam[bp];
-    const c = seq && seq[frame];
-    return (c && c[0] != null) ? c : null;
-}
-
-/* The best available coordinate to show as a ghost under the cursor.
- *
- * Priority runs from most to least authoritative, which is also what a
- * click adopts: a human correction beats a model prediction, and a
- * prediction beats a raw MediaPipe tip. */
-function ghostAt(frame, side, bp) {
-    const order = mode === 'initial'
-        ? ['committed', 'dlc', 'refine', 'corrections']
-        : ['corrections', 'refine', 'dlc', 'committed'];
-    for (const key of order) {
-        const c = bpAt(key, frame, side, bp);
-        if (c) return { coords: c, source: key };
-    }
-    return null;
-}
-
-/* The MediaPipe pass arrays for the loaded trial, or null. */
-function mpPass(key) {
-    return (mpTrial && mpTrial.passes && mpTrial.passes[key]) || null;
-}
-
-/* 21x2 landmarks for one frame of a pass, as a flat Float32Array view. */
-function mpFrame2d(passKey, frame, side) {
-    const p = mpPass(passKey);
-    if (!p) return null;
-    const arr = side === cameraNames[0] ? p.os : p.od;
+/* 21x2 landmarks for one frame and camera, as a flat Float32Array view. */
+function mpFrame2d(frame, side) {
+    if (!mpTrial) return null;
+    const arr = side === cameraNames[0] ? mpTrial.os : mpTrial.od;
     if (!arr) return null;
     const local = frame - mpTrial.start_frame;
     const [n, j] = arr.shape;
@@ -231,23 +159,19 @@ function mpFrame2d(passKey, frame, side) {
     return arr.data.subarray(local * j * 2, (local + 1) * j * 2);
 }
 
-/* Every MediaPipe landmark for a frame and camera, from the best pass
- * available.  A visible pass wins so the zoom agrees with what is drawn;
- * otherwise any pass will do, because framing the view on the hand is
- * useful whether or not the landmarks are switched on. */
+/* Every finite MediaPipe landmark for a frame and camera.
+ *
+ * Read whether or not the landmarks are drawn: the guided zoom aims at
+ * them, and hiding them is about what you look at, not what the page
+ * knows. */
 function mpPointsFor(frame, side) {
-    const order = [...mpPassSpecs].sort((a, b) =>
-        (vis(`mp_${b.key}`).d2 ? 1 : 0) - (vis(`mp_${a.key}`).d2 ? 1 : 0));
-    for (const spec of order) {
-        const lm = mpFrame2d(spec.key, frame, side);
-        if (!lm) continue;
-        const pts = [];
-        for (let j = 0; j < lm.length / 2; j++) {
-            if (Number.isFinite(lm[j * 2])) pts.push([lm[j * 2], lm[j * 2 + 1]]);
-        }
-        if (pts.length) return pts;
+    const lm = mpFrame2d(frame, side);
+    if (!lm) return [];
+    const pts = [];
+    for (let j = 0; j < lm.length / 2; j++) {
+        if (Number.isFinite(lm[j * 2])) pts.push([lm[j * 2], lm[j * 2 + 1]]);
     }
-    return [];
+    return pts;
 }
 
 function centroid(pts) {
@@ -270,8 +194,8 @@ function centroid(pts) {
 function cameraShift(frame, from, to) {
     const paired = [];
     for (const bp of bodyparts) {
-        const a = manualAt(frame, from, bp) || (ghostAt(frame, from, bp) || {}).coords;
-        const b = manualAt(frame, to, bp) || (ghostAt(frame, to, bp) || {}).coords;
+        const a = manualAt(frame, from, bp);
+        const b = manualAt(frame, to, bp);
         if (a && b) paired.push([a, b]);
     }
     if (paired.length) {
@@ -284,36 +208,22 @@ function cameraShift(frame, from, to) {
     return (a && b) ? [b[0] - a[0], b[1] - a[1]] : null;
 }
 
-function vis(key) {
-    return layerVis.get(key) || { d2: false };
-}
-
 // ── Session loading ──────────────────────────────────────────────────────
 
 async function openSubject(id) {
     subjectId = id;
     playing = false;
     stopVideoPlayback();
-    await openSession(mode);
+    await openSession();
 }
 
-async function openSession(newMode) {
-    mode = newMode;
-    document.querySelectorAll('.mode-btn').forEach(b =>
-        b.classList.toggle('active', b.dataset.mode === mode));
-    el('modeHelp').textContent = MODE_HELP[mode] || '';
-
-    // Refine edits the same corrections a Correct session does; it adds the
-    // choice of which frames graduate into training.  Sharing the session
-    // type means edits made in one mode are visible in the other.
-    const sessionType = mode === 'refine' ? 'corrections' : mode;
-
+async function openSession() {
     let session;
     try {
         session = await api(`/api/labeling/${subjectId}/sessions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ session_type: sessionType }),
+            body: JSON.stringify({ session_type: 'initial' }),
         });
     } catch (e) {
         toast(`Could not open a session: ${e.message}`, 'err');
@@ -324,7 +234,6 @@ async function openSession(newMode) {
     manual.clear();
     dirtyKeys.clear();
     deletedKeys.clear();
-    refineSelected.clear();
     undoStack.length = 0;
     redoStack.length = 0;
     imageCache.clear();
@@ -332,7 +241,6 @@ async function openSession(newMode) {
     videoTrialLoaded = -1;
     videoSideLoaded = null;
     mpTrial = null;
-    for (const k of Object.keys(bpData)) delete bpData[k];
 
     const info = await api(`/api/labeling/sessions/${sessionId}/info`);
     subject = info.subject;
@@ -342,8 +250,6 @@ async function openSession(newMode) {
     cameraNames = info.camera_names || ['OS', 'OD'];
     cameraMode = info.camera_mode || 'stereo';
     hasCalibration = !!info.has_calibration;
-    cropBoxes = info.crop_boxes || {};
-    mpPassSpecs = info.mp_passes || [];
     bodypartJoints = info.bodypart_joints || {};
     selection = null;
     guidedTarget = null;
@@ -358,194 +264,38 @@ async function openSession(newMode) {
         : 'No stereo calibration for this subject — 2D only, distances in pixels';
     el('calibNote').style.color = hasCalibration ? '' : 'var(--orange)';
 
-    // Load the per-session labels and the layer inventory together.
-    const [labels, layers] = await Promise.all([
-        api(`/api/labeling/sessions/${sessionId}/labels`),
-        api(`/api/labeling/sessions/${sessionId}/layers`),
-    ]);
-
+    const labels = await api(`/api/labeling/sessions/${sessionId}/labels`);
     for (const l of labels) {
         manual.set(`${l.frame_num}_${l.side}`, { ...l.keypoints });
     }
 
-    availableMp = layers.mp_by_trial || {};
-    availableStages = layers.stages || [];
-    hasCommittedLabels = !!layers.has_committed_labels;
-    if (layers.mp_passes) mpPassSpecs = layers.mp_passes;
-
-    buildLayerGrid();
-    buildFingerGrid();
-    updateModeUi();
     updateLabelCount();
     updateShortcuts();
 
-    // Jump back to where this subject was left, else the first trial.
-    const nav = getNavState();
-    const startFrame = (nav.frame != null && nav.frame < totalFrames)
-        ? nav.frame : (trials[0] ? trials[0].start_frame : 0);
-
-    await loadBodypartLayers();
-    await gotoFrame(startFrame, { force: true });
+    // The selection is the page: without it there is nothing to label,
+    // so it is loaded (or offered) before anything is drawn.
+    await enterGuided();
     renderTrialButtons(trials, trialForFrame(currentFrame), pickTrial);
 }
 
-/* Fetch every bodypart layer that has data.  Each is subject-wide, so this
- * runs once per session rather than per trial. */
-async function loadBodypartLayers() {
-    const jobs = [];
-    for (const spec of BP_LAYERS) {
-        const wanted = spec.stage === 'labels'
-            ? hasCommittedLabels
-            : availableStages.includes(spec.stage);
-        if (!wanted) continue;
-        jobs.push(
-            api(`/api/labeling/sessions/${sessionId}/stage?stage=${spec.stage}`)
-                .then(d => { if (d && Object.keys(d).length) bpData[spec.key] = d; })
-                .catch(e => console.warn(`layer ${spec.key} failed`, e))
-        );
-    }
-    await Promise.all(jobs);
-    buildLayerGrid();
-    if (mode === 'refine') buildRefineList();
-}
-
-/* Fetch the MediaPipe passes for one trial. */
+/* Fetch the MediaPipe forward pass for one trial. */
 async function loadMpTrial(trialIdx) {
     if (mpTrial && mpTrial.trial_idx === trialIdx) return;
-    const present = availableMp[trialIdx] || availableMp[String(trialIdx)] || [];
-    if (!present.length) { mpTrial = { trial_idx: trialIdx, start_frame: 0, passes: {} }; return; }
-
     try {
         const d = await api(`/api/labeling/sessions/${sessionId}`
-            + `/trial/${trialIdx}/mp?passes=${present.join(',')}`);
-        const passes = {};
-        for (const [key, p] of Object.entries(d.passes || {})) {
-            passes[key] = {
-                label: p.label, color: p.color,
-                os: decodeF32(p.OS), od: decodeF32(p.OD),
-                distances: p.distances || null,
-                distancesClean: p.distances_clean || null,
-                sourceOS: p.source_OS || null, sourceOD: p.source_OD || null,
-            };
-        }
-        mpTrial = { trial_idx: trialIdx, start_frame: d.start_frame || 0,
-                    frame_count: d.frame_count || 0, passes };
+            + `/trial/${trialIdx}/mp`);
+        mpTrial = {
+            trial_idx: trialIdx,
+            start_frame: d.start_frame || 0,
+            frame_count: d.frame_count || 0,
+            os: decodeF32(d.OS),
+            od: decodeF32(d.OD),
+            distances: d.distances || null,
+        };
     } catch (e) {
         console.warn('MediaPipe trial load failed', e);
-        mpTrial = { trial_idx: trialIdx, start_frame: 0, passes: {} };
+        mpTrial = { trial_idx: trialIdx, start_frame: 0, os: null, od: null };
     }
-    buildLayerGrid();
-}
-
-// ── Sidebar: layers and fingers ──────────────────────────────────────────
-
-function layerCatalog() {
-    const out = [];
-    out.push({ key: 'manual', label: 'Manual (this session)', color: MANUAL_COLOR,
-               available: true });
-    for (const spec of BP_LAYERS) {
-        out.push({ key: spec.key, label: spec.label, color: spec.color,
-                   available: !!bpData[spec.key] });
-    }
-    const presentHere = availableMp[currentTrialIdx]
-        || availableMp[String(currentTrialIdx)] || [];
-    for (const spec of mpPassSpecs) {
-        out.push({ key: `mp_${spec.key}`, label: spec.label, color: spec.color,
-                   indent: true, mpPass: spec.key,
-                   available: presentHere.includes(spec.key) });
-    }
-    return out;
-}
-
-function buildLayerGrid() {
-    const grid = el('layerGrid');
-    if (!grid) return;
-    const cat = layerCatalog();
-
-    // Sensible first view: what you are working on, plus the hand.
-    if (!layerVis.size) {
-        const on = ['manual', 'corrections', 'dlc', 'refine', 'committed',
-                    'mp_best', 'mp_forward'];
-        for (const l of cat) layerVis.set(l.key, { d2: on.includes(l.key) });
-        // Only one MediaPipe pass on by default: the fused one if it exists.
-        if (cat.some(l => l.key === 'mp_best' && l.available)) {
-            layerVis.set('mp_forward', { d2: false });
-        }
-    }
-    for (const l of cat) if (!layerVis.has(l.key)) layerVis.set(l.key, { d2: false });
-
-    grid.innerHTML = '';
-    for (const l of cat) {
-        const v = vis(l.key);
-        const name = document.createElement('span');
-        name.className = 'lname' + (l.indent ? ' indent' : '')
-            + (l.available ? '' : ' unavailable');
-        name.innerHTML = `<span class="swatch" style="background:${l.color};"></span>`
-            + `<span>${l.label}</span>`;
-        if (!l.available) name.title = 'No data for this trial yet';
-        grid.appendChild(name);
-
-        const cb = document.createElement('input');
-        cb.type = 'checkbox';
-        cb.checked = !!v.d2 && l.available;
-        cb.disabled = !l.available;
-        cb.addEventListener('change', () => {
-            layerVis.get(l.key).d2 = cb.checked;
-            render();
-            renderTrace();
-        });
-        grid.appendChild(cb);
-    }
-
-    const note = el('layerNote');
-    const bestOn = vis('mp_best').d2
-        && cat.some(l => l.key === 'mp_best' && l.available);
-    note.textContent = bestOn
-        ? 'Best per frame picks, for each frame and camera, whichever pass '
-        + 'triangulates to the most plausible thumb-index aperture.'
-        : '';
-}
-
-function buildFingerGrid() {
-    const grid = el('fingerGrid');
-    if (!grid) return;
-    grid.innerHTML = '';
-    for (const [key, f] of Object.entries(FINGERS)) {
-        const lab = document.createElement('label');
-        lab.className = 'finger-toggle';
-        const cb = document.createElement('input');
-        cb.type = 'checkbox';
-        cb.checked = f.joints.every(j => visibleJoints.has(j));
-        cb.addEventListener('change', () => {
-            for (const j of f.joints) {
-                if (cb.checked) visibleJoints.add(j); else visibleJoints.delete(j);
-            }
-            render();
-        });
-        lab.appendChild(cb);
-        lab.appendChild(document.createTextNode(f.label));
-        grid.appendChild(lab);
-    }
-}
-
-function updateModeUi() {
-    const isRefine = mode === 'refine';
-    const isCorr = mode === 'corrections';
-    el('saveCorrBtn').style.display = (isCorr || isRefine) ? '' : 'none';
-    el('refinePanel').style.display = isRefine ? '' : 'none';
-    // Guided labeling builds the first training set, so it belongs to
-    // Label mode; Correct and Refine work off the predictions instead.
-    el('guidedBtn').style.display = (isRefine || isCorr) ? 'none' : '';
-    if ((isRefine || isCorr) && guided) setGuided(false);
-    updateCommitButton();
-    el('actionHelp').textContent = isRefine
-        ? 'Commits the ticked frames as a new labeled-data round. Then run '
-        + 'Refine on the Jobs page.'
-        : isCorr
-            ? 'Writes every trial\'s reviewed labels to corrections/ as DLC CSVs.'
-            : 'Extracts your labeled frames as training images and writes the '
-            + 'DLC CollectedData files. Then run Train on the Jobs page.';
-    if (isRefine) buildRefineList();
 }
 
 // ── Frame navigation ─────────────────────────────────────────────────────
@@ -702,25 +452,14 @@ async function gotoFrame(frame, opts = {}) {
     }
 
     updateFrameDisplay();
-    if (guided) { renderPointGrid(); updateTargetBanner(); }
-    else renderTimeline();
+    renderPointGrid();
+    updateTargetBanner();
     renderTrace();
 }
 
 function pickTrial(trialIdx) {
     const t = trials[trialIdx];
     if (t) gotoFrame(t.start_frame);
-}
-
-function nextLabeledFrame(dir) {
-    const keys = [...manual.keys()]
-        .map(k => ({ f: parseInt(k.split('_')[0], 10), side: k.split('_').slice(1).join('_') }))
-        .filter(x => x.side === currentSide)
-        .map(x => x.f)
-        .sort((a, b) => a - b);
-    if (!keys.length) return null;
-    return dir > 0 ? keys.find(f => f > currentFrame)
-                   : [...keys].reverse().find(f => f < currentFrame);
 }
 
 // ── Zoom ─────────────────────────────────────────────────────────────────
@@ -750,41 +489,19 @@ function zoomToBox(minX, minY, maxX, maxY, pad) {
     offsetY = (ch - h * scale) / 2 - minY * scale;
 }
 
-/* Frame the view on the hand without anyone having to pan.
- *
- * Preference order: the labels on this frame, then whatever layer is
- * showing, then the whole MediaPipe hand, then the trial's crop box.
- * Falling back through those means the zoom is useful on a frame with no
- * labels yet — which is every frame you are about to label. */
+/* Frame the view on the hand, for the odd frame the guided zoom has not
+ * aimed at — the first load, and anywhere you arrow to with no zoom of
+ * your own.  Labels first, then the whole MediaPipe hand. */
 function applyAutoZoom(frame) {
-    if (hasUserZoom || boxMode) return;
-    if (!el('autoZoomCb').checked) { fitImage(); return; }
-
-    if (el('boxZoomCb').checked) {
-        const box = (cropBoxes[currentTrialIdx]
-            || cropBoxes[String(currentTrialIdx)] || {})[currentSide];
-        if (box) {
-            zoomToBox(box.x1, box.y1, box.x2, box.y2, 10);
-            return;
-        }
-    }
+    if (hasUserZoom) return;
 
     let pts = [];
     for (const bp of bodyparts) {
-        const c = manualAt(frame, currentSide, bp) || (ghostAt(frame, currentSide, bp) || {}).coords;
+        const c = manualAt(frame, currentSide, bp);
         if (c) pts.push(c);
     }
-    // No bodypart coordinates: use the whole MediaPipe hand, which is the
-    // common case on a fresh subject.
     if (!pts.length) pts = mpPointsFor(frame, currentSide);
-
-    if (!pts.length) {
-        const box = (cropBoxes[currentTrialIdx]
-            || cropBoxes[String(currentTrialIdx)] || {})[currentSide];
-        if (box) zoomToBox(box.x1, box.y1, box.x2, box.y2, 10);
-        else fitImage();
-        return;
-    }
+    if (!pts.length) { fitImage(); return; }
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const [x, y] of pts) {
@@ -827,63 +544,42 @@ function render() {
 
 function drawOverlays() {
     drawMpOverlays();
-    drawBodypartOverlays();
-    if (boxMode && editBox) drawBoxOverlay();
+    drawManualOverlays();
+}
+
+/* This session's labels, always drawn — they are the work. */
+function drawManualOverlays() {
+    for (const bp of bodyparts) {
+        const c = manualAt(currentFrame, currentSide, bp);
+        if (c) drawPoint(c[0], c[1], MANUAL_COLOR, bp[0].toUpperCase(), true);
+    }
 }
 
 function drawMpOverlays() {
-    for (const spec of mpPassSpecs) {
-        if (!vis(`mp_${spec.key}`).d2) continue;
-        const lm = mpFrame2d(spec.key, currentFrame, currentSide);
-        if (!lm) continue;
-        const color = spec.color;
+    if (!showMp) return;
+    const lm = mpFrame2d(currentFrame, currentSide);
+    if (!lm) return;
 
-        ctx.lineWidth = 1.5;
-        ctx.strokeStyle = color;
-        ctx.globalAlpha = 0.65;
-        for (const [a, b] of HAND_BONES) {
-            if (!visibleJoints.has(a) || !visibleJoints.has(b)) continue;
-            if (!Number.isFinite(lm[a * 2]) || !Number.isFinite(lm[b * 2])) continue;
-            const p = imageToScreen(lm[a * 2], lm[a * 2 + 1]);
-            const q = imageToScreen(lm[b * 2], lm[b * 2 + 1]);
-            ctx.beginPath();
-            ctx.moveTo(p.x, p.y);
-            ctx.lineTo(q.x, q.y);
-            ctx.stroke();
-        }
-        ctx.globalAlpha = 1;
-        ctx.fillStyle = color;
-        for (let j = 0; j < lm.length / 2; j++) {
-            if (!visibleJoints.has(j) || !Number.isFinite(lm[j * 2])) continue;
-            const p = imageToScreen(lm[j * 2], lm[j * 2 + 1]);
-            ctx.beginPath();
-            ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
-            ctx.fill();
-        }
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = MP_COLOR;
+    ctx.globalAlpha = 0.65;
+    for (const [a, b] of HAND_BONES) {
+        if (!Number.isFinite(lm[a * 2]) || !Number.isFinite(lm[b * 2])) continue;
+        const p = imageToScreen(lm[a * 2], lm[a * 2 + 1]);
+        const q = imageToScreen(lm[b * 2], lm[b * 2 + 1]);
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(q.x, q.y);
+        ctx.stroke();
     }
-}
-
-function drawBodypartOverlays() {
-    // Model and committed layers first, so the manual label a user is
-    // actually moving is never hidden under a ghost.
-    for (const spec of BP_LAYERS) {
-        if (!vis(spec.key).d2) continue;
-        for (const bp of bodyparts) {
-            const c = bpAt(spec.key, currentFrame, currentSide, bp);
-            if (!c) continue;
-            if (manualAt(currentFrame, currentSide, bp)) {
-                drawGhost(c[0], c[1], spec.color, bp[0].toUpperCase());
-            } else {
-                drawPoint(c[0], c[1], spec.color, bp[0].toUpperCase(), false);
-            }
-        }
-    }
-
-    if (vis('manual').d2) {
-        for (const bp of bodyparts) {
-            const c = manualAt(currentFrame, currentSide, bp);
-            if (c) drawPoint(c[0], c[1], MANUAL_COLOR, bp[0].toUpperCase(), true);
-        }
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = MP_COLOR;
+    for (let j = 0; j < lm.length / 2; j++) {
+        if (!Number.isFinite(lm[j * 2])) continue;
+        const p = imageToScreen(lm[j * 2], lm[j * 2 + 1]);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
+        ctx.fill();
     }
 }
 
@@ -907,213 +603,16 @@ function drawPoint(ix, iy, color, letter, solid) {
     ctx.fillText(letter, p.x + r + 2, p.y - 3);
 }
 
-function drawGhost(ix, iy, color, letter) {
-    const p = imageToScreen(ix, iy);
-    ctx.save();
-    ctx.globalAlpha = 0.4;
-    ctx.setLineDash([2, 2]);
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = color;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.restore();
-}
-
 // ── Crop box editing ─────────────────────────────────────────────────────
-
-function defaultBox() {
-    return { x1: imgW * 0.25, y1: imgH * 0.25, x2: imgW * 0.75, y2: imgH * 0.75 };
-}
-
-async function startBoxEdit() {
-    boxMode = true;
-    el('boxActions').style.display = '';
-    el('editBoxBtn').style.display = 'none';
-
-    const saved = (cropBoxes[currentTrialIdx]
-        || cropBoxes[String(currentTrialIdx)] || {})[currentSide];
-    if (saved) {
-        editBox = { ...saved };
-        el('boxStatus').textContent = 'Editing the saved box for this trial.';
-    } else {
-        // Nothing saved — ask the server for one derived from the landmarks,
-        // which puts the box roughly right before anyone drags a handle.
-        try {
-            const r = await api(`/api/labeling/sessions/${sessionId}`
-                + `/bbox?trial_idx=${currentTrialIdx}`);
-            const b = (r.boxes || {})[currentSide];
-            editBox = b ? { x1: b[0], y1: b[1], x2: b[2], y2: b[3] } : defaultBox();
-            el('boxStatus').textContent = b
-                ? 'Starting from the MediaPipe landmark extent.'
-                : 'No landmarks yet — drag the box onto the hand.';
-        } catch (e) {
-            editBox = defaultBox();
-            el('boxStatus').textContent = 'Drag the box onto the hand.';
-        }
-    }
-    hasUserZoom = false;
-    render();
-}
-
-function endBoxEdit() {
-    boxMode = false;
-    editBox = null;
-    boxDragHandle = null;
-    el('boxActions').style.display = 'none';
-    el('editBoxBtn').style.display = '';
-    render();
-}
-
-function drawBoxOverlay() {
-    const a = imageToScreen(editBox.x1, editBox.y1);
-    const b = imageToScreen(editBox.x2, editBox.y2);
-    ctx.save();
-    ctx.strokeStyle = '#ffd54f';
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([5, 3]);
-    ctx.strokeRect(a.x, a.y, b.x - a.x, b.y - a.y);
-    ctx.setLineDash([]);
-    ctx.fillStyle = '#ffd54f';
-    for (const [hx, hy] of [[a.x, a.y], [b.x, a.y], [a.x, b.y], [b.x, b.y]]) {
-        ctx.fillRect(hx - 4, hy - 4, 8, 8);
-    }
-    ctx.restore();
-}
-
-function boxHitTest(sx, sy) {
-    const a = imageToScreen(editBox.x1, editBox.y1);
-    const b = imageToScreen(editBox.x2, editBox.y2);
-    const near = (px, py) => Math.hypot(sx - px, sy - py) < 9;
-    if (near(a.x, a.y)) return 'nw';
-    if (near(b.x, a.y)) return 'ne';
-    if (near(a.x, b.y)) return 'sw';
-    if (near(b.x, b.y)) return 'se';
-    if (sx > a.x && sx < b.x && sy > a.y && sy < b.y) return 'move';
-    return null;
-}
-
-function applyBoxDrag(sx, sy) {
-    const d = screenToImage(sx, sy);
-    const start = screenToImage(boxDragStart.mx, boxDragStart.my);
-    const o = boxDragStart.box;
-    const dx = d.x - start.x, dy = d.y - start.y;
-    const clampX = (v) => Math.max(0, Math.min(imgW, v));
-    const clampY = (v) => Math.max(0, Math.min(imgH, v));
-
-    if (boxDragHandle === 'move') {
-        editBox = { x1: clampX(o.x1 + dx), y1: clampY(o.y1 + dy),
-                    x2: clampX(o.x2 + dx), y2: clampY(o.y2 + dy) };
-        return;
-    }
-    const b = { ...o };
-    if (boxDragHandle.includes('n')) b.y1 = clampY(o.y1 + dy);
-    if (boxDragHandle.includes('s')) b.y2 = clampY(o.y2 + dy);
-    if (boxDragHandle.includes('w')) b.x1 = clampX(o.x1 + dx);
-    if (boxDragHandle.includes('e')) b.x2 = clampX(o.x2 + dx);
-    editBox = {
-        x1: Math.min(b.x1, b.x2), y1: Math.min(b.y1, b.y2),
-        x2: Math.max(b.x1, b.x2), y2: Math.max(b.y1, b.y2),
-    };
-}
-
-async function saveBox() {
-    if (!editBox) return;
-    const boxes = {};
-    boxes[currentSide] = {
-        x1: Math.round(editBox.x1), y1: Math.round(editBox.y1),
-        x2: Math.round(editBox.x2), y2: Math.round(editBox.y2),
-    };
-    try {
-        const r = await api(`/api/labeling/sessions/${sessionId}/bbox`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                trial_idx: currentTrialIdx, boxes,
-                apply_to_all: el('boxAllTrials').checked,
-            }),
-        });
-        for (const ti of r.applied_trials) {
-            cropBoxes[ti] = { ...(cropBoxes[ti] || {}), ...boxes };
-        }
-        toast(r.applied_trials.length > 1
-            ? `Box saved for ${r.applied_trials.length} trials`
-            : 'Box saved', 'ok');
-        el('boxStatus').textContent = 'Saved. Re-detect to apply it.';
-    } catch (e) {
-        toast(`Could not save the box: ${e.message}`, 'err');
-    }
-}
-
-async function redetectTrial() {
-    if (!editBox) return;
-    const crops = {};
-    crops[currentSide] = {
-        x1: Math.round(editBox.x1), y1: Math.round(editBox.y1),
-        x2: Math.round(editBox.x2), y2: Math.round(editBox.y2),
-    };
-    try {
-        const r = await api(`/api/labeling/sessions/${sessionId}/rerun-mediapipe`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ trial_idx: currentTrialIdx, crops }),
-        });
-        el('boxStatus').textContent = 'Detecting…';
-        watchJob(r.job_id, async (job) => {
-            if (job.status === 'completed') {
-                el('boxStatus').textContent = 'Detection finished — reloading.';
-                mpTrial = null;
-                const layers = await api(
-                    `/api/labeling/sessions/${sessionId}/layers`);
-                availableMp = layers.mp_by_trial || {};
-                await loadMpTrial(currentTrialIdx);
-                render();
-                renderTrace();
-            } else if (job.status === 'failed') {
-                el('boxStatus').textContent = `Detection failed: ${job.error_msg || ''}`;
-            } else {
-                el('boxStatus').textContent =
-                    `Detecting… ${Math.round(job.progress_pct || 0)}%`;
-            }
-        });
-    } catch (e) {
-        toast(`Could not start detection: ${e.message}`, 'err');
-    }
-}
-
-/* Poll one job until it reaches a terminal state. */
-function watchJob(jobId, onUpdate) {
-    const tick = async () => {
-        let job;
-        try {
-            job = await api(`/api/jobs/${jobId}`);
-        } catch (e) { return; }
-        onUpdate(job);
-        if (!['completed', 'failed', 'cancelled'].includes(job.status)) {
-            setTimeout(tick, 1000);
-        }
-    };
-    tick();
-}
 
 // ── Label editing ────────────────────────────────────────────────────────
 
 function hitTest(sx, sy) {
-    // Manual points first: they are what a drag is most likely aimed at.
     for (const bp of bodyparts) {
         const c = manualAt(currentFrame, currentSide, bp);
         if (!c) continue;
         const p = imageToScreen(c[0], c[1]);
-        if (Math.hypot(sx - p.x, sy - p.y) < HIT_RADIUS) return { bp, ghost: false };
-    }
-    for (const bp of bodyparts) {
-        if (manualAt(currentFrame, currentSide, bp)) continue;
-        const g = ghostAt(currentFrame, currentSide, bp);
-        if (!g) continue;
-        const p = imageToScreen(g.coords[0], g.coords[1]);
-        if (Math.hypot(sx - p.x, sy - p.y) < HIT_RADIUS) {
-            return { bp, ghost: true, coords: g.coords, source: g.source };
-        }
+        if (Math.hypot(sx - p.x, sy - p.y) < HIT_RADIUS) return { bp };
     }
     return null;
 }
@@ -1133,65 +632,50 @@ function pushUndo(key, bp, prev) {
     redoStack.length = 0;
 }
 
+/* Place the point the mode is asking for.
+ *
+ * Only that one: every labeled frame here is a k-means pick, and a label
+ * dropped on a neighbouring frame would never be saved but would still
+ * look placed. Refusing is clearer than silently keeping it. */
 function placeLabel(ix, iy) {
+    if (!guidedTarget || !onTargetPoint()) {
+        setLabelInfo(onTargetFrame()
+            ? 'Switch camera or press N — this is not the point being asked for.'
+            : 'Not the frame being labeled — press B to go back to it.');
+        return;
+    }
+
     const key = `${currentFrame}_${currentSide}`;
     const lbl = manual.get(key) || {};
+    const bp = guidedTarget.bp;
 
-    // Fill the next unplaced bodypart; once all are placed, move the
-    // nearest one instead, so a stray click corrects rather than adds.
-    // In guided mode the point being asked for wins: the view is aimed
-    // at it, so a click there means that one, placed or not.
-    const onTarget = guided && guidedTarget && selection
-        && currentSide === guidedTarget.side
-        && currentFrame === (((selection.frames || [])[guidedTarget.frameIdx]
-                              || {}).global_frame);
-    const nextBp = onTarget ? guidedTarget.bp
-        : bodyparts.find(bp => !(lbl[bp] && lbl[bp][0] != null));
-    if (nextBp) {
-        pushUndo(key, nextBp, lbl[nextBp] || null);
-        setManual(nextBp, ix, iy);
-        if (onTarget && !autoAdvance) {
-            // The guided walk's next point is often the same bodypart on
-            // the other camera, so "click to place index" would send
-            // someone to the wrong one.  Name what is actually next.
-            const next = nextUnlabeledPoint(currentPointIndex());
-            setLabelInfo(`${nextBp} (${currentSide}) placed`
-                + (next ? ` — N for ${next.bp} (${next.side})`
-                          + `, frame ${next.frame.global_frame}`
-                        : ' — that was the last one'));
-        } else {
-            const left = bodyparts.filter(bp => {
-                const c = manual.get(key)[bp];
-                return !(c && c[0] != null);
-            });
-            setLabelInfo(left.length
-                ? `${nextBp} placed — click to place ${left[0]}.`
-                : 'All keypoints placed on this frame.');
-        }
-    } else {
-        let closest = null, best = Infinity;
-        for (const bp of bodyparts) {
-            const c = lbl[bp];
-            if (!c || c[0] == null) continue;
-            const d = Math.hypot(ix - c[0], iy - c[1]);
-            if (d < best) { best = d; closest = bp; }
-        }
-        if (!closest) return;
-        pushUndo(key, closest, lbl[closest]);
-        setManual(closest, ix, iy);
-    }
+    pushUndo(key, bp, lbl[bp] || null);
+    setManual(bp, ix, iy);
 
     render();
     updateLabelCount();
     scheduleSave();
-    if (guided) {
-        renderPointGrid();
-        // Placing the point that was asked for is the signal to move on;
-        // correcting some other point on the frame is not.  Whether that
-        // signal actually moves you is the labeler's call: some want to
-        // look at what they just placed before leaving it.
-        if (onTarget && autoAdvance) goToNextPoint();
+    renderPointGrid();
+
+    if (autoAdvance) {
+        goToNextPoint();
+    } else {
+        // The next point is usually the same bodypart on the other
+        // camera, so naming it beats "place the next one".
+        const next = nextUnlabeledPoint(currentPointIndex());
+        setLabelInfo(`${bp} (${currentSide}) placed`
+            + (next ? ` — N for ${next.bp} (${next.side}), `
+                      + `frame ${next.frame.global_frame}`
+                    : ' — that was the last one'));
     }
+}
+
+/* True when the view is on the exact point the mode is asking for. */
+function onTargetPoint() {
+    if (!guidedTarget || !selection) return false;
+    const f = (selection.frames || [])[guidedTarget.frameIdx];
+    return !!f && currentFrame === f.global_frame
+        && currentSide === guidedTarget.side;
 }
 
 function removeLabel(bp) {
@@ -1211,7 +695,7 @@ function removeLabel(bp) {
     render();
     updateLabelCount();
     scheduleSave();
-    if (guided) renderPointGrid();
+    renderPointGrid();
 }
 
 function applyUndoEntry(entry, toStack) {
@@ -1252,7 +736,8 @@ function applyUndoEntry(entry, toStack) {
 }
 
 function afterUndoRedo() {
-    if (guided) { renderPointGrid(); updateTargetBanner(); }
+    renderPointGrid();
+    updateTargetBanner();
 }
 
 function undo() {
@@ -1338,179 +823,26 @@ async function flushSave() {
     }
 }
 
-async function saveCorrections() {
-    await flushSave();
-    try {
-        const r = await api(`/api/labeling/sessions/${sessionId}/save_corrections`,
-                            { method: 'POST' });
-        toast(`Corrections written: ${r.csv_count} CSV file(s), `
-            + `${r.frame_count || r.corrected_frame_count || 0} frames`, 'ok');
-        await loadBodypartLayers();
-        render();
-    } catch (e) {
-        toast(`Could not save corrections: ${e.message}`, 'err');
-    }
-}
-
 async function commit() {
     await flushSave();
 
-    if (mode === 'refine') {
-        if (!refineSelected.size) {
-            toast('Tick at least one frame to add to the training set', 'err');
-            return;
-        }
-        const frames = [...refineSelected].map(k => {
-            const [f, ...sp] = k.split('_');
-            return { frame_num: parseInt(f, 10), side: sp.join('_') };
-        });
-        if (!confirm(`Add ${frames.length} corrected frame(s) to the training set `
-                   + `as a new round?`)) return;
-        try {
-            const r = await api(`/api/labeling/sessions/${sessionId}/commit`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ train_frames: frames }),
-            });
-            toast(`Committed ${r.frame_count} training frame(s) to `
-                + `${r.labeled_data_dir.split('/').slice(-2).join('/')}. `
-                + `Now run Refine on the Jobs page.`, 'ok');
-            await openSession('refine');
-        } catch (e) {
-            toast(`Commit failed: ${e.message}`, 'err');
-        }
-        return;
-    }
-
-    if (mode === 'corrections') {
-        if (!confirm('Write this subject\'s reviewed labels to corrections/ '
-                   + 'and mark the subject corrected?')) return;
-        try {
-            const r = await api(`/api/labeling/sessions/${sessionId}/commit`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ train_frames: [] }),
-            });
-            toast(`Corrections written: ${r.csv_count} CSV file(s). Switch to `
-                + `Refine to choose frames to retrain on.`, 'ok');
-            await openSession('corrections');
-        } catch (e) {
-            toast(`Could not finish corrections: ${e.message}`, 'err');
-        }
-        return;
-    }
-
     const n = manual.size;
-    if (!n) { toast('Nothing to commit — place some labels first', 'err'); return; }
-
-    // What is on screen decides what gets written: the grid is the
-    // selection, the timeline is everything.
-    const scope = guided ? 'selected' : 'all';
-    const what = guided
-        ? `the ${(selection && selection.frames.length) || 0} selected frame(s)`
-        : `${n} labeled frame(s)`;
-    if (!confirm(`Commit ${what} as DLC training data?`
-        + (guided ? '\n\nThis replaces the all-frames set for this round.'
-                  : '\n\nThis replaces the selected-frames set for this round.')))
+    if (!n) { toast('Nothing to save — place some labels first', 'err'); return; }
+    const frames = (selection && selection.frames.length) || 0;
+    if (!confirm(`Save ${frames} labeled frame(s) as DeepLabCut training data?`))
         return;
     try {
         const r = await api(`/api/labeling/sessions/${sessionId}/commit`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ train_frames: [], scope }),
+            body: JSON.stringify({ train_frames: [] }),
         });
-        toast(`Committed ${r.frame_count} frame(s) to `
-            + `${(r.labeled_data_dir || '').split('/').slice(-2).join('/')}. `
-            + `Now run Train on the Jobs page.`, 'ok');
-        const wasGuided = guided;
-        await openSession('initial');
-        if (wasGuided) await setGuided(true);
+        toast(`Saved ${r.frame_count} frame(s) to `
+            + `${(r.labeled_data_dir || '').split('/').slice(-2).join('/')}.`, 'ok');
+        await openSession();
     } catch (e) {
-        toast(`Commit failed: ${e.message}`, 'err');
+        toast(`Save failed: ${e.message}`, 'err');
     }
-}
-
-// ── Refine selection ─────────────────────────────────────────────────────
-
-/* Frames where the saved correction moved a point away from the model's
- * prediction.  Those are the frames the model got wrong, and the only
- * ones worth adding to the training set. */
-function correctedFrames() {
-    const corr = bpData.corrections;
-    if (!corr) return [];
-    const pred = bpData.refine || bpData.dlc;
-    const out = [];
-    for (const side of cameraNames) {
-        const cside = corr[side];
-        if (!cside) continue;
-        const len = Math.max(...bodyparts.map(bp => (cside[bp] || []).length), 0);
-        for (let f = 0; f < len; f++) {
-            let worst = 0;
-            let any = false;
-            for (const bp of bodyparts) {
-                const c = (cside[bp] || [])[f];
-                if (!c || c[0] == null) continue;
-                any = true;
-                const p = pred && pred[side] && (pred[side][bp] || [])[f];
-                if (p && p[0] != null) {
-                    worst = Math.max(worst, Math.hypot(c[0] - p[0], c[1] - p[1]));
-                } else {
-                    worst = Infinity;   // no prediction at all: definitely worth training
-                }
-            }
-            if (any && worst > 1.0) out.push({ frame: f, side, delta: worst });
-        }
-    }
-    out.sort((a, b) => b.delta - a.delta);
-    return out;
-}
-
-function buildRefineList() {
-    const list = el('refineList');
-    const summary = el('refineSummary');
-    if (!list) return;
-
-    const rows = correctedFrames();
-    if (!rows.length) {
-        list.innerHTML = '';
-        summary.textContent = bpData.corrections
-            ? 'No corrections differ from the predictions yet. Switch to '
-            + 'Correct, fix the frames the model gets wrong, and save.'
-            : 'No corrections saved for this subject yet.';
-        return;
-    }
-
-    summary.innerHTML = `${rows.length} corrected frame(s), largest change first. `
-        + `<span id="refineCount">${refineSelected.size}</span> selected.`;
-    list.innerHTML = '<table><thead><tr><th></th><th>Frame</th><th>Cam</th>'
-        + '<th>Moved</th></tr></thead><tbody>'
-        + rows.map(r => {
-            const key = `${r.frame}_${r.side}`;
-            const moved = Number.isFinite(r.delta) ? `${r.delta.toFixed(1)} px` : 'new';
-            return `<tr><td><input type="checkbox" data-key="${key}"
-                        ${refineSelected.has(key) ? 'checked' : ''}></td>`
-                + `<td><a href="#" data-goto="${r.frame}" data-side="${r.side}"
-                        style="color:var(--blue);">${r.frame}</a></td>`
-                + `<td>${r.side}</td><td>${moved}</td></tr>`;
-        }).join('') + '</tbody></table>';
-
-    list.querySelectorAll('input[type=checkbox]').forEach(cb => {
-        cb.addEventListener('change', () => {
-            if (cb.checked) refineSelected.add(cb.dataset.key);
-            else refineSelected.delete(cb.dataset.key);
-            const c = el('refineCount');
-            if (c) c.textContent = String(refineSelected.size);
-            renderTimeline();
-        });
-    });
-    list.querySelectorAll('a[data-goto]').forEach(a => {
-        a.addEventListener('click', (e) => {
-            e.preventDefault();
-            currentSide = a.dataset.side;
-            updateSideToggle();
-            gotoFrame(parseInt(a.dataset.goto, 10));
-        });
-    });
 }
 
 // ── Playback ─────────────────────────────────────────────────────────────
@@ -1610,12 +942,9 @@ function videoDrawLoop(now, metadata) {
     drawVideoToCanvas(currentFrame, { rezoom: false });
     updateFrameDisplay();
 
-    // The timeline and trace are context, not the thing being
-    // watched; refreshing them every frame at 60 fps costs more than it adds.
-    if (currentFrame % 10 === 0) {
-        renderTimeline();
-        renderTrace();
-    }
+    // The trace is context, not the thing being watched; refreshing it
+    // every frame at 60 fps costs more than it adds.
+    if (currentFrame % 10 === 0) renderTrace();
 
     if ('requestVideoFrameCallback' in videoEl) {
         videoEl.requestVideoFrameCallback(videoDrawLoop);
@@ -1704,18 +1033,10 @@ function guidedRows() {
 function mpTargetFor(frame, side, bp) {
     const joint = bodypartJoints[bp];
     if (joint == null) return null;
-    const lm = mpFrame2d('best', frame, side) || bestMpLandmarks(frame, side);
+    const lm = mpFrame2d(frame, side);
     if (!lm || lm.length < (joint + 1) * 2) return null;
     const x = lm[joint * 2], y = lm[joint * 2 + 1];
     return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : null;
-}
-
-function bestMpLandmarks(frame, side) {
-    for (const spec of mpPassSpecs) {
-        const lm = mpFrame2d(spec.key, frame, side);
-        if (lm) return lm;
-    }
-    return null;
 }
 
 /* Frame the view on the point being asked for.
@@ -1739,7 +1060,7 @@ function zoomToPoint(pt) {
         ];
         offFrame = Math.hypot(target[0] - raw[0], target[1] - raw[1]) > 1;
         const box = (pt.frame.crops || {})[pt.side];
-        const span = box ? Math.max(box.side * 0.14, 30) : 45;
+        const span = box ? Math.max(box.side * 0.07, 15) : 22;
         zoomToBox(target[0] - span, target[1] - span,
                   target[0] + span, target[1] + span, 0);
         hasUserZoom = true;
@@ -1789,7 +1110,7 @@ async function goToPoint(pt) {
 
 /* The frame the mode is currently asking about, or null. */
 function targetFrame() {
-    if (!guided || !guidedTarget || !selection) return null;
+    if (!guidedTarget || !selection) return null;
     const f = (selection.frames || [])[guidedTarget.frameIdx];
     return f ? f.global_frame : null;
 }
@@ -1806,11 +1127,29 @@ function onTargetFrame() {
  * labeling the neighbour by mistake is then one click away, and the only
  * thing standing between the two is knowing which frame you are on. */
 function updateTargetBanner() {
-    const away = guided && !onTargetFrame();
+    const away = !onTargetFrame();
     el('backToTargetBtn').style.display = away ? '' : 'none';
     el('vp2d').classList.toggle('off-target', away);
     const t = targetFrame();
     el('backToTargetBtn').textContent = `Back to frame ${t} (B)`;
+    // The "you are not on the target" note has to go when you are, or it
+    // reads as a complaint about the frame you just came back to.
+    if (!away && /not the (frame|point)/i.test(el('labelInfo').textContent)) {
+        setLabelInfo(guidedTarget
+            ? `Place ${guidedTarget.bp} (${guidedTarget.side}) — frame ${t}`
+            : '');
+    }
+}
+
+/* Step to the next or previous frame in the selection. */
+function stepSelectedFrame(dir) {
+    const frames = (selection && selection.frames) || [];
+    if (!frames.length) return;
+    const here = currentFrame;
+    const sorted = frames.map(f => f.global_frame).sort((a, b) => a - b);
+    const next = dir > 0 ? sorted.find(f => f > here)
+                         : [...sorted].reverse().find(f => f < here);
+    if (next != null) gotoFrame(next);
 }
 
 /* Return to the target frame without disturbing the view.
@@ -1863,7 +1202,7 @@ async function goToNextPoint() {
 
 function renderPointGrid() {
     const host = el('pointGrid');
-    if (!host || !guided) return;
+    if (!host) return;
     const rows = guidedRows();
     const frames = (selection && selection.frames) || [];
     host.style.gridTemplateColumns = `auto repeat(${frames.length}, 15px)`;
@@ -1900,6 +1239,30 @@ function renderPointGrid() {
         `${done} / ${total} points placed · ${frames.length} frames selected`;
 }
 
+/* Open the subject for labeling.
+ *
+ * There is nothing to label without a selection, so this is where the
+ * page either loads one or offers to make one. */
+async function enterGuided() {
+    await loadSelection();
+    if (!selection) {
+        el('guidedStatus').textContent = 'No frames selected for this subject yet.';
+        setLabelInfo('');
+        if (!confirm('No frames have been chosen for this subject yet.\n\n'
+                   + 'Pick them now? k-means reads every trial once, so it '
+                   + 'takes a minute or two.')) {
+            // Show something rather than a blank canvas.
+            const start = trials[0] ? trials[0].start_frame : 0;
+            await gotoFrame(start, { force: true });
+            return;
+        }
+        await runSelection();
+        if (!selection) return;
+    }
+    renderPointGrid();
+    await goToNextPoint();
+}
+
 async function loadSelection() {
     try {
         const d = await api(`/api/labeling/${subjectId}/selection`);
@@ -1916,209 +1279,118 @@ async function runSelection() {
     if (!Number.isFinite(n) || n < 1) return;
     el('guidedStatus').textContent = 'Selecting frames…';
     try {
-        const r = await api(`/api/labeling/${subjectId}/selection`, {
+        await api(`/api/labeling/${subjectId}/selection`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ n_pick: n }),
         });
-        await new Promise(resolve => watchJob(r.job_id, (job) => {
-            // The phase matters more than the number: the clustering is
-            // ten seconds with nothing to tick, and a percentage sitting
-            // still reads as a hang.
-            let phase = '';
-            try { phase = (JSON.parse(job.epoch_info || '{}') || {}).phase || ''; }
-            catch (e) { /* not JSON */ }
-            el('guidedStatus').textContent =
-                `${phase || 'Selecting frames'} · ${Math.round(job.progress_pct || 0)}%`;
-            if (['completed', 'failed', 'cancelled'].includes(job.status)) resolve(job);
-        }));
     } catch (e) {
         el('guidedStatus').textContent = '';
         toast(`Frame selection failed: ${e.message}`, 'err');
         return;
     }
+
+    const done = await watchSelection();
+    if (done.status === 'failed') {
+        el('guidedStatus').textContent = '';
+        toast(`Frame selection failed: ${done.error || 'unknown error'}`, 'err');
+        return;
+    }
+
     await loadSelection();
     if (!selection) {
         el('guidedStatus').textContent = '';
-        toast('Frame selection produced nothing — has MediaPipe run?', 'err');
+        toast('Frame selection produced nothing — are there MediaPipe files '
+            + 'for this subject?', 'err');
         return;
     }
     toast(`Selected ${selection.frames.length} frames`, 'ok');
 }
 
-async function setGuided(on) {
-    if (on && !selection) {
-        await loadSelection();
-        if (!selection) {
-            if (!confirm('No frames have been selected for this subject yet.\n\n'
-                       + 'Run the k-means selection now? It reads every trial '
-                       + 'once, so it takes a minute or two.')) return;
-            await runSelection();
-            if (!selection) return;
-        }
-    }
-
-    guided = on;
-    el('guidedBtn').classList.toggle('active', guided);
-    el('nextPointBtn').style.display = guided ? '' : 'none';
-    el('timelineContainer').style.display = guided ? 'none' : '';
-    el('gridContainer').style.display = guided ? '' : 'none';
-    el('autoAdvanceWrap').style.display = guided ? '' : 'none';
-    // The trace stays: the thumb-index aperture over time is how you tell
-    // a frame worth labeling from one where the hand is mid-blur, and the
-    // grid replaces the timeline, not the trace.
-    updateCommitButton();
-
-    if (guided) {
-        renderPointGrid();
-        await goToNextPoint();
-    } else {
-        guidedTarget = null;
-        guidedBusy = false;
-        el('guidedStatus').textContent = '';
-        el('backToTargetBtn').style.display = 'none';
-        el('vp2d').classList.remove('off-target');
-        setLabelInfo('');
-        renderTimeline();
-    }
-    renderTrace();
-    updateShortcuts();
-}
-
-/* The save button says what it will actually write.
+/* Poll until the selection finishes.
  *
- * Which labels get committed follows what is on screen: the grid is the
- * selection, so saving from the grid saves the selection, and saving
- * from the timeline saves everything. */
-function updateCommitButton() {
-    const btn = el('commitBtn');
-    if (!btn) return;
-    if (mode === 'refine') {
-        btn.textContent = 'Commit selected → training';
-        btn.title = 'Add the ticked frames to the training set as a new round';
-        return;
-    }
-    if (mode === 'corrections') {
-        btn.textContent = 'Save corrections';
-        btn.title = 'Write the reviewed labels to corrections/';
-        return;
-    }
-    if (guided) {
-        const n = (selection && selection.frames.length) || 0;
-        btn.textContent = `Save ${n} frames`;
-        btn.title = `Commit the ${n} selected frames as their own training set`;
-    } else {
-        btn.textContent = 'Save all frames';
-        btn.title = 'Commit every labeled frame as the training set';
+ * The phase matters more than the number: clustering is seconds with
+ * nothing to tick, and a percentage sitting still reads as a hang. */
+async function watchSelection() {
+    for (;;) {
+        await new Promise(r => setTimeout(r, 700));
+        let st;
+        try {
+            st = await api(`/api/labeling/${subjectId}/selection/progress`);
+        } catch (e) { continue; }
+        el('guidedStatus').textContent =
+            `${st.phase || 'Selecting frames'} · ${Math.round(st.pct || 0)}%`;
+        if (st.status === 'done' || st.status === 'failed') return st;
     }
 }
 
-// ── Timeline ─────────────────────────────────────────────────────────────
+/* Send these frames to somebody else to label.
+ *
+ * Writes the selection as a self-contained folder — images, the crop
+ * geometry that puts the labels back, and instructions — so the person
+ * labeling needs this app and nothing else. */
+async function exportForLabeling() {
+    if (!selection) { toast('Pick frames for this subject first', 'err'); return; }
+    const name = prompt('Folder name for the package (blank for the default):',
+                        '');
+    if (name === null) return;
 
-function renderTimeline() {
-    if (!timelineCanvas) return;
-    const dpr = window.devicePixelRatio || 1;
-    const w = timelineCanvas.clientWidth, h = timelineCanvas.clientHeight;
-    if (!w || !h) return;
-    timelineCanvas.width = w * dpr;
-    timelineCanvas.height = h * dpr;
-    const c = timelineCtx;
-    c.setTransform(dpr, 0, 0, dpr, 0, 0);
-    c.clearRect(0, 0, w, h);
-
-    if (!totalFrames) return;
-    const x = (f) => (f / Math.max(totalFrames - 1, 1)) * w;
-
-    // Three stacked rows: trial names on top, then one tick row per camera,
-    // then the refine picks.  Laid out from the top so the rows stay put
-    // whatever height the container ends up.
-    const nameY = 9;
-    const rowH = 8;
-    const rowTop = 16;
-    const rowY = [rowTop, rowTop + rowH + 2];
-    const refineY = rowTop + 2 * (rowH + 2);
-
-    // Trial bands, so the whole subject reads as one strip.
-    trials.forEach((t, i) => {
-        c.fillStyle = (i % 2 === 0) ? 'rgba(255,255,255,0.035)'
-                                    : 'rgba(255,255,255,0.015)';
-        c.fillRect(x(t.start_frame), 0, x(t.end_frame) - x(t.start_frame), h);
-        c.fillStyle = (i === currentTrialIdx) ? '#e0e0e0' : 'rgba(170,159,189,0.8)';
-        c.font = '9px -apple-system, sans-serif';
-        const name = t.trial_name.includes('_')
-            ? t.trial_name.split('_').slice(1).join('_') : t.trial_name;
-        c.fillText(name, x(t.start_frame) + 3, nameY);
-    });
-
-    // Per-camera label ticks: at a glance, which frames are labeled, and
-    // whether both cameras have them — a frame labeled on one camera only
-    // triangulates to nothing.
-    c.font = '8px -apple-system, sans-serif';
-    // With one camera there is nothing to compare against, so the row
-    // labels would just be a column of names for a single row.
-    if (!singleCamera()) {
-        cameraNames.slice(0, 2).forEach((cam, i) => {
-            c.fillStyle = 'rgba(170,159,189,0.55)';
-            c.fillText(cam, 2, rowY[i] + rowH - 1);
+    const btn = el('exportBtn');
+    btn.disabled = true;
+    try {
+        await api('/api/packages/export', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ subject: subject.name,
+                                   package_name: name.trim() || null }),
         });
-    }
-    for (const key of manual.keys()) {
-        const [f, ...sp] = key.split('_');
-        const side = sp.join('_');
-        const idx = sideIndex(side);
-        if (idx > 1) continue;
-        const lbl = manual.get(key);
-        const complete = bodyparts.every(bp => lbl[bp] && lbl[bp][0] != null);
-        c.fillStyle = complete ? '#ffffff' : 'rgba(255,255,255,0.4)';
-        c.fillRect(x(parseInt(f, 10)) - 0.5, rowY[idx], 1.5, rowH);
+    } catch (e) {
+        btn.disabled = false;
+        toast(`Export failed: ${e.message}`, 'err');
+        return;
     }
 
-    if (mode === 'refine') {
-        c.fillStyle = 'rgba(170,159,189,0.55)';
-        c.fillText('train', 2, refineY + rowH - 1);
-        c.fillStyle = '#ffd54f';
-        for (const key of refineSelected) {
-            const f = parseInt(key.split('_')[0], 10);
-            c.fillRect(x(f) - 0.5, refineY, 1.5, rowH);
+    for (;;) {
+        await new Promise(r => setTimeout(r, 700));
+        let st;
+        try {
+            st = await api('/api/packages/export/progress'
+                + `?subject=${encodeURIComponent(subject.name)}`);
+        } catch (e) { continue; }
+        btn.textContent = `Exporting ${Math.round(st.pct || 0)}%`;
+        if (st.status === 'done') {
+            toast(`Wrote ${st.image_count} images to ${st.package_dir}`, 'ok');
+            break;
+        }
+        if (st.status === 'failed') {
+            toast(`Export failed: ${st.error || 'unknown error'}`, 'err');
+            break;
         }
     }
-
-    // Playhead.
-    c.strokeStyle = '#a195c0';
-    c.lineWidth = 1;
-    c.beginPath();
-    c.moveTo(x(currentFrame), 0);
-    c.lineTo(x(currentFrame), h);
-    c.stroke();
-}
-
-function timelineSeek(clientX) {
-    const rect = timelineCanvas.getBoundingClientRect();
-    const frac = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
-    gotoFrame(Math.round(frac * (totalFrames - 1)));
+    btn.disabled = false;
+    btn.textContent = 'Export for labeling';
 }
 
 // ── Distance trace ───────────────────────────────────────────────────────
 
-/* Which layers contribute a distance trace, and in what colour. */
+/* What the trace plots.
+ *
+ * Always the MediaPipe aperture for the loaded trial, whether or not the
+ * landmarks are drawn: it is how you tell a frame worth labeling from
+ * one where the hand is mid-blur, and that is useful before you have
+ * decided to look at the landmarks themselves. */
 function traceSeries() {
     const out = [];
-    if (!mpTrial) return out;
-    for (const spec of mpPassSpecs) {
-        if (!vis(`mp_${spec.key}`).d2) continue;
-        const p = mpPass(spec.key);
-        if (!p) continue;
-        const seq = p.distancesClean || p.distances;
-        if (!seq) continue;
-        out.push({ label: spec.label, color: spec.color, values: seq,
-                   offset: mpTrial.start_frame });
+    if (mpTrial && mpTrial.distances) {
+        out.push({ label: 'MediaPipe', color: MP_COLOR,
+                   values: mpTrial.distances, offset: mpTrial.start_frame });
     }
-    for (const spec of BP_LAYERS) {
-        if (!vis(spec.key).d2) continue;
-        const d = bpData[spec.key];
-        if (!d || !d.distances) continue;
-        out.push({ label: spec.label, color: spec.color, values: d.distances,
-                   offset: 0 });
+    const mine = Object.keys(manualDistances);
+    if (mine.length) {
+        const values = [];
+        for (const [f, v] of Object.entries(manualDistances)) values[+f] = v;
+        out.push({ label: 'This session', color: MANUAL_COLOR,
+                   values, offset: 0 });
     }
     return out;
 }
@@ -2276,7 +1548,7 @@ function toggleSide() {
     if (singleCamera()) return;
     const from = currentSide, to = otherSide();
     let shift = null;
-    if (hasUserZoom && !boxMode) shift = cameraShift(currentFrame, from, to);
+    if (hasUserZoom) shift = cameraShift(currentFrame, from, to);
 
     currentSide = to;
     updateSideToggle();
@@ -2294,18 +1566,16 @@ function updateShortcuts() {
     el('shortcutList').innerHTML = [
         ['&larr; &rarr;', 'previous / next frame'],
         ['Shift + &larr;&rarr;', 'jump 10 frames'],
-        ['&uarr; &darr;', 'previous / next labeled frame'],
+        ['&uarr; &darr;', 'previous / next selected frame'],
         ['Space', 'play / pause'],
         ['E', 'switch camera'],
-        ['G', 'guided labeling on / off'],
-        ...(guided ? [['N', 'next unlabeled point'],
-                      ['B', 'back to the target frame']] : []),
+        ['N', 'next unlabeled point'],
+        ['B', 'back to the target frame'],
         ['R', 'reset zoom'],
         ['1 … 9', 'jump to trial'],
         ['Ctrl/&#8984; Z', 'undo'],
         ['Ctrl/&#8984; &#8679; Z', 'redo'],
         ['Right-click', 'remove a point'],
-        ...(mode === 'refine' ? [['T', 'tick this frame for training']] : []),
     ].map(([k, v]) => `<div><kbd>${k}</kbd> ${v}</div>`).join('');
 }
 
@@ -2316,27 +1586,9 @@ function onMouseDown(e) {
     const rect = canvas.getBoundingClientRect();
     const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
 
-    if (boxMode && editBox) {
-        const handle = boxHitTest(sx, sy);
-        if (handle) {
-            boxDragHandle = handle;
-            boxDragStart = { mx: sx, my: sy, box: { ...editBox } };
-            return;
-        }
-    }
-
     const hit = hitTest(sx, sy);
     if (hit) {
         const key = `${currentFrame}_${currentSide}`;
-        if (hit.ghost) {
-            // Taking over a prediction: adopt its position as a manual label
-            // and go straight into dragging, so one gesture both accepts and
-            // corrects it.
-            pushUndo(key, hit.bp, null);
-            setManual(hit.bp, hit.coords[0], hit.coords[1]);
-            updateLabelCount();
-            scheduleSave();
-        }
         const coords = manual.get(key)[hit.bp];
         dragging = hit.bp;
         dragOrigX = coords[0];
@@ -2359,14 +1611,6 @@ function onMouseMove(e) {
     const rect = canvas.getBoundingClientRect();
     const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
 
-    if (boxDragHandle) {
-        applyBoxDrag(sx, sy);
-        render();
-        return;
-    }
-    if (boxMode && editBox && !dragging) {
-        canvas.style.cursor = boxHitTest(sx, sy) ? 'move' : 'crosshair';
-    }
     if (!dragging) return;
 
     if (dragging === 'pending') {
@@ -2394,15 +1638,9 @@ function onMouseMove(e) {
 }
 
 function onMouseUp() {
-    if (boxDragHandle) {
-        boxDragHandle = null;
-        boxDragStart = null;
-        canvas.style.cursor = 'crosshair';
-        return;
-    }
     if (dragging === 'pending') {
         const img = screenToImage(dragStartX, dragStartY);
-        if (!boxMode && !guidedBusy
+        if (!guidedBusy
             && img.x >= 0 && img.x < imgW && img.y >= 0 && img.y < imgH) {
             placeLabel(img.x, img.y);
         }
@@ -2421,7 +1659,7 @@ function onRightClick(e) {
     e.preventDefault();
     const rect = canvas.getBoundingClientRect();
     const hit = hitTest(e.clientX - rect.left, e.clientY - rect.top);
-    if (hit && !hit.ghost) removeLabel(hit.bp);
+    if (hit) removeLabel(hit.bp);
 }
 
 function onWheel(e) {
@@ -2457,35 +1695,13 @@ function onKeyDown(e) {
     switch (e.key) {
         case 'ArrowLeft':  e.preventDefault(); gotoFrame(currentFrame - step); break;
         case 'ArrowRight': e.preventDefault(); gotoFrame(currentFrame + step); break;
-        case 'ArrowUp': {
-            e.preventDefault();
-            const f = nextLabeledFrame(-1);
-            if (f != null) gotoFrame(f);
-            break;
-        }
-        case 'ArrowDown': {
-            e.preventDefault();
-            const f = nextLabeledFrame(1);
-            if (f != null) gotoFrame(f);
-            break;
-        }
+        case 'ArrowUp':    e.preventDefault(); stepSelectedFrame(-1); break;
+        case 'ArrowDown':  e.preventDefault(); stepSelectedFrame(1); break;
         case ' ': e.preventDefault(); togglePlay(); break;
         case 'e': case 'E': toggleSide(); break;
-        case 'n': case 'N': if (guided) goToNextPoint(); break;
-        case 'b': case 'B': if (guided) backToTarget(); break;
-        case 'g': case 'G':
-            if (mode === 'initial') setGuided(!guided);
-            break;
+        case 'n': case 'N': goToNextPoint(); break;
+        case 'b': case 'B': backToTarget(); break;
         case 'r': case 'R': resetZoom(); break;
-        case 't': case 'T':
-            if (mode === 'refine') {
-                const key = `${currentFrame}_${currentSide}`;
-                if (refineSelected.has(key)) refineSelected.delete(key);
-                else refineSelected.add(key);
-                buildRefineList();
-                renderTimeline();
-            }
-            break;
         default:
             if (/^[1-9]$/.test(e.key)) {
                 const idx = parseInt(e.key, 10) - 1;
@@ -2502,8 +1718,6 @@ async function init() {
     containerEl = el('canvasContainer');
     vp2d = el('vp2d');
     videoEl = el('videoPlayer');
-    timelineCanvas = el('timelineCanvas');
-    timelineCtx = timelineCanvas.getContext('2d');
     traceCanvas = el('traceCanvas');
     traceCtx = traceCanvas.getContext('2d');
 
@@ -2514,7 +1728,6 @@ async function init() {
     canvas.addEventListener('wheel', onWheel, { passive: false });
     window.addEventListener('keydown', onKeyDown);
 
-    timelineCanvas.addEventListener('mousedown', (e) => timelineSeek(e.clientX));
     traceCanvas.addEventListener('mousedown', (e) => traceSeek(e.clientX));
 
     el('playBtn').addEventListener('click', togglePlay);
@@ -2531,15 +1744,12 @@ async function init() {
             try { videoEl.playbackRate = playbackRate; } catch (e) { /* unsupported */ }
         }
     });
-    el('autoZoomCb').addEventListener('change', resetZoom);
-    el('boxZoomCb').addEventListener('change', resetZoom);
-    el('editBoxBtn').addEventListener('click', startBoxEdit);
-    el('cancelBoxBtn').addEventListener('click', endBoxEdit);
-    el('saveBoxBtn').addEventListener('click', saveBox);
-    el('redetectBtn').addEventListener('click', redetectTrial);
     el('commitBtn').addEventListener('click', commit);
-    el('guidedBtn').addEventListener('click', () => setGuided(!guided));
     el('nextPointBtn').addEventListener('click', goToNextPoint);
+    el('exportBtn').addEventListener('click', exportForLabeling);
+    const mpCb = el('showMpCb');
+    mpCb.checked = showMp;
+    mpCb.addEventListener('change', () => { showMp = mpCb.checked; render(); });
     el('backToTargetBtn').addEventListener('click', backToTarget);
     const advCb = el('autoAdvanceCb');
     // Remembered per browser: it is a working habit, not a project setting.
@@ -2551,31 +1761,9 @@ async function init() {
         try { localStorage.setItem('dlcAutoAdvance', autoAdvance ? '1' : '0'); }
         catch (e) { /* private window */ }
     });
-    el('saveCorrBtn').addEventListener('click', saveCorrections);
-    el('refineAllBtn').addEventListener('click', () => {
-        correctedFrames().forEach(r => refineSelected.add(`${r.frame}_${r.side}`));
-        buildRefineList();
-        renderTimeline();
-    });
-    el('refineNoneBtn').addEventListener('click', () => {
-        refineSelected.clear();
-        buildRefineList();
-        renderTimeline();
-    });
-
-    document.querySelectorAll('.mode-btn').forEach(b => {
-        b.addEventListener('click', async () => {
-            if (b.dataset.mode === mode) return;
-            await flushSave();
-            await openSession(b.dataset.mode);
-            await gotoFrame(currentFrame, { force: true });
-        });
-    });
-
     new ResizeObserver(() => {
         if (!hasUserZoom) applyAutoZoom(currentFrame);
         render();
-        renderTimeline();
         renderTrace();
     }).observe(vp2d);
 
