@@ -283,7 +283,10 @@ cd "$PROJECT_DIR"
 ("$VENV_PY" "$LAUNCHER" open "$PORT" 60 >/dev/null 2>&1 || true) &
 
 # Exit code 42 means "restart" — the Settings page uses it when the data
-# directory changes, because DATA_DIR is resolved at import time.
+# directory changes (DATA_DIR is resolved at import time), and the Update
+# button uses it after pulling new code.  DLC_LAUNCHER tells the app this
+# loop exists, so it asks to be restarted instead of re-execing itself.
+export DLC_LAUNCHER=1
 while true; do
     set +e
     "$VENV_PY" -m uvicorn dlc_labeler.app:app \

@@ -301,6 +301,26 @@ how many images never came back, and which frames are already labeled
 differently — those are left alone unless you say otherwise. Importing
 the same package twice does nothing the second time.
 
+## Updating
+
+The **Update** button in the header pulls the latest version and restarts
+the app if the code changed. It only appears on a git checkout with a
+remote — if you installed by downloading a zip, download it again to
+update.
+
+It is deliberately narrow about what it will do. It fast-forwards and
+nothing else: it never merges, never rewrites history, and never
+discards local work. Uncommitted changes to the app's own files stop it,
+with the files named. A copy with commits the remote does not have is
+reported rather than merged.
+
+If the update only touches pages or styles the browser just reloads. If
+it touches Python, the server restarts — jobs running as their own
+process (MediaPipe passes, training) are picked back up afterwards, and
+you are warned first about anything running inside the app itself. When
+an update changes `requirements.txt`, it says so: close the app and run
+`setup.sh` (or `run.bat`) once to install the new packages.
+
 ## Jobs
 
 Two lanes run at once — CPU for MediaPipe, GPU for DeepLabCut — and jobs

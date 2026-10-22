@@ -339,6 +339,7 @@ echo.
 :: holds the port if our start fails.
 start "" /b %PYTHON% "%~dp0scripts\launcher.py" open %DLC_PORT% 60
 
+set "DLC_LAUNCHER=1"
 :: Exit code 42 means "restart" — the Settings page uses it when the
 :: data directory changes.
 :launch

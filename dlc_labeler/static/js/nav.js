@@ -63,6 +63,8 @@ function buildHeader() {
         </div>
         <div id="navPageSlot" style="display:flex;align-items:center;gap:8px;margin-left:auto;"></div>
         <nav>${links}</nav>
+        <button class="btn btn-sm" id="navUpdateBtn" style="display:none;"
+                title="Pull the latest version and restart if needed">Update</button>
     `;
 
     header.style.display = 'flex';
@@ -78,6 +80,8 @@ function buildHeader() {
     if (document.body.hasAttribute('data-subject-nav')) {
         document.getElementById('navSubjectBar').style.display = 'flex';
     }
+
+    initUpdateButton();
 
     const style = document.createElement('style');
     style.textContent = `
@@ -95,6 +99,111 @@ function buildHeader() {
         .nav-trial-btn.has-data::after { content: ' •'; color: var(--green); }
     `;
     document.head.appendChild(style);
+}
+
+/* ── Updating the app ─────────────────────────────────────────────
+ * These machines are run by people who install by cloning and launch by
+ * double-clicking, so "git pull" is the step that never happens and the
+ * bug report is about a version fixed weeks ago.  The button only
+ * appears where it can actually work — a git checkout with a remote —
+ * because a button that always fails is worse than no button. */
+async function initUpdateButton() {
+    const btn = document.getElementById('navUpdateBtn');
+    if (!btn) return;
+    let state;
+    try {
+        state = await (await fetch('/api/settings/update/status')).json();
+    } catch (e) { return; }
+    if (!state.available) return;
+
+    btn.style.display = '';
+    btn.title = `Pull the latest version and restart if needed `
+        + `(on ${state.branch} at ${state.commit})`;
+    btn.addEventListener('click', () => runUpdate(btn));
+}
+
+async function runUpdate(btn) {
+    // Re-read rather than trusting what the header saw on page load: what
+    // is running now is what a restart would interrupt.
+    let state = {};
+    try { state = await (await fetch('/api/settings/update/status')).json(); }
+    catch (e) { /* the POST will report it properly */ }
+
+    const interrupts = state.interrupts || [];
+    const warning = interrupts.length
+        ? `\n\nThis would interrupt work running inside the app right now `
+          + `(${interrupts.join(', ')}). Jobs running as their own process — `
+          + `MediaPipe passes, training — are picked back up afterwards.`
+        : '';
+    if (!confirm('Update the app to the latest version?\n\n'
+               + 'This pulls the newest code and restarts the server if it '
+               + 'changed. Labels are saved as you go, so none are lost.'
+               + warning)) return;
+
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Updating…';
+
+    let r;
+    try {
+        const res = await fetch('/api/settings/update', { method: 'POST' });
+        r = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(r.detail || res.statusText);
+    } catch (e) {
+        btn.disabled = false;
+        btn.textContent = original;
+        alert(`Could not update:\n\n${e.message}`);
+        return;
+    }
+
+    if (!r.updated) {
+        btn.disabled = false;
+        btn.textContent = original;
+        alert(r.message || 'Already up to date.');
+        return;
+    }
+
+    let note = r.message;
+    if (r.deps_changed && r.deps_changed.length) {
+        note += `\n\nThis update changed ${r.deps_changed.join(' and ')}. `
+            + 'Close the app and run setup.sh (or run.bat) once to install '
+            + 'the new requirements.';
+    }
+
+    if (!r.restarting) {
+        // Only pages and assets changed, and nothing here is cached, so a
+        // reload is the whole update.
+        alert(note);
+        location.reload();
+        return;
+    }
+
+    btn.textContent = 'Restarting…';
+    alert(`${note}\n\nThe server is restarting; the page will reload when `
+        + `it is back.`);
+    await waitForServer();
+    location.reload();
+}
+
+/* Poll until the restarted server answers again.  Gives up after a
+ * minute rather than reloading into a dead port, because a blank page is
+ * a worse place to be stuck than this one. */
+async function waitForServer(timeoutMs = 60000) {
+    const deadline = Date.now() + timeoutMs;
+    // It has not gone down yet when this starts, so wait before the first
+    // probe or the old process answers and we reload too early.
+    await new Promise(res => setTimeout(res, 1500));
+    while (Date.now() < deadline) {
+        try {
+            const res = await fetch('/api/settings/update/status',
+                                    { cache: 'no-store' });
+            if (res.ok) return true;
+        } catch (e) { /* still down */ }
+        await new Promise(res => setTimeout(res, 1000));
+    }
+    alert('The server has not come back. Start it again with setup.sh '
+        + '(or run.bat).');
+    return false;
 }
 
 /* Fill the subject selector and wire prev/next.

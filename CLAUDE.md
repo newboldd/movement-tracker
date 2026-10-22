@@ -39,6 +39,7 @@ dlc_labeler/
 │   ├── queue.py        # the Jobs page's API
 │   ├── jobs.py         # job detail, log tail, SSE, cancel
 │   ├── packages.py     # list packages, import returned labels
+│   │                   #   (settings.py also holds self-update + restart)
 │   └── settings.py     # settings, status, data directory
 ├── services/
 │   ├── video.py              # trial maps, frame extraction, stereo split
@@ -244,6 +245,14 @@ schema pass (which would otherwise be a silent no-op).
   `JOB_DISPATCH` to make it reachable), or it will be queued and never
   drained. Settings
   keys this app does not model are preserved on save (`Settings._foreign`).
+- **Restarting the process** (`_schedule_restart` in `routers/settings.py`,
+  used by the data-directory change and the Update button): prefer exit
+  code 42, which the launchers loop on — they know how the app was
+  started. Re-exec is the fallback, and it must rebuild the command from
+  `__main__.__spec__`, not from `sys.argv`: under `python -m uvicorn`,
+  `sys.argv[0]` is uvicorn's `__main__.py`, and re-execing that as a
+  script puts uvicorn's package directory on `sys.path`, so the next
+  `import logging` finds `uvicorn/logging.py` and the process dies.
 - **Port and browser**: both apps default to 8080. `scripts/launcher.py`
   answers both launch questions — `free <port>` (by binding, not by
   parsing lsof/netstat) and `open <port>` (which waits for the server to

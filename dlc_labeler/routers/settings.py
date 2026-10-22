@@ -174,20 +174,235 @@ def set_data_dir(req: DataDirReq) -> dict:
     except OSError as e:
         raise HTTPException(500, f"Failed to write bootstrap file: {e}")
 
-    def _restart():
-        import time
-        time.sleep(0.5)
-        logger.info("Restarting process to switch DATA_DIR -> %s", new_path)
-        try:
-            os.execv(sys.executable, [sys.executable, *sys.argv])
-        except Exception as e:
-            logger.error("os.execv failed: %s; exiting so the launcher "
-                         "can restart us", e)
-            os._exit(1)
-
-    threading.Thread(target=_restart, daemon=True).start()
+    _schedule_restart(f"DATA_DIR -> {new_path}")
     return {
         "saved": str(new_path),
         "bootstrap_file": str(BOOTSTRAP_DATA_DIR_FILE),
         "restarting": True,
     }
+
+
+# ── Updating the app in place ──────────────────────────────────────────
+#
+# The people this is built for install by cloning and run by
+# double-clicking.  Asking them to open a terminal to pick up a fix is
+# the step that does not happen, so the app pulls its own updates.
+#
+# Deliberately narrow: a fast-forward pull of the checkout the app is
+# running from, and nothing else.  It never merges, never rewrites
+# history, never discards local work, and never installs packages — each
+# of those can leave someone with a broken install and no way to tell
+# what happened.
+
+GIT_TIMEOUT = 120
+
+# A change to any of these means the running process is now stale: Python
+# is read once at import, and the launcher scripts are what started it.
+_RESTART_SUFFIXES = (".py",)
+_RESTART_NAMES = ("setup.sh", "run.bat")
+_DEPS_NAMES = ("requirements.txt", "requirements-dlc.txt")
+
+
+def _git(*args: str, timeout: int = GIT_TIMEOUT):
+    """Run git in the app's own directory. Returns (ok, stdout, stderr)."""
+    import subprocess
+
+    from ..config import PROJECT_DIR
+
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(PROJECT_DIR), *args],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        return out.returncode == 0, out.stdout.strip(), out.stderr.strip()
+    except FileNotFoundError:
+        return False, "", "git is not installed"
+    except subprocess.SubprocessError as e:
+        return False, "", str(e)
+
+
+def _git_state() -> dict:
+    """What the checkout looks like right now, without touching the network."""
+    from ..config import PROJECT_DIR
+
+    ok, head, _ = _git("rev-parse", "HEAD", timeout=10)
+    if not ok:
+        return {"available": False,
+                "reason": f"{PROJECT_DIR} is not a git checkout — update by "
+                          f"downloading the app again."}
+
+    has_origin, _, _ = _git("remote", "get-url", "origin", timeout=10)
+    if not has_origin:
+        return {"available": False,
+                "reason": "This checkout has no 'origin' remote to update from."}
+
+    _, branch, _ = _git("rev-parse", "--abbrev-ref", "HEAD", timeout=10)
+
+    # Asked as two commands that print plain paths rather than parsing
+    # `status --porcelain`, whose two-column prefix is partly spaces and
+    # does not survive being stripped.
+    _, tracked, _ = _git("diff", "--name-only", "HEAD", timeout=15)
+    _, untracked, _ = _git("ls-files", "--others", "--exclude-standard",
+                           timeout=15)
+    return {
+        "available": True,
+        "commit": head[:8],
+        "branch": branch,
+        # Edits to files the app ships: a pull could overwrite these, so
+        # they stop it.
+        "dirty": [f for f in tracked.splitlines() if f.strip()],
+        # New files that are not ignored.  Reported but not a blocker:
+        # one only matters if the update adds a file at the same path,
+        # and git refuses that itself — blocking every update because
+        # somebody left a notes file in the folder would mean nobody
+        # updates again.
+        "untracked": [f for f in untracked.splitlines() if f.strip()],
+        "project_dir": str(PROJECT_DIR),
+    }
+
+
+def _work_at_risk() -> list[str]:
+    """Running jobs a restart would kill, described for the person.
+
+    A job with a live PID is a subprocess: it keeps running and the queue
+    re-attaches to it on the way back up.  A running job without one is
+    on a thread inside this process — the frame selection, a cropped
+    MediaPipe re-detect — and a restart ends it.  Worth saying before
+    somebody loses twenty minutes of decoding to a one-line fix.
+    """
+    from ..app import _pid_alive
+    from ..db import get_db_ctx
+
+    try:
+        with get_db_ctx() as db:
+            rows = db.execute(
+                "SELECT job_type, pid FROM jobs WHERE status = 'running'"
+            ).fetchall()
+    except Exception:
+        return []
+    return sorted({r["job_type"] for r in rows if not _pid_alive(r.get("pid"))})
+
+
+@router.get("/update/status")
+def update_status() -> dict:
+    """Whether this install can update itself, and what it is running.
+
+    Local only — no fetch.  The nav asks this on every page load, and a
+    network round trip there would stall the header on a machine that is
+    offline, which these often are.
+    """
+    state = _git_state()
+    if state.get("available"):
+        state["interrupts"] = _work_at_risk()
+    return state
+
+
+@router.post("/update")
+def run_update() -> dict:
+    """Fast-forward the checkout, and restart if the code changed.
+
+    Refuses rather than resolves anything: uncommitted changes stop the
+    update with the files named, and a branch that has diverged from the
+    remote is reported instead of merged.  Someone who has edited the app
+    knows what they did; this should not be what tells them it is gone.
+    """
+    state = _git_state()
+    if not state.get("available"):
+        raise HTTPException(400, state.get("reason", "Cannot update."))
+    if state["dirty"]:
+        raise HTTPException(
+            409, "This checkout has uncommitted changes, so an update would "
+                 "risk losing them: "
+                 + ", ".join(state["dirty"][:8])
+                 + (f" and {len(state['dirty']) - 8} more" if len(state["dirty"]) > 8 else "")
+                 + ". Commit or discard them, then update again.")
+
+    before = state["commit"]
+    ok, out, err = _git("pull", "--ff-only")
+    if not ok:
+        detail = (err or out or "git pull failed").splitlines()
+        message = detail[-1] if detail else "git pull failed"
+        blob = (err + " " + out).lower()
+        if "fast-forward" in blob or "diverge" in blob:
+            message = ("This copy has commits the remote does not, so it "
+                       "cannot be fast-forwarded. Sort it out with git, then "
+                       "update again.")
+        elif "would be overwritten" in blob:
+            message = ("Local files would be overwritten by the update. "
+                       "Move or remove them, then update again: " + message)
+        raise HTTPException(400, f"Update failed: {message}")
+
+    _, after, _ = _git("rev-parse", "HEAD", timeout=10)
+    after = after[:8]
+    if after == before:
+        return {"updated": False, "commit": after, "restarting": False,
+                "message": "Already up to date."}
+
+    _, names, _ = _git("diff", "--name-only", before, after, timeout=30)
+    files = [f for f in names.splitlines() if f.strip()]
+    deps = [f for f in files if Path(f).name in _DEPS_NAMES]
+    needs_restart = any(
+        f.endswith(_RESTART_SUFFIXES) or Path(f).name in _RESTART_NAMES
+        for f in files)
+
+    if needs_restart:
+        _schedule_restart(f"update {before} -> {after}")
+
+    return {
+        "updated": True,
+        "from": before,
+        "commit": after,
+        "file_count": len(files),
+        "files": files[:40],
+        "restarting": needs_restart,
+        "deps_changed": [Path(f).name for f in deps],
+        "message": (f"Updated to {after} ({len(files)} file(s) changed)."),
+    }
+
+
+def _restart_argv() -> list[str]:
+    """The command that would start this process again.
+
+    ``sys.argv`` alone is not it.  Under ``python -m uvicorn`` — which is
+    how the launchers start the app — ``sys.argv[0]`` is uvicorn's
+    ``__main__.py``, and re-execing that as a *script* puts uvicorn's own
+    package directory first on ``sys.path``.  The next ``import logging``
+    then finds ``uvicorn/logging.py`` instead of the standard library and
+    the process dies on startup.  ``__main__.__spec__`` is what says the
+    process was started with ``-m``, so rebuild it that way.
+    """
+    import __main__
+
+    spec = getattr(__main__, "__spec__", None)
+    if spec is not None and spec.name:
+        return [sys.executable, "-m", spec.name, *sys.argv[1:]]
+    return [sys.executable, *sys.argv]
+
+
+def _schedule_restart(reason: str):
+    """Bring the server back, after the HTTP response has gone out.
+
+    Prefers handing the job to the launcher: setup.sh and run.bat loop on
+    exit code 42 and start the app exactly the way they did the first
+    time, which beats any guess made from inside the process.  Re-exec is
+    the fallback for someone running uvicorn themselves.
+    """
+    def _restart():
+        import time
+        time.sleep(0.5)
+        if os.environ.get("DLC_LAUNCHER"):
+            logger.info("Exiting 42 after %s; the launcher restarts us", reason)
+            os._exit(42)
+
+        argv = _restart_argv()
+        logger.info("Restarting after %s: %s", reason, " ".join(argv))
+        try:
+            os.execv(argv[0], argv)
+        except Exception as e:
+            # Nothing is supervising us and the re-exec failed, so 42 is
+            # a guess — but a launcher that is there will catch it, and
+            # staying up on stale code is not better.
+            logger.error("Re-exec failed: %s; exiting 42", e)
+            os._exit(42)
+
+    threading.Thread(target=_restart, daemon=True).start()
